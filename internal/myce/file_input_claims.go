@@ -29,10 +29,6 @@ func (c FileInputClaim) equal(other FileInputClaim) bool {
 		c.At.Equal(other.At) && c.SettledAt.Equal(other.SettledAt)
 }
 
-// A claim is explicit upload/submission intent. Elapsed time cannot release
-// its bytes or reservation; settlement transfers accounting to the job.
-func (c FileInputClaim) valid(_ time.Time) bool { return true }
-
 type fileInputClaimKey struct{}
 type fileDeclaredOutputKey struct{}
 
@@ -63,12 +59,17 @@ func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileIn
 	if err := normalizeJobClass(&s); err != nil {
 		return out, err
 	}
+	// Serialize receipt issuance with removal of the matching interrupted upload.
+	if err := lockUploadContext(ctx, q.fileLifecycle.RLock, q.fileLifecycle.RUnlock); err != nil {
+		return out, err
+	}
+	defer q.fileLifecycle.RUnlock()
 	// Settlement transfers quota attribution to the job, but concurrent uploads
 	// may still hold this receipt. An unrelated claim grants no revocation
-	// authority. Payload collection forgets receipts only when their bytes leave.
+	// authority. Interrupted upload collection retires a claim with its transfer.
 	err := q.updateUploadRequest(ctx, func() error {
 		for _, claim := range q.s.FileInputClaims {
-			if claim.Project == s.Project && claim.Class == s.Class && claim.File == ref && claim.valid(q.clock.Now()) {
+			if claim.Project == s.Project && claim.Class == s.Class && claim.File == ref {
 				out = claim
 				return nil
 			}
@@ -98,6 +99,28 @@ func (q *Queue) forgetFileInputClaims(hash string, before time.Time) {
 	}
 }
 
+// Caller holds q.mu. Snapshot the receipts separately from committed file
+// references so an idle, unpublished transfer can release its quota charge.
+func (q *Queue) unsettledInputClaims() map[string][]FileInputClaim {
+	claims := map[string][]FileInputClaim{}
+	for _, claim := range q.s.FileInputClaims {
+		if claim.SettledAt.IsZero() {
+			hash := claim.File.SHA256
+			claims[hash] = append(claims[hash], claim)
+		}
+	}
+	return claims
+}
+
+func allocatedInputClaim(claims []FileInputClaim, size int64) bool {
+	for _, claim := range claims {
+		if claim.Allocated && claim.File.SizeBytes == size {
+			return true
+		}
+	}
+	return false
+}
+
 // No disk work: the immutable server record, never a mutable project header,
 // controls quota attribution and resume. Call before opening a transfer.
 func (q *Queue) inputClaimContext(ctx context.Context, ref FileRef, allocate bool) (context.Context, error) {
@@ -110,7 +133,7 @@ func (q *Queue) inputClaimContext(ctx context.Context, ref FileRef, allocate boo
 	if _, ok := ctx.Value(fileStoreAttemptKey{}).(fileStoreAttempt); ok {
 		required = false
 	}
-	valid := found && (ref.SHA256 == "" || claim.File == ref || ref.SizeBytes == -1 && claim.File.SHA256 == ref.SHA256) && claim.valid(q.clock.Now())
+	valid := found && (ref.SHA256 == "" || claim.File == ref || ref.SizeBytes == -1 && claim.File.SHA256 == ref.SHA256)
 	declaredOutput := false
 	if ctx.Value(fileStoreOrdinaryKey{}) != nil {
 		required = false
@@ -149,10 +172,10 @@ func (q *Queue) inputClaimContext(ctx context.Context, ref FileRef, allocate boo
 	if allocate && !claim.Allocated {
 		if err := q.updateUploadRequest(ctx, func() error {
 			current, ok := q.s.FileInputClaims[id]
-			if ok && current.valid(q.clock.Now()) && (current.Allocated || !current.SettledAt.IsZero()) {
+			if ok && (current.Allocated || !current.SettledAt.IsZero()) {
 				return nil
 			}
-			if !ok || !current.equal(claim) || !current.valid(q.clock.Now()) {
+			if !ok || !current.equal(claim) {
 				return inputClaimError()
 			}
 			current.Allocated = true
@@ -170,7 +193,7 @@ func (q *Queue) noteInputClaimFacts(f *projectFileFacts, project string) {
 		if project != "" && claim.Project != project {
 			continue
 		}
-		if !claim.SettledAt.IsZero() || !claim.valid(q.clock.Now()) {
+		if !claim.SettledAt.IsZero() {
 			continue
 		}
 		fact := projectFileFact{project: claim.Project, hash: claim.File.SHA256, size: uint64(claim.File.SizeBytes), at: claim.At}

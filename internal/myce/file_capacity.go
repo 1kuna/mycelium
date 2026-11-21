@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/tus/tusd/v2/pkg/filestore"
@@ -89,6 +90,7 @@ type storedPayload struct {
 	size, length uint64
 	modified     time.Time
 	upload       bool
+	jobInput     bool
 }
 
 // Caller fences file-pair creation and internal bundle writes.
@@ -139,6 +141,7 @@ func (s *FileStore) inventoryUnlocked(ctx context.Context) (map[string]storedPay
 						return nil, errors.New("invalid upload length")
 					}
 					p.length = uint64(info.Size)
+					p.jobInput = jobInputUpload(info, hash)
 					meta, err := os.Lstat(filepath.Join(s.root, dir, hash+".info"))
 					if os.IsNotExist(err) {
 						if blob, e := os.Lstat(s.blob(FileRef{SHA256: hash})); e == nil && blob.Mode().IsRegular() {
@@ -243,7 +246,9 @@ type fileStoreObservation struct {
 	store                     *FileStore
 	expired, keep, referenced map[string]bool
 	markers                   map[string]time.Time
+	outputMarkers             map[string]time.Time
 	bundles                   map[string]time.Time
+	claims                    map[string][]FileInputClaim
 	age                       filePublicationAge
 	projects                  projectFileFacts
 	outputs                   []statusOutputReservation
@@ -259,7 +264,7 @@ type statusOutputReservation struct {
 func (q *Queue) captureFileStoreStatus() fileStoreObservation {
 	// One reference walk serves capacity and per-project retained bytes.
 	projects := projectFileFacts{retained: make([]projectFileFact, 0, 4*len(q.s.Jobs))}
-	expired, keep, referenced := q.collectFileReferences(true, nil, projects.retain)
+	expired, keep, referenced := q.collectDurableFileReferences(true, nil, projects.retain)
 	q.noteProjectFileAdditions(&projects, q.s.Jobs)
 	q.noteProjectFileAdditions(&projects, q.retiredSubmissionJobs("", nil))
 	q.noteInputClaimFacts(&projects, "")
@@ -271,17 +276,6 @@ func (q *Queue) captureFileStoreStatus() fileStoreObservation {
 			projects.limits[name] = p
 		}
 	}
-	markers := make(map[string]time.Time, len(q.s.JobInputUploads)+len(q.s.AttemptOutputUploads))
-	bundles := make(map[string]time.Time, len(q.s.BundleUploads))
-	for hash, at := range q.jobUploadMarkers() {
-		markers[hash] = at
-	}
-	for hash, at := range q.s.BundleUploads {
-		bundles[hash] = at
-		if _, exists := markers[hash]; !exists {
-			markers[hash] = at
-		}
-	}
 	var outputs []statusOutputReservation
 	for _, j := range q.liveJobs() {
 		if j.OutputAdmissionPending || terminal(j.State) || j.Spec.OutputDelivery != asyncNAS {
@@ -289,7 +283,11 @@ func (q *Queue) captureFileStoreStatus() fileStoreObservation {
 		}
 		outputs = append(outputs, statusOutputReservation{j.Spec.Disk.OutputBytes, maps.Clone(j.PendingOutputRefs)})
 	}
-	return fileStoreObservation{q.files, expired, keep, referenced, markers, bundles, q.filePublicationAge(q.clock.Now()), projects, outputs}
+	return fileStoreObservation{
+		store: q.files, expired: expired, keep: keep, referenced: referenced,
+		markers: q.jobUploadMarkers(), outputMarkers: maps.Clone(q.s.AttemptOutputUploads), bundles: maps.Clone(q.s.BundleUploads),
+		claims: q.unsettledInputClaims(), age: q.filePublicationAge(q.clock.Now()), projects: projects, outputs: outputs,
+	}
 }
 
 func (q *Queue) fileStoreStatus(ctx context.Context) *FileStoreStatus {
@@ -321,21 +319,31 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 		return &status
 	}
 	for hash, p := range payloads {
+		at, marked := markers[hash]
+		claims := v.claims[hash]
+		if p.upload {
+			_, output := v.outputMarkers[hash]
+			owned := marked && at.IsZero() || !marked && p.jobInput && allocatedInputClaim(claims, int64(p.length))
+			if owned && !referenced[hash] && (!output || len(claims) == 0) && v.age.interruptedUploadIdle(p.modified, claims) {
+				status.ReclaimableBytes = addDiskBytes(status.ReclaimableBytes, p.size)
+			}
+			continue
+		}
 		// Mirror the collector: only marked orphans and bundles keep the full
 		// horizon; an expired job's files use the grace capped at retention.
 		_, bundle := v.bundles[hash]
-		_, marker := markers[hash]
-		ordinaryExpired := !bundle && (!marker || referenced[hash])
-		if keep[hash] || v.age.protects(p.modified, ordinaryExpired) {
+		ordinaryExpired := !bundle && (!marked || referenced[hash])
+		if keep[hash] || len(claims) != 0 || v.age.protects(p.modified, ordinaryExpired) {
 			continue
 		}
 		if at, tracked := v.bundles[hash]; tracked && !expired[hash] && (at.After(now.Add(-retention)) || p.modified.After(now.Add(-retention))) {
 			continue
 		}
-		reclaimable := !p.upload && expired[hash]
-		if at, marked := markers[hash]; retention > 0 && marked && !referenced[hash] && !p.modified.After(now.Add(-retention)) {
-			reclaimable = p.upload || !at.IsZero() && !at.After(now.Add(-retention))
+		if !marked && bundle {
+			at, marked = v.bundles[hash], true
 		}
+		reclaimable := expired[hash] || retention > 0 && marked && !referenced[hash] && !at.IsZero() &&
+			!at.After(now.Add(-retention)) && !p.modified.After(now.Add(-retention))
 		if reclaimable {
 			status.ReclaimableBytes = addDiskBytes(status.ReclaimableBytes, p.size)
 		}
@@ -445,34 +453,77 @@ func (s *FileStore) refreshUpload(hash string) error {
 	return nil
 }
 
-// Only positively marked job-input uploads are disposable. Unknown/imported
-// files stay for operator recovery. The publication fence excludes every active
-// PATCH and verify/commit interval while custody and idle time are rechecked.
+func jobInputUpload(info tus.FileInfo, hash string) bool {
+	return info.ID == hash && info.MetaData["sha256"] == hash && info.MetaData["purpose"] == jobInputUploadPurpose && !info.SizeIsDeferred
+}
+
+func (a filePublicationAge) interruptedUploadIdle(modified time.Time, claims []FileInputClaim) bool {
+	cutoff := a.now.Add(-a.retention)
+	if a.retention == 0 || modified.After(cutoff) {
+		return false
+	}
+	for _, claim := range claims {
+		if claim.At.After(cutoff) {
+			return false
+		}
+	}
+	// Transfer activity sets the idle deadline for a claimed input. A measured
+	// delay from other claims to submission still protects published bytes and
+	// unclaimed interrupted transfers under their existing rules.
+	return len(claims) != 0 || !a.protects(modified, false)
+}
+
+// The publication fence excludes active transfers and verify/commit intervals
+// while custody and idle time are rechecked.
 func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) error {
 	requestCtx := requestContext(requestContexts)
 
 	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
 	store := q.files
-	_, _, referenced := q.fileReferences(false)
-	revision := q.fileReferenceRevision
-	markers := map[string]time.Time{}
-	for hash, at := range q.jobUploadMarkers() {
-		if at.IsZero() && !referenced[hash] {
-			markers[hash] = at
-		}
-	}
-	if q.fileRetention == 0 {
+	if store == nil || q.fileRetention == 0 {
 		requestUnlock1()
 		return nil
 	}
+	_, _, referenced := q.collectDurableFileReferences(false, nil, nil)
+	claims := q.unsettledInputClaims()
+	revision := q.fileReferenceRevision
 	age := q.filePublicationAge(q.clock.Now())
-	claimCutoff := age.now.Add(-max(q.fileRetention, q.s.PublicationHorizon))
+	candidates := map[string]bool{}
+	markers := q.jobUploadMarkers()
+	for hash, at := range markers {
+		if at.IsZero() && !referenced[hash] {
+			candidates[hash] = true
+		}
+	}
+	// Older queues dropped the marker as soon as a claim kept the identity.
+	// Verify the original purpose and exact allocation from tus metadata below.
+	legacy := map[string]bool{}
+	for hash, receipts := range claims {
+		if _, marked := markers[hash]; !marked && !referenced[hash] && age.interruptedUploadIdle(time.Time{}, receipts) {
+			for _, claim := range receipts {
+				if claim.Allocated {
+					legacy[hash] = true
+					break
+				}
+			}
+		}
+	}
 	requestUnlock1()
-	if store == nil || len(markers) == 0 {
-		return nil
+	// Completed legacy claims can outnumber interrupted transfers. Intersect
+	// with the upload directory before taking the write fence for any of them.
+	if len(legacy) != 0 {
+		entries, err := os.ReadDir(filepath.Join(store.root, "uploads"))
+		if err != nil {
+			log.Printf("file retention deferred: upload inventory unavailable: %v", err)
+		}
+		for _, entry := range entries {
+			if hash, ok := strings.CutSuffix(entry.Name(), ".info"); ok && legacy[hash] {
+				candidates[hash] = true
+			}
+		}
 	}
 	attempted := false
-	for hash, at := range markers {
+	for hash := range candidates {
 		if (FileRef{SHA256: hash}).validate() != nil {
 			continue
 		}
@@ -487,72 +538,104 @@ func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) er
 		}
 		requestUnlock2 := requestReadLock(requestCtx, &q.mu)
 		if revision != q.fileReferenceRevision {
-			_, _, referenced = q.fileReferences(false)
+			_, _, referenced = q.collectDurableFileReferences(false, nil, nil)
+			claims = q.unsettledInputClaims()
 			revision = q.fileReferenceRevision
-			age = q.filePublicationAge(q.clock.Now())
 		}
-		current, marked := q.jobUploadMarker(hash)
-		remove := q.files == store && marked && current == at && !referenced[hash]
+		age = q.filePublicationAge(q.clock.Now())
+		at, marked := q.jobUploadMarker(hash)
+		_, output := q.s.AttemptOutputUploads[hash]
+		receipts := claims[hash]
+		remove := q.files == store && !referenced[hash] && (!marked || at.IsZero()) &&
+			(!output || len(receipts) == 0) && age.interruptedUploadIdle(time.Time{}, receipts)
 		requestUnlock2()
-		err := func() error {
-			if !remove {
-				return nil
+		if remove {
+			if err := q.reclaimInterruptedUpload(requestCtx, store, hash, age, receipts, marked); err != nil {
+				log.Printf("file retention deferred upload=%s error=%q; retrying next tick", hash, err)
 			}
-			var published time.Time
-			if st, err := os.Lstat(store.blob(FileRef{SHA256: hash})); err == nil {
-				if !st.Mode().IsRegular() {
-					return nil
-				}
-				// Publication can crash before the SQLite marker changes. Recover
-				// its original freshness, rather than granting a new idle window.
-				published = st.ModTime()
-			} else if !os.IsNotExist(err) {
-				return err
-			}
-			path := filepath.Join(store.root, "uploads", hash)
-			for _, suffix := range []string{"", ".info"} {
-				st, err := os.Lstat(path + suffix)
-				if os.IsNotExist(err) {
-					continue
-				}
-				if err != nil {
-					return err
-				}
-				if !st.Mode().IsRegular() || age.protects(st.ModTime(), false) || st.ModTime().After(age.now.Add(-age.retention)) {
-					return nil
-				}
-			}
-			// Remove metadata first: leftover data cannot be resumed or refreshed,
-			// and a later sweep can finish cleanup after a crash.
-			for _, suffix := range []string{".info", ""} {
-				if err := os.Remove(path + suffix); err != nil && !os.IsNotExist(err) {
-					return err
-				}
-			}
-			if err := store.syncDir(filepath.Join(store.root, "uploads")); err != nil {
-				return err
-			}
-			return q.updateRequest(requestCtx, func() error {
-				if published.IsZero() {
-					q.forgetFileInputClaims(hash, claimCutoff)
-					delete(q.s.JobInputUploads, hash)
-					delete(q.s.AttemptOutputUploads, hash)
-				} else {
-					if _, owned := q.s.AttemptOutputUploads[hash]; owned {
-						q.s.AttemptOutputUploads[hash] = published
-					} else {
-						q.s.JobInputUploads[hash] = published
-					}
-				}
-				return nil
-			}, nil)
-		}()
-		q.fileLifecycle.Unlock()
-		if err != nil {
-			log.Printf("file retention deferred upload=%s error=%q; retrying next tick", hash, err)
 		}
+		q.fileLifecycle.Unlock()
 	}
 	return nil
+}
+
+// Caller holds the lifecycle write fence. Disk checks and removal never hold q.mu.
+func (q *Queue) reclaimInterruptedUpload(ctx context.Context, store *FileStore, hash string, age filePublicationAge, claims []FileInputClaim, marked bool) error {
+	var published time.Time
+	if st, err := os.Lstat(store.blob(FileRef{SHA256: hash})); err == nil {
+		if !marked || !st.Mode().IsRegular() {
+			return nil
+		}
+		// Recover a publish/link crash using the blob's original freshness.
+		published = st.ModTime()
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	path := filepath.Join(store.root, "uploads", hash)
+	for _, suffix := range []string{"", ".info"} {
+		st, err := os.Lstat(path + suffix)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !st.Mode().IsRegular() || !age.interruptedUploadIdle(st.ModTime(), claims) {
+			return nil
+		}
+	}
+	if !marked {
+		upload, err := filestore.New(filepath.Dir(path)).GetUpload(ctx, hash)
+		if errors.Is(err, tus.ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		info, err := upload.GetInfo(ctx)
+		if err != nil {
+			return err
+		}
+		if !jobInputUpload(info, hash) || !allocatedInputClaim(claims, info.Size) {
+			return nil
+		}
+		// Persist ownership before consuming the legacy metadata. A restart
+		// after either unlink can then finish cleanup and retire the claim.
+		if err := q.recordFileUpload(hash, jobInputUploadPurpose, true, ctx); err != nil {
+			return err
+		}
+		unlock := requestReadLock(ctx, &q.mu)
+		_, marked = q.s.JobInputUploads[hash]
+		unlock()
+		if !marked {
+			return nil
+		}
+	}
+	// Remove metadata first so leftover data cannot be resumed or refreshed.
+	for _, suffix := range []string{".info", ""} {
+		if err := os.Remove(path + suffix); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	if err := store.syncDir(filepath.Dir(path)); err != nil {
+		return err
+	}
+	return q.updateRequest(ctx, func() error {
+		if published.IsZero() {
+			cutoff := age.now.Add(-age.retention)
+			if len(claims) == 0 {
+				cutoff = age.now.Add(-max(age.retention, q.s.PublicationHorizon))
+			}
+			q.forgetFileInputClaims(hash, cutoff)
+			delete(q.s.JobInputUploads, hash)
+			delete(q.s.AttemptOutputUploads, hash)
+		} else if _, output := q.s.AttemptOutputUploads[hash]; output {
+			q.s.AttemptOutputUploads[hash] = published
+		} else {
+			q.s.JobInputUploads[hash] = published
+		}
+		return nil
+	}, nil)
 }
 
 // Match public capacity codes without relaying arbitrary upstream bodies.

@@ -218,7 +218,7 @@ func (q *Queue) rebuildRecords() {
 			q.records.removed[r.JobID] = r.Job
 		}
 	}
-	_, _, q.records.references = q.fileReferences(false)
+	_, _, q.records.references = q.collectDurableFileReferences(false, nil, nil)
 }
 func (q *Queue) liveJobs() map[string]*Job {
 	if q.observationLive != nil {
