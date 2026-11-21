@@ -182,6 +182,8 @@ func (q *Queue) noteInputClaimFacts(f *projectFileFacts, project string) {
 // The job's ordinary reference now carries attribution/retention. This runs in
 // the same transaction as submission and never removes payload bytes.
 func (q *Queue) settleFileInputClaims(s Spec) {
+	now := q.clock.Now()
+	var delay time.Duration
 	for _, ref := range submissionFiles(s) {
 		for id, claim := range q.s.FileInputClaims {
 			if claim.Project == s.Project && claim.File == ref {
@@ -189,13 +191,53 @@ func (q *Queue) settleFileInputClaims(s Spec) {
 				// Its age then measures reuse, not a publication delay: live, one
 				// reused claim lifted the horizon past file retention (#1375).
 				if claim.SettledAt.IsZero() {
-					q.s.PublicationHorizon = max(q.s.PublicationHorizon, q.clock.Now().Sub(claim.At))
+					delay = max(delay, now.Sub(claim.At))
 				}
-				claim.SettledAt = q.clock.Now()
+				claim.SettledAt = now
 				q.s.FileInputClaims[id] = claim
 			}
 		}
 	}
+	if delay > 0 {
+		q.recordPublicationTiming(now, delay)
+	}
+}
+
+type filePublicationSample struct {
+	At    time.Time     `json:"at"`
+	Delay time.Duration `json:"delay"`
+}
+
+type filePublicationTimings struct {
+	MeasuredSince time.Time               `json:"measured_since"`
+	LegacyGrace   time.Duration           `json:"legacy_grace"`
+	Peaks         []filePublicationSample `json:"peaks"`
+}
+
+// Keep a longer observation while it describes the retention window or the
+// measured delay itself. Once newer observations cover that period, an old peak
+// cannot govern collection forever. With no new evidence, keep the latest.
+func (s filePublicationSample) recent(now time.Time, retention time.Duration) bool {
+	return now.Sub(s.At) < max(s.Delay, retention)
+}
+
+// The timing snapshot is immutable for queue transaction rollback. A newer
+// equal or longer sample dominates an older one for both delay and freshness.
+func (q *Queue) recordPublicationTiming(now time.Time, delay time.Duration) {
+	next := filePublicationTimings{MeasuredSince: now, LegacyGrace: q.s.PublicationHorizon}
+	if previous := q.s.PublicationTimings; previous != nil {
+		next = *previous
+		next.Peaks = nil
+		for _, sample := range previous.Peaks {
+			if sample.Delay > delay && sample.recent(now, q.fileRetention) {
+				next.Peaks = append(next.Peaks, sample)
+			}
+		}
+	}
+	next.Peaks = append(next.Peaks, filePublicationSample{At: now, Delay: delay})
+	q.s.PublicationTimings = &next
+	// An adjacent older release still reads this field on rollback.
+	q.s.PublicationHorizon = max(q.s.PublicationHorizon, delay)
 }
 
 // Admission pools reserve only each other project's unused entitlement. No

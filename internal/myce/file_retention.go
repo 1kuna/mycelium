@@ -577,9 +577,9 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 		}
 	}
 	revision := q.fileReferenceRevision
-	cutoff := q.clock.Now().Add(-q.s.PublicationHorizon)
-	expiredCutoff := q.clock.Now().Add(-q.expiredFilePublicationGrace())
-	orphanCutoff := q.clock.Now().Add(-q.fileRetention)
+	age := q.filePublicationAge(q.clock.Now())
+	claimCutoff := age.now.Add(-q.s.PublicationHorizon)
+	orphanCutoff := age.now.Add(-q.fileRetention)
 	orphans := map[string]time.Time{}
 	bundles := map[string]time.Time{}
 	markers := q.jobUploadMarkers()
@@ -622,6 +622,7 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 		if revision != q.fileReferenceRevision {
 			expired, keep, referenced = q.fileReferences(true)
 			revision = q.fileReferenceRevision
+			age = q.filePublicationAge(q.clock.Now())
 		}
 		for i, c := range batch {
 			remove := q.files == store && expired[c.hash] && !keep[c.hash]
@@ -654,7 +655,7 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 			st, err := os.Lstat(path)
 			// Stat inside the publication fence: a publisher/HEAD may have
 			// refreshed mtime since the collection snapshot was taken.
-			if err == nil && filePayloadAgeEligible(st, cutoff, expiredCutoff, orphanCutoff, decisions[i].marked, decisions[i].expired) {
+			if err == nil && age.payloadEligible(st, decisions[i].marked, decisions[i].expired) {
 				err = os.Remove(path)
 				if err == nil {
 					gone[c.hash] = true
@@ -708,7 +709,7 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 			return nil
 		}
 		for hash := range gone {
-			q.forgetFileInputClaims(hash, cutoff)
+			q.forgetFileInputClaims(hash, claimCutoff)
 			delete(q.s.RetiredJobFiles, hash)
 			// A re-publication between unlink and this transaction owns a newer
 			// marker. Never erase its eligibility/progress with an older result.
@@ -759,11 +760,11 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 // longer blob-age rule for positively marked orphan uploads. Expired/released
 // bundles keep publication grace but no second retention window from upload.
 // Other expired job files use the grace capped at the queue's file retention.
-func filePayloadAgeEligible(st os.FileInfo, publicationCutoff, expiredCutoff, orphanCutoff time.Time, marked, expired bool) bool {
+func (a filePublicationAge) payloadEligible(st os.FileInfo, marked, expired bool) bool {
 	if !marked {
-		return !st.ModTime().After(expiredCutoff)
+		return !a.protects(st.ModTime(), true)
 	}
-	return !st.ModTime().After(publicationCutoff) && st.Mode().IsRegular() && (expired || !st.ModTime().After(orphanCutoff))
+	return !a.protects(st.ModTime(), false) && st.Mode().IsRegular() && (expired || !st.ModTime().After(a.now.Add(-a.retention)))
 }
 
 func hasJobFiles(j *Job) bool {
@@ -778,18 +779,36 @@ func hasJobFiles(j *Job) bool {
 	return false
 }
 
-// Caller holds q.mu. A publication or HEAD refreshes a blob's mtime, and the
-// publication horizon (the longest measured first settlement of an input claim)
-// keeps it until the submission that references it can commit. For an expired
-// finished job's files that grace never outlasts the file retention: they are
-// kept 3 days, then reclaimed (MY-47). Live, a horizon past the retention stopped
-// every unlink (#1375). An unsettled claim keeps its bytes as custody anyway.
-// Orphan and bundle uploads keep the full horizon. Zero retention keeps it too.
-func (q *Queue) expiredFilePublicationGrace() time.Duration {
-	if q.fileRetention > 0 {
-		return min(q.s.PublicationHorizon, q.fileRetention)
+type filePublicationAge struct {
+	now, measuredSince        time.Time
+	retention, legacy, recent time.Duration
+}
+
+// Caller holds q.mu. A first settlement after upgrade establishes the clock
+// boundary for new evidence. Earlier publications retain their previous grace.
+func (q *Queue) filePublicationAge(now time.Time) filePublicationAge {
+	age := filePublicationAge{now: now, retention: q.fileRetention, legacy: q.s.PublicationHorizon}
+	if timing := q.s.PublicationTimings; timing != nil && len(timing.Peaks) > 0 {
+		age.measuredSince, age.legacy = timing.MeasuredSince, timing.LegacyGrace
+		age.recent = timing.Peaks[len(timing.Peaks)-1].Delay
+		for _, sample := range timing.Peaks {
+			if sample.recent(now, q.fileRetention) {
+				age.recent = max(age.recent, sample.Delay)
+			}
+		}
 	}
-	return q.s.PublicationHorizon
+	return age
+}
+
+func (a filePublicationAge) protects(modified time.Time, expiredJobFile bool) bool {
+	grace := a.legacy
+	if !a.measuredSince.IsZero() && modified.After(a.measuredSince) {
+		grace = a.recent
+	}
+	if expiredJobFile && a.retention > 0 {
+		grace = min(grace, a.retention)
+	}
+	return modified.After(a.now.Add(-grace))
 }
 
 // Measured control pressure: a control request has waited on q.mu longer than

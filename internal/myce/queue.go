@@ -52,6 +52,7 @@ type state struct {
 	EfficiencyHealth       map[string]efficiencyBaseline `json:"efficiency_health,omitempty"`
 	StrandedDemand         []StrandedDemand              `json:"stranded_demand,omitempty"`
 	PublicationHorizon     time.Duration                 `json:"publication_horizon,omitempty"`
+	PublicationTimings     *filePublicationTimings       `json:"publication_timings,omitempty"`
 	ToolInventories        map[string]toolInventoryFence `json:"tool_inventories,omitempty"`
 	FileInputClaims        map[string]FileInputClaim     `json:"file_input_claims,omitempty"`
 	ModelIntervalSince     *time.Time                    `json:"model_interval_since,omitempty"`

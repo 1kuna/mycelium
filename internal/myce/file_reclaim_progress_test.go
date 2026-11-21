@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -225,9 +226,89 @@ func TestReusedInputClaimKeepsPublicationHorizon(t *testing.T) {
 	clock.Advance(time.Minute)
 	submit(t, q, s)
 	horizon := q.s.PublicationHorizon
+	measuredAt := q.s.PublicationTimings.Peaks[0].At
 	clock.Advance(4 * 24 * time.Hour)
 	submit(t, q, s)
 	if q.s.PublicationHorizon != horizon {
 		t.Fatalf("re-settling a reused claim moved the horizon from %v to %v", horizon, q.s.PublicationHorizon)
+	}
+	if peak := q.s.PublicationTimings.Peaks[0]; !peak.At.Equal(measuredAt) || peak.Delay != time.Minute {
+		t.Fatalf("reused claim refreshed publication evidence: %+v", peak)
+	}
+}
+
+// A legacy lifetime maximum can outlive the workload that produced it. A
+// verified first settlement teaches reclamation for subsequent publications,
+// while an in-flight publication from before the measurement keeps its grace.
+func TestFileReclaimUsesNewPublicationEvidence(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	jobs, refs := expiredRetentionInputs(t, q, clock, c, 2)
+	q.s.PublicationHorizon = 2 * testFileRetention
+	if err := q.files.refreshBlob(q.files.blob(refs[0])); err != nil {
+		t.Fatal(err)
+	}
+
+	_, recent := retentionUpload(t, c, "observe publication time")
+	s := spec("experiment")
+	s.Files = FileManifest{"input": recent}
+	if _, err := q.claimFileInput(context.Background(), s, recent); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Minute)
+	submit(t, q, s)
+	clock.Advance(time.Minute)
+	if err := q.files.refreshBlob(q.files.blob(refs[1])); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Minute)
+
+	dbPath, root, storeRoot := strings.TrimSuffix(q.lock.Name(), ".lock"), q.root, q.files.root
+	if err := q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	q, err := Open(dbPath, root, clock, WithFileStore(storeRoot, 1<<20, true), WithCheckpointAvailability(func() bool { return true }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { q.Close() })
+	if err := q.ConfigureFileRetention(testFileRetention); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := q.PlanFileRelease(context.Background(), FileReleaseSelection{
+		Project: s.Project,
+		Jobs:    []string{jobs[0].ID, jobs[1].ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.ReclaimableBytes != refs[1].SizeBytes {
+		t.Fatalf("release plan reclaimable bytes = %d, want %d", plan.ReclaimableBytes, refs[1].SizeBytes)
+	}
+	if got := q.fileStoreStatus(context.Background()).ReclaimableBytes; got != uint64(refs[1].SizeBytes) {
+		t.Fatalf("status reclaimable bytes = %d, want %d", got, refs[1].SizeBytes)
+	}
+	if err := q.reclaimJobFiles(); err != nil {
+		t.Fatal(err)
+	}
+	if !blobExists(t, q, refs[0]) || blobExists(t, q, refs[1]) {
+		t.Fatal("collection did not preserve legacy grace and reclaim the newer publication")
+	}
+}
+
+func TestFileReclaimLetsPublicationPeakAgeOut(t *testing.T) {
+	q, clock := fixture(t)
+	long := 2 * testFileRetention
+	q.recordPublicationTiming(clock.Now(), long)
+	clock.Advance(testFileRetention)
+	q.recordPublicationTiming(clock.Now(), time.Minute)
+	modified := clock.Now().Add(time.Nanosecond)
+	clock.Advance(2 * time.Minute)
+	if age := q.filePublicationAge(clock.Now()); age.recent != long || !age.protects(modified, true) {
+		t.Fatalf("recent long publication lost protection: %+v", age)
+	}
+	clock.Advance(testFileRetention - 2*time.Minute)
+	if age := q.filePublicationAge(clock.Now()); age.recent != time.Minute || age.protects(modified, true) {
+		t.Fatalf("old publication peak still controls grace: %+v", age)
 	}
 }

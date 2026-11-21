@@ -242,10 +242,7 @@ type fileStoreObservation struct {
 	expired, keep, referenced map[string]bool
 	markers                   map[string]time.Time
 	bundles                   map[string]time.Time
-	now                       time.Time
-	retention                 time.Duration
-	publicationHorizon        time.Duration
-	expiredGrace              time.Duration
+	age                       filePublicationAge
 	projects                  projectFileFacts
 	outputs                   []statusOutputReservation
 }
@@ -290,7 +287,7 @@ func (q *Queue) captureFileStoreStatus() fileStoreObservation {
 		}
 		outputs = append(outputs, statusOutputReservation{j.Spec.Disk.OutputBytes, maps.Clone(j.PendingOutputRefs)})
 	}
-	return fileStoreObservation{q.files, expired, keep, referenced, markers, bundles, q.clock.Now(), q.fileRetention, q.s.PublicationHorizon, q.expiredFilePublicationGrace(), projects, outputs}
+	return fileStoreObservation{q.files, expired, keep, referenced, markers, bundles, q.filePublicationAge(q.clock.Now()), projects, outputs}
 }
 
 func (q *Queue) fileStoreStatus(ctx context.Context) *FileStoreStatus {
@@ -305,7 +302,7 @@ func (q *Queue) fileStoreStatus(ctx context.Context) *FileStoreStatus {
 func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 	store := v.store
 	expired, keep, referenced, markers := v.expired, v.keep, v.referenced, v.markers
-	now, retention := v.now, v.retention
+	now, retention := v.age.now, v.age.retention
 	if store == nil {
 		return nil
 	}
@@ -326,11 +323,8 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 		// horizon; an expired job's files use the grace capped at retention.
 		_, bundle := v.bundles[hash]
 		_, marker := markers[hash]
-		grace := v.expiredGrace
-		if bundle || marker && !referenced[hash] {
-			grace = v.publicationHorizon
-		}
-		if keep[hash] || p.modified.After(now.Add(-grace)) {
+		ordinaryExpired := !bundle && (!marker || referenced[hash])
+		if keep[hash] || v.age.protects(p.modified, ordinaryExpired) {
 			continue
 		}
 		if at, tracked := v.bundles[hash]; tracked && !expired[hash] && (at.After(now.Add(-retention)) || p.modified.After(now.Add(-retention))) {
@@ -469,7 +463,8 @@ func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) er
 		requestUnlock1()
 		return nil
 	}
-	cutoff := q.clock.Now().Add(-max(q.fileRetention, q.s.PublicationHorizon))
+	age := q.filePublicationAge(q.clock.Now())
+	claimCutoff := age.now.Add(-max(q.fileRetention, q.s.PublicationHorizon))
 	requestUnlock1()
 	if store == nil || len(markers) == 0 {
 		return nil
@@ -492,6 +487,7 @@ func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) er
 		if revision != q.fileReferenceRevision {
 			_, _, referenced = q.fileReferences(false)
 			revision = q.fileReferenceRevision
+			age = q.filePublicationAge(q.clock.Now())
 		}
 		current, marked := q.jobUploadMarker(hash)
 		remove := q.files == store && marked && current == at && !referenced[hash]
@@ -520,7 +516,7 @@ func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) er
 				if err != nil {
 					return err
 				}
-				if !st.Mode().IsRegular() || st.ModTime().After(cutoff) {
+				if !st.Mode().IsRegular() || age.protects(st.ModTime(), false) || st.ModTime().After(age.now.Add(-age.retention)) {
 					return nil
 				}
 			}
@@ -536,7 +532,7 @@ func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) er
 			}
 			return q.updateRequest(requestCtx, func() error {
 				if published.IsZero() {
-					q.forgetFileInputClaims(hash, cutoff)
+					q.forgetFileInputClaims(hash, claimCutoff)
 					delete(q.s.JobInputUploads, hash)
 					delete(q.s.AttemptOutputUploads, hash)
 				} else {
