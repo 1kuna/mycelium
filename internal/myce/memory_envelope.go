@@ -258,6 +258,7 @@ type MemorySizingInputs struct {
 	LaunchGapGB            float64  `json:"launch_gap_gb"`
 	ProjectedRemainderGB   *float64 `json:"projected_remainder_gb,omitempty"`
 	DriftGB                float64  `json:"drift_gb,omitempty"`
+	ResidentEngineHostGB   float64  `json:"resident_engine_host_gb,omitempty"`
 	RecoveryCapacityGB     float64  `json:"recovery_capacity_gb,omitempty"`
 	ConstrainedCheckHostGB float64  `json:"constrained_check_host_gb,omitempty"`
 }
@@ -504,7 +505,7 @@ func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
 				} else if peak != nil && (estimate.uncalibrated || estimate.deviceUncalibrated) {
 					// A missing device measurement cannot authorize sharing or
 					// book less than the exclusive card's available capacity.
-					n.MemoryGB = q.reclaimableGPUMemory(m, j.Spec.Priority, j.Spec)
+					n.MemoryGB = q.exploratoryDeviceRoom(j, m)
 					source += "; unknown device peak; exclusive card"
 				} else {
 					source += "; GPU recipe default"
@@ -544,7 +545,7 @@ func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
 			}
 			if !n.cpuOnly() && !m.UnifiedMemory {
 				if n.MemoryGB == 0 {
-					n.MemoryGB = q.reclaimableGPUMemory(m, j.Spec.Priority, j.Spec)
+					n.MemoryGB = q.exploratoryDeviceRoom(j, m)
 					source += "; exploratory device"
 				}
 				if n.HostMemoryGB == 0 {
@@ -612,10 +613,7 @@ func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
 				refusal = "a first run explores one card; work spreads across cards only after evidence shows one card is too small"
 			}
 			if !n.cpuOnly() && !gpuBounded {
-				n.MemoryGB = q.reclaimableGPUMemory(m, j.Spec.Priority, j.Spec)
-				if m.TotalMemoryGB > 0 {
-					n.MemoryGB = min(n.MemoryGB, m.TotalMemoryGB)
-				}
+				n.MemoryGB = q.exploratoryDeviceRoom(j, m)
 				if m.UnifiedMemory {
 					n.MemoryGB = max(0, n.MemoryGB-exploratoryDriftMarginGB(m))
 					// Reserve member containment before filling the GPU share.
@@ -1036,6 +1034,19 @@ func (q *Queue) exploratoryMemoryStatus(j *Job, m *Machine) (float64, string, bo
 	return q.physicalProbeMemoryStatus(j, m, nil)
 }
 
+// An exclusive probe can use the card's remaining room alongside its own
+// engine. The normal planner still admits the complete combined reservation.
+func (q *Queue) exploratoryDeviceRoom(j *Job, m *Machine) float64 {
+	room := q.reclaimableGPUMemory(m, j.Spec.Priority, j.Spec)
+	if m.TotalMemoryGB > 0 {
+		room = min(room, m.TotalMemoryGB)
+	}
+	if model := q.coldResidentModel(j, m); model != nil {
+		room = max(0, room-model.MemoryGB)
+	}
+	return room
+}
+
 func (q *Queue) hostSizingInputs(m *Machine) MemorySizingInputs {
 	e := MemorySizingInputs{LedgerRemainderGB: q.hostRoomArms(m).gb(), AllowanceGB: hostMemoryAllowanceGB(m), SlackGB: m.MemoryCeilingSlackGB}
 	if l := q.hostMemoryLedgers[m.ID]; l != nil {
@@ -1120,6 +1131,7 @@ func (q *Queue) physicalProbeMemoryStatus(j *Job, m *Machine, inputs *MemorySizi
 	// hostNeed adds ceiling slack back. Leave the named drift margin unused
 	// between the inventory snapshot and the strict launch check.
 	slack := sizing.SlackGB + drift
+	sizing.ResidentEngineHostGB = q.coldResidentHostCharge(j, m)
 	if inputs != nil {
 		sizing.LaunchGapGB, sizing.DriftGB = gap, drift
 		if projected != sizing.LedgerRemainderGB {
@@ -1135,6 +1147,12 @@ func (q *Queue) physicalProbeMemoryStatus(j *Job, m *Machine, inputs *MemorySizi
 				return 0, fmt.Sprintf("exploratory first run waiting for occupied host RAM (%.3f GiB offer; %.3f GiB without reservations)", max(0, room-slack), max(0, unoccupied-slack)), true
 			}
 		}
+	}
+	if resident := sizing.ResidentEngineHostGB; resident > 0 {
+		if room <= slack+resident {
+			return 0, fmt.Sprintf("exploratory first run needs host RAM for the resident engine and probe (%.3f GiB available; %.3f GiB for the engine and launch headroom)", room, slack+resident), true
+		}
+		room -= resident
 	}
 	if room <= slack {
 		return 0, fmt.Sprintf("exploratory first run needs physical headroom (%.1f GiB available; %.1f GiB allowance)", room, allowance), true

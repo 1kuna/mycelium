@@ -380,6 +380,70 @@ func TestResidentJobsExtensionAndQualificationBinding(t *testing.T) {
 	}
 }
 
+func TestResidentAutoCheckFitsAlongsideColdEngine(t *testing.T) {
+	q, clock, m, _ := residentFixture(t)
+	model := q.models.Models[0]
+	model.MemoryGB, model.HostMemoryGB = 24, 16
+	if err := q.ConfigureModels(ModelConfig{Models: []Model{model}}); err != nil {
+		t.Fatal(err)
+	}
+	m.ModelConfigHash = modelConfigHash(q.models)
+	m.CapabilityProfile.LogicalCPUs, m.CapabilityProfile.SystemMemoryBytes = 16, 31<<30
+	m.TotalMemoryGB, m.FreeMemoryGB = 30, 30
+	m.HostMemoryBudgetGB, m.HostAvailableMemoryGB = 24, 17.44
+	check(t, q, m, nil)
+
+	e := fakeExtension(t)
+	e.Resumable, e.Resident = false, &ResidentBinding{Model: model.Name}
+	e.Files["extension.yaml"], _ = yaml.Marshal(e)
+	e, err := extensionFromFiles(e.Files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q.AddExtension(e); err != nil {
+		t.Fatal(err)
+	}
+	r := newExtensionReport(e, &m, "kind:sample")
+	r.Setup = true
+	m.ExtensionReports = []ExtensionReport{r}
+	check(t, q, m, nil)
+	queued := submit(t, q, Spec{Name: "extension-check", Project: "extension-check", Priority: "experiment",
+		Extension: extensionKey(e), ExtensionDigest: e.Digest, AllowedMachines: []string{m.ID},
+		Needs:          ResourceNeeds{Memory: "auto"},
+		ExtensionCheck: &ExtensionCheckRequest{Work: "kind:sample", Directory: t.TempDir()}})
+	m.FreeMemoryGB = 23
+	clock.Advance(time.Second)
+	if run := check(t, q, m, nil).Job; run != nil {
+		t.Fatal("check admitted without room for its engine")
+	}
+	drainAdmissionWait(t, q)
+	wait := job(t, q, queued.ID)
+	if !strings.Contains(wait.Reason, "24.000 GiB accelerator memory; 23.000 GiB available") {
+		t.Fatalf("wrong wait reason: %s", wait.Reason)
+	}
+	if wait.AdmissionWait == nil || wait.AdmissionWait.Latest == nil || !slices.ContainsFunc(wait.AdmissionWait.Latest.Targets, func(target AdmissionWaitTarget) bool {
+		return target.AdmissionDecision != nil && target.AdmissionDecision.Predicate == predicateResidentDeviceMemory &&
+			target.RequiredDeviceGB == 24 && target.AvailableDeviceGB == 23
+	}) {
+		t.Fatalf("missing device rejection and combined demand: %+v", wait.AdmissionWait)
+	}
+	m.FreeMemoryGB = 30
+	clock.Advance(time.Second)
+	run := check(t, q, m, nil).Job
+	if run == nil || run.ID != queued.ID || run.Attempt != 1 {
+		t.Fatalf("cold resident check not assigned: %s", job(t, q, queued.ID).Reason)
+	}
+	if n := run.Spec.Needs; n.MemoryGB != 6 || n.HostMemoryGB <= 0 || n.HostMemoryGB+model.HostMemoryGB > m.HostAvailableMemoryGB {
+		t.Fatalf("probe did not leave space for its engine: %+v", n)
+	}
+	if sizing := run.MemoryEnvelope.SizingInputs; sizing == nil || sizing.ResidentEngineHostGB != model.HostMemoryGB {
+		t.Fatalf("probe did not retain the engine's host charge: %+v", sizing)
+	}
+	if slot := q.s.ModelSlots[targetSlotKey(&m, run.Spec.Resident.Engine.Model.Name)]; slot == nil || !slotReservesMemory(slot) {
+		t.Fatal("engine was not reserved with the check")
+	}
+}
+
 // Real HTTP process, queue call admission and attempt pipes. Independent
 // accepted results stay in SQLite; invalid/stale calls cannot affect siblings.
 func TestResidentJobsRealCPUProcessAndAttemptBridge(t *testing.T) {
