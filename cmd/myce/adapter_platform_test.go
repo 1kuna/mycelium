@@ -211,6 +211,9 @@ func TestAdapterPlatformDev(t *testing.T) {
 	resolveQueue, resolveClock, _, _ := waitQueue(t)
 	m := *snapshot.Machines[0]
 	m.InventoryProbe = nil
+	// The resolution queue receives inventory only, independent of the dev
+	// queue's model endpoint and the catalog that authenticates it.
+	m.ModelURL, m.ModelConfigHash = "", ""
 	if _, err := currentCLICheckin(resolveQueue, resolveClock, myce.Checkin{Machine: m}); err != nil {
 		t.Fatal(err)
 	}
