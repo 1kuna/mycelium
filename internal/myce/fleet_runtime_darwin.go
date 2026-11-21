@@ -3,7 +3,6 @@ package myce
 import (
 	"context"
 	"debug/macho"
-	"errors"
 	"os"
 	"os/exec"
 	"strconv"
@@ -23,15 +22,15 @@ func openFleetRunningImage() (*os.File, error) {
 func verifyFleetRunningImage(file *os.File) error {
 	image, err := macho.NewFile(file)
 	if err != nil || image.Type != macho.TypeExec {
-		return errors.New("opened image is not a Mach-O executable")
+		return fleetProofImageFormat
 	}
 	info, err := file.Stat()
 	if err != nil {
-		return err
+		return fleetProofImageStat
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return errors.New("running executable vnode unavailable")
+		return fleetProofImageStat
 	}
 	// Darwin has no /proc/self/exe. lsof exposes the kernel's mapped text
 	// vnodes. Match the retained descriptor, so a swap before opening fails
@@ -44,7 +43,7 @@ func verifyFleetRunningImage(file *os.File) error {
 	cmd.Env = withoutMyceToken(os.Environ())
 	output, err := cmd.Output()
 	if err != nil {
-		return errors.New("running executable mappings unavailable")
+		return fleetProofImageMapping
 	}
 	var device uint64
 	text := false
@@ -64,5 +63,5 @@ func verifyFleetRunningImage(file *os.File) error {
 			}
 		}
 	}
-	return errors.New("opened executable is not the running image")
+	return fleetProofImageMismatch
 }

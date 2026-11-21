@@ -432,6 +432,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			}
 			c.period = period
 		}
+		c.fleetProofIssue = safeFleetProofIssue(FleetProofIssue(r.Header.Get(fleetProofIssueHeader)))
 		accepted := false
 		contact, settle := a.Queue.trackWorkerCheckin(c.Machine.ID, c.Machine.Session, c.period, true, r.Context())
 		c.contact = contact
@@ -820,8 +821,13 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "myce/"+BuildVersion)
-	if checkin, ok := in.(Checkin); ok && path == "/api/workers/checkin" && checkin.period > 0 {
-		req.Header.Set(checkinPeriodHeader, checkin.period.String())
+	if checkin, ok := in.(Checkin); ok && path == "/api/workers/checkin" {
+		if checkin.period > 0 {
+			req.Header.Set(checkinPeriodHeader, checkin.period.String())
+		}
+		if issue := safeFleetProofIssue(checkin.fleetProofIssue); issue != "" {
+			req.Header.Set(fleetProofIssueHeader, string(issue))
+		}
 	}
 	if workerProtocolEndpoint(path) {
 		req.Header.Set("X-Myce-Start-Gate", startGateProtocol)

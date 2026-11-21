@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"maps"
 	"net/url"
 	"os"
@@ -53,6 +54,9 @@ type fleetImage struct {
 
 func captureFleetImage() *fleetImage {
 	f, err := openFleetRunningImage()
+	if err != nil {
+		err = fleetProofImageOpen
+	}
 	return &fleetImage{file: f, err: err}
 }
 
@@ -62,18 +66,22 @@ func (image *fleetImage) sha256() (string, error) {
 			return
 		}
 		before, err := image.file.Stat()
-		if err == nil {
-			err = verifyFleetRunningImage(image.file)
-		}
 		if err != nil || !before.Mode().IsRegular() {
-			image.err = errors.New("running executable identity unavailable")
+			image.err = fleetProofImageStat
+			return
+		}
+		if err := verifyFleetRunningImage(image.file); err != nil {
+			image.err = err
 			return
 		}
 		hash := sha256.New()
-		_, err = io.Copy(hash, io.NewSectionReader(image.file, 0, before.Size()))
-		after, statErr := image.file.Stat()
-		if err != nil || statErr != nil || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
-			image.err = errors.New("running executable changed during observation")
+		if _, err = io.Copy(hash, io.NewSectionReader(image.file, 0, before.Size())); err != nil {
+			image.err = fleetProofImageHash
+			return
+		}
+		after, err := image.file.Stat()
+		if err != nil || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+			image.err = fleetProofImageChanged
 			return
 		}
 		image.hash = hex.EncodeToString(hash.Sum(nil))
@@ -96,9 +104,10 @@ func fleetRunnerSmoke(ctx context.Context, dir string) error {
 		// continues. No retry can silently turn a failed startup into readiness.
 		probe, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		r.err = cleanupRecordedProcesses(dir, "enrollment-command-*.json", RealClock{})
-		if r.err == nil {
-			r.err = enrollmentRunnerSmoke(probe, dir, RealClock{})
+		if err := cleanupRecordedProcesses(dir, "enrollment-command-*.json", RealClock{}); err != nil {
+			r.err = fleetProofSmokeCleanup
+		} else if err := enrollmentRunnerSmoke(probe, dir, RealClock{}); err != nil {
+			r.err = fleetProofSmokeFailed
 		}
 	})
 	return r.err
@@ -118,11 +127,11 @@ func collectFleetRuntime(ctx context.Context, c ServiceConfig, session string, c
 
 func collectFleetRuntimeAt(ctx context.Context, c ServiceConfig, session string, command func(context.Context, string, ...string) ([]byte, error), clock Clock) (*FleetRuntimeProof, error) {
 	if session == "" || c.State == "" || c.Config == "" || c.Service == "" || (c.Role != "worker" && c.Role != "queue") {
-		return nil, errors.New("installed service identity unavailable")
+		return nil, fleetProofConfigMissing
 	}
 	hash, err := fleetStartupImage.sha256()
 	if err != nil {
-		return nil, errors.New("running executable proof unavailable")
+		return nil, err
 	}
 	p := &FleetRuntimeProof{Version: BuildVersion, SHA256: hash, Session: session, PID: os.Getpid(), StartGate: startGateProtocol, AttemptProtocol: keyedAttemptProtocol}
 	slot, slotErr := observeReleaseSlot(c.Binary)
@@ -138,7 +147,7 @@ func collectFleetRuntimeAt(ctx context.Context, c ServiceConfig, session string,
 
 	if err := fleetRunnerSmoke(ctx, c.State); err != nil {
 		p.Failure = "runner_smoke_failed"
-		return p, errors.New("fleet runner smoke unavailable")
+		return p, err
 	}
 	p.RunnerSmoke = true
 	// A stuck service manager must not monopolize the asynchronous observer.
@@ -146,8 +155,11 @@ func collectFleetRuntimeAt(ctx context.Context, c ServiceConfig, session string,
 	defer cancel()
 	identity, err := EnrollmentServiceHealth(probe, c, command)
 	pid, _, _ := strings.Cut(identity, "/")
-	if err != nil || pid != strconv.Itoa(p.PID) {
-		return p, errors.New("running service identity unavailable")
+	if err != nil {
+		return p, fleetProofManagerUnhealthy
+	}
+	if pid != strconv.Itoa(p.PID) {
+		return p, fleetProofManagerPID
 	}
 	p.ServiceHealthy = true
 	p.ObservedAt = clock.Now()
@@ -158,6 +170,9 @@ func collectFleetRuntimeAt(ctx context.Context, c ServiceConfig, session string,
 // deliver a value through pending; they never write Worker or Machine fields.
 type workerFleetRuntime struct {
 	adoptionProtocol int
+	startupIssue     FleetProofIssue
+	pollIssue        FleetProofIssue
+	issue            FleetProofIssue
 	failureReceipt   string
 	config           ServiceConfig
 	client           Client
@@ -176,6 +191,7 @@ type workerFleetRuntime struct {
 }
 
 type fleetPollResult struct {
+	issue          FleetProofIssue
 	failureReceipt string
 	proof          *FleetRuntimeProof
 	attempted      string
@@ -262,7 +278,7 @@ func (w Worker) newFleetRuntime() *workerFleetRuntime {
 	// Hash once at startup, outside the worker loop. Failure withholds fleet
 	// support only; it is never an error returned by Worker.Run.
 	if _, err := fleetStartupImage.sha256(); err != nil {
-		return nil
+		return &workerFleetRuntime{startupIssue: fleetCollectionIssue(err)}
 	}
 	clock := w.Clock
 	if clock == nil {
@@ -278,14 +294,47 @@ func (w Worker) newFleetRuntime() *workerFleetRuntime {
 // fleetProofMaxAge (#1450); a new process is judged against this.
 const fleetRuntimeFreshFor = min(ProductionLossAfter, DeadlineLossAfter, LossAfter)
 
+func fleetCollectionIssue(err error) FleetProofIssue {
+	var issue FleetProofIssue
+	if errors.As(err, &issue) && safeFleetProofIssue(issue) != "" {
+		return issue
+	}
+	return fleetProofCollectionFailed
+}
+
+func (r *workerFleetRuntime) proofIssue() FleetProofIssue {
+	if r == nil {
+		return fleetProofConfigMissing
+	}
+	return r.issue
+}
+
 func (r *workerFleetRuntime) observe(ctx context.Context, m Machine, eligible bool) *FleetRuntimeProof {
-	if r == nil || m.Session == "" {
+	if r == nil {
 		return nil
+	}
+	proof, issue := r.observeProof(ctx, m, eligible)
+	if issue != r.issue {
+		r.issue = issue
+		if issue != "" && issue != fleetProofPending {
+			log.Printf("fleet runtime proof unavailable: %s", issue)
+		}
+	}
+	return proof
+}
+
+func (r *workerFleetRuntime) observeProof(ctx context.Context, m Machine, eligible bool) (*FleetRuntimeProof, FleetProofIssue) {
+	if r.startupIssue != "" {
+		return nil, r.startupIssue
+	}
+	if m.Session == "" {
+		return nil, fleetProofSessionMissing
 	}
 	if r.pending != nil {
 		select {
 		case result := <-r.pending:
 			r.proof, r.attempted, r.failed = result.proof, result.attempted, result.failed
+			r.pollIssue = result.issue
 			r.failureReceipt, r.acks = result.failureReceipt, result.acks
 			r.generation++
 			r.pending = nil
@@ -306,8 +355,14 @@ func (r *workerFleetRuntime) observe(ctx context.Context, m Machine, eligible bo
 			pending <- pollFleetRuntimeAt(ctx, config, client, collect, launch, host, machine, session, eligible, prior, clock)
 		}()
 	}
-	if r.proof == nil || r.proof.Session != m.Session {
-		return nil
+	if r.proof == nil {
+		if r.pollIssue != "" {
+			return nil, r.pollIssue
+		}
+		return nil, fleetProofPending
+	}
+	if r.proof.Session != m.Session {
+		return nil, fleetProofSessionMismatch
 	}
 	clock := r.clock
 	if clock == nil {
@@ -317,12 +372,21 @@ func (r *workerFleetRuntime) observe(ctx context.Context, m Machine, eligible bo
 	// Report the proof with its age and let the queue judge freshness against
 	// this process's cadence. Never extend it past the ceiling while a manager
 	// or control request is stuck.
-	if r.proof.ObservedAt.IsZero() || now.Before(r.proof.ObservedAt) || now.Sub(r.proof.ObservedAt) >= fleetProofMaxAge {
-		return nil
+	if r.proof.ObservedAt.IsZero() {
+		if r.pollIssue != "" {
+			return nil, r.pollIssue
+		}
+		return nil, fleetProofTimeMissing
+	}
+	if now.Before(r.proof.ObservedAt) {
+		return nil, fleetProofTimeFuture
+	}
+	if now.Sub(r.proof.ObservedAt) >= fleetProofMaxAge {
+		return nil, fleetProofExpired
 	}
 	p := *r.proof
 	p.ObservationAgeSeconds = now.Sub(r.proof.ObservedAt).Seconds()
-	return &p
+	return &p, ""
 }
 
 func pollFleetRuntime(ctx context.Context, config ServiceConfig, client Client, collect func(context.Context, ServiceConfig, string) (*FleetRuntimeProof, error), launch func(context.Context, ServiceConfig, FleetUpdateInstruction) error, host, machine, session string, eligible bool, attempted string, failed *fleetLaunchFailure, handled ...string) fleetPollResult {
@@ -336,6 +400,7 @@ func pollFleetRuntime(ctx context.Context, config ServiceConfig, client Client, 
 func pollFleetRuntimeAt(ctx context.Context, config ServiceConfig, client Client, collect func(context.Context, ServiceConfig, string) (*FleetRuntimeProof, error), launch func(context.Context, ServiceConfig, FleetUpdateInstruction) error, host, machine, session string, eligible bool, prior fleetPollResult, clock Clock) fleetPollResult {
 	result := prior
 	result.proof = nil
+	result.issue = ""
 	if result.acks == nil {
 		result.acks = map[string]fleetAckRetry{}
 	}
@@ -344,6 +409,7 @@ func pollFleetRuntimeAt(ctx context.Context, config ServiceConfig, client Client
 	// receipt never withholds the proof (#600), but blocks new instructions.
 	receipt, readErr := ReadFleetUpdateFailure(config)
 	if readErr != nil {
+		result.issue = fleetProofReceiptInvalid
 		return result
 	}
 	receiptPending := false
@@ -359,6 +425,9 @@ func pollFleetRuntimeAt(ctx context.Context, config ServiceConfig, client Client
 	}
 	proof, err := collect(ctx, config, session)
 	result.proof = proof
+	if err != nil || proof == nil {
+		result.issue = fleetCollectionIssue(err)
+	}
 	if receiptPending || err != nil || proof == nil || !proof.ServiceHealthy || !eligible || ctx.Err() != nil {
 		return result
 	}

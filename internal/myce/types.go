@@ -659,6 +659,7 @@ type Machine struct {
 	MemoryObservation      *HostMemoryObservation `json:"memory_observation,omitempty"`
 	Release                *RunningRelease        `json:"release,omitempty"`
 	Fleet                  *FleetRuntimeProof     `json:"fleet,omitempty"`
+	FleetProofIssue        FleetProofIssue        `json:"fleet_proof_issue,omitempty"`
 	DiskReceivedAt         time.Time              `json:"disk_received_at,omitempty"` // Queue-owned receipt time; only disk check-ins renew it.
 	DiskVolumes            []DiskVolume           `json:"disk_volumes,omitempty"`
 	Enrollment             *EnrollmentProof       `json:"enrollment,omitempty"`
@@ -781,6 +782,7 @@ type Execution struct {
 type Checkin struct {
 	contact              *checkinContact // Queue-local request fence, never serialized.
 	period               time.Duration   // Transport header; not part of strict legacy JSON.
+	fleetProofIssue      FleetProofIssue // Advisory transport header, compatible with strict legacy JSON.
 	ToolInventoryHash    string          `json:"tool_inventory_hash,omitempty"`
 	ToolInventoryVersion uint64          `json:"tool_inventory_version,omitempty"`
 	NASPathReports       []NASPathReport `json:"nas_path_reports,omitempty"`

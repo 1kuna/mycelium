@@ -1190,6 +1190,9 @@ func printStatusDetail(s myce.Snapshot, full, detail bool) {
 		} else {
 			fmt.Printf("worker %s release: unknown\n", m.ID)
 		}
+		if m.FleetProofIssue != "" {
+			fmt.Printf("worker %s fleet runtime proof unavailable: %s\n", m.ID, m.FleetProofIssue)
+		}
 		if p := m.Fleet; p != nil && (p.SlotMismatch || p.SlotError != "") {
 			slot := "unavailable"
 			if p.InstalledSlot != nil {
