@@ -25,6 +25,8 @@ const (
 // to the attempt's existing diagnostic path.
 type ephemeralRefusal string
 
+const ephemeralRefusalHeader = "X-Myce-Ephemeral-Refusal"
+
 const (
 	ephemeralLinuxRequired        ephemeralRefusal = "linux_required"
 	ephemeralNamespaceRequired    ephemeralRefusal = "namespaces_unqualified"
@@ -33,12 +35,12 @@ const (
 	ephemeralCoreLimitUnqualified ephemeralRefusal = "core_limit_unqualified"
 )
 
-func (r ephemeralRefusal) known() bool {
+func safeEphemeralRefusal(r ephemeralRefusal) ephemeralRefusal {
 	switch r {
 	case ephemeralLinuxRequired, ephemeralNamespaceRequired, ephemeralNamespacePolicy, ephemeralCoreRouteUnqualified, ephemeralCoreLimitUnqualified:
-		return true
+		return r
 	}
-	return false
+	return ""
 }
 
 func (s Spec) ephemeral() bool { return s.WorkerData == "ephemeral" }

@@ -1632,9 +1632,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 	c.Machine.ToolInventory, c.Machine.toolInventory = nil, nil
 	c = receivedDeviceTelemetry(c, q.clock.Now())
 	preparedMachine := cloneMachine(&c.Machine)
-	if !preparedMachine.EphemeralRefusal.known() {
-		preparedMachine.EphemeralRefusal = ""
-	}
+	preparedMachine.EphemeralRefusal = c.ephemeralRefusal
 	preparedMachine.FleetProofIssue = c.fleetProofIssue
 	reply := Reply{WorkerDiskBudgetProtocol: workerDiskBudgetProtocol, WorkerDiskHeadroomProtocol: workerDiskHeadroomProtocol, WorkerDiskTrendProtocol: workerDiskTrendProtocol, DeviceHealthProtocol: deviceHealthProtocol, DeviceRecoveryProtocol: deviceRecoveryProtocol, HostMountProgressProtocol: hostMountProgressProtocol, DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, HostMemorySampleProtocol: hostMemorySampleProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, HostForeignProtocol: hostForeignProtocol, ToolInventoryProtocol: toolInventoryProtocol, CheckpointExpiryProtocol: checkpointExpiryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
 	q.kickCheckpointShards()

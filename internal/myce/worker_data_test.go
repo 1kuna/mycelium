@@ -473,9 +473,17 @@ func TestEphemeralPlacementRefusalAndWaitReason(t *testing.T) {
 			check(t, q, m, nil)
 			j := submit(t, q, s)
 
-			m.Capabilities, m.EphemeralRefusal = tc.caps, tc.refusal
-			if assigned := check(t, q, m, nil).Job; assigned != nil {
-				t.Fatal("assigned to an unqualified worker", assigned.ID)
+			api := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+			defer api.Close()
+			client := Client{URL: api.URL, Token: "test"}
+			m.Capabilities = tc.caps
+			c := keyedFixtureCheckin(Checkin{Machine: m, period: time.Second, ephemeralRefusal: tc.refusal})
+			var reply Reply
+			if err := client.Call(context.Background(), "POST", "/api/workers/checkin", c, &reply); err != nil {
+				t.Fatal(err)
+			}
+			if len(reply.Attempts) != 0 {
+				t.Fatal("assigned to an unqualified worker", reply.Attempts)
 			}
 			assertReason := func(surface, reason string) {
 				t.Helper()
@@ -505,15 +513,42 @@ func TestEphemeralPlacementRefusalAndWaitReason(t *testing.T) {
 			}
 			assertReason("resolve", report.Targets[0].Reason)
 
-			api := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
-			defer api.Close()
-			got, err := (Client{URL: api.URL, Token: "test"}).GetJob(context.Background(), j.ID)
+			got, err := client.GetJob(context.Background(), j.ID)
 			if err != nil || got.Hold == nil || got.Hold.Kind != ephemeralIsolationHold || got.State != "queued" {
 				t.Fatalf("expected queued job with a hold, got %+v, %v", got, err)
 			}
 			assertReason("job GET", got.Reason)
 			assertReason("myce status", JobReason(got))
 		})
+	}
+}
+
+func TestEphemeralRefusalKeepsPredecessorCheckinJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get(ephemeralRefusalHeader); got != string(ephemeralCoreRouteUnqualified) {
+			t.Errorf("refusal header = %q", got)
+		}
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			return
+		}
+		if _, present := body["ephemeral_refusal"]; present {
+			t.Error("refusal is in the check-in JSON")
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(body["machine"], &fields); err != nil {
+			t.Error(err)
+		}
+		if _, present := fields["ephemeral_refusal"]; present {
+			t.Error("refusal is in the machine JSON")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	c := Checkin{Machine: Machine{ID: "worker", EphemeralRefusal: ephemeralCoreRouteUnqualified}, ephemeralRefusal: ephemeralCoreRouteUnqualified}
+	if err := (Client{URL: server.URL}).Call(context.Background(), "POST", "/api/workers/checkin", c, nil); err != nil {
+		t.Fatal(err)
 	}
 }
 
