@@ -29,6 +29,7 @@ type workerDiskBudget struct {
 	controlPrevious map[string]uint64
 	declines        map[string]diskDecline
 	inventoryDir    string
+	fileStoreSample fileStoreDiskSample // Accessed only by the serialized hygiene lane.
 	// Read by cache sizing under cache locks, so it has its own short lock
 	// rather than waiting behind a reclaim that holds mu.
 	foreignMu sync.Mutex

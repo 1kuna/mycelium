@@ -83,12 +83,22 @@ retention lane also checks the queue's production reserve and its measured
 non-production write shortfall. The queue matches the registered worker
 session and the exact volume before returning a physical free-space target.
 An existing upload allocation contributes only its remaining commitment.
-The queue keeps the larger observed blocked write through smaller retries
-until a hygiene poll can recheck its ownership, allocation, and headroom.
-The worker trims its own Go objects up to the measured shortfall rounded up to
-a filesystem allocation block, checking current free space between removals.
-Cache locks and pins still apply. A configured store allowance or project
-quota can require a separate capacity decision.
+The queue rechecks ownership, allocations, output reservations, and physical
+headroom on each poll. It keeps the larger blocked write through smaller
+retries, including polls that encounter a compiler lock or pin. An unowned
+preflight expires 15 minutes after refusal. A later poll retires demand that
+now fits, is already allocated, or can no longer justify physical relief.
+The hygiene route calculates worker disk demand and file-store reservations
+from committed queue state without waiting for the queue mutex.
+
+For a blocked write, the worker adds one minute of slack at the net rate of
+free-space loss measured between hygiene samples on the same volume. A first
+sample or a sample without a decline adds zero. The worker rounds the bounded
+shortfall up to a filesystem allocation block, rechecks free space between
+removals, and trims only eligible Go objects with cache locks and pins checked.
+The production reserve and file-store admission checks continue to apply. A
+configured store allowance or project quota can require a separate capacity
+decision.
 
 `hygiene_collection.disk_budget` reports per-volume allocated Mycelium bytes,
 free/floor/reserved bytes, measured control growth, last-pass physical free-space

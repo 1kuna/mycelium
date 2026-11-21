@@ -864,7 +864,7 @@ func (q *Queue) freezeReadCapture() *committedReadCapture {
 	generation, models, environments, runtime := q.readGeneration, q.readModels, q.readEnvironments, q.readRuntime
 	source := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable, evidenceRetention: q.evidenceRetention, checkpointExpiryStatus: q.checkpointExpiryStatus, efficiencyView: q.efficiencyView,
 		simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts, productionInfrastructureRetries: q.productionInfrastructureRetries,
-		restartUntil: q.restartUntil, networkQuiet: q.networkQuiet, root: q.root, files: q.files, fileRetention: q.fileRetention, hostMemorySamples: q.readSamples, detachedRead: true}
+		restartUntil: q.restartUntil, networkQuiet: q.networkQuiet, root: q.root, files: q.files, diskHost: q.diskHost, fileRetention: q.fileRetention, hostMemorySamples: q.readSamples, detachedRead: true}
 	ledgers := make(map[string]observationMachineLedger, len(q.s.Machines))
 	fresh := make(map[string]readFreshness, len(q.s.Machines))
 	for key, m := range q.s.Machines {

@@ -18,6 +18,7 @@ func (q *Queue) ConfigureFleetService(c ServiceConfig) error {
 	q.fleetService = &copy
 	q.diskHost = c.HostID
 	q.fleetQueue = &fleetQueueRuntime{Session: ID(), Host: c.HostID, OS: c.Detection.OS, Arch: c.Detection.Arch}
+	q.republishReads()
 	return nil
 }
 
