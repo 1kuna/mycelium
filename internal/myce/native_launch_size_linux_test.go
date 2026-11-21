@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -11,13 +12,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"unsafe"
-
-	"golang.org/x/sys/unix"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestNativeLaunchBindingE2BIG(t *testing.T) {
@@ -101,11 +102,12 @@ func TestNativeNamespaceOptionsFile(t *testing.T) {
 	if len(options) > 100 || len(policy.Read) != 10000 {
 		t.Fatal("binding mounts grew or exact Landlock grants changed")
 	}
-	argv, err := nativeNamespaceMonitorFileArgs(bwrap, options, work)
+	command := []string{"/bin/true"}
+	argv, err := nativeNamespaceMonitorFileArgs(bwrap, options, command, work)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(argv) != 6 {
+	if len(argv) != 6+len(command) {
 		t.Fatal("namespace options still grow exec argv")
 	}
 	written := time.Now()
@@ -115,6 +117,49 @@ func TestNativeNamespaceOptionsFile(t *testing.T) {
 		t.Fatalf("file-backed bubblewrap option parsing: %v: %s", err, out)
 	}
 	t.Logf("10,000 bindings: option construction and file write=%s; bubblewrap launch and option parse=%s (no mounts performed)", written.Sub(started), time.Since(written))
+}
+
+func TestNativeNamespaceOptionsFileCommand(t *testing.T) {
+	bwrap, err := exec.LookPath("bwrap")
+	if err != nil {
+		t.Skip("bubblewrap is not installed")
+	}
+	options := nativeBwrapBase()
+	command := []string{"/bin/sh", "-ec", `printf '%s\n' "$1"`, "myce-test", "namespace payload with spaces"}
+	work := filepath.Join(t.TempDir(), "work")
+	if err := os.Mkdir(work, 0700); err != nil {
+		t.Fatal(err)
+	}
+	argv, err := nativeNamespaceMonitorFileArgs(bwrap, options, command, work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(executable string, args ...string) (string, error) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, executable, args...)
+		cmd.Env = []string{"PATH=/usr/bin:/bin", "LANG=C"}
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	direct, directErr := run(bwrap, append(append(options, "--"), command...)...)
+	actual, actualErr := run(argv[0], argv[1:]...)
+	if directErr != nil {
+		denial := strings.ToLower(direct)
+		if !strings.Contains(denial, "permission denied") && !strings.Contains(denial, "operation not permitted") && !strings.Contains(denial, "no permissions to create") {
+			t.Fatalf("direct bubblewrap invocation failed unexpectedly: %v: %s", directErr, direct)
+		}
+		if actualErr == nil || actual != direct {
+			t.Fatalf("file-backed invocation did not reach the same kernel refusal as direct argv: %v: %q; direct: %q", actualErr, actual, direct)
+		}
+		t.Logf("real bubblewrap accepted the command; host policy prevented payload execution: %s", strings.TrimSpace(direct))
+		return
+	}
+	const want = "namespace payload with spaces\n"
+	if direct != want || actualErr != nil || actual != want {
+		t.Fatalf("bubblewrap payload: direct %q; file-backed %q (%v); want %q", direct, actual, actualErr, want)
+	}
 }
 
 // Fault injection runs in a disposable helper. It simulates unavailable or

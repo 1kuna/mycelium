@@ -463,7 +463,7 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 		bwrap := nativeBwrapPolicyArgs(p)
 		// bwrap 0.9 passes inherited descriptors to its executable by default;
 		// --preserve-fds belongs to other launchers and is not a bwrap option.
-		args, err = nativeNamespaceMonitorFileArgs(s.bwrap, append(append(bwrap, "--"), args...), work)
+		args, err = nativeNamespaceMonitorFileArgs(s.bwrap, bwrap, args, work)
 		if err != nil {
 			return err
 		}
