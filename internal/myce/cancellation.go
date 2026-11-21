@@ -394,7 +394,13 @@ func (q *Queue) confirmPreviousCopies(c Checkin) {
 }
 
 func (q *Queue) retainedJob(id string) *Job {
-	if j := q.touchJob(id); j != nil {
+	j := q.s.Jobs[id]
+	// Read-only projections also call this under RLock. Only writers may
+	// journal a job and invalidate the retained-memory index.
+	if q.simulation || q.records != nil && q.records.updating {
+		j = q.touchJob(id)
+	}
+	if j != nil {
 		return j
 	}
 	if q.records != nil && q.records.updating {

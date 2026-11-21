@@ -66,7 +66,9 @@ func fileReleaseCommand(ctx context.Context, args []string, out io.Writer) error
 		return errors.New("expected one release plan")
 	}
 	var result myce.FileReleaseResult
-	err = c.Call(ctx, "POST", "/api/files/release/apply", myce.FileReleaseApply{Selection: plan.Selection, PlanID: plan.ID, AcceptExpiry: *accept}, &result)
+	err = c.Call(ctx, "POST", "/api/files/release/apply", myce.FileReleaseApply{
+		Selection: plan.Selection, PlanID: plan.ID, AcceptExpiry: *accept, CollectionCandidates: plan.CollectionCandidates,
+	}, &result)
 	if err != nil {
 		return err
 	}

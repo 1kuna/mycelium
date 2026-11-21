@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strings"
 	"time"
+	"unicode"
 )
 
 // Project is attribution under the shared fleet credential, not authorization.
@@ -68,6 +70,9 @@ type FileReleasePlan struct {
 	Jobs             []FileReleaseJob     `json:"jobs"`
 	Blobs            []FileReleaseBlob    `json:"blobs"`
 	ReclaimableBytes int64                `json:"reclaimable_bytes"`
+	// One fingerprint per eligible blob, carried back on apply to verify
+	// that live collection is still within the reviewed scope.
+	CollectionCandidates []string `json:"collection_candidates,omitempty"`
 }
 
 // Acceptance receipts use the existing retained job ledger, including keyed
@@ -114,9 +119,10 @@ func (q *Queue) fileReleaseReplay(selection FileReleaseSelection, planID string)
 }
 
 type FileReleaseApply struct {
-	Selection    FileReleaseSelection `json:"selection"`
-	PlanID       string               `json:"plan_id"`
-	AcceptExpiry bool                 `json:"accept_expiry"`
+	Selection            FileReleaseSelection `json:"selection"`
+	PlanID               string               `json:"plan_id"`
+	AcceptExpiry         bool                 `json:"accept_expiry"`
+	CollectionCandidates []string             `json:"collection_candidates,omitempty"`
 }
 
 type FileReleaseResult struct {
@@ -142,6 +148,11 @@ func normalizeFileRelease(s FileReleaseSelection) (FileReleaseSelection, error) 
 	if s.Project == "" || len(s.Jobs) == 0 || slices.Contains(s.Jobs, "") {
 		return s, fileReleaseInvalid("release requires a project and explicit job IDs")
 	}
+	for _, id := range s.Jobs {
+		if strings.IndexFunc(id, unicode.IsSpace) >= 0 {
+			return s, fileReleaseInvalid("pass each selected job ID separately; job IDs cannot contain whitespace")
+		}
+	}
 	return s, nil
 }
 
@@ -151,22 +162,15 @@ func fileReleaseDigest(v any) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// Takes the metadata-only snapshot before inspecting stored content. The
-// separate bundle window and tracking cannot affect collection of a blob that
-// the selection leaves ineligible. Keep them in the displayed plan.
-func fileReleaseMetadataDigest(plan FileReleasePlan) string {
-	plan.Blobs = slices.Clone(plan.Blobs)
-	for i := range plan.Blobs {
-		b := &plan.Blobs[i]
-		if !b.CollectionEligible {
-			b.BundleTracked, b.BundleProtected = false, false
-		}
-	}
-	return fileReleaseDigest(plan)
+func fileReleasePlanID(base string, candidates []string) string {
+	return fileReleaseDigest(struct {
+		Base       string
+		Candidates []string
+	}{base, candidates})
 }
 
 // q.mu held. Only metadata work here; no blob reads, stats or NAS access.
-func (q *Queue) fileReleaseMetadata(selection FileReleaseSelection) (FileReleasePlan, error) {
+func (q *Queue) fileReleaseMetadata(selection FileReleaseSelection, includeReferences bool) (FileReleasePlan, error) {
 	plan := FileReleasePlan{Selection: selection, Jobs: []FileReleaseJob{}, Blobs: []FileReleaseBlob{}}
 	releasing := map[string]bool{}
 	hashes := map[string]bool{}
@@ -246,11 +250,15 @@ func (q *Queue) fileReleaseMetadata(selection FileReleaseSelection) (FileRelease
 		releasing[id] = len(item.Blockers) == 0
 	}
 	refs := map[string][]FileKeepingReference{}
-	pending, keep, _ := q.collectFileReferences(true, releasing, func(file FileRef, ref FileKeepingReference) {
-		if hashes[file.SHA256] {
-			refs[file.SHA256] = append(refs[file.SHA256], ref)
+	var report func(FileRef, FileKeepingReference)
+	if includeReferences {
+		report = func(file FileRef, ref FileKeepingReference) {
+			if hashes[file.SHA256] {
+				refs[file.SHA256] = append(refs[file.SHA256], ref)
+			}
 		}
-	})
+	}
+	pending, keep, _ := q.collectFileReferences(true, releasing, report)
 	for hash := range hashes {
 		if (FileRef{SHA256: hash}).validate() != nil {
 			return plan, fileReleaseInvalid("invalid retained content identity")
@@ -271,65 +279,76 @@ func compareReleaseJSON(a, b any) int {
 	return slices.Compare(aa, bb)
 }
 
+type fileReleaseSnapshot struct {
+	plan       FileReleasePlan
+	store      *FileStore
+	baseDigest string
+	jobsDigest string
+}
+
 // Caller holds fileLifecycle.RLock; this prevents collection, while publications
 // may proceed. Apply checks metadata again in its final transaction. A later
 // HEAD/publication still receives the collector's ordinary publication grace.
-func (q *Queue) fileReleasePlan(ctx context.Context, selection FileReleaseSelection) (FileReleasePlan, string, *FileStore, error) {
+func (q *Queue) fileReleasePlan(ctx context.Context, selection FileReleaseSelection) (fileReleaseSnapshot, error) {
 	unlock := requestReadLock(ctx, &q.mu)
-	plan, err := q.fileReleaseMetadata(selection)
+	plan, err := q.fileReleaseMetadata(selection, true)
 	store, age := q.files, q.filePublicationAge(q.clock.Now())
 	unlock()
 	if err != nil {
-		return plan, "", store, err
+		return fileReleaseSnapshot{}, err
 	}
 	if store == nil {
-		return plan, "", store, fileReleaseInvalid("queue file store is not configured")
+		return fileReleaseSnapshot{}, fileReleaseInvalid("queue file store is not configured")
 	}
-	metadata := fileReleaseMetadataDigest(plan)
-	// Bind presence and size for every selected identity. Bind publication time
-	// only for collection candidates, before applying the time-dependent grace
-	// calculation. The collector rechecks grace and keeping references.
+	jobs := fileReleaseDigest(plan.Jobs)
+	// Preserve presence and size for every selected identity. Collection
+	// fingerprints also bind publication time and bundle tracking for eligible
+	// blobs. Grace and individual reference explanations are display fields.
 	type storedContent struct {
-		SHA256     string
-		Present    bool
-		SizeBytes  int64
-		ModifiedAt time.Time
+		SHA256    string
+		Present   bool
+		SizeBytes int64
 	}
 	stored := make([]storedContent, len(plan.Blobs))
 	for i := range plan.Blobs {
 		if err := ctx.Err(); err != nil {
-			return plan, metadata, store, err
+			return fileReleaseSnapshot{}, err
 		}
 		b := &plan.Blobs[i]
-		stored[i].SHA256 = b.SHA256
 		st, err := os.Lstat(store.blob(FileRef{SHA256: b.SHA256}))
-		if os.IsNotExist(err) {
-			continue
+		if !os.IsNotExist(err) {
+			if err != nil {
+				return fileReleaseSnapshot{}, fileReleaseInvalid("cannot read stored release content metadata")
+			}
+			if !st.Mode().IsRegular() {
+				return fileReleaseSnapshot{}, fileReleaseInvalid("stored release content is not a regular file")
+			}
+			b.Present, b.SizeBytes, b.ModifiedAt = true, st.Size(), st.ModTime()
+			b.PublicationProtected = age.protects(b.ModifiedAt, !b.BundleTracked)
+			b.BundleProtected = b.BundleProtected || b.BundleTracked && !b.CollectionEligible && b.ModifiedAt.After(age.now.Add(-age.retention))
+			if b.CollectionEligible && !b.BundleProtected && age.payloadEligible(st, b.BundleTracked, b.CollectionEligible) {
+				b.ReclaimableBytes = b.SizeBytes
+				plan.ReclaimableBytes += b.SizeBytes
+			}
 		}
-		if err != nil {
-			return plan, metadata, store, fileReleaseInvalid("cannot read stored release content metadata")
-		}
-		if !st.Mode().IsRegular() {
-			return plan, metadata, store, fileReleaseInvalid("stored release content is not a regular file")
-		}
-		b.Present, b.SizeBytes, b.ModifiedAt = true, st.Size(), st.ModTime()
-		stored[i].Present, stored[i].SizeBytes = b.Present, b.SizeBytes
+		stored[i] = storedContent{b.SHA256, b.Present, b.SizeBytes}
 		if b.CollectionEligible {
-			stored[i].ModifiedAt = b.ModifiedAt
-		}
-		b.PublicationProtected = age.protects(st.ModTime(), !b.BundleTracked)
-		b.BundleProtected = b.BundleProtected || b.BundleTracked && !b.CollectionEligible && st.ModTime().After(age.now.Add(-age.retention))
-		if b.CollectionEligible && !b.BundleProtected && age.payloadEligible(st, b.BundleTracked, b.CollectionEligible) {
-			b.ReclaimableBytes = b.SizeBytes
-			plan.ReclaimableBytes += b.SizeBytes
+			plan.CollectionCandidates = append(plan.CollectionCandidates, fileReleaseDigest(struct {
+				SHA256        string
+				ModifiedAt    time.Time
+				BundleTracked bool
+			}{b.SHA256, b.ModifiedAt, b.BundleTracked}))
 		}
 	}
-	plan.ID = fileReleaseDigest(struct {
-		Metadata string
-		Stored   []storedContent
-	}{metadata, stored})
+	slices.Sort(plan.CollectionCandidates)
+	base := fileReleaseDigest(struct {
+		Selection FileReleaseSelection
+		Jobs      string
+		Stored    []storedContent
+	}{selection, jobs, stored})
+	plan.ID = fileReleasePlanID(base, plan.CollectionCandidates)
 	plan.GeneratedAt = age.now
-	return plan, metadata, store, nil
+	return fileReleaseSnapshot{plan: plan, store: store, baseDigest: base, jobsDigest: jobs}, nil
 }
 
 func (q *Queue) PlanFileRelease(ctx context.Context, selection FileReleaseSelection) (FileReleasePlan, error) {
@@ -339,8 +358,8 @@ func (q *Queue) PlanFileRelease(ctx context.Context, selection FileReleaseSelect
 	}
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
-	plan, _, _, err := q.fileReleasePlan(ctx, selection)
-	return plan, err
+	snapshot, err := q.fileReleasePlan(ctx, selection)
+	return snapshot.plan, err
 }
 
 func (q *Queue) ApplyFileRelease(ctx context.Context, req FileReleaseApply) (FileReleaseResult, error) {
@@ -361,12 +380,23 @@ func (q *Queue) ApplyFileRelease(ctx context.Context, req FileReleaseApply) (Fil
 	if replay {
 		return result, nil
 	}
-	plan, metadata, store, err := q.fileReleasePlan(ctx, selection)
+	snapshot, err := q.fileReleasePlan(ctx, selection)
 	if err != nil {
 		return result, err
 	}
+	plan := snapshot.plan
 	if plan.ID != req.PlanID {
-		return result, fileReleaseError("file_release_stale", "release plan changed; generate and review a new plan")
+		// The live stable fields and reviewed candidates must reproduce the
+		// saved ID before accepting a strict subset of those candidates.
+		stale := fileReleaseError("file_release_stale", "release plan changed; generate and review a new plan")
+		if len(req.CollectionCandidates) == 0 || fileReleasePlanID(snapshot.baseDigest, req.CollectionCandidates) != req.PlanID {
+			return result, stale
+		}
+		for _, candidate := range plan.CollectionCandidates {
+			if _, found := slices.BinarySearch(req.CollectionCandidates, candidate); !found {
+				return result, stale
+			}
+		}
 	}
 	for _, j := range plan.Jobs {
 		if len(j.Blockers) > 0 {
@@ -378,9 +408,17 @@ func (q *Queue) ApplyFileRelease(ctx context.Context, req FileReleaseApply) (Fil
 			result = receipt
 			return nil
 		}
-		current, e := q.fileReleaseMetadata(selection)
-		if e != nil || q.files != store || fileReleaseMetadataDigest(current) != metadata {
-			return fileReleaseError("file_release_stale", "release references or custody changed; generate a new plan")
+		current, e := q.fileReleaseMetadata(selection, false)
+		stale := fileReleaseError("file_release_stale", "release collection scope or custody changed; generate and review a new plan")
+		if e != nil || q.files != snapshot.store || fileReleaseDigest(current.Jobs) != snapshot.jobsDigest {
+			return stale
+		}
+		// Equal job manifests yield the same sorted blob identities. This
+		// transaction can narrow the inspected scope while it holds q.mu.
+		for i, b := range current.Blobs {
+			if b.CollectionEligible && (!plan.Blobs[i].CollectionEligible || b.BundleTracked != plan.Blobs[i].BundleTracked) {
+				return stale
+			}
 		}
 		for _, id := range selection.Jobs {
 			j := q.retainedJob(id)
