@@ -480,7 +480,9 @@ silently cleared. See [fresh install](#archive-old-state-and-install-fresh).
    their hosts while they report the previous hash.
 4. On each worker, rerun the preview against the updated queue, then run
    `myce install worker --config WORKER_CONFIG --model-config NEW_CATALOG`.
-   The installer handles the service restart. `myce host status HOST` prints
+   The installer handles the service restart, including a [fresh enrolled
+   worker missing fleet runtime proof](#recover-a-worker-missing-fleet-runtime-proof).
+   `myce host status HOST` prints
    JSON. Check for a fresh worker and a changed `machine.model_config_hash`.
    Confirm that it matches across workers. `myce status --json` also shows the
    worker hashes. Keep a worker that still reports the old hash or the
@@ -495,6 +497,30 @@ its selected service through the service manager before running the matching
 reinstall. If custody was never verified, restore the previous queue catalog
 while admission stays drained and verify release before proceeding. A signed
 binary-only upgrade preserves the configured catalog and cannot fix a mismatch.
+
+### Recover a worker missing fleet runtime proof
+
+Use the verified signed candidate and the worker's exact saved config. Run
+`myce host drain HOST --wait` or preserve the existing drain or disable.
+Confirm `myce host status HOST` shows a fresh worker and `quiescent: true`.
+Keep admission closed throughout the install and coordinate with the owner of
+any existing drain or rollout.
+
+```sh
+NEW_MYCE install worker --config WORKER_CONFIG --dry-run
+NEW_MYCE install worker --config WORKER_CONFIG
+```
+
+The preview checks queue custody, the enrollment session, the managed process
+and the installed executable. If Linux reports a private executable mapping,
+the installer checks the saved slot against signed release evidence. If it
+asks for a manifest, pass `--installed-release-manifest INSTALLED_RELEASE_JSON`
+to both commands, using the publisher-signed manifest for the currently
+installed release. The install takes the local update lock, repeats the checks
+and handles stopping and starting the existing service. Check the replacement's fresh
+session, service health and signed release hash before resuming only your own
+drain. For a catalog transition, pass the matching `--model-config` on both
+commands and confirm the replacement reports the active catalog before resuming.
 
 ### Legacy EnvironmentFile workers
 

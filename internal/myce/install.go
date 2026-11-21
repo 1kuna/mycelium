@@ -115,8 +115,9 @@ func (p MachineProbe) Detect(ctx context.Context) (Detection, error) {
 }
 
 type ServiceConfig struct {
-	storageWarning   *StoragePreflightFailure // Current invocation only; never configuration authority.
-	SaveSettingsOnly bool                     `json:"-"` // Prepare queue override retirement without activation.
+	storageWarning           *StoragePreflightFailure // Current invocation only; never configuration authority.
+	SaveSettingsOnly         bool                     `json:"-"` // Prepare queue override retirement without activation.
+	InstalledReleaseManifest string                   `json:"-"` // Signed incumbent artifact evidence for local recovery.
 
 	DailyUse       bool            `json:"daily_use"`
 	Laptop         bool            `json:"laptop"`
@@ -372,7 +373,7 @@ func InstallWithRollback(ctx context.Context, c ServiceConfig, executable, token
 // PreflightInstall checks the ordinary install's read-only prerequisites. The
 // transaction repeats them at install time and keeps its own rollback snapshot.
 func PreflightInstall(ctx context.Context, c ServiceConfig, executable, token string, command func(context.Context, string, ...string) ([]byte, error)) error {
-	plan, err := prepareInstall(ctx, c, executable, token, command, installFiles{})
+	plan, err := prepareInstall(ctx, c, executable, token, command, installFiles{}, nil)
 	if err != nil || c.SaveSettingsOnly {
 		return err
 	}
@@ -382,6 +383,7 @@ func PreflightInstall(ctx context.Context, c ServiceConfig, executable, token st
 
 type installPreparation struct {
 	config         ServiceConfig
+	slotConfig     ServiceConfig
 	transaction    *installTransaction
 	roots          []string
 	existing       bool
@@ -390,7 +392,7 @@ type installPreparation struct {
 	executable     []byte
 }
 
-func prepareInstall(ctx context.Context, c ServiceConfig, executable, token string, command func(context.Context, string, ...string) ([]byte, error), files installFiles) (installPreparation, error) {
+func prepareInstall(ctx context.Context, c ServiceConfig, executable, token string, command func(context.Context, string, ...string) ([]byte, error), files installFiles, lockSlot func() error) (installPreparation, error) {
 	if os.Geteuid() == 0 {
 		return installPreparation{}, ErrHostIdentity
 	}
@@ -417,6 +419,11 @@ func prepareInstall(ctx context.Context, c ServiceConfig, executable, token stri
 	}
 	if err := c.ValidateInstall(); err != nil {
 		return installPreparation{}, err
+	}
+	if lockSlot != nil {
+		if err := lockSlot(); err != nil {
+			return installPreparation{}, err
+		}
 	}
 	if _, err := InstallUnitPlan(ctx, c, command); err != nil {
 		return installPreparation{}, err
@@ -493,9 +500,9 @@ func prepareInstall(ctx context.Context, c ServiceConfig, executable, token stri
 	}
 	var reconciliation *slotReconciliation
 	if existing {
-		reconciliationConfig := installed
-		reconciliationConfig.Queue = c.Queue // Address repair already verified the saved certificate pin.
-		reconciliation, err = preflightInstallSlot(ctx, reconciliationConfig, command)
+		installed.Queue = c.Queue // Address repair already verified the saved certificate pin.
+		installed.InstalledReleaseManifest = c.InstalledReleaseManifest
+		reconciliation, err = preflightInstallSlot(ctx, installed, command, files.imageProbe)
 		if err != nil {
 			return installPreparation{}, err
 		}
@@ -532,13 +539,36 @@ func prepareInstall(ctx context.Context, c ServiceConfig, executable, token stri
 		}
 	}
 	return installPreparation{
-		config: c, transaction: tx, roots: roots, existing: existing,
+		config: c, slotConfig: installed, transaction: tx, roots: roots, existing: existing,
 		invitation: invitation, reconciliation: reconciliation, executable: data,
 	}, nil
 }
 
 func installWithFiles(ctx context.Context, c ServiceConfig, executable, token string, command func(context.Context, string, ...string) ([]byte, error), files installFiles) (result error) {
-	plan, err := prepareInstall(ctx, c, executable, token, command, files)
+	var unlock func()
+	defer func() {
+		if unlock != nil {
+			unlock()
+		}
+	}()
+	// Acquire before observing the unit. Otherwise a second install could see
+	// recovery's temporary stop and proceed without the first install's fences.
+	plan, err := prepareInstall(ctx, c, executable, token, command, files, func() error {
+		if c.Role != "worker" || c.HostID == "" {
+			return nil
+		}
+		if _, err := os.Lstat(filepath.Join(c.State, "fleet-publisher.pub")); os.IsNotExist(err) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		release, err := commandLock(c.State, "fleet-update.lock", false)
+		if err != nil {
+			return errors.New("fleet_helper_busy")
+		}
+		unlock = release
+		return nil
+	})
 	if err != nil {
 		return err
 	}
@@ -550,9 +580,11 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		return err
 	}
 	existing, invitation, reconciliation := plan.existing, plan.invitation, plan.reconciliation
+	recovery := reconciliation != nil && reconciliation.Recovery != nil
 
+	recoveryStopIssued := false
 	defer func() {
-		if result != nil && len(tx.published) > 0 {
+		if result != nil && (len(tx.published) > 0 || recoveryStopIssued) {
 			result = errors.Join(result, tx.restore(ctx))
 		} else if result == nil {
 			if err := tx.pruneBackups(); err != nil {
@@ -575,6 +607,29 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 	receipt, err := json.Marshal(installStorageReceipt{Warning: warning})
 	if err != nil {
 		return err
+	}
+	if recovery {
+		// Recheck the original drain, local process and slot after storage work.
+		// Stop under that evidence before publication, so an early failure can't
+		// restart an unchecked service as a side effect of file rollback.
+		if !tx.fileMatches(c.Config) || !tx.fileMatches(c.Service) {
+			return errors.New("fleet_install_changed")
+		}
+		current, err := preflightInstallSlot(ctx, plan.slotConfig, command, files.imageProbe)
+		if err != nil {
+			return err
+		}
+		if !tx.units[0].state.active || current == nil || current.Recovery == nil || *current.Recovery != *reconciliation.Recovery || current.Slot != reconciliation.Slot {
+			return errFleetRecoveryChanged
+		}
+		identity, err := EnrollmentServiceHealth(ctx, plan.slotConfig, command)
+		if err != nil || identity != current.Recovery.ServiceIdentity {
+			return errFleetRecoveryChanged
+		}
+		recoveryStopIssued = true
+		if err := tx.manager.stop(ctx, tx.units[0]); err != nil {
+			return fmt.Errorf("fleet_restart_failed: %w", err)
+		}
 	}
 	if reconciliation != nil {
 		current, err := readReleaseSlot(c.Binary)
@@ -654,14 +709,14 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		if _, err = command(ctx, "systemctl", "--user", "enable", "--now", filepath.Base(c.Service)); err != nil {
 			return err
 		}
-		if existing {
+		if existing && !recovery {
 			_, err = command(ctx, "systemctl", "--user", "restart", filepath.Base(c.Service))
 		}
 	} else {
 		if err = ValidateWorkerServiceEnvironment(ctx, c, RealClock{}, command); err != nil {
 			return err
 		}
-		if tx.units[0].state.loaded {
+		if tx.units[0].state.loaded && !recovery {
 			if err = tx.manager.stop(ctx, tx.units[0]); err != nil {
 				return err
 			}
