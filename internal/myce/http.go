@@ -433,6 +433,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			c.period = period
 		}
 		c.fleetProofIssue = safeFleetProofIssue(FleetProofIssue(r.Header.Get(fleetProofIssueHeader)))
+		c.ephemeralRefusal = safeEphemeralRefusal(ephemeralRefusal(r.Header.Get(ephemeralRefusalHeader)))
 		accepted := false
 		contact, settle := a.Queue.trackWorkerCheckin(c.Machine.ID, c.Machine.Session, c.period, true, r.Context())
 		c.contact = contact
@@ -655,6 +656,10 @@ func respond(w http.ResponseWriter, v any, err error) {
 			code = rule.code
 		}
 		body := map[string]any{"error": rejectionMessages[code], "code": code}
+		var launchConflict *batchLaunchConflict
+		if errors.As(err, &launchConflict) {
+			body["cause"] = safeRuntimeCause(&RuntimeCause{Operation: "start_authorization", Class: "admission_changed", Predicate: "launch_authorization", LaunchRefusal: launchConflict.boundary})
+		}
 		var apiError *HTTPError
 		if errors.As(err, &apiError) && publicErrorCode(apiError.Code) && (apiError.Status < 500 || knownServerRefusal(apiError.Code)) {
 			if apiError.RetryAfter > 0 {
@@ -799,6 +804,13 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 var replaySafePost = map[string]bool{"/api/resolve": true, "/api/files/preflight": true, "/api/extensions": true}
 
 func (c Client) callOnce(ctx context.Context, method, path string, in, out any) error {
+	checkin, workerCheckin := in.(Checkin)
+	workerCheckin = workerCheckin && path == "/api/workers/checkin"
+	if workerCheckin && checkin.Machine.EphemeralRefusal != "" {
+		// The queue's status field is never part of the strict check-in body.
+		checkin.Machine.EphemeralRefusal = ""
+		in = checkin
+	}
 	var body io.Reader
 	if in != nil {
 		data, err := json.Marshal(in)
@@ -821,12 +833,15 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "myce/"+BuildVersion)
-	if checkin, ok := in.(Checkin); ok && path == "/api/workers/checkin" {
+	if workerCheckin {
 		if checkin.period > 0 {
 			req.Header.Set(checkinPeriodHeader, checkin.period.String())
 		}
 		if issue := safeFleetProofIssue(checkin.fleetProofIssue); issue != "" {
 			req.Header.Set(fleetProofIssueHeader, string(issue))
+		}
+		if refusal := safeEphemeralRefusal(checkin.ephemeralRefusal); refusal != "" {
+			req.Header.Set(ephemeralRefusalHeader, string(refusal))
 		}
 	}
 	if workerProtocolEndpoint(path) {

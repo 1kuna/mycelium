@@ -226,7 +226,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 	var publicationPace ClientPace
 	var publicationRetryAt time.Time
 	var preparationRetryAt time.Time
-	var releaseSent bool
+	var releaseSent, launchRefusalLogged bool
 	recoveryProgress := a.recovering != nil
 	for ctx.Err() == nil {
 		a.mu.Lock()
@@ -319,7 +319,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		if connected {
 			if p == nil && s.state.Result == nil {
 				if d.Stop && s.state.Custodian == "" {
-					cause := s.startFailure(a.job, launchRefused, errors.New("assignment withdrawn before command started"))
+					cause := s.startFailureAt(a.job, launchRefused, errAssignmentWithdrawn, now)
 					r := startFailureOutcome(Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Error: cause.Error()}, cause)
 					r = withStopProvenance(r, d.PriorityStop)
 					s.state.Result = &r
@@ -353,7 +353,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					d = a.directive
 					a.mu.Unlock()
 					if p == nil && d.Stop && s.state.Custodian == "" && !errors.Is(err, errWorkerReleasePending) {
-						err = s.startFailure(a.job, launchRefused, errors.New("assignment withdrawn before command started"))
+						err = s.startFailureAt(a.job, launchRefused, errAssignmentWithdrawn, now)
 					}
 					if errors.Is(err, errWorkerMemory) {
 						// RAM may disappear after assignment or during preparation.
@@ -402,6 +402,12 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			return
 		}
 		if s.state.Result != nil {
+			if !launchRefusalLogged {
+				if cause := safeRuntimeCause(s.state.Result.ExecutionCause); cause != nil && cause.LaunchRefusal != "" {
+					log.Printf("event=worker_launch_refused job=%s attempt=%d boundary=%s class=%s", a.job.ID, a.job.Attempt, cause.LaunchRefusal, cause.Class)
+					launchRefusalLogged = true
+				}
+			}
 			if p == nil && s.nasPrepare.inFlight() {
 				s.state.InputWriterPending, s.state.Result.ReleasePending = true, true
 				if err := s.save(); err != nil {
@@ -1417,7 +1423,8 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				return c == ephemeralCapability || c == ephemeralLegacyCapability || c == "native_network" || c == "native_sidecars" || c == "native_network_partial" || strings.HasPrefix(c, "native_isolation_")
 			})
 			m.Capabilities = append(m.Capabilities, w.nativeIsolationCapabilities()...)
-			if w.checkEphemeralSupport() == nil {
+			refusal, supportErr := w.checkEphemeralSupport()
+			if supportErr == nil {
 				// Keep accepting the older queue's plain-command contract during
 				// a rolling upgrade; v2 queues require the expanded contract.
 				m.Capabilities = append(m.Capabilities, ephemeralLegacyCapability, ephemeralCapability)
@@ -1485,7 +1492,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			m.SharedHostPressure = pressureProbe.snapshot(w.Machine.SharedHost != nil)
 			w.Machine.SharedHostPressure = m.SharedHostPressure
 			heartbeatStarted := w.Clock.Now()
-			reply, err := w.checkin(observeCtx, Checkin{NASPathReports: w.nasPathReports(), Machine: m, fleetProofIssue: w.fleet.proofIssue(), Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
+			reply, err := w.checkin(observeCtx, Checkin{NASPathReports: w.nasPathReports(), Machine: m, fleetProofIssue: w.fleet.proofIssue(), ephemeralRefusal: refusal, Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
 			health.noteHeartbeat(w.Clock.Now().Sub(heartbeatStarted))
 			if err == nil {
 				if receiptErr := saveEnrollmentReceipt(root.dir, m); receiptErr != nil {

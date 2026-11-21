@@ -503,8 +503,12 @@ func nativeCompatibilityRun(t *testing.T, w Worker, root *workerStore, j Job, bu
 	// The ordinary worker retries while its asynchronous NAS input copy is
 	// pending. Reuse the same attempt store so a slow mount is not misreported
 	// as confinement failure or copied twice.
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
-	defer cancel()
+	ctx := t.Context()
+	if budget > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, budget)
+		defer cancel()
+	}
 	started := time.Now()
 	var p *process
 	var workerReturned time.Time

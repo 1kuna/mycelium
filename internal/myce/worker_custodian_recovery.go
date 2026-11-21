@@ -62,7 +62,7 @@ func (w Worker) recoverUnstartedCustodian(parent *workerStore) error {
 	}
 	// Commit the refusal facts and result in one atomic snapshot. A separate
 	// launch marker could survive a failed snapshot write and block recovery.
-	facts := memberOutcome{Infrastructure: []infrastructureFact{{Kind: launchRefused, At: w.Clock.Now(), Predicate: launchFailurePredicate(launchRefused, errCustodianStartup), PrelaunchRefused: true}}}
+	facts := memberOutcome{Infrastructure: []infrastructureFact{{Kind: launchRefused, At: w.Clock.Now(), Predicate: "launch_authorization", LaunchRefusal: custodianStartupFailed, PrelaunchRefused: true}}}
 	cause := &recordedStartError{cause: errCustodianStartup, facts: facts}
 	r := startFailureOutcome(Result{Machine: j.Machine, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: errCustodianStartup.Error()}, &executionEvidenceError{cause, unstartedExecution(j.Attempt)})
 	v.Finished, v.At, v.State = true, w.Clock.Now(), req.State

@@ -195,6 +195,7 @@ func validateModels(c ModelConfig) error {
 }
 
 type ModelSlot struct {
+	MemoryPeaks          *ModelMemoryPeaks   `json:"memory_peaks,omitempty"`
 	PriorityPolicy       *PriorityMatch      `json:"priority_policy,omitempty"`
 	Custody              *ModelCustody       `json:"custody,omitempty"`
 	URL                  string              `json:"url,omitempty"`
@@ -237,9 +238,10 @@ type ModelSlot struct {
 	IdleSeconds       float64            `json:"idle_seconds"`
 }
 type ModelReport struct {
-	Custody                *ModelCustody `json:"custody,omitempty"`
-	URL                    string        `json:"url,omitempty"`
-	memoryGB, hostMemoryGB float64       // Worker-local budgets, never accepted over the wire.
+	MemoryPeaks            *ModelMemoryPeaks `json:"memory_peaks,omitempty"`
+	Custody                *ModelCustody     `json:"custody,omitempty"`
+	URL                    string            `json:"url,omitempty"`
+	memoryGB, hostMemoryGB float64           // Worker-local budgets, never accepted over the wire.
 	resourcesMeasured      bool
 	Device                 string `json:"device,omitempty"`
 	Attempt                string `json:"attempt,omitempty"`
@@ -771,14 +773,25 @@ func (q *Queue) addCall(c *ModelCall, requestContexts ...context.Context) error 
 	}, nil)
 }
 func (q *Queue) finishCall(id string, requestContexts ...context.Context) error {
-	requestCtx := requestContext(requestContexts)
+	return q.finishCallWithMemory(id, nil, requestContext(requestContexts))
+}
 
-	return q.updateRequest(requestCtx, func() error {
+func (q *Queue) finishCallWithMemory(id string, memory *ModelMemoryWindow, ctx context.Context) error {
+	return q.updateRequest(ctx, func() error {
 		c := q.calls[id]
 		if c != nil {
 			if s := q.s.ModelSlots[slotKey(c.Machine, c.Model, c.Device)]; s != nil && s.Session == c.Session && s.Attempt == c.Attempt {
 				s.InFlight = max(0, s.InFlight-1)
 				s.LastUsed = q.clock.Now()
+				if memory != nil && memory.RequestID == id {
+					peaks := ModelMemoryPeaks{}
+					if s.MemoryPeaks != nil {
+						peaks = *s.MemoryPeaks
+					}
+					peaks.Request = newestModelMemoryRequest(peaks.Request, memory)
+					s.MemoryPeaks = &peaks
+					q.recordModelInterval(s, "memory_request", memory)
+				}
 			}
 			delete(q.calls, id)
 			if c.Machine != "" && c.Error == "" {
@@ -942,7 +955,11 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 		modelError(w, 400, "invalid model request")
 		return
 	}
-	defer a.Queue.finishCall(c.ID, context.WithoutCancel(r.Context()))
+	w.Header().Set(modelMemoryRequestHeader, c.ID)
+	var requestMemory *ModelMemoryWindow
+	defer func() {
+		a.Queue.finishCallWithMemory(c.ID, requestMemory, context.WithoutCancel(r.Context()))
+	}()
 	tick := time.NewTicker(20 * time.Millisecond)
 	defer tick.Stop()
 	attempt := 0
@@ -1069,6 +1086,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			req.Header.Set("Authorization", "Bearer "+a.Token)
 			req.Header.Set("X-Myce-Session", call.Session)
 			req.Header.Set("X-Myce-Engine-Attempt", call.Attempt)
+			req.Header.Set(modelMemoryRequestHeader, call.ID)
 			if generic {
 				req.ContentLength = bodySize
 			}
@@ -1112,6 +1130,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 				if !body.Stream {
 					response, readErr := io.ReadAll(res.Body)
 					if readErr == nil {
+						requestMemory = readModelRequestMemory(res, call.ID)
 						copyProxyHeaders(w.Header(), res.Header)
 						w.WriteHeader(res.StatusCode)
 						_, _ = w.Write(response)
@@ -1144,6 +1163,9 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 							}
 						}
 						if readErr != nil {
+							if readErr == io.EOF {
+								requestMemory = readModelRequestMemory(res, call.ID)
+							}
 							// Unload can close the transport before the watcher runs.
 							requestUnlock6 := requestLock(r.Context(), &a.Queue.mu)
 							live := a.Queue.calls[c.ID]
