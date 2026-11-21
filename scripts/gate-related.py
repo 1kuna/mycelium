@@ -109,8 +109,10 @@ for source in ('model_root_local', 'model_root_local_darwin', 'model_root_local_
     SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = ('onboarding_storage_test.go',)
 
 # The shared ledger's pressure tests exercise these private cache adapters.
-for source in ('cache_references', 'worker_compiler_cache', 'worker_disk_candidates'):
+for source in ('cache_references', 'worker_compiler_cache', 'worker_disk_candidates',
+               'worker_hygiene_collection'):
     SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = ('worker_disk_budget_test.go',)
+SUPPLEMENTAL_CONSUMERS['internal/myce/shared_input_custody.go'] = ('model_snapshots_test.go',)
 
 # The monitor's tests predate the source split; it has no matching test filename.
 SUPPLEMENTAL_CONSUMERS['internal/myce/engine_health.go'] = (
