@@ -21,6 +21,8 @@ targets:
   - {os: darwin, arch: arm64, platform: cpu}
 # Locked CPU tools for every declared target (see env/mycelium-gate/README.md).
 environment: mycelium-gate
+advanced:
+  keep_on_failure: [gate-failures.txt]
 outputs:
   gate-result.txt: results
   gate-timings.jsonl: results

@@ -162,6 +162,16 @@ individual shard uses one Go CPU at every allocation size. Timings live beside
 Go's execution-host build cache (`mycelium-gate-timings`), shared across checkouts
 on that host, and every invocation appends a sanitized record to
 `gate-timings.jsonl`. Fleet profiles return that report with their result marker.
+On failure, the watchdog writes a compact receipt from the Go event stream.
+It names the failing package and tests, or records a build, watchdog,
+signal or exit reason when no named test failed. The receipt survives a
+truncated console. Local Darwin orchestration retains `native-failures.txt`
+and `linux-failures.txt` in the per-run receipt directory as applicable.
+Direct Linux gates print the path to their per-run failure receipt.
+For fleet gates, fetch the failed attempt with
+`myce result JOB --attempt N --out DIR` and read `kept/gate-failures.txt`.
+The fleet attempt's `summary.json` carries worker-level failure reasons, including
+failures before the gate starts.
 A new selection/toolchain/CPU configuration learns independently; a small quick
 selection cannot shorten a full-package deadline.
 

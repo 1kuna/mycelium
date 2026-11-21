@@ -75,9 +75,10 @@ func TestNativeManagedInputBindings(t *testing.T) {
 				if group {
 					j.Spec.Run.MemoryGB = .0625
 				}
-				// 771 real cache acquisitions consume about 25s on a loaded
-				// laptop before launch; allow room for the grouped handshake too.
-				p := nativeCompatibilityRun(t, w, root, j, 60*time.Second, func(v nativeCompatibilityTiming) {
+				// This probe checks launch, all binding contents and release.
+				// Real cache I/O can dominate both sides of the payload, so
+				// leave the hang bound to the package watchdog.
+				p := nativeCompatibilityRun(t, w, root, j, 0, func(v nativeCompatibilityTiming) {
 					logNativeBindingsTiming(t, v)
 				})
 				nativeCompatibilityRead(t, filepath.Join(p.job.Spec.Run.Workdir, "bindings-ok"), "771 inputs verified\n")
