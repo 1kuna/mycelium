@@ -194,6 +194,7 @@ func devStandaloneSmoke(t *testing.T, backend string) {
 	if effect, err := os.ReadFile(marker); err != nil || string(effect) != "done" {
 		t.Fatal("short command effect missing", err)
 	}
+	maintenanceSpec := spec
 	if backend == "cpu" {
 		proveDevPauseYield(t, ctx, binary, client, root, env)
 		spec.Name = "smoke-progress"
@@ -269,13 +270,43 @@ cat expected > effect`}
 		}
 	}
 	var maintenance myce.HostMaintenanceStatus
-	if err := client.Call(ctx, "POST", "/api/hosts/smoke-host/maintenance", myce.HostMaintenanceRequest{Action: "drain"}, &maintenance); err != nil {
+	expected := time.Date(2030, 1, 2, 15, 0, 0, 0, time.UTC)
+	if err := client.Call(ctx, "POST", "/api/hosts/smoke-host/maintenance", myce.HostMaintenanceRequest{
+		Action: "drain", Reason: "scheduled service", ExpectedReturn: &expected,
+	}, &maintenance); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(func() bool {
 		return readReady(client.Call(ctx, "GET", "/api/hosts/smoke-host/maintenance", nil, &maintenance)) && maintenance.Quiescent
 	})
-	t.Log("PASS: standalone binary, authenticated API, command effect/exact release, queue maintenance; child and listener joined")
+	maintenanceSpec.Name = "smoke-maintenance-hold"
+	var held myce.Job
+	if err := client.Call(ctx, "POST", "/api/jobs", maintenanceSpec, &held); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(func() bool {
+		current, err := client.GetJob(ctx, held.ID)
+		if !readReady(err) || current.State != "queued" || current.Hold == nil {
+			return false
+		}
+		h := current.Hold
+		return h.Kind == "host_maintenance" && h.Owner == "operator" &&
+			strings.Contains(h.Reason, "scheduled service") && strings.Contains(h.Reason, expected.Format(time.RFC3339))
+	})
+	if err := client.Call(ctx, "POST", "/api/hosts/smoke-host/maintenance", myce.HostMaintenanceRequest{Action: "resume"}, &maintenance); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(func() bool {
+		current, err := client.GetJob(ctx, held.ID)
+		if !readReady(err) {
+			return false
+		}
+		if current.State == "failed" {
+			t.Fatal(sanitizeSmokeEvidence("resumed job failed: "+current.Reason, root, token))
+		}
+		return current.State == "succeeded" && current.Hold == nil && current.ReleaseConfirmed
+	})
+	t.Log("PASS: standalone binary, authenticated API, command effect/exact release, consumer maintenance hold and resume; child and listener joined")
 }
 
 // Evidence comes only from this isolated fixture, but redact its credential and

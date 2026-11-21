@@ -57,6 +57,8 @@ func (h *Hold) FullText() string {
 func (h Hold) operatorAction() bool { return h.Owner == ownerOperator }
 
 const (
+	hostMaintenanceJobHold = "host_maintenance"
+
 	ownerQueue    = "queue"
 	ownerOperator = "operator"
 	ownerConsumer = "consumer"
@@ -73,6 +75,7 @@ type holdKind struct{ owner, reason, clears, next string }
 var holdKinds = map[string]holdKind{
 	// Job waits: the scheduler's current reason for a queued job.
 	"paused":                   {ownerConsumer, "paused", "resumed, or the pause's until time passes", "myce resume JOB_ID when it should run"},
+	hostMaintenanceJobHold:     {ownerOperator, "eligible hosts are in maintenance", "an eligible host resumes admission", "wait for the applicable maintenance owner to resume admission"},
 	"fan_out_cap":              {ownerConsumer, "at its declared max_concurrency", "a running piece of the same parent finishes", "wait, or resubmit with a higher max_concurrency"},
 	"upstream":                 {ownerProducer, "waiting for an upstream result", "the required upstream job succeeds and publishes its result", "complete and publish the required upstream result"},
 	deviceFaultRetryHold:       {ownerQueue, "waiting for healthy accelerator capacity after a driver fault", "another healthy device or host fits, or the quarantined device proves healthy", "wait; Mycelium retries on healthy capacity automatically"},
@@ -170,7 +173,7 @@ var holdDiagnosticCodes = map[string]string{
 // The efficiency report's wait category for a scheduler wait kind. Kinds not
 // listed are capacity waits.
 var holdEfficiencyCategories = map[string]string{
-	"paused": "holds", "production_admission": "holds",
+	"paused": "holds", "production_admission": "holds", hostMaintenanceJobHold: "holds",
 	"pinned_model": "holds", checkpointTargetHold: "holds", "reservation": "holds", "unified_cuda_headroom": "holds",
 	"waiting_for_builder": "preparation", "building": "preparation", "unprepared": "preparation",
 	"shared_input": "preparation", "shared_input_unreported": "preparation",

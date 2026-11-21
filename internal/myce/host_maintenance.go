@@ -19,6 +19,8 @@ type HostMaintenance struct {
 	SharedHost     *SharedHostProfile `json:"shared_host,omitempty"`
 	LastResort     bool               `json:"last_resort"`
 	DrainOwner     string             `json:"drain_owner,omitempty"`
+	Reason         string             `json:"reason,omitempty"`
+	ExpectedReturn time.Time          `json:"expected_return,omitzero"`
 	CPUBudgetCores *int               `json:"cpu_budget_cores,omitempty"`
 	StopAt         *time.Time         `json:"stop_at,omitempty"`
 	Mode           string             `json:"mode"`
@@ -31,6 +33,8 @@ type HostMaintenanceRequest struct {
 	SharedHost           *SharedHostProfile `json:"shared_host,omitempty"`
 	LastResort           *bool              `json:"last_resort,omitempty"`
 	DrainOwner           string             `json:"drain_owner,omitempty"`
+	Reason               string             `json:"reason,omitempty"`
+	ExpectedReturn       *time.Time         `json:"expected_return,omitempty"`
 	IfDrainOwner         string             `json:"if_drain_owner,omitempty"`
 	IfMode               string             `json:"if_mode,omitempty"`
 	IfUpdatedAt          *time.Time         `json:"if_updated_at,omitempty"`
@@ -89,6 +93,57 @@ func (q *Queue) maintenanceBlocked(host string) bool {
 	mode := q.s.HostMaintenance[host].Mode
 	return mode == "drained" || mode == "disabled"
 }
+
+// Used by detached status projections. DrainOwner is an operation receipt,
+// while Hold.Owner identifies who can take the next action.
+func (q *Queue) maintenanceHold(host string) *Hold {
+	policy := q.s.HostMaintenance[host]
+	h := newHold("host_disabled", "")
+	h.Scope = host
+	h.Reason = "host " + host + " is disabled for planned host maintenance"
+	if policy.Mode == "drained" {
+		h.Reason = "waiting for drained host " + host + " to return from maintenance"
+	}
+	h.Next = "operator: run myce host resume " + host + " when maintenance is done"
+	reason := policy.Reason
+	if selector, ok := strings.CutPrefix(policy.DrainOwner, "exclusion:"); ok {
+		h.Reason += " (component exclusion " + selector + ")"
+		h.Clears = "an operator removes the exclusion"
+		h.Next = "operator: run myce exclude remove " + selector + " when maintenance is done"
+		reason = q.s.ComponentExclusions[selector].Reason
+	} else if policy.DrainOwner != "" {
+		operation, state := "", ""
+		if u := q.s.FleetUpgrade; u != nil {
+			operation, state = u.Operation, u.State
+		} else if q.observationSelection != nil && q.observationSelection.upgrade != nil {
+			u := q.observationSelection.upgrade
+			operation, state = u.Operation, u.State
+		}
+		if operation == policy.DrainOwner {
+			h.Reason += " (fleet upgrade " + operation + ")"
+			if state == "running" {
+				h.Owner = ownerQueue
+				h.Clears = "the queue resumes the host after the upgrade"
+				h.Next = "queue: finish the fleet upgrade and resume " + host
+			} else {
+				h.Next = "operator: resolve the stopped fleet upgrade and its retained drain on " + host
+			}
+		} else {
+			h.Reason += " (operation " + policy.DrainOwner + ")"
+			h.Owner = "operation owner"
+			h.Clears = "the operation owner resumes the host"
+			h.Next = "operation owner: finish maintenance and resume " + host
+		}
+	}
+	if reason != "" {
+		h.Reason += ": " + reason
+	}
+	if !policy.ExpectedReturn.IsZero() {
+		h.Reason += "; expected return " + policy.ExpectedReturn.Format(time.RFC3339Nano)
+	}
+	return h
+}
+
 func plannedMaintenanceStop(j *Job) bool {
 	for _, c := range j.Copies {
 		if c.Attempt == j.Attempt && c.Machine == j.Machine && c.Session == j.Session {
@@ -385,6 +440,19 @@ func (q *Queue) changeHostMaintenance(host string, request HostMaintenanceReques
 	if policy.Mode == "" {
 		policy.Mode = "enabled"
 	}
+	maintenance := request.Action == "drain" || request.Action == "disable"
+	if !maintenance && (request.Reason != "" || request.ExpectedReturn != nil) {
+		return errors.New("reason and expected_return require drain or disable")
+	}
+	if maintenance {
+		policy.Reason = strings.Join(strings.Fields(request.Reason), " ")
+		policy.ExpectedReturn = time.Time{}
+		if request.ExpectedReturn != nil {
+			policy.ExpectedReturn = request.ExpectedReturn.UTC()
+		}
+	} else if request.Action == "resume" {
+		policy.Reason, policy.ExpectedReturn = "", time.Time{}
+	}
 	// Placement and allowance edits do not transfer drain authority, so an
 	// owner's conditional resume still works after them. Other maintenance
 	// edits, including a re-drain at the same timestamp, revoke it.
@@ -533,6 +601,9 @@ func (q *Queue) changeHostMaintenance(host string, request HostMaintenanceReques
 		policy.UpdatedAt = q.clock.Now()
 	}
 	q.s.HostMaintenance[host] = policy
+	if maintenance || request.Action == "resume" {
+		q.invalidateDependentSnapshots()
+	}
 	return nil
 }
 

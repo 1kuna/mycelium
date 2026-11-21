@@ -397,6 +397,7 @@ func (q *Queue) fleetStop(h *fleetUpgradeHost, reason string) {
 		}
 	}
 	q.s.FleetUpgrade.State = "stopped"
+	q.invalidateDependentSnapshots()
 	h.Failure = reason
 	h.Wait = "fix forward, then rerun myce fleet upgrade"
 	if h.StartProbe != "" {

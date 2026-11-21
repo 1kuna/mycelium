@@ -752,11 +752,14 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   reference. Repair the worker, then `myce env retry WORKER HASH OS ARCH PLATFORM`,
   or submit changed recipe inputs. Process restarts and idle polling do not
   clear failures; transient network/disk failures and planned stops remain holds.
-- **Drained hosts (r6.16+):** production waiting only on drained hosts keeps
-  the same job and key, with its relative start window paused for capacity.
-  Status says `waiting for drained host ... to return`; the operator resumes
-  the host after maintenance. Explicit `start_by` and `give_up_at` still bind;
-  deliberately disabled hosts still fail new production work promptly.
+- **Host maintenance:** `myce status JOB_ID` shows a `host_maintenance`
+  hold when every eligible host is under maintenance. Read the reason for
+  the operation, `owner` and `next` for who restores admission, and the
+  expected return when the operator recorded one. Fleet status lists the
+  affected hosts. Keep the same job and key. Production waiting only on
+  drained hosts pauses its relative start window for capacity. Explicit
+  `start_by` and `give_up_at` still bind, and deliberately disabled hosts
+  still fail new production work promptly.
 - **Long waits:** submit without `--wait` and you are woken once when the job
   finishes. From a shell whose harness exports a wake channel (T3 today), that
   needs no setup ([T3 binding](t3-binding.md)). Otherwise `myce run` prints a

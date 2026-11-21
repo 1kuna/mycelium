@@ -294,6 +294,13 @@ func JobWork(j *Job) string {
 // is authoritative; status only words it for readers.
 func (q *Queue) statusWaitingReason(j *Job) string {
 	j.Hold = q.jobHold(j, false)
+	if j.Hold != nil && j.Hold.Kind == hostMaintenanceJobHold {
+		reason := j.Hold.Reason
+		if q.startCapacityPaused(j) {
+			reason += "; " + pausedStartBudget(j)
+		}
+		return reason
+	}
 	if j.Hold != nil && j.Hold.Kind == "native_qualification" {
 		return j.Hold.Reason
 	}
