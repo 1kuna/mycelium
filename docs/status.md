@@ -23,6 +23,27 @@ stage when known. Compact JSON reports `hyphas[].fleet_proof_issue` and machine
 detail reports `machines[].fleet_proof_issue`. The worker log also records
 changes to failure codes, including while the queue is still on an older release.
 
+For a refused worker start, use `myce status --history JOB_ID` or read the
+exact attempt's `execution_cause.launch_refusal` in `myce status --json JOB_ID`.
+The worker journal records the same boundary and class as
+`event=worker_launch_refused`, keyed by job ID and attempt.
+
+| `launch_refusal` | Observed boundary |
+| --- | --- |
+| `custodian_startup_failed` | The detached custodian exited before startup. |
+| `assignment_withdrawn` | The worker received a stop directive before starting the assignment. |
+| `launch_rpc_stale` | The queue rejected the exact launch request's attempt custody with HTTP 409. |
+| `queue_launch_refused` | The queue recognized the current assignment and refused its launch gate with HTTP 409. The ledger may also have a `start_refused` entry naming the fence. |
+| `launch_rpc_conflict` | HTTP 409 arrived without a boundary, as with an older queue. |
+| `launch_rpc_failed` | The launch RPC supplied no usable authorization. Read `execution_cause.class` for the available transport or response class. |
+| `local_launch_refused` | An unclassified local refusal occurred before execution. |
+
+The `launch_authorization` predicate stays on the receipt for release and
+retry compatibility. A missing `launch_refusal` leaves the specific boundary
+unknown. An obsolete result may settle its own release, while the queue
+continues to reject its outcome. In that case only the worker journal carries
+the new boundary for that result.
+
 Use `myce cancel JOB_ID --wait --timeout 30s` to bound the cancellation call
 and release wait. A deadline after acknowledgement returns the last
 acknowledgement and exits 75 if release still needs confirmation. A deadline
@@ -302,7 +323,7 @@ maps link to their element types; timestamps are JSON time strings.
 | <a id="fields-retentioncapacity"></a>**RetentionCapacity** | `memory_available_bytes`: number; `disk_available_bytes`: number |
 | <a id="fields-runspec"></a>**RunSpec** | `memory_gb?`: number; `command`: array of string; `workdir?`: string; `env?`: map of string; `sidecars?`: array of [NativeSidecar](#fields-nativesidecar); `docker?`: boolean; `docker_network?`: string; `docker_memory_gb?`: number; `docker_memory_swap?`: number; `docker_sidecars?`: array of JSON value |
 | <a id="fields-runningrelease"></a>**RunningRelease** | `version`: string; `commit`: string |
-| <a id="fields-runtimecause"></a>**RuntimeCause** | `file_capacity?`: [FileCapacityEvidence](#fields-filecapacityevidence); `checkpoint_storage?`: [CheckpointStorageEvidence](#fields-checkpointstorageevidence); `finalization?`: [FinalizationDetail](#fields-finalizationdetail); `linkage?`: [MachOLinkage](#fields-macholinkage); `rss_limit?`: [RSSLimitEvidence](#fields-rsslimitevidence); `missing_tools?`: array of string; `host?`: string; `staging?`: [StagingCause](#fields-stagingcause); `path_diagnostic?`: [PathDiagnostic](#fields-pathdiagnostic); `admission?`: [AdmissionDetail](#fields-admissiondetail); `prelaunch_refused?`: boolean; `operation`: string; `class`: string; `exit_code?`: number; `predicate?`: string; `reason?`: string |
+| <a id="fields-runtimecause"></a>**RuntimeCause** | `file_capacity?`: [FileCapacityEvidence](#fields-filecapacityevidence); `checkpoint_storage?`: [CheckpointStorageEvidence](#fields-checkpointstorageevidence); `finalization?`: [FinalizationDetail](#fields-finalizationdetail); `linkage?`: [MachOLinkage](#fields-macholinkage); `rss_limit?`: [RSSLimitEvidence](#fields-rsslimitevidence); `missing_tools?`: array of string; `host?`: string; `staging?`: [StagingCause](#fields-stagingcause); `path_diagnostic?`: [PathDiagnostic](#fields-pathdiagnostic); `admission?`: [AdmissionDetail](#fields-admissiondetail); `prelaunch_refused?`: boolean; `launch_refusal?`: string; `operation`: string; `class`: string; `exit_code?`: number; `predicate?`: string; `reason?`: string |
 | <a id="fields-scarcehostyield"></a>**ScarceHostYield** | `cause`: string; `demand`: string; `victim`: string; `attempt`: number; `machine`: string; `session`: string; `destination`: string; `destination_device`: string; `destination_target`: [ExecutionTarget](#fields-executiontarget); `generation`: number; `authorized`: boolean; `final_received`: boolean; `hold?`: string |
 | <a id="fields-scarceyieldprojection"></a>**ScarceYieldProjection** | `host?`: string; `requirements?`: array of string; `victims?`: array of [ScarceHostYield](#fields-scarcehostyield); `reason`: string |
 | <a id="fields-sharedcpuobservation"></a>**SharedCPUObservation** | `attempt`: number; `machine`: string; `session`: string; `elapsed_seconds`: number; `usage_seconds`: number; `peak_cores`: number |

@@ -6168,6 +6168,9 @@
         "host": {
           "type": "string"
         },
+        "launch_refusal": {
+          "type": "string"
+        },
         "linkage": {
           "$ref": "#/$defs/MachOLinkage"
         },

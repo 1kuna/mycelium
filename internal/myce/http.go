@@ -655,6 +655,10 @@ func respond(w http.ResponseWriter, v any, err error) {
 			code = rule.code
 		}
 		body := map[string]any{"error": rejectionMessages[code], "code": code}
+		var launchConflict *batchLaunchConflict
+		if errors.As(err, &launchConflict) {
+			body["cause"] = safeRuntimeCause(&RuntimeCause{Operation: "start_authorization", Class: "admission_changed", Predicate: "launch_authorization", LaunchRefusal: launchConflict.boundary})
+		}
 		var apiError *HTTPError
 		if errors.As(err, &apiError) && publicErrorCode(apiError.Code) && (apiError.Status < 500 || knownServerRefusal(apiError.Code)) {
 			if apiError.RetryAfter > 0 {
