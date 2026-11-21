@@ -346,6 +346,9 @@ func upgradeInstall(t *testing.T, ctx context.Context, root string) {
 		t.Fatal(err)
 	}
 	c.EnvironmentRoot = ""
+	// The fixture builds no environments. Persist a bounded cache so the
+	// previous installer can exercise downgrade independently of free disk.
+	c.EnvironmentCacheBytes = 1 << 20
 	c.ModelRoot = ""
 	c.Checkpoints = ""
 	c.HostID = "compat-host"
