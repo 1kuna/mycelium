@@ -1137,11 +1137,12 @@ the same recipe/work/shape
 Unknown, constrained, stale-identity or failed measurements, and peaks
 recorded more than 30 days ago, are excluded. A peak's age is its own and does
 not follow the throughput measured at the same point; main-process RSS alone is not a whole-attempt observation. Next use
-the optional hint. Otherwise an exploratory first run needs at least half the
-host allowance (physical RAM if uncapped) available and no protected attempt or
-model residency charging a quarter of it. Its envelope uses the available
-allowance after existing reserves, charges and attempt slack. Existing priority
-and release rules still apply. Accepted exploratory peaks train later runs.
+the optional hint. Otherwise a cold accelerator workload uses measured physical
+room bounded by the host allowance, idle history, launch gaps and slack. When
+another reservation would lower that offer, status reports
+`exploratory first run waiting for occupied host RAM`. The workload can use
+another eligible host or start when ordinary admission has room. Accepted
+exploratory peaks train later runs.
 A CPU first run bounded by similar work's peak plus the spread between its
 runs explores the same way on a host whose allowance holds every accepted peak
 but not that bound, never below the measured peak, rather than refusing a
@@ -1151,7 +1152,13 @@ source, reservation and enforcement mode appear in `memory_envelope` on the job.
 Finished attempt facts are also stored in `memory_attempts` on the job GET,
 without joining `work_curves`. Each entry has exact `attempt`, `machine`,
 `session`, the envelope it ran with (`memory_envelope`), and its observed
-`memory_peak` when measured. The peak includes `host_gb`, `cgroup_gb`,
+`memory_peak` when measured. For physical offers and ceiling-censored
+accelerator retries, the envelope's `sizing_inputs` retain the assignment's
+signed ledger remainder, allowance, idle-history bound when known, ceiling
+slack and launch gap. When a physical offer used a different projected
+remainder, that value and the drift reserve also appear. Recovery records the
+target's usable host capacity and any constrained native-check host lower bound.
+The envelope's `source` describes the sizing path. The peak includes `host_gb`, `cgroup_gb`,
 `device_gb`, Linux `swap_gb` (`memory.swap.peak`), `events`
 (`high`, `max`, `oom`, `oom_kill`, `oom_group_kill`), and `constrained`
 (omitted false). Optional readings are absent when unavailable, distinct from
@@ -1204,9 +1211,13 @@ protection. Omit optional member caps that would censor the measurement.
 Without a hint, the next run uses recovery evidence or explores available
 headroom; a constrained invalidation can report
 `exploratory (previous peak constrained)`. A successful unconstrained run teaches
-a new peak. Ceiling pressure alone leaves
-the job outcome unchanged; an OOM retains a job-local host floor for one retry
-with 25% more room, without persisting a floor for later jobs.
+a new peak. Ceiling pressure alone leaves the job outcome unchanged. When an
+auto accelerator workload reports exact-attempt cgroup OOM and its peak reached
+the applied ceiling, the queue keeps the device reservation and sizes the host
+retry from observed growth, target capacity and any constrained check floor for
+the same frozen extension and work. The retry waits for admission without
+interrupting other work. Other accelerator failures without this evidence retain
+their existing retry path, including the legacy 25% increase where applicable.
 Verified stopped members with a vanished parent release custody with unknown
 memory/cause and supply no learning data. A surviving parent's post-exit reading
 cannot train an estimate when the running sampler was lost during restart.

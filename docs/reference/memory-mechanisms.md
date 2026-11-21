@@ -161,13 +161,11 @@ OS/architecture/backend/layout. Accepted target-family evidence replaces the
 prior; OOM gets no retry and ineligible results cannot reopen it. Unified
 targets, multi-card work and fan-out retain their existing rules. Next use an
 optional submitter hint; a bootstrap declaration is not required and recipe
-defaults do not count as submitter hints. Without either, allow an exploratory
-first run only with measured memory, a known allowance (physical RAM if
-uncapped), at least half that allowance available after existing reserves and
-charges, and no protected attempt or model residency charging a quarter of the
-allowance. Use that available room, less existing per-attempt slack, as the
-envelope. Lower-priority work remains reclaimable through the existing release
-planner; release acknowledgement still precedes admission. Accepted exploratory
+defaults do not count as submitter hints. Without either, a cold accelerator
+workload probes measured physical room within the host allowance and observed
+idle bound, after launch gap and slack. A reservation that would reduce this
+offer holds the workload for room. Existing release acknowledgement still
+precedes admission. Accepted exploratory
 peaks become measurements. Status shows the source, envelope and enforcement
 mode. Memory learning is independent of throughput occupancy comparability:
 clean, attempt-specific single-piece serial fan-out children teach the ordinary
@@ -191,10 +189,17 @@ memory even on a successful result. Without a hint, a CPU run starts at its
 retained measured floor; GPU work keeps its device containment contract. When a constrained peak invalidated the measurement, its source reads
 `exploratory (previous peak constrained)`. A successful unconstrained
 exploration re-teaches the peak. Ceiling pressure alone does not retry or
-change the job's outcome. After OOM, one retry keeps a job-local host floor
-with 25% more room, on the same host if it fits, without raising its GPU
-reservation from a host OOM. If that floor exceeds every eligible host
-allowance or card, fail explicitly with the required GiB. Device reservations
+change the job's outcome. An auto accelerator workload with exact-attempt
+cgroup OOM at the applied ceiling keeps its device reservation. Its host
+retry uses observed growth above the failed host floor or the higher
+constrained native-check floor for the same frozen extension, work and native
+target. A check floor is lower-bound evidence only. Without a higher check
+floor, sizing also uses measured physical opportunity before co-tenant charges.
+Target allowance and physical RAM bound recovery headroom above measured
+need. The retry awaits ordinary admission and cannot stop other work. If the
+retry floor exceeds every eligible host allowance or card, fail explicitly with
+the required GiB. The generic accelerator OOM fallback still uses its legacy
+retry sizing when the exact ceiling evidence is missing. Device reservations
 never exceed the card total and never stand in for measured device peaks.
 Member caps are optional; explicit caps remain supported and fit the job
 envelope.

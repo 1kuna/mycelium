@@ -605,6 +605,15 @@ limit. For a terminal declared-limit failure, reduce memory use or raise the
 limit and submit the changed work. Missing tools or exec failures can still
 produce coverage findings on an unproven type.
 
+Leave cold accelerator work queued when status says
+`exploratory first run waiting for occupied host RAM`. After a kernel OOM at
+the attempt's host ceiling, an auto accelerator workload can retry with its
+existing device reservation and host RAM sized from measured growth, eligible
+host capacity and any comparable constrained native-check floor. The retry
+waits for room while other work continues. Keep the job and key. Read
+`memory_attempts[].memory_envelope` for the sizing source and `sizing_inputs`
+recorded when each attempt was assigned.
+
 `myce logs JOB_ID` labels each chunk `[attempt N]`. The appended preparation
 failure is `[attempt 0: environment failure]`, separate from command attempts.
 `--after SEQ` and `--follow` keep the same API sequence cursors; labels are
