@@ -689,6 +689,7 @@ type Machine struct {
 	SharedInputCache    *SharedInputCapacity `json:"shared_input_cache,omitempty"`
 
 	Capabilities                []string              `json:"capabilities,omitempty"`
+	EphemeralRefusal            ephemeralRefusal      `json:"ephemeral_refusal,omitempty"`
 	NativeIsolationWarning      string                `json:"native_isolation_warning,omitempty"`
 	MaxJobs                     int                   `json:"max_jobs,omitempty"`
 	AdmissionReason             string                `json:"admission_reason,omitempty"`
@@ -781,12 +782,13 @@ type Execution struct {
 	Attempt  int    `json:"attempt"`
 }
 type Checkin struct {
-	contact              *checkinContact // Queue-local request fence, never serialized.
-	period               time.Duration   // Transport header; not part of strict legacy JSON.
-	fleetProofIssue      FleetProofIssue // Advisory transport header, compatible with strict legacy JSON.
-	ToolInventoryHash    string          `json:"tool_inventory_hash,omitempty"`
-	ToolInventoryVersion uint64          `json:"tool_inventory_version,omitempty"`
-	NASPathReports       []NASPathReport `json:"nas_path_reports,omitempty"`
+	contact              *checkinContact  // Queue-local request fence, never serialized.
+	period               time.Duration    // Transport header; not part of strict legacy JSON.
+	fleetProofIssue      FleetProofIssue  // Advisory transport header, compatible with strict legacy JSON.
+	ephemeralRefusal     ephemeralRefusal // Advisory transport header, compatible with strict legacy JSON.
+	ToolInventoryHash    string           `json:"tool_inventory_hash,omitempty"`
+	ToolInventoryVersion uint64           `json:"tool_inventory_version,omitempty"`
+	NASPathReports       []NASPathReport  `json:"nas_path_reports,omitempty"`
 	// Sent only after the queue advertises checkpointExpiryProtocol (#894).
 	CheckpointExpiryProtocol string                   `json:"checkpoint_expiry_protocol,omitempty"`
 	CheckpointExpiryReports  []CheckpointExpiryReport `json:"checkpoint_expiry_reports,omitempty"`

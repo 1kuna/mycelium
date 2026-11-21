@@ -461,7 +461,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		return nil, err
 	}
 	if j.Spec.ephemeral() {
-		if err := w.checkEphemeralSupport(); err != nil {
+		if _, err := w.checkEphemeralSupport(); err != nil {
 			return nil, s.startFailure(j, launchRefused, err)
 		}
 	}

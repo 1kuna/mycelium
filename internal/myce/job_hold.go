@@ -200,6 +200,9 @@ func (q *Queue) jobHold(j *Job, resolving bool) (blocker *Hold) {
 		reason = strings.ReplaceAll(reason, key, "required software")
 	}
 	b := newHold(wait.Kind, reason)
+	if wait.Kind == ephemeralIsolationHold {
+		b.Reason = wait.Reason
+	}
 	if specificWaitKind(wait.Kind) {
 		return b
 	}

@@ -13,22 +13,23 @@ import (
 // Each immutable event carries the interval known at that transition. Missing
 // times remain unknown, particularly for engines loaded before ledger coverage.
 type ModelInterval struct {
-	Model         string        `json:"model"`
-	Attempt       string        `json:"attempt"`
-	Machine       string        `json:"machine"`
-	Host          string        `json:"host"`
-	Session       string        `json:"session"`
-	Device        string        `json:"device"`
-	Identity      string        `json:"identity,omitempty"`
-	Platform      string        `json:"platform"`
-	Project       string        `json:"project"`
-	Class         string        `json:"class"`
-	Priority      string        `json:"priority"`
-	Tier          PriorityMatch `json:"tier"`
-	AssignedAt    *time.Time    `json:"assigned_at,omitempty"`
-	LoadStartedAt *time.Time    `json:"load_started_at,omitempty"`
-	StoppedAt     *time.Time    `json:"stopped_at,omitempty"`
-	ReleasedAt    *time.Time    `json:"released_at,omitempty"`
+	MemoryPeaks   *ModelMemoryPeaks `json:"memory_peaks,omitempty"`
+	Model         string            `json:"model"`
+	Attempt       string            `json:"attempt"`
+	Machine       string            `json:"machine"`
+	Host          string            `json:"host"`
+	Session       string            `json:"session"`
+	Device        string            `json:"device"`
+	Identity      string            `json:"identity,omitempty"`
+	Platform      string            `json:"platform"`
+	Project       string            `json:"project"`
+	Class         string            `json:"class"`
+	Priority      string            `json:"priority"`
+	Tier          PriorityMatch     `json:"tier"`
+	AssignedAt    *time.Time        `json:"assigned_at,omitempty"`
+	LoadStartedAt *time.Time        `json:"load_started_at,omitempty"`
+	StoppedAt     *time.Time        `json:"stopped_at,omitempty"`
+	ReleasedAt    *time.Time        `json:"released_at,omitempty"`
 }
 
 type ModelIntervalEvent struct {
@@ -46,7 +47,7 @@ type ModelIntervalPage struct {
 	Entries       []ModelIntervalEvent `json:"entries"`
 }
 
-func (q *Queue) recordModelInterval(s *ModelSlot, kind string) {
+func (q *Queue) recordModelInterval(s *ModelSlot, kind string, request ...*ModelMemoryWindow) {
 	if q.simulation {
 		return
 	}
@@ -93,9 +94,18 @@ func (q *Queue) recordModelInterval(s *ModelSlot, kind string) {
 		}
 		interval.ReleasedAt = &now
 	}
+	event := interval
 	s.Interval = &interval // Replace: older events and transaction undo never alias mutable data.
+	switch kind {
+	case "memory_request":
+		if len(request) > 0 {
+			event.MemoryPeaks = &ModelMemoryPeaks{Request: request[0]}
+		}
+	case "memory_load", "released":
+		event.MemoryPeaks = s.MemoryPeaks
+	}
 	q.s.ModelIntervalHighWater++
-	q.modelIntervalWrites = append(q.modelIntervalWrites, ModelIntervalEvent{Sequence: q.s.ModelIntervalHighWater, At: now, Kind: kind, ModelInterval: interval})
+	q.modelIntervalWrites = append(q.modelIntervalWrites, ModelIntervalEvent{Sequence: q.s.ModelIntervalHighWater, At: now, Kind: kind, ModelInterval: event})
 }
 
 func (q *Queue) observeModelIntervals() {
