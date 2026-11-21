@@ -2,6 +2,7 @@ package myce
 
 import (
 	"errors"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -166,7 +167,7 @@ func TestFanOutAutoMemorySerialQualifiedDevice(t *testing.T) {
 			}
 			sized := *run.MemoryEnvelope
 			sized.Learned = nil
-			if sized != *want.MemoryEnvelope || run.Spec.Needs.HostMemoryGB != want.Spec.Needs.HostMemoryGB || run.Spec.Needs.MemoryGB != want.Spec.Needs.MemoryGB {
+			if !reflect.DeepEqual(sized, *want.MemoryEnvelope) || run.Spec.Needs.HostMemoryGB != want.Spec.Needs.HostMemoryGB || run.Spec.Needs.MemoryGB != want.Spec.Needs.MemoryGB {
 				t.Fatalf("child lost ordinary memory sizing: needs=%+v envelope=%+v want=%+v", run.Spec.Needs, run.MemoryEnvelope, want.MemoryEnvelope)
 			}
 			got := job(t, q, parent.ID)
