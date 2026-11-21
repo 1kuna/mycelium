@@ -234,6 +234,10 @@ lowered execution before staging customer inputs.
 Execution requires `worker_data_ephemeral_v2`: Linux PID/mount namespaces and
 a readable file core route, or the qualified Mycelium core router, and an exec
 helper that passed a core-limit probe.
+Placement refusals and queued-job status name the missing capability. When
+worker evidence identifies the cause, the reason names namespace qualification,
+the core route or the core-limit helper. If host policy refused user namespaces,
+see the [optional administrator action](native-isolation.md#optional-administrator-action-per-host-apparmor-user-namespaces).
 macOS, unsupported workers and the Linux fallback boundary cannot silently run
 these jobs. The worker rechecks core routing at launch and sets both soft and
 hard `RLIMIT_CORE` to zero in the payload helper, without changing the worker

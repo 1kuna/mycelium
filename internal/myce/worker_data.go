@@ -21,6 +21,28 @@ const (
 	ephemeralLegacyCapability = "worker_data_ephemeral_v1"
 )
 
+// Only bounded codes cross the inventory boundary. Launch errors stay local
+// to the attempt's existing diagnostic path.
+type ephemeralRefusal string
+
+const ephemeralRefusalHeader = "X-Myce-Ephemeral-Refusal"
+
+const (
+	ephemeralLinuxRequired        ephemeralRefusal = "linux_required"
+	ephemeralNamespaceRequired    ephemeralRefusal = "namespaces_unqualified"
+	ephemeralNamespacePolicy      ephemeralRefusal = "namespace_policy_denied"
+	ephemeralCoreRouteUnqualified ephemeralRefusal = "core_route_unqualified"
+	ephemeralCoreLimitUnqualified ephemeralRefusal = "core_limit_unqualified"
+)
+
+func safeEphemeralRefusal(r ephemeralRefusal) ephemeralRefusal {
+	switch r {
+	case ephemeralLinuxRequired, ephemeralNamespaceRequired, ephemeralNamespacePolicy, ephemeralCoreRouteUnqualified, ephemeralCoreLimitUnqualified:
+		return r
+	}
+	return ""
+}
+
 func (s Spec) ephemeral() bool { return s.WorkerData == "ephemeral" }
 
 // The policy opts into the ci boundary, including extension-owned executions.
@@ -137,9 +159,9 @@ func ephemeralRoot(spool string, j Job) string {
 func ephemeralLogName(j Job) string {
 	return filepath.Join("ephemeral-logs", j.ID+"-"+strconv.Itoa(j.Attempt)+"-"+identityHash(j.Session)+".log")
 }
-func (w Worker) checkEphemeralSupport() error {
+func (w Worker) checkEphemeralSupport() (ephemeralRefusal, error) {
 	if w.ephemeralProbe != nil {
-		return w.ephemeralProbe()
+		return "", w.ephemeralProbe()
 	}
 	return w.ephemeralWorkerSupport()
 }
