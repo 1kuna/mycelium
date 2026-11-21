@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -51,11 +53,29 @@ func TestExtensionCheckMaintenanceBeforeSetup(t *testing.T) {
 				if _, err = d.Queue.ChangeHostMaintenance("local-host", HostMaintenanceRequest{Action: action}); err != nil {
 					t.Fatal(err)
 				}
-				ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-				reports, checkErr := CheckExtension(ctx, ext, e, "fake", "0", "local-host", io.Discard, &EnvironmentCache{Root: filepath.Join(root, "cache"), Limit: 4 << 20}, d.Client())
+				cache := &EnvironmentCache{Root: filepath.Join(root, "cache"), Limit: 4 << 20}
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				client := d.Client()
+				var blocked *Job
+				var blockedErr error
+				client.HTTP = &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+					// Cancel only after observing the accepted check under
+					// maintenance. The cleanup calls use a separate context.
+					if id, ok := strings.CutPrefix(r.URL.Path, "/api/jobs/"); ok && r.Method == http.MethodGet && ctx.Err() == nil {
+						blocked, blockedErr = d.Client().GetJob(r.Context(), id)
+						cancel()
+						return nil, context.Canceled
+					}
+					return http.DefaultTransport.RoundTrip(r)
+				})}
+				reports, checkErr := CheckExtension(ctx, ext, e, "fake", "0", "local-host", io.Discard, cache, client)
 				cancel()
-				if checkErr == nil {
-					t.Fatal("blocked check succeeded", reports)
+				if blockedErr != nil || blocked == nil {
+					t.Fatalf("blocked check was never observed: read=%v check=%v", blockedErr, checkErr)
+				}
+				if blocked.State != "queued" || blocked.Attempt != 0 || blocked.StartedAt != nil || !errors.Is(checkErr, context.Canceled) {
+					t.Fatalf("expected an unassigned check before cancellation: state=%s attempt=%d started=%v check=%v", blocked.State, blocked.Attempt, blocked.StartedAt, checkErr)
 				}
 				marker := filepath.Join(extensionCache(ext, e, "fake"), "review-setup-marker")
 				if _, err = os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
@@ -68,11 +88,12 @@ func TestExtensionCheckMaintenanceBeforeSetup(t *testing.T) {
 				if _, err = d.Queue.ChangeHostMaintenance("local-host", HostMaintenanceRequest{Action: "resume"}); err != nil {
 					t.Fatal(err)
 				}
-				ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				reports, err = CheckExtension(ctx, ext, e, "fake", "0", "local-host", io.Discard, &EnvironmentCache{Root: filepath.Join(root, "cache"), Limit: 4 << 20}, d.Client())
+				// A legacy check waits for each work in series. Its admission,
+				// execution and release have no shared ten-second contract.
+				var commandLog bytes.Buffer
+				reports, err = CheckExtension(t.Context(), ext, e, "fake", "0", "local-host", &commandLog, cache, d.Client())
 				if err != nil {
-					t.Fatal("resumed check failed", reports, err)
+					t.Fatalf("resumed check failed: %v\nreports: %+v\ncommand output:\n%s", err, reports, commandLog.String())
 				}
 				if _, err = os.Stat(marker); err != nil {
 					t.Fatal("authorized setup never ran", err)
