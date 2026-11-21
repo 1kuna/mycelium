@@ -48,6 +48,7 @@ class GoTestProfileTests(unittest.TestCase):
                                  capture_output=True, text=True)
             self.assertEqual(run.returncode, 7, run.stderr)
             self.assertFalse((root / 'gate-result.txt').exists())
+            self.assertEqual((root / 'gate-failures.txt').read_text(), 'gate quick execution: exit 7\n')
 
     def test_timeout_and_exit(self):
         script = Path(__file__).resolve().with_name('go-test-profile.sh')

@@ -139,7 +139,7 @@ host_os=$(go env GOHOSTOS)
 host_arch=$(go env GOHOSTARCH)
 native_cgo=0
 if [[ $host_os == darwin ]]; then native_cgo=1; fi
-step build env CGO_ENABLED="$native_cgo" go build -o "$scratch/bin/myce" ./cmd/myce
+step build env CGO_ENABLED="$native_cgo" go build -json -o "$scratch/bin/myce" ./cmd/myce
 # Vet must retain checkout paths: cached cgo records with -trimpath can
 # refer to a removed prior checkout (the merge check uses the same boundary).
 step vet env GOFLAGS="-p=$cores" go vet ./...
@@ -154,11 +154,11 @@ while read -r os arch cgo; do
     step "build-$os-$arch" cp "$scratch/bin/myce" "$scratch/bin/myce-$os-$arch"
     continue
   fi
-  step "build-$os-$arch" env GOOS="$os" GOARCH="$arch" CGO_ENABLED="$cgo" go build -o "$scratch/bin/myce-$os-$arch" ./cmd/myce
+  step "build-$os-$arch" env GOOS="$os" GOARCH="$arch" CGO_ENABLED="$cgo" go build -json -o "$scratch/bin/myce-$os-$arch" ./cmd/myce
 done < <("$scratch/bin/myce" release build-targets)
 # CLI shards share one race-instrumented synthetic child image. Outside the
 # gate, devTestBinary still builds its own image for ordinary go test users.
-step build-test-cli go build -race -tags=myce_test -o "$scratch/bin/myce-test" ./cmd/myce
+step build-test-cli go build -json -race -tags=myce_test -o "$scratch/bin/myce-test" ./cmd/myce
 export GATE_TEST_CLI_BINARY="$scratch/bin/myce-test"
 if [[ $mode == full ]]; then
   export GATE_TEST_BINARY_DIR="$scratch/bin/packages"

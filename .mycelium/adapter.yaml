@@ -1,6 +1,9 @@
 default: mycelium-gate-full
 entries:
     mycelium-gate-full:
+        advanced:
+            keep_on_failure:
+                - gate-failures.txt
         checks:
             result:
                 - grep
@@ -33,6 +36,9 @@ entries:
               os: linux
               platform: cpu
     mycelium-gate-full-darwin:
+        advanced:
+            keep_on_failure:
+                - gate-failures.txt
         checks:
             result:
                 - grep
@@ -62,6 +68,9 @@ entries:
               os: darwin
               platform: cpu
     mycelium-gate-quick:
+        advanced:
+            keep_on_failure:
+                - gate-failures.txt
         checks:
             result:
                 - grep
@@ -95,6 +104,9 @@ entries:
               os: linux
               platform: cpu
     mycelium-gate-quick-darwin:
+        advanced:
+            keep_on_failure:
+                - gate-failures.txt
         checks:
             result:
                 - grep

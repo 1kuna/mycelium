@@ -13,6 +13,11 @@ import threading
 import time
 
 
+_receipt_spec = importlib.util.spec_from_file_location('gate_receipt', Path(__file__).with_name('gate-receipt.py'))
+receipts = importlib.util.module_from_spec(_receipt_spec)
+_receipt_spec.loader.exec_module(receipts)
+
+
 def merge_status(status, result):
     # Signal death cannot establish that the watchdog completed fixture cleanup.
     # The whole-run supervisor must settle that custody before any slot reuse.
@@ -27,6 +32,7 @@ def run(entries, cores, command, environment=None):
     pending = {}
     completed = queue.Queue()
     status = 0
+    label, stage = 'scheduler', 'schedule packages'
 
     def wait(child):
         child.wait()
@@ -41,6 +47,8 @@ def run(entries, cores, command, environment=None):
             if result is not None:
                 status = merge_status(status, result)
                 del pending[child]
+                if result < 0:
+                    receipts.failure(label, 'watchdog killed by ' + receipts.exit_reason(result))
                 print(f'{label}: {int(time.monotonic() - started)}s', flush=True)
 
     try:
@@ -57,11 +65,14 @@ def run(entries, cores, command, environment=None):
                 completed.get()
             if status == 125:
                 break
+            label = entry.split('\t', 1)[0] if isinstance(entry, str) else entry[0]
+            stage = 'prepare package'
             label, argv = command(entry)
             # Command preparation (quick's go list) may take time.
             reap()
             if status == 125:
                 break
+            stage = 'start watchdog'
             child = subprocess.Popen(argv, env=environment)
             pending[child] = (label, time.monotonic())
             threading.Thread(target=wait, args=(child,), daemon=True).start()
@@ -73,6 +84,9 @@ def run(entries, cores, command, environment=None):
         status = error.code if isinstance(error, SystemExit) else 130
     except Exception as error:
         print(f'gate scheduler: {error}', file=sys.stderr, flush=True)
+        reason = (receipts.exit_reason(error.returncode)
+                  if isinstance(error, subprocess.CalledProcessError) else type(error).__name__)
+        receipts.failure(label, f'{stage} failed ({reason})')
         status = merge_status(status, 1)
     finally:
         # Watchdogs handle TERM with their existing package custody cleanup.
@@ -80,8 +94,10 @@ def run(entries, cores, command, environment=None):
         for child in pending:
             if child.poll() is None:
                 child.terminate()
-        for child in pending:
+        for child, (label, _) in pending.items():
             result = child.wait()
+            if result < 0:
+                receipts.failure(label, 'watchdog killed by ' + receipts.exit_reason(result))
             if result < 0 or result in (124, 125):
                 status = merge_status(status, result)
     return status
@@ -113,15 +129,24 @@ def compile_packages(entries, folder):
             continue
         # Resolve the package cwd that `go test` ordinarily chooses. Relative
         # fixture paths and TestMain's package-directory hygiene depend on it.
-        info = json.loads(subprocess.check_output(
-            ['go', 'list', '-race', '-json', package], text=True))
+        try:
+            info = json.loads(subprocess.check_output(
+                ['go', 'list', '-race', '-json', package], text=True))
+        except subprocess.CalledProcessError as error:
+            receipts.failure(package, f'build preparation failed ({receipts.exit_reason(error.returncode)})')
+            raise
         if not info.get('TestGoFiles') and not info.get('XTestGoFiles'):
             continue  # Preserve `go test`'s ordinary no-test package result.
         image = folder / (hashlib.sha256(package.encode()).hexdigest() + '.test')
         label = 'compile-test:' + package
-        subprocess.run([sys.executable, str(Path(__file__).with_name('gate-progress.py')),
-                        label, 'go', 'test', '-c', '-race', '-vet=off', '-p', '1',
-                        '-o', str(image), info['ImportPath']], check=True)
+        try:
+            subprocess.run([sys.executable, str(Path(__file__).with_name('gate-progress.py')),
+                            label, 'go', 'test', '-c', '-race', '-vet=off', '-p', '1',
+                            '-json', '-o', str(image), info['ImportPath']], check=True)
+        except subprocess.CalledProcessError as error:
+            if error.returncode < 0:
+                receipts.failure(label, 'watchdog killed by ' + receipts.exit_reason(error.returncode))
+            raise
         binaries[package] = (str(image), info['Dir'])
     return binaries
 

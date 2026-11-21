@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 import platform
+import re
 import selectors
 import shutil
 import signal
@@ -20,6 +21,9 @@ import uuid
 _custody_spec = importlib.util.spec_from_file_location('gate_custody', Path(__file__).with_name('gate-budget.py'))
 custody = importlib.util.module_from_spec(_custody_spec)
 _custody_spec.loader.exec_module(custody)
+_receipt_spec = importlib.util.spec_from_file_location('gate_receipt', Path(__file__).with_name('gate-receipt.py'))
+receipts = importlib.util.module_from_spec(_receipt_spec)
+_receipt_spec.loader.exec_module(receipts)
 
 
 # Two missed expected completions after the normal completion interval. This is
@@ -138,6 +142,8 @@ def run(label, command, cache, report, clock=time.monotonic):
                      if compiled and startup_expected > 0 else 3600)
     first_launch = image_sha is None or image_sha != (history or {}).get('image_sha256')
     is_test = compiled or command[:2] == ['go', 'test'] and '-c' not in command[2:]
+    is_build = label == 'build' or label.startswith(('build-', 'compile-test:'))
+    is_unittest = label.startswith('python-client') or label.endswith('-regressions') or label == 'upgrade-compat-supervisor'
     directory = None
     if compiled:
         _, package, image, directory, *arguments = command
@@ -157,6 +163,10 @@ def run(label, command, cache, report, clock=time.monotonic):
     progress = Progress(None, clock())
     pending = b''
     active_tests = set()
+    failed_tests = set()
+    failed_builds = set()
+    termination = None
+    named_test_started = False
     package_started = None
     startup_gap = None
     phase = 'compile'
@@ -188,6 +198,7 @@ def run(label, command, cache, report, clock=time.monotonic):
     child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              env=child_env, cwd=directory)
     status = 1
+    stalled = False
     try:
         with selectors.DefaultSelector() as selector:
             selector.register(child.stdout, selectors.EVENT_READ)
@@ -195,6 +206,7 @@ def run(label, command, cache, report, clock=time.monotonic):
                 remaining = progress.remaining(clock())
                 if remaining == 0:
                     status = 124
+                    stalled = True
                     kind = 'test progress' if is_test else 'output'
                     print(f'gate stall {label}: no {kind} for {STALL_INTERVALS * progress.expected:.3f}s ({phase})',
                           file=sys.stderr, flush=True)
@@ -212,11 +224,15 @@ def run(label, command, cache, report, clock=time.monotonic):
                     if status < 0:
                         status = 128 - status
                     break
-                if is_test:
+                if is_test or is_build or is_unittest:
                     pending += data
                     lines = pending.split(b'\n')
                     pending = lines.pop()
                     for line in lines:
+                        if is_unittest:
+                            if line.startswith((b'FAIL: ', b'ERROR: ')):
+                                failed_tests.add(line.split(b': ', 1)[1].decode(errors='replace'))
+                            continue
                         try:
                             event = json.loads(line)
                         except (ValueError, UnicodeDecodeError):
@@ -224,6 +240,18 @@ def run(label, command, cache, report, clock=time.monotonic):
                         if not isinstance(event, dict):
                             continue
                         action = event.get('Action')
+                        if action == 'build-fail' and isinstance(event.get('ImportPath'), str):
+                            failed_builds.add(event['ImportPath'])
+                        if action == 'fail' and isinstance(event.get('FailedBuild'), str):
+                            failed_builds.add(event['FailedBuild'])
+                        if action == 'output' and isinstance(event.get('Output'), str):
+                            output = event['Output'].strip().removeprefix('test2json: ')
+                            if output.startswith(('panic: test timed out after ', '*** Test killed')):
+                                termination = output.removeprefix('panic: ')
+                            elif re.fullmatch(r'signal: [a-zA-Z0-9 -]+', output):
+                                termination = output
+                        if not is_test:
+                            continue
                         # Diagnostic output (including reconnect warnings) is
                         # not evidence that a test advanced. Only test2json
                         # lifecycle transitions renew the learned watchdog.
@@ -243,12 +271,15 @@ def run(label, command, cache, report, clock=time.monotonic):
                             phase = 'test'
                             progress.expected = expected
                         if isinstance(name, str):
+                            named_test_started = True
                             if action == 'run':
                                 active_tests.add(name)
                             elif action in ('pass', 'fail', 'skip'):
                                 active_tests.discard(name)
+                                if action == 'fail':
+                                    failed_tests.add(name)
                         progress.output(now)
-                else:
+                if not is_test:
                     progress.output(clock())
                 sys.stdout.buffer.write(data)
                 sys.stdout.buffer.flush()
@@ -256,6 +287,7 @@ def run(label, command, cache, report, clock=time.monotonic):
         status = error.code if isinstance(error, SystemExit) else 130
     finally:
         child.stdout.close()
+        command_status = status
         if package_scratch is not None:
             try:
                 stopped = custody.stop_fixtures('GATE_PACKAGE_ID=' + child_env['GATE_PACKAGE_ID'],
@@ -267,6 +299,23 @@ def run(label, command, cache, report, clock=time.monotonic):
             else:
                 print('gate: package custody unconfirmed; scratch retained', file=sys.stderr, flush=True)
                 status = 125
+        if command_status:
+            if stalled:
+                reason = f'watchdog during {phase if is_test else "command output"} (exit 124)'
+            elif termination:
+                reason = f'{termination} ({receipts.exit_reason(command_status)})'
+            elif failed_builds:
+                reason = 'build failure in ' + ', '.join(sorted(failed_builds))
+            elif is_build and command_status <= 128:
+                reason = f'build failure ({receipts.exit_reason(command_status)})'
+            else:
+                reason = receipts.exit_reason(command_status)
+            tests = failed_tests | (active_tests if not failed_tests or termination or stalled else set())
+            if not tests and is_test and not failed_builds and not named_test_started:
+                reason += ' before first test'
+            receipts.failure(label, reason, tests)
+        if status == 125 and command_status != 125:
+            receipts.failure(label, 'package cleanup unconfirmed (exit 125)')
         # A successful no-test package can exit without a named lifecycle.
         if status == 0 and is_test and startup_gap is None and package_started is not None:
             startup_gap = clock() - package_started
@@ -278,7 +327,7 @@ def run(label, command, cache, report, clock=time.monotonic):
                       startup_gap_seconds=startup_gap,
                       startup_limit_seconds=startup_limit if is_test else None,
                       first_launch=first_launch if compiled else None,
-                      stopped_phase=phase if status == 124 else None,
+                      stopped_phase=phase if stalled else None,
                       progress_kind='test lifecycle' if is_test else 'output',
                       active_tests=sorted(active_tests))
         # Every run is evidence, including failures, but censored/failed runs
@@ -308,5 +357,13 @@ if __name__ == '__main__':
         print(cpu_count())
     else:
         label, *command = sys.argv[1:]
-        sys.exit(run(label, command, Path(os.environ['GATE_TIMING_CACHE']),
-                     Path(os.environ['GATE_TIMING_REPORT'])))
+        try:
+            status = run(label, command, Path(os.environ['GATE_TIMING_CACHE']),
+                         Path(os.environ['GATE_TIMING_REPORT']))
+        except (OSError, ValueError) as error:
+            receipts.failure(label, f'watchdog error ({type(error).__name__}; exit 1)')
+            raise
+        except (KeyboardInterrupt, SystemExit) as error:
+            status = error.code if isinstance(error, SystemExit) else 130
+            receipts.failure(label, receipts.exit_reason(status))
+        sys.exit(status)

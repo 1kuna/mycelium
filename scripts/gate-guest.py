@@ -62,8 +62,11 @@ def main():
     marker = active / identity
     receipt = reports / 'cleanup.json'
     receipts = module('gate-receipt')
+    failures = reports / 'gate-failures.txt'
+    failures.touch()
     env = dict(os.environ, GOCACHE=str(cache_root / 'go-build'),
                GOMODCACHE=str(cache_root / 'go-mod'), GOMAXPROCS=cores, GATE_TARGET='native',
+               GATE_FAILURE_REPORT=str(failures),
                GATE_CLEANUP_ID=identity, GATE_CLEANUP_RECEIPT=str(receipt))
     for path in (env['GOCACHE'], env['GOMODCACHE']):
         Path(path).mkdir(exist_ok=True)
