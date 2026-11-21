@@ -119,6 +119,14 @@ def execute(path):
     def invalid_exit(result):
         return result == 125 or result < 0 or result >= 128
 
+    def leg_confirmed(result, receipt, nonce):
+        confirmed = receipts.confirmed(receipt, nonce)
+        failures = receipt.with_name(receipt.name.replace('-cleanup.json', '-failures.txt'))
+        if (result or not confirmed) and (not failures.exists() or not failures.stat().st_size):
+            reason = receipts.exit_reason(result) if result else 'cleanup unconfirmed (exit 125)'
+            failures.write_text(f'{receipt.name.split("-", 1)[0]} leg: {reason}\n')
+        return confirmed
+
     def launch(command, receipt, nonce, **kwargs):
         # A completed refusal must stop new work, even before its wait-thread
         # notification. Ordinary test failures still collect the other leg.
@@ -146,8 +154,11 @@ def execute(path):
         if manifest['platform'] != 'linux':
             native_id = uuid.uuid4().hex
             native_receipt = folder / 'native-cleanup.json'
+            native_failures = folder / 'native-failures.txt'
+            native_failures.touch()
             native_env = dict(env, GATE_CLEANUP_ID=native_id, GATE_CLEANUP_RECEIPT=str(native_receipt),
-                              GATE_EXECUTION_CUSTODY=str(folder / 'native-custody.json'))
+                              GATE_EXECUTION_CUSTODY=str(folder / 'native-custody.json'),
+                              GATE_FAILURE_REPORT=str(native_failures))
             if manifest.get('capacity_owner', {}).get('admission_protocol') == 2:
                 native_env.update(GATE_LOCAL_SLOT=manifest['capacity_slot'],
                                   GATE_LOCAL_SLOT_ID=manifest['capacity_owner']['run_id'])
@@ -168,7 +179,8 @@ def execute(path):
                 manifest.get('sequential_platforms', False)):
             child, result, receipt, nonce = completed.get()
             collected += 1
-            if invalid_exit(result) or interrupted or not receipts.confirmed(receipt, nonce):
+            confirmed = leg_confirmed(result, receipt, nonce)
+            if invalid_exit(result) or interrupted or not confirmed:
                 return 125
             status = status or result
         if manifest['platform'] != 'native':
@@ -179,6 +191,7 @@ def execute(path):
                              source_info=json.loads(info.read_text()))
             linux = [sys.executable, str(REPO / 'scripts/gate-linux.py'), '--archive', str(runtime),
                      '--report', str(report), '--cleanup-receipt', str(linux_receipt),
+                     '--failures', str(folder / 'linux-failures.txt'),
                      '--cleanup-id', linux_id, '--cores', str(manifest['cores']),
                      '--input', str(info) + '=source-identity.json']
             for predecessor in predecessor_files:
@@ -195,8 +208,8 @@ def execute(path):
                 return 125
         for _ in children[collected:]:
             child, result, receipt, nonce = completed.get()
-            if (invalid_exit(result) or interrupted or
-                    not receipts.confirmed(receipt, nonce)):
+            confirmed = leg_confirmed(result, receipt, nonce)
+            if invalid_exit(result) or interrupted or not confirmed:
                 return 125
             status = status or result
         return status

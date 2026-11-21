@@ -6,6 +6,20 @@ export GATE_TARGET=native
 export GATE_FLEET_PROFILE=1  # gate.sh skips local-host admission regressions
 mode=${1:-full}
 case "$mode" in full) gate=(full);; quick) gate=(quick --selection gate-selection.tsv);; *) echo "gate profile: unknown mode: $mode" >&2; exit 2;; esac
+export GATE_FAILURE_REPORT="$PWD/gate-failures.txt"
+: > "$GATE_FAILURE_REPORT"
+phase=setup
+failed() {
+  status=$?
+  if [[ $status != 0 && ! -s $GATE_FAILURE_REPORT ]]; then
+    if [[ $status -gt 128 ]] && name=$(kill -l "$status" 2>/dev/null); then
+      printf 'gate %s %s: signal SIG%s (exit %s)\n' "$mode" "$phase" "$name" "$status" >> "$GATE_FAILURE_REPORT"
+    else
+      printf 'gate %s %s: exit %s\n' "$mode" "$phase" "$status" >> "$GATE_FAILURE_REPORT"
+    fi
+  fi
+}
+trap failed EXIT
 for tool in go git python3 uv; do
   if ! command -v "$tool" >/dev/null; then
     printf 'gate profile: missing required tool: %s\n' "$tool" >&2
@@ -25,5 +39,6 @@ if [[ $mode == full ]]; then
   # and seed its modules before gate.sh disables network dependency resolution.
   python3 scripts/upgrade-compat.py prepare
 fi
+phase=execution
 ./scripts/gate.sh "${gate[@]}"
 printf 'gate %s: exit=0\n' "$mode" > gate-result.txt

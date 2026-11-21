@@ -424,6 +424,7 @@ def main():
     started = time.monotonic()
     status = 1
     mode = 'full' if 'full' in sys.argv[2:] else 'quick'
+    failure_path = os.environ.get('GATE_FAILURE_REPORT')
     # The repository's two-suite safety rule is specific to Macs. Linux fleet
     # jobs are already admitted against declared CPU and learned host memory;
     # an additional fixed suite count would strand those allocated resources.
@@ -461,6 +462,11 @@ def main():
     child_env['GATE_RUN_ID'] = marker.split('=', 1)[1]
     runtime_dir = root.parent / '.reports/gate-runtime' / child_env['GATE_RUN_ID']
     runtime_dir.mkdir(parents=True, mode=0o700)
+    if not failure_path and Path(sys.argv[1]).name == 'gate.sh':
+        failure_path = str(runtime_dir / 'gate-failures.txt')
+        Path(failure_path).touch()
+    if failure_path:
+        child_env['GATE_FAILURE_REPORT'] = failure_path
     child_env['GATE_RUNTIME_DIR'] = str(runtime_dir)
     # Receipt authority belongs only to this supervisor, never nested fixtures.
     receipt_path = child_env.pop('GATE_CLEANUP_RECEIPT', None)
@@ -522,6 +528,12 @@ def main():
             pending.write_text(json.dumps(dict(schema=1, identity=receipt_identity,
                                                stopped=stopped, status=status)) + '\n')
             pending.replace(path)
+        if failure_path and status:
+            if not stopped or not Path(failure_path).stat().st_size:
+                reason = 'cleanup unconfirmed (exit 125)' if not stopped else f'exit {status}'
+                with open(failure_path, 'a') as output:
+                    output.write(f'gate {mode}: {reason}\n')
+            print(f'gate failure receipt: {failure_path}', flush=True)
         print(f'gate {mode}: exit={status} wall={int(time.monotonic() - started)}s', flush=True)
     return status
 
