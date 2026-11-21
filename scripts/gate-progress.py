@@ -195,6 +195,12 @@ def run(label, command, cache, report, clock=time.monotonic):
             shutil.copy2(image, private)
             command[6] = str(private)
             child_env['PWD'] = directory
+    # The watchdog owns the receipt. Regression fixtures run intentional
+    # failures, and their nested watchdogs must never write to the real gate.
+    if 'GATE_FAILURE_REPORT' in os.environ:
+        if child_env is None:
+            child_env = dict(os.environ)
+        child_env.pop('GATE_FAILURE_REPORT', None)
     child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              env=child_env, cwd=directory)
     status = 1

@@ -334,13 +334,16 @@ class ProgressTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             env = dict(os.environ, GATE_TIMING_CACHE=str(root / 'cache'),
-                       GATE_TIMING_REPORT=str(root / 'report'))
+                       GATE_TIMING_REPORT=str(root / 'report'), GATE_FAILURE_REPORT=str(root / 'failures'))
             run = subprocess.run([sys.executable, str(Path(progress.__file__)), 'fixture',
-                                  sys.executable, '-c', 'print("progress"); raise SystemExit(7)'],
+                                  sys.executable, '-c',
+                                  'import os; assert "GATE_FAILURE_REPORT" not in os.environ; '
+                                  'print("progress"); raise SystemExit(7)'],
                                  env=env, capture_output=True, text=True, timeout=10)
             self.assertEqual(run.returncode, 7, run.stderr)
             self.assertIn('progress', run.stdout)
             self.assertEqual(json.loads((root / 'report').read_text())['exit'], 7)
+            self.assertEqual((root / 'failures').read_text(), 'fixture: exit 7\n')
             self.assertEqual(list((root / 'cache').iterdir()), [])
 
 
