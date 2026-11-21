@@ -333,20 +333,20 @@ func TestInstallFailureRecoveryAndFilesystems(t *testing.T) {
 				}
 				return os.Rename(source, destination)
 			}}
-			dropInInspections := 0
+			reloaded := false
 			manager := func(_ context.Context, name string, args ...string) ([]byte, error) {
 				if name == "systemctl" && len(args) == 3 && args[1] == "show" {
 					return installUnitObservation(c), nil
 				}
 				call := strings.Join(args, " ")
-				if strings.Contains(call, "--property=DropInPaths") {
-					dropInInspections++
+				if call == "--user daemon-reload" {
+					reloaded = true
 				}
 				if call == "--user is-active --quiet myce-worker.service" {
 					return nil, inactiveInstallUnit{}
 				}
 
-				if failure == "reload" && strings.Contains(call, "daemon-reload") || failure == "preactivation" && strings.Contains(call, "--property=DropInPaths") && dropInInspections == 2 || failure == "enable" && call == "--user enable --now myce-worker.service" {
+				if failure == "reload" && call == "--user daemon-reload" || failure == "preactivation" && reloaded && strings.Contains(call, "--property=DropInPaths") || failure == "enable" && call == "--user enable --now myce-worker.service" {
 					fired = true
 					return nil, injected
 				}

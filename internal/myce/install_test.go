@@ -122,8 +122,9 @@ func TestInstallAndUninstallTempOnly(t *testing.T) {
 	if e = Install(context.Background(), c, executable, "private-test-secret", runner); e != nil {
 		t.Fatal(e)
 	}
-	// Snapshot the current unit, both obsolete units and effective drop-ins.
-	if len(commands) != 12 {
+	// Snapshot the current unit and both obsolete units, then verify effective
+	// drop-ins before publication and again after reloading the manager.
+	if len(commands) != 13 {
 		t.Fatal(commands)
 	}
 	if commands[1] != "systemctl --user is-active --quiet myce-worker.service" {
@@ -432,7 +433,7 @@ func TestInstallDeploymentDefaultUnitAndNASBoundary(t *testing.T) {
 	executable := filepath.Join(home, "binary")
 	os.WriteFile(executable, []byte("test"), 0700)
 	if err := Install(context.Background(), c, executable, "token", func(_ context.Context, name string, args ...string) ([]byte, error) {
-		if name != "systemctl" || len(args) < 2 || (args[1] != "is-active" && !(args[1] == "show" && strings.Contains(strings.Join(args, " "), "--property=UnitFileState"))) {
+		if name != "systemctl" || len(args) < 2 || args[1] != "is-active" && args[1] != "show" {
 			t.Fatal("service changed before NAS check")
 		}
 		return nil, nil
