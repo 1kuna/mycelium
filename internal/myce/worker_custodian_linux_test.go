@@ -36,6 +36,12 @@ func TestCustodianEntryScopeIdentity(t *testing.T) {
 // Exercise the real launcher/wait path with a test-owned executable, without
 // creating or changing any service manager objects.
 func TestCustodianLauncherExitProducesRefusal(t *testing.T) {
+	q, clock, host := fleetAtStartProbe(t)
+	j := job(t, q, host.StartProbe)
+	var dbPath string
+	if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&dbPath); err != nil {
+		t.Fatal(err)
+	}
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "bin")
 	if err := os.Mkdir(bin, 0700); err != nil {
@@ -47,18 +53,25 @@ func TestCustodianLauncherExitProducesRefusal(t *testing.T) {
 	t.Setenv("PATH", bin)
 	argsPath := filepath.Join(dir, "launcher-args")
 	t.Setenv("MYCE_TEST_LAUNCH_ARGS", argsPath)
-	j := Job{ID: ID(), Attempt: 1, Machine: "worker", Session: "session"}
-	s := &workerStore{dir: dir, stateName: "attempt.json", state: workerState{Job: &j, Session: j.Session}}
-	w := Worker{Clock: RealClock{}, Machine: Machine{ID: j.Machine}, ServiceConfig: &ServiceConfig{State: dir, Binary: "/unused", Config: "/unused", Slice: "mycetest0123456789abcdef0123456789abcdef.slice"}}
-	p, err := w.startCustodian(t.Context(), s, j)
+	s := &workerStore{dir: dir, stateName: "attempt.json", state: workerState{Job: j, Session: j.Session}}
+	w := Worker{Clock: clock, Machine: Machine{ID: j.Machine}, ServiceConfig: &ServiceConfig{State: dir, Binary: "/unused", Config: "/unused", Slice: "mycetest0123456789abcdef0123456789abcdef.slice"}}
+	p, err := w.startAssignedAttempt(t.Context(), s, *j)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer p.custodian.detach()
 	select {
 	case f := <-p.done:
-		if f.result.Error != errCustodianStartup.Error() || f.result.ReleasePending || f.result.ExecutionEvidence == nil || f.result.ExecutionEvidence.Main != executionNotStarted {
+		r := f.result
+		if r.Error != errCustodianStartup.Error() || r.ReleasePending || r.ExecutionEvidence == nil || r.ExecutionEvidence.Main != executionNotStarted || r.ExecutionEvidence.Sidecars != executionNotStarted || r.ExecutionCause == nil || !r.ExecutionCause.PrelaunchRefused || r.ExecutionCause.LaunchRefusal != custodianStartupFailed {
 			t.Fatalf("launcher exit lost startup refusal: %+v", f.result)
+		}
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		r.ReleaseOnly = true
+		if err := q.Complete(r); err != nil {
+			t.Fatal("release replay", err)
 		}
 	case <-time.After(testWaitTimeout):
 		t.Fatal("launcher exit was retained as uncertain startup")
@@ -66,5 +79,25 @@ func TestCustodianLauncherExitProducesRefusal(t *testing.T) {
 	args, err := os.ReadFile(argsPath)
 	if err != nil || !strings.Contains(string(args), "--slice="+w.ServiceConfig.custodianSlice()+"\n") || strings.Contains(string(args), "--slice=myce-jobs.slice") {
 		t.Fatalf("custodian escaped configured slice: %s %v", args, err)
+	}
+	fleetTick(t, q)
+	if q.s.FleetUpgrade.State != "stopped" || host.Failure != "worker_start_probe_failed" || host.WorkerDone || q.s.FleetUpgrade.Hosts[1].Phase != "pending" {
+		t.Fatalf("refused probe advanced rollout: %+v", q.fleetUpgradeStatus())
+	}
+	if err := q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(dbPath, q.root, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	got := job(t, reopened, j.ID)
+	if got.State != "cancelled" || got.Losses != 0 || got.InfrastructureRetries != 0 || !got.ReleaseConfirmed || got.Ledger == nil || !got.Ledger.Complete || len(got.AttemptHistory) != 1 {
+		t.Fatalf("probe lost release, history, or accounting: %+v", got)
+	}
+	a := got.AttemptHistory[0]
+	if a.Attempt != j.Attempt || a.ExecutionCause == nil || a.ExecutionCause.LaunchRefusal != custodianStartupFailed || !a.ExecutionCause.PrelaunchRefused || a.ExecutionEvidence == nil || a.ExecutionEvidence.Main != executionNotStarted {
+		t.Fatalf("reopened queue lost startup refusal: %+v", a)
 	}
 }
