@@ -236,7 +236,6 @@ type Queue struct {
 	productionGrace time.Duration
 	wake            chan struct{}
 	models          ModelConfig
-	modelHash       string
 	calls           map[string]*ModelCall
 	lock            *os.File
 	mu              queueMutex

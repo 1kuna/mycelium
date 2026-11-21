@@ -299,7 +299,6 @@ func (q *Queue) ConfigureModels(c ModelConfig) error {
 	if e := validateModels(c); e != nil {
 		return e
 	}
-	hash := modelConfigHash(c)
 	return q.update(func() error {
 		if q.calls != nil {
 			for _, p := range q.s.Pins {
@@ -330,7 +329,7 @@ func (q *Queue) ConfigureModels(c ModelConfig) error {
 				}
 			}
 		}
-		q.models, q.modelHash = c, hash
+		q.models = c
 		q.calls = map[string]*ModelCall{}
 		if q.s.ModelSlots == nil {
 			q.s.ModelSlots = map[string]*ModelSlot{}
@@ -1285,7 +1284,7 @@ func (q *Queue) catalogStale(m *Machine) bool {
 	if m.ModelConfigHash == "" && (m.ModelURL == "" || len(q.models.Models) == 0) {
 		return false // Legacy reports without a model endpoint carry no catalog identity.
 	}
-	return m.ModelConfigHash != q.modelHash
+	return m.ModelConfigHash != modelConfigHash(q.models)
 }
 
 // Batch workers run one command at a time. Plan its release together with
