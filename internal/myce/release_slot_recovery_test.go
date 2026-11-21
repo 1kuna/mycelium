@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,7 +47,11 @@ func TestReleaseSlotProoflessWorkerInstall(t *testing.T) {
 	if err := Install(ctx, c, source, token, fakeInstallManager(c)); err != nil {
 		t.Fatal(err)
 	}
-	_, publisher, _ := signedTestRelease(t)
+	_, _, manifest := signedTestRelease(t)
+	publisher, signer, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(c.State, "fleet-publisher.pub"), publisher, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -237,6 +242,45 @@ func TestReleaseSlotProoflessWorkerInstall(t *testing.T) {
 	nextConfig.ModelCatalog = nextPath
 	if err := PreflightInstall(ctx, nextConfig, candidate, token, manager); err != nil {
 		t.Fatal(err)
+	}
+	// Protected Linux mappings can authenticate the incumbent slot with its
+	// signed artifact. Missing or incorrect evidence stays a read-only refusal.
+	privateMapping := installFiles{imageProbe: func(context.Context, int, *os.File, func(context.Context, string, ...string) ([]byte, error)) error {
+		return os.ErrPermission
+	}}
+	if _, err := prepareInstall(ctx, nextConfig, candidate, token, manager, privateMapping, nil); !errors.Is(err, errFleetRecoveryManifest) {
+		t.Fatalf("private mapping without signed evidence = %v", err)
+	}
+	manifestConfig := nextConfig
+	manifestConfig.InstalledReleaseManifest = filepath.Join(t.TempDir(), "release.json")
+	manifest.Version = m.Release.Version
+	writeManifest := func() {
+		t.Helper()
+		payload, err := json.Marshal(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		envelope, err := json.Marshal(SignedRelease{Manifest: payload, Signature: ed25519.Sign(signer, payload)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(manifestConfig.InstalledReleaseManifest, envelope, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeManifest()
+	if _, err := prepareInstall(ctx, manifestConfig, candidate, token, manager, privateMapping, nil); !errors.Is(err, errFleetRecoveryManifest) {
+		t.Fatalf("signed manifest for other bytes = %v", err)
+	}
+	for i, artifact := range manifest.Artifacts {
+		if artifact.OS == c.Detection.OS && artifact.Arch == c.Detection.Arch {
+			manifest.Artifacts[i].SHA256, manifest.Artifacts[i].Size = before.SHA256, before.Size
+		}
+	}
+	writeManifest()
+	plan, err := prepareInstall(ctx, manifestConfig, candidate, token, manager, privateMapping, nil)
+	if err != nil || plan.reconciliation.Recovery.SlotEvidence != "signed_installed_release" {
+		t.Fatalf("protected mapping did not reconcile the signed slot: %v", err)
 	}
 	if err := Install(ctx, nextConfig, candidate, token, manager); err != nil {
 		t.Fatal(err)

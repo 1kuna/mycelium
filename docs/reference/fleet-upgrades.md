@@ -153,8 +153,13 @@ selected service:
   the installer checks. This protects against stopping a replacement process.
 - The installed file must match the service's kernel executable mapping and
   the installer's rollback snapshot. This detects an unrelated or recently
-  swapped slot without executing it. The private `slot-reconciliation.json`
-  records the recovery evidence and the hash of the rollback slot.
+  swapped slot without executing it. If Linux credential protection hides
+  the mapping, the saved slot must match a signature under the pinned publisher
+  key, the queue-reported installed version, and the platform artifact's exact
+  hash and size. The installer checks a retained managed update receipt or
+  current queue approval, or accepts an explicit `--installed-release-manifest`
+  for a prior release. The private `slot-reconciliation.json` records which
+  evidence qualified the saved rollback slot.
 
 The installer keeps the existing queue maintenance policy and serializes with
 the local fleet helper. Keep the drain or disable in force through activation.
@@ -200,6 +205,7 @@ Local installer and service updater failures. Updater reports expose a fixed
 | `fleet_recovery_not_quiescent` | Keep the host drained or disabled. Wait for queue and local custody to release, and confirm fresh worker check-ins. |
 | `fleet_recovery_worker_unproven` | Verify the selected worker, its fresh enrollment session and the service-manager PID. |
 | `fleet_recovery_slot_mismatch` | Verify the installed slot matches the active service's kernel executable mapping. Inspect an interrupted publication or unusable process observation before retrying. |
+| `fleet_recovery_manifest_required` | Linux hides the executable mapping and the signed installed slot could not be verified. Supply the installed release's signed manifest with `--installed-release-manifest` and check the slot's version, hash and size. |
 | `fleet_recovery_runtime_changed` | Check the selected service, session and host drain again. The operation's original evidence changed. |
 | `fleet_config_invalid`, `fleet_service_invalid`, `fleet_install_invalid`, `fleet_state_invalid`, `fleet_local_file_invalid`, `fleet_preflight_failed` | Repair saved settings, file permissions or the private state directory through the installer. |
 | `fleet_storage_preflight_failed` | Repair the named state or NAS root or mount through the storage owner. |

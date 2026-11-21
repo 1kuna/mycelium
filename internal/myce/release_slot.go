@@ -130,7 +130,9 @@ func preflightInstallSlot(ctx context.Context, c ServiceConfig, command func(con
 	}
 	running := worker.Machine.Fleet
 	if running == nil && c.Enrollment {
-		slot, err := reconcileQuietWorkerSlot(ctx, c, command, imageProbe, status, worker)
+		slot, err := reconcileQuietWorkerSlot(ctx, c, command, imageProbe, status, worker, func(slot ReleaseSlotIdentity) bool {
+			return signedInstalledSlot(ctx, c, client, key, slot)
+		})
 		if err != nil {
 			return nil, err
 		}

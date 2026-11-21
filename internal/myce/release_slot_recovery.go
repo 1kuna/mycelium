@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ type quietWorkerSlot struct {
 	MaintenanceMode string    `json:"maintenance_mode"`
 	DrainOwner      string    `json:"drain_owner,omitempty"`
 	MaintenanceAt   time.Time `json:"maintenance_at"`
+	SlotEvidence    string    `json:"slot_evidence"`
 }
 
 type installImageProbe func(context.Context, int, *os.File, func(context.Context, string, ...string) ([]byte, error)) error
@@ -25,6 +27,7 @@ var (
 	errFleetRecoveryNotQuiescent = errors.New("fleet_recovery_not_quiescent: keep the host drained and wait for execution and cleanup to release")
 	errFleetRecoveryWorker       = errors.New("fleet_recovery_worker_unproven: verify the fresh enrolled worker session and its active service")
 	errFleetRecoverySlot         = errors.New("fleet_recovery_slot_mismatch: cannot match the installed binary to the active service image")
+	errFleetRecoveryManifest     = errors.New("fleet_recovery_manifest_required: executable mapping is private; provide the signed installed release with --installed-release-manifest")
 	errFleetRecoveryChanged      = errors.New("fleet_recovery_runtime_changed: recheck the active service, worker session and host drain before retrying")
 )
 
@@ -50,7 +53,7 @@ func checkQuietWorkerQueue(c ServiceConfig, status HostMaintenanceStatus, worker
 
 // This evidence authorizes a local idle-service stop. Fleet live takeover
 // still requires its own runtime proof.
-func reconcileQuietWorkerSlot(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error), imageProbe installImageProbe, status HostMaintenanceStatus, worker MaintenanceWorker) (*slotReconciliation, error) {
+func reconcileQuietWorkerSlot(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error), imageProbe installImageProbe, status HostMaintenanceStatus, worker MaintenanceWorker, signedSlot func(ReleaseSlotIdentity) bool) (*slotReconciliation, error) {
 	if err := checkQuietWorkerQueue(c, status, worker); err != nil {
 		return nil, err
 	}
@@ -74,8 +77,15 @@ func reconcileQuietWorkerSlot(ctx context.Context, c ServiceConfig, command func
 	if imageProbe == nil {
 		imageProbe = verifyInstallServiceImage
 	}
+	slotEvidence := "kernel_mapping"
 	slot, err := readVerifiedReleaseSlot(c.Binary, func(f *os.File) error {
 		if err := imageProbe(ctx, receipt.ProcessID, f, command); err != nil {
+			if c.Detection.OS == "linux" && errors.Is(err, os.ErrPermission) {
+				// Linux services protect their credentials by withholding
+				// ptrace-sensitive /proc metadata even from the same user.
+				slotEvidence = "signed_installed_release"
+				return nil
+			}
 			return errFleetRecoverySlot
 		}
 		return nil
@@ -83,17 +93,45 @@ func reconcileQuietWorkerSlot(ctx context.Context, c ServiceConfig, command func
 	if err != nil {
 		return nil, err
 	}
+	slot.Version = receipt.Version
+	if slotEvidence == "signed_installed_release" && !signedSlot(slot) {
+		return nil, errFleetRecoveryManifest
+	}
 	if err := checkQuietWorkerSpool(c.State, m.Session); err != nil {
 		return nil, err
 	}
 	if after, err := processBirth(receipt.ProcessID); err != nil || after != birth {
 		return nil, errFleetRecoveryWorker
 	}
-	slot.Version = receipt.Version
 	return &slotReconciliation{Slot: slot, RollbackTarget: "installed_slot", Recovery: &quietWorkerSlot{
 		Session: m.Session, ServiceIdentity: identity, ProcessBirth: birth,
-		MaintenanceMode: policy.Mode, DrainOwner: policy.DrainOwner, MaintenanceAt: policy.UpdatedAt.UTC(),
+		MaintenanceMode: policy.Mode, DrainOwner: policy.DrainOwner, MaintenanceAt: policy.UpdatedAt.UTC(), SlotEvidence: slotEvidence,
 	}}, nil
+}
+
+// Authenticate the saved bytes for the enrolled release and platform without
+// claiming a running image hash when the kernel withholds it.
+func signedInstalledSlot(ctx context.Context, c ServiceConfig, client Client, key ed25519.PublicKey, slot ReleaseSlotIdentity) bool {
+	matches := func(envelope []byte) bool {
+		m, err := VerifyRelease(envelope, key)
+		if err != nil || m.Version != slot.Version {
+			return false
+		}
+		artifact, err := m.Select(c.Detection.OS, c.Detection.Arch)
+		return err == nil && artifact.SHA256 == slot.SHA256 && artifact.Size == slot.Size
+	}
+	if path := c.InstalledReleaseManifest; path != "" {
+		if fleetPrivateFile(path, false) != nil {
+			return false
+		}
+		envelope, err := os.ReadFile(path)
+		return err == nil && matches(envelope)
+	}
+	if r, err := readFleetReceipt(filepath.Join(c.State, fleetUpdateReceiptFile)); err == nil && r.Instruction.Host == c.HostID && r.Instruction.Machine == c.Name && matches(r.Instruction.Release.SignedRelease) {
+		return true
+	}
+	var approved EnrollmentRelease
+	return client.Call(ctx, "GET", "/api/invites/release", nil, &approved) == nil && matches(approved.SignedRelease)
 }
 
 // A durable local record can precede the worker's next queue report. Preserve

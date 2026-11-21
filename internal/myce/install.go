@@ -115,8 +115,9 @@ func (p MachineProbe) Detect(ctx context.Context) (Detection, error) {
 }
 
 type ServiceConfig struct {
-	storageWarning   *StoragePreflightFailure // Current invocation only; never configuration authority.
-	SaveSettingsOnly bool                     `json:"-"` // Prepare queue override retirement without activation.
+	storageWarning           *StoragePreflightFailure // Current invocation only; never configuration authority.
+	SaveSettingsOnly         bool                     `json:"-"` // Prepare queue override retirement without activation.
+	InstalledReleaseManifest string                   `json:"-"` // Signed incumbent artifact evidence for local recovery.
 
 	DailyUse       bool            `json:"daily_use"`
 	Laptop         bool            `json:"laptop"`
@@ -500,6 +501,7 @@ func prepareInstall(ctx context.Context, c ServiceConfig, executable, token stri
 	var reconciliation *slotReconciliation
 	if existing {
 		installed.Queue = c.Queue // Address repair already verified the saved certificate pin.
+		installed.InstalledReleaseManifest = c.InstalledReleaseManifest
 		reconciliation, err = preflightInstallSlot(ctx, installed, command, files.imageProbe)
 		if err != nil {
 			return installPreparation{}, err

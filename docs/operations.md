@@ -512,9 +512,12 @@ NEW_MYCE install worker --config WORKER_CONFIG
 ```
 
 The preview checks queue custody, the enrollment session, the managed process
-and the installed executable. The install takes the local update lock, repeats
-those checks and handles
-stopping and starting the existing service. Check the replacement's fresh
+and the installed executable. If Linux reports a private executable mapping,
+the installer checks the saved slot against signed release evidence. If it
+asks for a manifest, pass `--installed-release-manifest INSTALLED_RELEASE_JSON`
+to both commands, using the publisher-signed manifest for the currently
+installed release. The install takes the local update lock, repeats the checks
+and handles stopping and starting the existing service. Check the replacement's fresh
 session, service health and signed release hash before resuming only your own
 drain. For a catalog transition, pass the matching `--model-config` on both
 commands and confirm the replacement reports the active catalog before resuming.
