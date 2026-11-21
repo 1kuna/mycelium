@@ -131,6 +131,9 @@ func signedInstalledSlot(ctx context.Context, c ServiceConfig, client Client, ke
 		return true
 	}
 	var approved EnrollmentRelease
+	// Approval is optional evidence here. The queue returns a persistent 503
+	// when it has no approved release, so allow the caller to supply a manifest.
+	client.singleAttempt = true
 	return client.Call(ctx, "GET", "/api/invites/release", nil, &approved) == nil && matches(approved.SignedRelease)
 }
 
