@@ -620,7 +620,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				}
 				// Release callbacks are best effort and may race result delivery.
 				// Never retire the durable owner until every cache pin is removed.
-				if e := s.releaseSharedInputPins(); e != nil {
+				if e := s.releaseAttemptCachePins(); e != nil {
 					s.fileError = "cache pin cleanup pending; attempt custody retained"
 					select {
 					case <-ctx.Done():
@@ -777,6 +777,7 @@ func (s *workerStore) attemptStores() ([]*workerStore, error) {
 		return nil, err
 	}
 	stores := []*workerStore{}
+	var retired []*workerStore
 	for _, name := range s.state.Attempts {
 		if filepath.Base(name) != name || name != "legacy-state.json" && (!strings.HasPrefix(name, "state-attempt-") || !strings.HasSuffix(name, ".json")) {
 			return nil, errors.New("invalid saved attempt index")
@@ -827,19 +828,37 @@ func (s *workerStore) attemptStores() ([]*workerStore, error) {
 		}
 		if child.state.Job != nil {
 			stores = append(stores, child)
+		} else if child.state.Custodian != "" && child.state.Identity != "" &&
+			child.state.Result == nil && child.state.PID == 0 && !child.state.LaunchPending &&
+			!child.state.InputWriterPending && child.state.Preparation == "" {
+			retired = append(retired, child)
 		}
 	}
 	seen := map[attemptKey]bool{}
+	activeCustodians := map[string]bool{}
 	for _, child := range stores {
 		key := jobKey(*child.state.Job)
 		if key.session != s.state.Session || key.session != child.state.Session || seen[key] {
 			return nil, errors.New("mismatched or duplicate saved attempt custody")
 		}
 		seen[key] = true
+		if child.state.Custodian != "" {
+			activeCustodians[child.state.Custodian] = true
+		}
 		child.nasProbe.timeout, child.nasPrepare.timeout = heartbeatFilesystemBudget, checkpointPreparationBudget
 		child.nasProgress.timeout = heartbeatFilesystemBudget
 		if err := child.readOperatorStop(); err != nil {
 			return nil, err
+		}
+	}
+	// Previous workers could retire the parent after exact release and leave
+	// the detached runner's pin. The saved retired parent still names that
+	// owner. A missing actor or a missing snapshot alone proves nothing.
+	for _, child := range retired {
+		if !activeCustodians[child.state.Custodian] {
+			if err := child.releaseCustodianCachePins(); err != nil {
+				log.Printf("retired attempt cache pin cleanup pending: %v", err)
+			}
 		}
 	}
 	return stores, nil

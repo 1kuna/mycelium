@@ -631,7 +631,12 @@ func TestModelSnapshotPinCleanupPrecedesAttemptRetirement(t *testing.T) {
 	if _, err := s.pinSharedInput(cacheRoot, key); err != nil {
 		t.Fatal(err)
 	}
-	pin := sharedInputPin(cacheRoot, key, s.sharedInputOwnerID())
+	s.state.Custodian = ID()
+	detached := &workerStore{dir: s.dir, stateName: custodianName(s.state.Custodian, "state")}
+	if _, err := detached.pinSharedInput(cacheRoot, key); err != nil {
+		t.Fatal(err)
+	}
+	pin := sharedInputPin(cacheRoot, key, detached.sharedInputOwnerID())
 	if err := os.Remove(pin); err != nil {
 		t.Fatal(err)
 	}
@@ -677,5 +682,41 @@ func TestModelSnapshotPinCleanupPrecedesAttemptRetirement(t *testing.T) {
 	saved = workerState{}
 	if err := decodeWorkerState(data, &saved); err != nil || saved.Job != nil {
 		t.Fatal("owner not retired after unpin", err)
+	}
+	if pinned, err := sharedInputPinned(cacheRoot, key); err != nil || pinned {
+		t.Fatal("released attempt retains a cache pin", err)
+	}
+}
+
+func TestRetiredDetachedCachePinsReconcile(t *testing.T) {
+	root := &workerStore{dir: t.TempDir(), state: workerState{Session: "session"}}
+	cache := t.TempDir()
+	owner := func() (*workerStore, string) {
+		t.Helper()
+		child := &workerStore{dir: root.dir, stateName: "state-attempt-" + ID() + ".json",
+			state: workerState{Custodian: ID(), Identity: ID(), Session: root.state.Session}}
+		detached := &workerStore{dir: root.dir, stateName: custodianName(child.state.Custodian, "state")}
+		key := identityHash(child.state.Custodian)
+		if _, err := detached.pinSharedInput(cache, key); err != nil {
+			t.Fatal(err)
+		}
+		return child, key
+	}
+	retired, retiredKey := owner()
+	active, activeKey := owner()
+	active.state.Job = &Job{ID: ID(), Session: root.state.Session, Attempt: 1}
+	_, uncertainKey := owner() // A pin without a saved retired parent.
+	for _, child := range []*workerStore{retired, active} {
+		if err := child.save(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if stores, err := root.attemptStores(); err != nil || len(stores) != 1 {
+		t.Fatalf("reopen attempts: %d %v", len(stores), err)
+	}
+	for _, key := range []string{retiredKey, activeKey, uncertainKey} {
+		if pinned, err := sharedInputPinned(cache, key); err != nil || pinned != (key != retiredKey) {
+			t.Fatalf("wrong custody disposition for %s: pinned=%t err=%v", key, pinned, err)
+		}
 	}
 }

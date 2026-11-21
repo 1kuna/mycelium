@@ -425,6 +425,9 @@ func (w Worker) finishEphemeralAttempt(ctx context.Context, s *workerStore, conn
 	if err := w.Client.Call(ctx, "POST", "/api/workers/complete", released, nil); err != nil {
 		return false, err
 	}
+	if err := s.releaseAttemptCachePins(); err != nil {
+		return false, err
+	}
 	s.state.Job, s.state.Result = nil, nil
 	s.state.PID, s.state.LaunchPending = 0, false
 	s.state.Log = ""

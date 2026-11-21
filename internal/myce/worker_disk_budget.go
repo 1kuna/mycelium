@@ -88,8 +88,19 @@ type diskBudgetRoot struct {
 type diskBudgetCandidate struct {
 	path  string
 	used  time.Time
+	class diskCacheClass
 	evict func(context.Context) (bool, error)
+	trim  func(context.Context, func() (bool, error)) error
 }
+
+type diskCacheClass uint8
+
+const (
+	// Private blobs and Go objects can be refetched or rebuilt independently.
+	disposableDiskCache diskCacheClass = iota
+	transferDiskCache                  // A complete verified shared input or model copy.
+	preparedDiskCache                  // An installed environment requires a complete rebuild.
+)
 
 // Public evidence contains role names and opaque volume IDs, never host paths.
 type DiskBudgetVolume struct {
@@ -231,6 +242,9 @@ func (b *workerDiskBudget) reclaim(ctx context.Context, volume, path string, nee
 		candidates = append(candidates, entries...)
 	}
 	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].class != candidates[j].class {
+			return candidates[i].class < candidates[j].class
+		}
 		if candidates[i].used.Equal(candidates[j].used) {
 			return candidates[i].path < candidates[j].path
 		}
@@ -240,7 +254,13 @@ func (b *workerDiskBudget) reclaim(ctx context.Context, volume, path string, nee
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		_, _ = candidate.evict(ctx) // A failed proof never permits deletion.
+		// A failed proof never permits deletion. A cache comprising independent
+		// objects can trim only enough of them to satisfy this same live goal.
+		if candidate.trim != nil {
+			_ = candidate.trim(ctx, enough)
+		} else {
+			_, _ = candidate.evict(ctx)
+		}
 		if ok, err := enough(); ok || err != nil {
 			return err
 		}
@@ -252,6 +272,28 @@ func (b *workerDiskBudget) reclaim(ctx context.Context, volume, path string, nee
 	protected := addDiskBytes(b.reservations[volume], floor)
 	available := r.FreeBytes - min(r.FreeBytes, protected)
 	return &stagingCapacityError{required: int64(min(need, math.MaxInt64)), available: int64(min(available, math.MaxInt64)), limit: int64(min(r.TotalBytes-min(r.TotalBytes, floor), math.MaxInt64)), capacity: "disk_free_floor"}
+}
+
+// A fresh statfs shortfall can use the retention lane without waiting on the
+// adaptive backoff of its full allocation inventory.
+func (b *workerDiskBudget) reclaimPressure(ctx context.Context) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	seen := map[string]bool{}
+	for _, root := range b.roots {
+		r, err := b.probe(root.path)
+		if err != nil || r.TotalBytes == 0 || seen[r.Volume] {
+			continue
+		}
+		seen[r.Volume] = true
+		floor := addDiskBytes(addDiskBytes(diskFreeFloor(r.TotalBytes), b.controlGrowth[r.Volume]), b.foreignHeadroomFor(r.Volume))
+		if r.FreeBytes < addDiskBytes(floor, b.reservations[r.Volume]) {
+			_ = b.reclaim(ctx, r.Volume, root.path, 0, floor)
+		}
+	}
 }
 
 // The existing retention lane owns inventory. Free-space deltas are compared

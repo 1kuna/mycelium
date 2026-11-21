@@ -26,8 +26,10 @@ overcommit during concurrent writes, a transfer's full remaining reservation
 stays charged until completion, even as statfs starts reflecting those writes.
 This can temporarily withhold a transfer that would fit after another finishes.
 
-Before refusing capacity, the ledger reclaims inactive entries across cache
-classes, oldest successful use first. Private-file cache blobs and partials
+Before refusing capacity, the ledger reclaims inactive entries by rebuild cost:
+disposable files, package downloads, partial shared transfers and Go objects
+first, then complete shared-input and model copies, then prepared environments.
+Entries within a class are considered oldest use first. Private-file cache blobs and partials
 are disposable copies: attempts have private materializations, and eviction
 holds both the in-process mutex and cross-process collection/download lock.
 They do not require a victim HEAD, so queue expiry or an unavailable victim
@@ -54,11 +56,19 @@ The existing retention lane also requests pending disk demand from the queue.
 This lets a worker reclaim enough inactive cache for a job held before staging,
 then advertise recovered free space at its next ordinary check-in. It adds no
 polling daemon. Neither filesystem scans nor remote source/reference checks run
-under the queue mutex or on the heartbeat path. Collection retains the existing
-measured 10% duty budget and minimum minute cadence.
+under the queue mutex or on the heartbeat path. The retention lane can check
+pending demand and fresh filesystem pressure while the full inventory is backed
+off. These checks use the existing minimum minute cadence and back off based on
+their own duration, independently of the full inventory's measured duty budget.
 
 Default unsandboxed native jobs receive a worker-owned `GOCACHE`, shared between
 jobs and protected until exact process cleanup, including durable restart pins.
+Under pressure, the worker trims recognized regular Go cache objects oldest
+first until a fresh free-space read meets the current goal. It retains auxiliary
+gate state and leaves the entire cache alone while its use lock or any durable
+pin is held. The publishing worker releases both its own and the detached
+runner's pins after exact release. At startup, it can also reconcile a prior
+runner pin when a saved retired attempt names that exact custodian.
 Environment builders use a private compiler cache removed after their helper
 custody clears. Authored `GOCACHE`, sandbox/container caches and historical Go
 caches in the user's default cache directory remain external: report them and
@@ -89,8 +99,8 @@ Mycelium's allocated bytes there. The headroom is the larger of:
 - their fastest growth between two collections (`foreign_peak_growth_bytes`),
   which is how far they can grow before this worker's next chance to evict.
 
-Collection evicts reproducible cache copies (oldest use first, with the existing
-protections) so that free space stays at or above `floor_bytes`, which now
+Collection evicts reproducible cache copies in the order above so that free space
+stays at or above `floor_bytes`, which now
 includes `foreign_headroom_bytes`. Automatic `--file-cache-bytes` and
 shared-input allowances shrink by the same amount, and new reservations cannot
 take it. On a host nobody else writes to, the headroom stays zero. It is not a
