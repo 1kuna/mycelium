@@ -37,9 +37,10 @@ type WorkerHygieneCollection struct {
 }
 
 type workerHygieneCollector struct {
-	mu     sync.Mutex
-	w      Worker
-	report WorkerHygieneCollection
+	mu             sync.Mutex
+	w              Worker
+	report         WorkerHygieneCollection
+	nextPressureAt time.Time // Only accessed by the serialized retention lane.
 }
 
 func (c *workerHygieneCollector) snapshot() *WorkerHygieneCollection {
@@ -61,6 +62,12 @@ func (c *workerHygieneCollector) collect(ctx context.Context) {
 	due := !started.Before(c.report.NextAt)
 	c.mu.Unlock()
 	if !due {
+		if !started.Before(c.nextPressureAt) {
+			c.w.reclaimPendingDisk(ctx)
+			c.w.diskBudget.reclaimPressure(ctx)
+			ended := c.w.Clock.Now()
+			c.nextPressureAt = ended.Add(max(time.Minute, ended.Sub(started)*10))
+		}
 		return
 	}
 	r := WorkerHygieneCollection{At: started}
@@ -100,6 +107,7 @@ func (c *workerHygieneCollector) collect(ctx context.Context) {
 	// A measured expensive sweep backs off instead of continuously scanning a
 	// large cache. The tenfold period budgets at most 10% of time for hygiene.
 	r.NextAt = c.w.Clock.Now().Add(max(time.Minute, c.w.Clock.Now().Sub(started)*10))
+	c.nextPressureAt = c.w.Clock.Now().Add(time.Minute)
 	c.mu.Lock()
 	c.report = r
 	c.mu.Unlock()

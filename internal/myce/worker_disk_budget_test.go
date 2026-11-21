@@ -502,25 +502,73 @@ func TestWorkerCompilerCacheCustodyAndPublicBudget(t *testing.T) {
 	if path == "" {
 		t.Fatal("no owned Go build cache")
 	}
-	if err = os.WriteFile(filepath.Join(path, "rebuildable"), []byte("object"), 0600); err != nil {
+	shard := filepath.Join(path, "aa")
+	if err := os.Mkdir(shard, 0700); err != nil {
 		t.Fatal(err)
 	}
-	entries, err := c.budgetCandidates(context.Background())
-	if err != nil || len(entries) != 1 {
-		t.Fatal(entries, err)
+	old := filepath.Join(shard, strings.Repeat("a", 64)+"-d")
+	recent := filepath.Join(shard, strings.Repeat("a", 63)+"b-a")
+	unknown := filepath.Join(path, "gate-evidence")
+	for _, file := range []string{old, recent, unknown} {
+		if err := os.WriteFile(file, []byte("object"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(file, clock.Now(), clock.Now()); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(time.Second)
 	}
-	if removed, err := entries[0].evict(context.Background()); err != nil || removed {
-		t.Fatal("active compiler cache evicted", err)
+	assertPresent := func(file string) {
+		t.Helper()
+		if _, err := os.Stat(file); err != nil {
+			t.Fatalf("unexpected eviction of %s: %v", filepath.Base(file), err)
+		}
 	}
+	const total = 100 << 30
+	floor := diskFreeFloor(total)
+	free := floor
+	b := newWorkerDiskBudget(clock, func(string) (DiskReading, error) {
+		available := free
+		if _, err := os.Stat(old); os.IsNotExist(err) {
+			available++
+		}
+		return DiskReading{Volume: "local", TotalBytes: total, FreeBytes: available}, nil
+	})
+	b.add(diskBudgetRoot{name: "compiler", path: c.cache.Root, candidates: c.budgetCandidates})
+	var expensiveTried bool
+	b.add(diskBudgetRoot{name: "models", path: t.TempDir(), candidates: func(context.Context) ([]diskBudgetCandidate, error) {
+		return []diskBudgetCandidate{{class: transferDiskCache, evict: func(context.Context) (bool, error) {
+			expensiveTried = true
+			return false, nil
+		}}}, nil
+	}})
+	collector := workerHygieneCollector{w: Worker{Clock: clock, diskBudget: b}, report: WorkerHygieneCollection{NextAt: clock.Now().Add(time.Hour)}}
+	ctx := context.Background()
+	collector.collect(ctx)
+	if expensiveTried {
+		t.Fatal("considered eviction with sufficient free disk")
+	}
+	clock.Advance(time.Minute)
+	free--
+	collector.collect(ctx)
+	assertPresent(old)
 	done()
-	// Refresh mtime after last use; stale inventory cannot delete a newer entry.
-	entries, err = c.budgetCandidates(context.Background())
+	unpin, err := owner.pinSharedInput(c.cache.Root, identityHash("go-build"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if removed, err := entries[0].evict(context.Background()); err != nil || !removed {
-		t.Fatal("idle compiler cache not reclaimed", err)
+	clock.Advance(time.Minute)
+	collector.collect(ctx)
+	assertPresent(old)
+	unpin()
+	expensiveTried = false
+	clock.Advance(time.Minute)
+	collector.collect(ctx)
+	if _, err := os.Stat(old); !os.IsNotExist(err) || expensiveTried {
+		t.Fatalf("old cheap object did not satisfy pressure before costly eviction: stat=%v costly=%t", err, expensiveTried)
 	}
+	assertPresent(recent)
+	assertPresent(unknown)
 	j.Spec.Run.Env = map[string]string{"GOCACHE": "/external/private"}
 	path, done, err = c.acquire(context.Background(), owner, j)
 	if err != nil {

@@ -206,7 +206,7 @@ func (c *SharedInputCache) budgetCandidates(ctx context.Context) ([]diskBudgetCa
 		if err != nil {
 			continue
 		}
-		out = append(out, diskBudgetCandidate{path: path, used: info.ModTime(), evict: func(ctx context.Context) (bool, error) {
+		out = append(out, diskBudgetCandidate{path: path, used: info.ModTime(), class: transferDiskCache, evict: func(ctx context.Context) (bool, error) {
 			use, err := c.cache.tryLock(key + ".use")
 			if err != nil || use == nil {
 				return false, err
@@ -279,7 +279,7 @@ func (c *EnvironmentCache) budgetCandidates(ctx context.Context) ([]diskBudgetCa
 	var out []diskBudgetCandidate
 	for _, entry := range entries {
 		key := entry.Key
-		out = append(out, diskBudgetCandidate{path: filepath.Join(c.Root, key), used: c.Clock.Now().Add(-entry.Age), evict: func(ctx context.Context) (bool, error) {
+		out = append(out, diskBudgetCandidate{path: filepath.Join(c.Root, key), used: c.Clock.Now().Add(-entry.Age), class: preparedDiskCache, evict: func(ctx context.Context) (bool, error) {
 			if c.references == nil {
 				return false, errors.New("environment references unavailable")
 			}
@@ -346,7 +346,7 @@ func (c *ModelCache) budgetCandidates(ctx context.Context) ([]diskBudgetCandidat
 			continue
 		}
 		path := filepath.Join(c.Root, entry.Name())
-		out = append(out, diskBudgetCandidate{path: path, used: info.ModTime(), evict: func(ctx context.Context) (bool, error) {
+		out = append(out, diskBudgetCandidate{path: path, used: info.ModTime(), class: transferDiskCache, evict: func(ctx context.Context) (bool, error) {
 			if !c.mu.TryLock() {
 				return false, nil
 			}

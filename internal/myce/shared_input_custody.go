@@ -107,6 +107,27 @@ func (s *workerStore) releaseSharedInputPins() error {
 	return nil
 }
 
+// The detached runner stages inputs under its own durable owner name. The
+// publishing worker must release both receipts after exact attempt cleanup.
+func (s *workerStore) releaseAttemptCachePins() error {
+	if err := s.releaseSharedInputPins(); err != nil {
+		return err
+	}
+	return s.releaseCustodianCachePins()
+}
+
+func (s *workerStore) releaseCustodianCachePins() error {
+	id := s.state.Custodian
+	if id == "" {
+		return nil
+	}
+	if !validCustodianID(id) {
+		return errors.New("invalid detached cache custody owner")
+	}
+	owner := workerStore{dir: s.dir, stateName: custodianName(id, "state")}
+	return owner.releaseSharedInputPins()
+}
+
 func removeSharedInputPin(pin string) error {
 	for _, path := range []string{pin, pin + ".tmp"} {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
