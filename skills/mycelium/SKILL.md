@@ -752,7 +752,12 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   launch-authorization refusal with exact proof that neither main nor sidecars
   started is infrastructure evidence. Wait for the queue's automatic retry
   under the same useful job and key. A retained failed check has no automatic
-  retry. Inspect the recorded failure before changing the implementation.
+  retry. The useful job's GET, `myce status JOB_ID` and terminal `myce wait`
+  name the failed check job IDs and attempts, with each available `code`,
+  `exception_type` and `missing_module`. Use the `myce logs CHECK_ID` action,
+  fix and register a new version, then resubmit a failed useful job with a new
+  key. Check authors can emit these identifiers as one bounded JSON line using
+  the [qualification error contract](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md#report-a-qualification-error).
   On older releases, an installation owner can run `myce extension check --gpu cpu
   NAME@VERSION` locally on an enrolled dedicated worker to refresh its native
   evidence. This does not pin the useful job. Consumers cannot remotely clear

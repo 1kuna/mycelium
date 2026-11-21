@@ -2134,6 +2134,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	quotaFailure := attemptDiskLimitFailure(r)
 	unlockRequest := requestLock(ctx, &q.mu)
 	j, err := q.wallTimeVerificationJob(r)
+	readCheckFailure := err == nil && !terminal(j.State) && automaticExtensionCheck(j) != nil && !r.Success && !r.ReleaseOnly
 	if err == nil && parkedStorage(j) && !r.ReleaseOnly {
 		unlockRequest()
 		return errors.New(parkedStorageReason)
@@ -2168,6 +2169,10 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 		}
 	}
 	unlockRequest()
+	var checkFailure NativeCheckFailure
+	if readCheckFailure {
+		checkFailure = q.readNativeCheckFailure(ctx, r)
+	}
 	// Arbitrary checkpoint writers do not report live progress. Finalization
 	// discovers their last save before recording its resume origin or retrying.
 	var finalGeneration int64 = -1
@@ -2257,7 +2262,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 		if j := q.s.Jobs[r.ID]; j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session && wallTimeStopped(j) && r.Success && !r.ReleaseOnly {
 			rejected = ErrStale
 		}
-		return q.complete(r, verify)
+		return q.complete(r, verify, checkFailure)
 	}, nil)
 	if err != nil {
 		return err
@@ -2275,7 +2280,7 @@ func (q *Queue) retainLaunchCapacityRefusal(r Result) {
 	}
 }
 
-func (q *Queue) complete(r Result, filesVerified bool) error {
+func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckFailure) error {
 	if err := q.retainWorkerDataCleanup(r); err != nil {
 		return err
 	}
@@ -2470,6 +2475,9 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		q.requeue(j, "requeued: queue restart interrupted authorization before execution: "+j.ExecutionCause.String(), false)
 	} else if !r.Success && automaticExtensionCheck(j) != nil {
 		j.State, j.Reason = "failed", "native check failed: "+r.Error
+		if checkFailure.JobID != "" {
+			j.NativeCheckFailures = []NativeCheckFailure{checkFailure}
+		}
 	} else if !r.Success && !oomFailure && j.StartedAt == nil && j.ExecutionCause != nil && (j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == launchRefused || r.Interrupted && j.ExecutionCause.Operation == "input_staging") {
 		q.noteInventoryRefusal(j)
 		// A prelaunch refusal or staging interruption is not a lost execution,

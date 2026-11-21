@@ -83,6 +83,10 @@ func terminalJobFinding(stored *Job) *JobFinding {
 
 func failedJobFinding(j *Job, raw string) *JobFinding {
 	if j.DiagnosticCode == deadEndWait {
+		if len(j.NativeCheckFailures) != 0 {
+			evidence, action := nativeCheckFailureText(j.NativeCheckFailures)
+			return &JobFinding{deadEndWait, findingOwnerJob, "The implementation's native qualification check failed: " + evidence + "; source: " + nativeFailureSource, action}
+		}
 		return deadEndFinding(raw)
 	}
 	cause := j.ExecutionCause

@@ -2804,8 +2804,8 @@ GET, compact and detailed status, batched wait replies for failed jobs, and the
 terminal `ID state` line, and `myce result` includes it when it refuses a job
 with no accepted result.
 
-Findings are derived on each read from sanitized runtime causes and fixed
-queue-owned reasons; they are never persisted and never copy worker text.
+Findings are derived from sanitized runtime causes, queue-owned reasons and
+bounded qualification evidence. The finding itself is never persisted.
 Covered classes include output-contract failures after exit 0 (`output_*`),
 publication failures (`output_publication`), resource stops (`memory_limit`,
 `out_of_memory`, `memory_exceeds_hosts`, `wall_time_limit`, `disk_limit`),
@@ -2815,6 +2815,14 @@ command started (`queue_admission`, owner `mycelium`), launch failures (`library
 nonzero exits and payload signals. A failure with no typed cause reports
 `cause_unknown` rather than a guess. Succeeded and cancelled jobs carry none;
 waiting explanations remain in `hold`.
+
+A useful job that fails because of automatic native qualification keeps
+`finding.code: dead_end_wait`. Its finding names the failed check job IDs and
+attempts, with `code`, `exception_type` and `missing_module` when available from
+the [qualification error contract](../adapter.md#report-a-qualification-error).
+Job GET and detailed status also expose these records as `native_check_failures`.
+The action links the evidence through `myce logs CHECK_ID` even when a check
+emitted no structured error. Automatic retries of failed verdicts stay disabled.
 
 ## Read-only consumer project doctor
 

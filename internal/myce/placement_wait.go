@@ -201,13 +201,14 @@ func (q *Queue) maintainDeadEndWaits() {
 		if j.State != "queued" || cancelled(j) || started || j.Batch != nil || !dependencyReady(j) || j.Attempt > 0 && !j.ReleaseConfirmed {
 			continue
 		}
-		reason := q.deadEndReason(j)
+		reason, failures := q.deadEndReason(j)
 		if reason == "" {
 			continue
 		}
 		q.touchJob(j.ID)
 		q.closeAdmissionWait(j, "failed")
 		j.State, j.Reason, j.DiagnosticCode, j.FinishedAt = "failed", reason, deadEndWait, &now
+		j.NativeCheckFailures = failures
 		for i := range j.Copies {
 			j.Copies[i].Recoverable = false
 		}
@@ -216,18 +217,18 @@ func (q *Queue) maintainDeadEndWaits() {
 
 const deadEndWait = "dead_end_wait"
 
-func (q *Queue) deadEndReason(j *Job) string {
+func (q *Queue) deadEndReason(j *Job) (string, []NativeCheckFailure) {
 	if j.Spec.ExtensionCheck != nil {
-		return q.checkMemoryCapacityDeadEnd(j)
+		return q.checkMemoryCapacityDeadEnd(j), nil
 	}
 	if why := q.oomCapacityDeadEnd(j); why != "" {
-		return why
+		return why, nil
 	}
-	if why := q.extensionDeadEnd(j); why != "" {
-		return why
+	if why, failures := q.extensionDeadEnd(j); why != "" {
+		return why, failures
 	}
 	if why := q.environmentDeadEnd(j); why != "" {
-		return why
+		return why, nil
 	}
-	return q.memorySizingDeadEnd(j)
+	return q.memorySizingDeadEnd(j), nil
 }

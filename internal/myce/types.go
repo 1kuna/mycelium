@@ -478,11 +478,12 @@ type Job struct {
 	Efficiency              *JobEfficiency         `json:"efficiency,omitempty"`
 	Hold                    *Hold                  `json:"hold,omitempty"`
 	// Finding is derived on each read and never persisted; see JobFinding.
-	Finding         *JobFinding            `json:"finding,omitempty"`
-	WallTime        *WallTimeStatus        `json:"wall_time,omitempty"`
-	YieldPlan       *ScarceYieldProjection `json:"yield_plan,omitempty"`
-	ScarceHostYield *ScarceHostYield       `json:"scarce_host_yield,omitempty"`
-	YieldGeneration int64                  `json:"yield_generation,omitempty"`
+	Finding             *JobFinding            `json:"finding,omitempty"`
+	NativeCheckFailures []NativeCheckFailure   `json:"native_check_failures,omitempty"`
+	WallTime            *WallTimeStatus        `json:"wall_time,omitempty"`
+	YieldPlan           *ScarceYieldProjection `json:"yield_plan,omitempty"`
+	ScarceHostYield     *ScarceHostYield       `json:"scarce_host_yield,omitempty"`
+	YieldGeneration     int64                  `json:"yield_generation,omitempty"`
 	// The target that wrote the newest accepted checkpoint generation (#1437).
 	CheckpointTarget *CheckpointOrigin `json:"checkpoint_target,omitempty"`
 	FaultEvidence    []*FaultEvidence  `json:"fault_evidence,omitempty"`
