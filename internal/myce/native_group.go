@@ -326,6 +326,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 	if memory != nil {
 		g.custody.Cgroup = memory.path
 	}
+	s.state.Cgroup = g.custody.Cgroup
 	if err := g.setupMemory(); err != nil {
 		cancel()
 		output.Close()

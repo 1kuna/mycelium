@@ -55,11 +55,16 @@ differed. Use the supported client version for these commands.
 
 Ephemeral execution needs qualified Linux PID/mount namespaces and either a
 file `kernel.core_pattern` (the helper sets both core limits to zero) or the
-Mycelium router below. A pipe to apport, systemd-coredump or an older Mycelium
-router is refused. A router filename alone does not qualify it: the worker
+Mycelium router below. A pipe to apport, systemd-coredump or a router without
+the required suppression protocol is refused. The worker
 checks the exact pattern, root ownership/write permissions and the suppression
-protocol, including its own cgroup/state-directory mapping, at inventory and
-launch. `core_pipe_limit` must be nonzero so Linux keeps the dumping process's
+protocol at inventory and launch. A worker that launches into detached
+`myce-attempt-*.scope` units checks its configured job slice before advertising
+the capability. Each custodian checks its actual scope before staging inputs.
+The router derives that slice from the worker service's cgroup and reads the
+scope's exact `custodian-*.state.json` in the worker state directory. Install a
+router that supports this layout before enabling ephemeral work on a detached
+worker. `core_pipe_limit` must be nonzero so Linux keeps the dumping process's
 `/proc` entries available until routing finishes.
 
 There is no crash-router option in `myce install`. This is a separate,
@@ -100,11 +105,15 @@ cfg = json.loads(p.read_text()) if p.exists() else {
     'previous_core_pattern': pathlib.Path('/proc/sys/kernel/core_pattern').read_text().strip(),
     'budget_bytes': 1024 * 1024 * 1024,
 }
-if not cfg['previous_core_pattern'].startswith('|/usr/share/apport/apport '):
+apport = '|/usr/share/apport/apport -p%p -s%s -c%c -d%d -P%P -u%u -g%g -F%F -- %E'
+if cfg['previous_core_pattern'].strip() != apport:
     raise SystemExit('This procedure supports a saved apport route only')
 cfg.setdefault('previous_core_pipe_limit', int(pathlib.Path('/proc/sys/kernel/core_pipe_limit').read_text()))
-workers = [w for w in cfg.get('workers', []) if w['cgroup'] != sys.argv[1]]
+workers = [{'cgroup': w['cgroup'], 'state_dir': w['state_dir']}
+           for w in cfg.get('workers', []) if w['cgroup'] != sys.argv[1]]
 workers.append({'cgroup': sys.argv[1], 'state_dir': os.path.realpath(sys.argv[2])})
+# Publish only the routing metadata the unprivileged qualifier needs.
+cfg = {key: cfg[key] for key in ('previous_core_pattern', 'previous_core_pipe_limit', 'budget_bytes')}
 cfg['workers'] = workers  # Include every worker service on this host.
 p.write_text(json.dumps(cfg) + '\n')
 os.chmod(p, 0o644)  # Qualification reads routing metadata; this file has no credentials.
@@ -132,13 +141,14 @@ positive `kernel.core_pipe_limit` in an operator-owned sysctl file, recording
 its prior contents for undo. The service intentionally does not overwrite
 sysctl policy. Verify the exact pattern and pipe limit after reboot, and
 recheck fresh worker capability after upgrading/resuming the worker. A shell
-outside the worker service fails `--qualify` by design; the installed worker
-performs this probe from its actual cgroup. Router and config upgrades alone
-do not upgrade the worker binary.
+outside the configured worker service or detached scope fails `--qualify`.
+The installed worker runs this probe from its actual cgroup. The router and
+worker executable each need the release's corresponding version.
 
 Before accepting the release, use harmless fixtures on each Linux execution
 host: an ephemeral managed-I/O success plus a fatal-signal attempt, including
-a descendant inside its PID namespace. Check output hashes, logs, exact-attempt
+a descendant inside its PID namespace. Exercise detached scope custody on a
+worker that launches into scopes. Check output hashes, logs, exact-attempt
 cleanup receipts and release, absence of all private payload/log/cache copies,
 and journal `MYCE_CORE_CAPTURE=suppressed_ephemeral` with matching
 `COREDUMP_CGROUP`, `MYCE_ATTEMPT`, signal and timestamp. Compare read-only core

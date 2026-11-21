@@ -189,6 +189,9 @@ func nativePortHandoff(t *testing.T, collisions int) Result {
 					if e != nil || !owned || birth == "" || custody.Cgroup != filepath.Join(ceilings.root, "attempt-"+st.Identity) {
 						t.Error("member reached exec gate without durable birth/group/cgroup custody", e)
 					}
+					if st.Cgroup != custody.Cgroup {
+						t.Error("member reached exec gate before its attempt state recorded the core routing cgroup")
+					}
 					out, e := exec.Command("ps", "-p", strconv.Itoa(v.Members[0].PID), "-o", "command=").Output()
 					stealErr = e
 					fields := strings.Fields(string(out))

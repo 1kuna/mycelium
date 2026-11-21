@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"os/exec"
-	"strings"
 	"sync"
 	"time"
 
@@ -19,13 +18,10 @@ func ephemeralCoreRoute(stateDirs ...string) error {
 	if len(stateDirs) > 0 {
 		state = stateDirs[0]
 	}
-	return checkEphemeralCoreRoute(pattern, err, state, qualifyCoreRouter)
+	return checkEphemeralCoreRoute(pattern, err, state, "", qualifyCoreRouter)
 }
 
 var ephemeralCoreProbe = sync.OnceValues(func() (ephemeralRefusal, error) {
-	if err := ephemeralCoreRoute(); err != nil {
-		return ephemeralCoreRouteUnqualified, err
-	}
 	args, err := nativePolicyArgs(nativeLinuxPolicy{Read: []string{"/usr", "/bin", "/lib", "/lib64"}, Ephemeral: true}, []string{"/bin/sh", "-c", `test "$(ulimit -c)" = 0 && test "$(ulimit -H -c)" = 0`})
 	if err != nil {
 		return ephemeralCoreLimitUnqualified, err
@@ -66,11 +62,8 @@ func (w Worker) ephemeralWorkerSupport() (ephemeralRefusal, error) {
 		return refusal, err
 	}
 	pattern, err := os.ReadFile("/proc/sys/kernel/core_pattern")
-	if err := checkEphemeralCoreRoute(pattern, err, w.StateDir, qualifyCoreRouter); err != nil {
-		return ephemeralCoreRouteUnqualified, err
-	}
-	if strings.TrimSpace(string(pattern)) == myceCorePattern && w.memoryCeilings == nil {
-		return ephemeralCoreRouteUnqualified, errors.New("ephemeral core routing requires delegated attempt cgroups")
+	if refusal, err := w.qualifyEphemeralExecution(pattern, err, qualifyCoreRouter); err != nil {
+		return refusal, err
 	}
 	return ephemeralCoreProbe()
 }

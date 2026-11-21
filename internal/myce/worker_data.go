@@ -32,12 +32,13 @@ const (
 	ephemeralNamespaceRequired    ephemeralRefusal = "namespaces_unqualified"
 	ephemeralNamespacePolicy      ephemeralRefusal = "namespace_policy_denied"
 	ephemeralCoreRouteUnqualified ephemeralRefusal = "core_route_unqualified"
+	ephemeralDetachedUnqualified  ephemeralRefusal = "detached_core_route_unqualified"
 	ephemeralCoreLimitUnqualified ephemeralRefusal = "core_limit_unqualified"
 )
 
 func safeEphemeralRefusal(r ephemeralRefusal) ephemeralRefusal {
 	switch r {
-	case ephemeralLinuxRequired, ephemeralNamespaceRequired, ephemeralNamespacePolicy, ephemeralCoreRouteUnqualified, ephemeralCoreLimitUnqualified:
+	case ephemeralLinuxRequired, ephemeralNamespaceRequired, ephemeralNamespacePolicy, ephemeralCoreRouteUnqualified, ephemeralDetachedUnqualified, ephemeralCoreLimitUnqualified:
 		return r
 	}
 	return ""

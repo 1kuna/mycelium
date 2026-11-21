@@ -14,7 +14,7 @@ import (
 
 func TestCoreRouterQualification(t *testing.T) {
 	for _, pattern := range []string{"", "|/usr/share/apport/apport -P%P", "|/usr/lib/systemd/systemd-coredump", "|/tmp/myce-core-router", myceCorePattern + " extra", "|/usr/local/libexec/myce-core-router"} {
-		if err := checkEphemeralCoreRoute([]byte(pattern), nil, "state", func(context.Context, string) error {
+		if err := checkEphemeralCoreRoute([]byte(pattern), nil, "state", "", func(context.Context, string, string) error {
 			t.Fatal("untrusted handler executed")
 			return nil
 		}); err == nil {
@@ -25,7 +25,7 @@ func TestCoreRouterQualification(t *testing.T) {
 		t.Fatal("unreadable route accepted")
 	}
 	for _, pattern := range []string{"core", "core.%p\n"} {
-		if err := checkEphemeralCoreRoute([]byte(pattern), nil, "state", func(context.Context, string) error {
+		if err := checkEphemeralCoreRoute([]byte(pattern), nil, "state", "", func(context.Context, string, string) error {
 			t.Fatal("file route needs no handler qualification")
 			return nil
 		}); err != nil {
@@ -34,9 +34,9 @@ func TestCoreRouterQualification(t *testing.T) {
 	}
 	for _, qualifyErr := range []error{nil, errors.New("legacy router"), context.DeadlineExceeded} {
 		called := false
-		err := checkEphemeralCoreRoute([]byte(myceCorePattern+"\n"), nil, "exact-state", func(ctx context.Context, state string) error {
+		err := checkEphemeralCoreRoute([]byte(myceCorePattern+"\n"), nil, "exact-state", "/exact-cgroup", func(ctx context.Context, state, cgroup string) error {
 			called = true
-			if _, ok := ctx.Deadline(); !ok || state != "exact-state" {
+			if _, ok := ctx.Deadline(); !ok || state != "exact-state" || cgroup != "/exact-cgroup" {
 				t.Fatal("qualification lost timeout or worker identity")
 			}
 			return qualifyErr
@@ -44,6 +44,63 @@ func TestCoreRouterQualification(t *testing.T) {
 		if !called || !errors.Is(err, qualifyErr) {
 			t.Fatal("router accepted without suppression qualification", called, err)
 		}
+	}
+}
+
+func TestEphemeralQualificationsFollowAssignedLaunchPath(t *testing.T) {
+	state := t.TempDir()
+	const slice = "/user.slice/example.slice/example-worker.slice/"
+	const service = slice + "myce-worker.service"
+	scope := slice + "example-worker-jobs.slice/" + custodianUnit(strings.Repeat("a", 32))
+	base := Worker{StateDir: state, memoryCeilings: &memoryCeilings{root: "/sys/fs/cgroup" + service}}
+	for _, tc := range []struct {
+		name        string
+		configure   func(*Worker)
+		wantCgroup  string
+		wantRefusal ephemeralRefusal
+	}{
+		{"service", func(*Worker) {}, "", ephemeralCoreRouteUnqualified},
+		{"shared service", func(w *Worker) {
+			w.Machine.SharedHost = &SharedHostProfile{}
+			w.sharedExecutionCeilings = &memoryCeilings{root: "/sys/fs/cgroup" + service + "/shared-execution"}
+		}, service + "/shared-execution", ephemeralCoreRouteUnqualified},
+		{"detached advertisement", func(w *Worker) {
+			w.ServiceConfig = &ServiceConfig{Config: "config", Binary: "myce", Slice: "example-worker.slice"}
+		}, slice + "example-worker-jobs.slice", ephemeralDetachedUnqualified},
+		{"detached launch", func(w *Worker) {
+			w.Custodian = strings.Repeat("a", 32)
+			w.memoryCeilings = &memoryCeilings{root: "/sys/fs/cgroup" + scope}
+		}, scope, ephemeralDetachedUnqualified},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := base
+			tc.configure(&w)
+			for _, probeErr := range []error{nil, errors.New("unqualified launch route")} {
+				called := false
+				refusal, err := w.qualifyEphemeralExecution([]byte(myceCorePattern), nil, func(_ context.Context, stateDir, cgroup string) error {
+					called = true
+					if stateDir != state || cgroup != tc.wantCgroup {
+						t.Fatalf("probe got state %q and cgroup %q, want %q and %q", stateDir, cgroup, state, tc.wantCgroup)
+					}
+					return probeErr
+				})
+				want := ephemeralRefusal("")
+				if probeErr != nil {
+					want = tc.wantRefusal
+				}
+				if !called || !errors.Is(err, probeErr) || refusal != want {
+					t.Fatalf("called=%t refusal=%q err=%v, want refusal=%q err=%v", called, refusal, err, want, probeErr)
+				}
+			}
+		})
+	}
+	base.ServiceConfig = &ServiceConfig{Config: "config", Binary: "myce", Slice: "wrong.slice"}
+	refusal, err := base.qualifyEphemeralExecution([]byte(myceCorePattern), nil, func(context.Context, string, string) error {
+		t.Fatal("probed a slice different from the launcher's actual slice")
+		return nil
+	})
+	if err == nil || refusal != ephemeralDetachedUnqualified {
+		t.Fatalf("worker slice drift did not withhold support: %q %v", refusal, err)
 	}
 }
 
