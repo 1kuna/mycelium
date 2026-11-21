@@ -4831,6 +4831,9 @@
         "recovery_capacity_gb": {
           "type": "number"
         },
+        "resident_engine_host_gb": {
+          "type": "number"
+        },
         "slack_gb": {
           "type": "number"
         }

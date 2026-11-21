@@ -139,42 +139,91 @@ func (q *Queue) residentModelByName(name string) (Model, bool) {
 	return Model{}, false
 }
 
+func (q *Queue) coldResidentModel(j *Job, m *Machine) *Model {
+	r := j.Spec.Resident
+	if r == nil || r.Engine == nil {
+		return nil
+	}
+	if slot := q.s.ModelSlots[targetSlotKey(m, r.Engine.Model.Name)]; slot != nil && slotReservesMemory(slot) {
+		return nil
+	}
+	return &r.Engine.Model
+}
+
+// The incremental host charge in residentPlanningJob includes the engine's
+// device reservation on unified workers and one extra ceiling slack.
+func (q *Queue) coldResidentHostCharge(j *Job, m *Machine) float64 {
+	if model := q.coldResidentModel(j, m); model != nil {
+		return hostNeed(m, model.MemoryGB, 0) + model.HostMemoryGB + m.MemoryCeilingSlackGB
+	}
+	return 0
+}
+
 // Cold residency and the driver are admitted together. A batch of staged
 // drivers must never consume the room needed to load their common engine.
 func (q *Queue) residentPlanningJob(j *Job, m *Machine) *Job {
-	r := j.Spec.Resident
-	if r == nil || r.Engine == nil {
-		return j
-	}
-	if slot := q.s.ModelSlots[targetSlotKey(m, r.Engine.Model.Name)]; slot != nil && slotReservesMemory(slot) {
+	model := q.coldResidentModel(j, m)
+	if model == nil {
 		return j
 	}
 	copy := *j
-	model := r.Engine.Model
 	copy.Spec.Needs.MemoryGB += model.MemoryGB
 	copy.Spec.Needs.HostMemoryGB += model.HostMemoryGB + m.MemoryCeilingSlackGB
 	copy.Spec.Needs.CPUCores = j.Spec.Needs.cores() + 1
 	return &copy
 }
 
-func (q *Queue) residentJobFits(j *Job, m *Machine) bool {
+func (q *Queue) residentJobFailure(j *Job, m *Machine) AdmissionPredicate {
 	r := j.Spec.Resident
 	if r == nil {
-		return true
+		return ""
 	}
 	if r.Engine == nil || !contains(m.Capabilities, residentJobsCapability) || len(m.groupMembers) > 0 || m.ModelURL == "" || !q.modelUsableMachine(r.Engine.Model, m) {
-		return false
+		return predicateResidentTarget
 	}
 	if slot := q.s.ModelSlots[targetSlotKey(m, r.Engine.Model.Name)]; slot != nil {
 		if slot.Session != m.Session || slot.State != "ready" && slot.State != "loading" {
-			return false
+			return predicateResidentSlot
 		}
 	} else if q.modelLoadDiskHeadroomReason(r.Engine.Model, m) != "" {
-		return false
+		return predicateResidentDisk
 	}
-	planned := q.residentPlanningJob(j, m)
-	n := planned.Spec.Needs
-	return m.FreeMemoryGB >= n.MemoryGB && hostFits(m, n.MemoryGB, n.HostMemoryGB) && cpuAllocationFits(m, n.cores())
+	n := q.residentPlanningJob(j, m).Spec.Needs
+	if !(m.FreeMemoryGB >= n.MemoryGB) {
+		return predicateResidentDeviceMemory
+	}
+	if !hostFits(m, n.MemoryGB, n.HostMemoryGB) {
+		return predicateResidentHostMemory
+	}
+	if !cpuAllocationFits(m, n.cores()) {
+		return predicateResidentCPU
+	}
+	return ""
+}
+
+func (q *Queue) residentWaitDetail(j *Job, m *Machine) string {
+	failure := q.residentJobFailure(j, m)
+	n := q.residentPlanningJob(j, m).Spec.Needs
+	switch failure {
+	case predicateResidentTarget:
+		return "resident engine is incompatible with the target or its approvals"
+	case predicateResidentSlot:
+		return "resident engine slot needs a current loading or ready attempt"
+	case predicateResidentDisk:
+		return "insufficient disk headroom to load the resident engine"
+	case predicateResidentDeviceMemory:
+		return fmt.Sprintf("resident job needs %.3f GiB accelerator memory; %.3f GiB available", n.MemoryGB, m.FreeMemoryGB)
+	case predicateResidentHostMemory:
+		why := hostFitFailure(m, n.MemoryGB, n.HostMemoryGB)
+		if why != "host memory" {
+			return "resident job: " + why
+		}
+		return fmt.Sprintf("resident job needs %.3f GiB host RAM; %.3f GiB available", hostNeed(m, n.MemoryGB, n.HostMemoryGB), m.FreeHostMemoryGB)
+	case predicateResidentCPU:
+		return fmt.Sprintf("resident job needs %d logical cores; %d available", n.cores(), m.FreeCPUCores)
+	default:
+		return ""
+	}
 }
 
 func (q *Queue) reserveResident(j *Job, m *Machine) {

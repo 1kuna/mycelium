@@ -302,6 +302,12 @@ the released interval after unload and match the response’s
 source, coverage, constraint and unavailability labels before qualifying a
 budget. See the [engine memory contract](https://github.com/1kuna/mycelium/blob/main/docs/reference/models.md#resident-engine-memory-peaks).
 
+If native qualification holds a resident job, inspect the queue-owned check
+ID with `myce status CHECK_ID --json`. Supporting queues size cold probes
+after reserving the engine and report resident device, host or core refusals
+in `admission_wait.latest.targets[].admission_decision.predicate`. Keep the
+parent and check IDs. The parent entry's size hint does not edit its queued check.
+
 ## 6. Inputs
 
 Small files travel with the job: `inputs: {DEST: local/path}` in the entry, or

@@ -3318,6 +3318,13 @@ An early return records `not_considered`, with reasons such as `attempt_reports`
 `candidate_unavailable` means no variant emerged without a more specific
 captured predicate. It does not imply a diagnosed underlying cause.
 
+For resident jobs, the `resident_device_memory`, `resident_host_memory` and
+`resident_cpu_cores` predicates identify the failed capacity check for the
+driver and its engine. The diagnostic vector includes the frozen engine's
+budget when it has no reservation on the target. A cold exploratory offer
+uses the room left after that budget. An already reserved engine is charged
+through the live ledger.
+
 `at`, `checkin_machine`, `checkin_session`, and optional `device` identify the
 actual observation. Unchanged outcomes reuse their original timestamp; absence
 is unknown, never proof of consideration. Each target retains its most recent

@@ -714,6 +714,8 @@ func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration) 
 					candidate = &copy
 					resolution = "planner_candidate"
 				}
+				residentFailure := q.residentJobFailure(candidate, m)
+				n = q.residentPlanningJob(candidate, m).Spec.Needs
 				target := AdmissionWaitTarget{Host: hostID(m), Machine: m.ID, Session: m.Session, Device: m.Device, Resolution: resolution, Concurrency: concurrency,
 					RequiredCores: n.cores(), AvailableCores: m.FreeCPUCores, RequiredHostGB: hostNeed(m, n.MemoryGB, n.HostMemoryGB), AvailableHostGB: m.FreeHostMemoryGB,
 					HostDebtGB: m.hostReservationDebtGB, RequiredDeviceGB: n.MemoryGB, AvailableDeviceGB: m.FreeMemoryGB,
@@ -731,7 +733,10 @@ func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration) 
 				for _, p := range fit.failed {
 					target.Predicates = append(target.Predicates, strings.ReplaceAll(strings.ToLower(p), " ", "_"))
 				}
-				if !hostFits(m, n.MemoryGB, n.HostMemoryGB) {
+				if residentFailure != "" {
+					target.Predicates = append(target.Predicates, string(residentFailure))
+				}
+				if needs := candidate.Spec.Needs; !hostFits(m, needs.MemoryGB, needs.HostMemoryGB) {
 					target.Predicates = append(target.Predicates, "host_memory")
 				}
 				if !q.placementAllowed(candidate, m) {

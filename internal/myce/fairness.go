@@ -394,7 +394,11 @@ func (q *Queue) batchResourcesFitWithScan(j *Job, m *Machine, resources map[batc
 			resources[key] = room
 		}
 	}
-	return q.admissionPass(j, m, room.ok, predicateReleasePlan) && q.admissionPass(j, m, fitsResources(j, &room.machine, room.memory) && q.residentJobFits(j, &room.machine), predicateResources)
+	if !q.admissionPass(j, m, room.ok, predicateReleasePlan) || !q.admissionPass(j, m, fitsResources(j, &room.machine, room.memory), predicateResources) {
+		return false
+	}
+	failure := q.residentJobFailure(j, &room.machine)
+	return q.admissionPass(j, m, failure == "", failure)
 }
 func (q *Queue) batchResourceProjection(j *Job, m *Machine) batchResourceRoom {
 	plan, yield := q.ordinaryRoomPlan(j, m, true)
@@ -476,8 +480,14 @@ func (q *Queue) plannedPick(m *Machine, scan *placementScan) *Job {
 }
 
 func (q *Queue) immediateCandidate(best *Job, m *Machine) *Job {
-	if best != nil && (!q.admissionGate(best, m, !q.preemptionReleasesPending(best), predicateReleasePending) || !q.admissionGate(best, m, !q.preparationActive(m), predicatePreparationActive) || !q.admissionGate(best, m, !q.preparationStopping(m), predicatePreparationStopping) || !q.admissionGate(best, m, q.calls[best.ID] == nil, predicateModelCall) || !q.admissionGate(best, m, fits(best, m, m.FreeMemoryGB) && q.residentJobFits(best, m), predicateResources) || !q.admissionGate(best, m, environmentReady(best, m), predicateEnvironment)) {
-		return nil
+	if best != nil {
+		if !q.admissionGate(best, m, !q.preemptionReleasesPending(best), predicateReleasePending) || !q.admissionGate(best, m, !q.preparationActive(m), predicatePreparationActive) || !q.admissionGate(best, m, !q.preparationStopping(m), predicatePreparationStopping) || !q.admissionGate(best, m, q.calls[best.ID] == nil, predicateModelCall) || !q.admissionGate(best, m, fits(best, m, m.FreeMemoryGB), predicateResources) {
+			return nil
+		}
+		failure := q.residentJobFailure(best, m)
+		if !q.admissionGate(best, m, failure == "", failure) || !q.admissionGate(best, m, environmentReady(best, m), predicateEnvironment) {
+			return nil
+		}
 	}
 	return best
 }
