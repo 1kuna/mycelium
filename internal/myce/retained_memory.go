@@ -56,11 +56,19 @@ func learnedMemoryFactOf(j *Job) *learnedMemoryFact {
 	valid := false
 	for _, facts := range j.MemoryAttempts {
 		p := facts.MemoryPeak
-		if facts.Attempt != j.Timing.Execution.Attempt || j.Timing.Execution.ID != j.ID || facts.Machine != j.Timing.Machine || facts.Session != j.Timing.Session || p == nil || !p.constrained() || p.HostGB == nil || !validRate(*p.HostGB) || !memoryConstraintFacts(facts) {
+		if facts.Attempt != j.Timing.Execution.Attempt || j.Timing.Execution.ID != j.ID || facts.Machine != j.Timing.Machine || facts.Session != j.Timing.Session || !p.constrained() || !memoryConstraintFacts(facts) {
+			continue
+		}
+		peak := 0.0
+		if p.HostGB != nil && validRate(*p.HostGB) {
+			peak = hostMemoryPeakGB(p)
+		} else if j.Timing.Key.Check && p.CgroupGB != nil && validRate(*p.CgroupGB) {
+			peak = *p.CgroupGB
+		}
+		if peak == 0 {
 			continue
 		}
 		valid = true
-		peak := hostMemoryPeakGB(p)
 		evidence.lower = max(evidence.lower, peak)
 		margin := memoryGrowthGB(p)
 		if envelope := facts.MemoryEnvelope; envelope != nil && envelope.HostGB > 0 {
@@ -136,6 +144,26 @@ func buildRetainedMemoryIndex(jobs map[string]*Job, skip map[string]*Job, learne
 
 func (c *memoryPlanningCache) retainedMemoryEvidence(q *Queue, key memoryLowerKey) memoryConstraintEvidence {
 	history := q.memoryHistory()
+	c.loadRetainedMemoryIndex(q)
+	evidence := memoryConstraintEvidence{}
+	now := q.clock.Now()
+	for _, entry := range c.history.index[memoryHistoryKey{key.work.work, key.os}][key.work] {
+		p := entry.provenance
+		if p.ended.Before(key.after) || now.Before(p.ended) {
+			continue
+		}
+		m := c.history.retainedOwner(history, p, key.discrete)
+		if !retainedMemoryIdentity(p, m) {
+			continue
+		}
+		evidence.lower = max(evidence.lower, entry.evidence.lower)
+		evidence.recovery = max(evidence.recovery, entry.evidence.recovery)
+	}
+	return evidence
+}
+
+func (c *memoryPlanningCache) loadRetainedMemoryIndex(q *Queue) {
+	history := q.memoryHistory()
 	if c.history.index == nil {
 		defer q.bodyPhaseFinish("retained_index", q.bodyPhaseStart())
 		if history.records != nil && history.records.updating {
@@ -157,37 +185,23 @@ func (c *memoryPlanningCache) retainedMemoryEvidence(q *Queue, key memoryLowerKe
 			c.history.index = buildRetainedMemoryIndex(history.memoryHistoryJobs(true), nil, history.expiredMemory)
 		}
 	}
-	evidence := memoryConstraintEvidence{}
-	now := q.clock.Now()
-	for _, entry := range c.history.index[memoryHistoryKey{key.work.work, key.os}][key.work] {
-		p := entry.provenance
-		if p.ended.Before(key.after) || now.Before(p.ended) {
-			continue
-		}
-		m := c.history.retainedOwner(history, p, key.discrete)
-		if m == nil {
-			continue
-		}
-		if hostID(m) != p.key.Host || m.ExtensionFingerprint != p.key.Fingerprint || machineTarget(m) != p.key.Target {
-			continue
-		}
-		if p.key.ExtensionDigest != "" {
-			usable := false
-			for _, e := range p.extension.Extensions {
-				if e.Digest == p.key.ExtensionDigest {
-					point := WorkObservation{Key: p.key}
-					point.StaleReason = memoryStaleReason(point, e, m)
-					usable = memoryIdentityUsable(point)
-				}
-			}
-			if !usable {
-				continue
-			}
-		}
-		evidence.lower = max(evidence.lower, entry.evidence.lower)
-		evidence.recovery = max(evidence.recovery, entry.evidence.recovery)
+}
+
+func retainedMemoryIdentity(p retainedMemoryProvenance, m *Machine) bool {
+	if m == nil || hostID(m) != p.key.Host || m.ExtensionFingerprint != p.key.Fingerprint || machineTarget(m) != p.key.Target {
+		return false
 	}
-	return evidence
+	if p.key.ExtensionDigest == "" {
+		return true
+	}
+	for _, e := range p.extension.Extensions {
+		if e.Digest == p.key.ExtensionDigest {
+			point := WorkObservation{Key: p.key}
+			point.StaleReason = memoryStaleReason(point, e, m)
+			return memoryIdentityUsable(point)
+		}
+	}
+	return false
 }
 func (c *memoryHistoryCache) mergeRetainedIndex(cold retainedMemoryIndex) {
 	for key, works := range cold {

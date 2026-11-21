@@ -183,6 +183,15 @@ func (q *Queue) retryOOM(j *Job) {
 			j.State, j.Reason = "failed", "out of memory after one retry above the OOM envelope"
 			return
 		}
+		if peak := censoredHostOOMPeak(j); peak != nil {
+			growth := memoryGrowthGB(peak)
+			j.MemoryCensoredOOMGrowthGB = &growth
+			// The cgroup ceiling includes slack and, on unified hosts, the
+			// device reservation. Advance only the host part of that vector.
+			q.retryHostOOMWithFloor(j, j.Spec.Needs.HostMemoryGB+minimumHostMemoryGB, !bounded)
+			return
+		}
+		j.MemoryCensoredOOMGrowthGB = nil
 		growth := 2.0
 		if !bounded {
 			j.OOMRetries++
@@ -277,12 +286,18 @@ func capabilityWaitingReason(j *Job) string {
 // Strictly larger floors prevent another execution of the same failed bound;
 // physical qualification, rather than an attempt count, bounds a leaking job.
 func (q *Queue) retryHostOOM(j *Job) {
+	q.retryHostOOMWithFloor(j, memoryStopFloor(j), true)
+}
+
+func (q *Queue) retryHostOOMWithFloor(j *Job, hostFloor float64, spendRetry bool) {
 	if j != nil && q.s.Jobs[j.ID] == j {
 		q.touchJob(j.ID)
 	}
-	j.MemoryOOMFloor = &SizeHint{MemoryGB: j.Spec.Needs.MemoryGB, HostMemoryGB: memoryStopFloor(j)}
+	j.MemoryOOMFloor = &SizeHint{MemoryGB: j.Spec.Needs.MemoryGB, HostMemoryGB: hostFloor}
 	j.OOMCapacity = nil
-	j.OOMRetries++
+	if spendRetry {
+		j.OOMRetries++
+	}
 	probe := cloneJob(j)
 	probe.State, probe.MemoryEnvelope = "queued", nil
 	probe.Spec.Needs.HostMemoryGB = j.MemoryOOMFloor.HostMemoryGB
@@ -296,11 +311,30 @@ func (q *Queue) retryHostOOM(j *Job) {
 // GPU allocation failure is not evidence of a host-RAM shortage. Only local
 // memcg OOM events select host recovery for an accelerator extension check.
 func hostOOMAttempt(j *Job) bool {
+	return hostOOMPeak(j) != nil
+}
+
+func hostOOMPeak(j *Job) *AttemptMemoryPeak {
 	for _, f := range j.MemoryAttempts {
 		if f.Attempt == j.Attempt && f.Machine == j.Machine && f.Session == j.Session && f.MemoryPeak != nil && f.MemoryPeak.Events != nil {
 			e := f.MemoryPeak.Events
-			return e.OOM > 0 || e.OOMKill > 0 || e.OOMGroupKill > 0
+			if e.OOM > 0 || e.OOMKill > 0 || e.OOMGroupKill > 0 {
+				return f.MemoryPeak
+			}
 		}
 	}
-	return false
+	return nil
+}
+
+func censoredHostOOMPeak(j *Job) *AttemptMemoryPeak {
+	e, p := j.MemoryEnvelope, hostOOMPeak(j)
+	if e == nil || e.Enforcement != cgroupMemoryEnforcement || p == nil || p.CgroupGB == nil || !validRate(*p.CgroupGB) {
+		return nil
+	}
+	// The worker rounds memory.max down to a kernel page. Accept that
+	// rounding interval without interpreting lower member caps as host OOMs.
+	if *p.CgroupGB >= e.HostGB-minimumHostMemoryGB && *p.CgroupGB <= e.HostGB {
+		return p
+	}
+	return nil
 }

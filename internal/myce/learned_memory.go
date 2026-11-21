@@ -194,11 +194,11 @@ func (q *Queue) constrainedMemoryLowerUncached(j *Job, estimate memoryEstimate, 
 // a nonzero device/exclusivity marker, with the remaining pool available to the
 // enforced host member. It is not a device-use estimate or sharing evidence.
 // Explicit vectors and member floors retain their original meaning.
-func (q *Queue) unifiedGPUFirstRun(j *Job, m *Machine, estimate memoryEstimate, device, host, floor float64) (float64, float64, string, int, bool) {
+func (q *Queue) unifiedGPUFirstRun(j *Job, m *Machine, estimate memoryEstimate, device, host, floor float64, inputs *MemorySizingInputs) (float64, float64, string, int, bool) {
 	if !m.UnifiedMemory || j.Spec.Needs.cpuOnly() || !q.learnedMemory() {
 		return 0, 0, "", 0, false
 	}
-	room, why := q.exploratoryMemory(j, m)
+	room, why, _ := q.physicalProbeMemoryStatus(j, m, inputs)
 	if why != "" {
 		return 0, 0, "", 0, false
 	}

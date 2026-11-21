@@ -237,7 +237,7 @@ func (q *Queue) boundedMemoryCandidate(j *Job, m *Machine, estimate memoryEstima
 	if lower <= 0 || !validRate(lower) || lower > budget || hint > budget {
 		return 0, "", false
 	}
-	room, why, _ := q.physicalProbeMemoryStatus(j, m)
+	room, why, _ := q.physicalProbeMemoryStatus(j, m, nil)
 	if why == "" && room < budget {
 		why = boundedMemoryCapacityWait
 	}

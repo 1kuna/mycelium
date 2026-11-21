@@ -2,9 +2,181 @@ package myce
 
 import (
 	"context"
+	"math"
+	"strings"
 	"testing"
 	"time"
 )
+
+const replayHostCeilingGB = 561369088.0 / (1 << 30)
+const replayCheckChargeGB = 16.420490264892578
+
+func startReplayCheck(t *testing.T, q *Queue, m Machine, s Spec, device string, running ...*Job) *Job {
+	t.Helper()
+	s.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
+	s.Workload = nil
+	s.ExtensionDigest = registeredExtension(t, q, s.Extension).Digest
+	s.AllowedMachines = []string{m.ID}
+	s.RequireTarget = true
+	s.Needs.GPU = &GPUSelection{Devices: []string{device}}
+	s.SizeHint = SizeHint{HostMemoryGB: replayCheckChargeGB}
+	pending := submit(t, q, s)
+	run := assignedJob(machineCheck(t, q, m, running...))
+	if run == nil || run.ID != pending.ID || run.MemoryEnvelope.HostGB != replayCheckChargeGB {
+		t.Fatalf("check envelope: run=%+v status=%+v", run, job(t, q, pending.ID))
+	}
+	if err := q.Started(result(run, false)); err != nil {
+		t.Fatal(err)
+	}
+	return run
+}
+
+func completeReplayCheck(t *testing.T, q *Queue, clock *fakeClock, run *Job, peak float64) {
+	t.Helper()
+	clock.Advance(time.Second)
+	r := result(run, true)
+	r.MemoryPeak = &AttemptMemoryPeak{CgroupGB: &peak, Events: &MemoryEventCounts{Max: 1}}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	facts := job(t, q, run.ID).MemoryAttempts
+	if len(facts) != 1 || facts[0].LearningReason != "constrained" {
+		t.Fatalf("check supplied accepted memory evidence: %+v", facts)
+	}
+}
+
+func TestCensoredAcceleratorOOMReplaysMeasuredRecovery(t *testing.T) {
+	for _, tc := range []string{"constrained check", "no check peak", "physical insufficiency"} {
+		t.Run(tc, func(t *testing.T) {
+			q, clock, m, s := gpuHostFixture(t)
+			checkPeak, growth := 9.054, .1078
+			if tc == "constrained check" {
+				completeReplayCheck(t, q, clock, startReplayCheck(t, q, m, s, "0"), checkPeak)
+			}
+			// Reissue the historical tiny ceiling before introducing the
+			// co-tenant. The cold gate now refuses that offer under contention.
+			m.HostAvailableMemoryGB = replayHostCeilingGB + minimumHostMemoryGB
+			machineCheck(t, q, m)
+			work := s
+			work.Needs.GPU = &GPUSelection{Devices: []string{"0"}}
+			run := assignGPU(t, q, m, submit(t, q, work))
+			if run.MemoryEnvelope.HostGB != replayHostCeilingGB {
+				t.Fatalf("historical ceiling = %.12f GiB", run.MemoryEnvelope.HostGB)
+			}
+			if err := q.Started(result(run, false)); err != nil {
+				t.Fatal(err)
+			}
+			m.HostAvailableMemoryGB += replayCheckChargeGB
+			holder := startReplayCheck(t, q, m, s, "1", run)
+			if tc == "physical insufficiency" {
+				profile := *m.CapabilityProfile
+				profile.SystemMemoryBytes = uint64(replayHostCeilingGB * (1 << 30))
+				m.CapabilityProfile = &profile
+				machineCheck(t, q, m, run, holder)
+			}
+			oom := func(run *Job, peak float64) {
+				t.Helper()
+				clock.Advance(time.Second)
+				r := result(run, false)
+				r.OutOfMemory = true
+				r.MemoryPeak = &AttemptMemoryPeak{CgroupGB: &peak, GrowthGB: &growth, Events: &MemoryEventCounts{OOM: 1, OOMKill: 3, OOMGroupKill: 1}}
+				if err := q.Complete(r); err != nil {
+					t.Fatal(err)
+				}
+			}
+			oom(run, replayHostCeilingGB)
+			pending := job(t, q, run.ID)
+			if tc == "physical insufficiency" {
+				if pending.State != "failed" || !strings.Contains(pending.Reason, "measured OOM lower bound") {
+					t.Fatalf("known physical limit did not fail recovery: %s (%s)", pending.State, pending.Reason)
+				}
+				return
+			}
+			// With unchanged live availability, more than 16 GiB returns
+			// through the actual host ledger only after the check releases.
+			if retry := assignedJob(machineCheck(t, q, m, holder)); retry != nil || pending.State != "queued" || pending.OOMRetries != 1 {
+				t.Fatalf("retry crossed the occupied host ledger: run=%+v state=%s (%s)", retry, pending.State, pending.Reason)
+			}
+			if got := job(t, q, holder.ID); got.State != "running" {
+				t.Fatalf("recovery interrupted the check: %s (%s)", got.State, got.Reason)
+			}
+			facts := pending.MemoryAttempts[0]
+			inputs := facts.MemoryEnvelope.SizingInputs
+			if facts.LearningReason != "oom" || inputs == nil || inputs.LedgerRemainderGB-inputs.DriftGB != replayHostCeilingGB || inputs.AllowanceGB != 24 {
+				t.Fatalf("attempt lost original sizing: %+v", inputs)
+			}
+			if err := q.Complete(result(holder, true)); err != nil {
+				t.Fatal(err)
+			}
+			retry := assignGPU(t, q, m, pending)
+			e := retry.MemoryEnvelope
+			want, check := m.HostAvailableMemoryGB, 0.0
+			if tc == "constrained check" {
+				want, check = checkPeak+growth, checkPeak
+			}
+			if !strings.Contains(e.Source, censoredHostOOMRecoverySource) || e.Evidence != 0 ||
+				retry.Spec.Needs.MemoryGB != run.Spec.Needs.MemoryGB || math.Abs(e.HostGB-want) > 1e-9 ||
+				e.SizingInputs == nil || e.SizingInputs.ConstrainedCheckHostGB != check {
+				t.Fatalf("retry envelope = %+v, want %.6f GiB; sizing = %+v", e, want, e.SizingInputs)
+			}
+			if err := q.Started(result(retry, false)); err != nil {
+				t.Fatal(err)
+			}
+			oom(retry, e.HostGB)
+			if got := job(t, q, run.ID); got.State != "failed" || got.OOMRetries != 1 {
+				t.Fatalf("retry budget changed: %s (%s), retries=%d", got.State, got.Reason, got.OOMRetries)
+			}
+		})
+	}
+}
+
+func TestColdAcceleratorWaitsForOccupiedHostRAM(t *testing.T) {
+	q, _, m, s := gpuHostFixture(t)
+	m.HostAvailableMemoryGB = replayCheckChargeGB + replayHostCeilingGB + minimumHostMemoryGB
+	holder := startReplayCheck(t, q, m, s, "1")
+	s.Needs.GPU = &GPUSelection{Devices: []string{"0"}}
+	pending := submit(t, q, s)
+	if run := assignedJob(machineCheck(t, q, m, holder)); run != nil {
+		t.Fatalf("cold job got contention-limited ceiling: %+v", run.MemoryEnvelope)
+	}
+	if got := job(t, q, pending.ID); !strings.Contains(got.Reason, "waiting for occupied host RAM") {
+		t.Fatalf("missing contention hold: %+v (%s)", got.Hold, got.Reason)
+	}
+	if err := q.Complete(result(holder, true)); err != nil {
+		t.Fatal(err)
+	}
+	run := assignGPU(t, q, m, pending)
+	if run.MemoryEnvelope.HostGB != m.HostAvailableMemoryGB-minimumHostMemoryGB {
+		t.Fatalf("released RAM did not size the cold offer: %+v", run.MemoryEnvelope)
+	}
+}
+
+func TestCensoredHostOOMRequiresMatchingCeilingAndAttempt(t *testing.T) {
+	ceiling := replayHostCeilingGB
+	j := Job{Attempt: 2, Machine: "worker", Session: "session",
+		MemoryEnvelope: &JobMemoryEnvelope{HostGB: ceiling, Enforcement: cgroupMemoryEnforcement},
+		MemoryAttempts: []AttemptMemoryFacts{{Attempt: 1, Machine: "worker", Session: "session",
+			MemoryPeak: &AttemptMemoryPeak{CgroupGB: &ceiling, Events: &MemoryEventCounts{OOM: 1}}}}}
+	if censoredHostOOMPeak(&j) != nil {
+		t.Fatal("stale OOM evidence selected recovery")
+	}
+	j.MemoryAttempts[0].Attempt = j.Attempt
+	peak := j.MemoryAttempts[0].MemoryPeak
+	below := ceiling - 2*minimumHostMemoryGB
+	peak.CgroupGB = &below
+	if censoredHostOOMPeak(&j) != nil {
+		t.Fatal("uncensored peak selected ceiling recovery")
+	}
+	rounded := ceiling - minimumHostMemoryGB/2
+	peak.CgroupGB = &rounded
+	if censoredHostOOMPeak(&j) != peak {
+		t.Fatal("kernel page rounding hid host ceiling evidence")
+	}
+	peak.Events = &MemoryEventCounts{Max: 1}
+	if censoredHostOOMPeak(&j) != nil {
+		t.Fatal("ceiling pressure without kernel OOM selected recovery")
+	}
+}
 
 func TestOOMRecoveryUsesDemandNotFreeRAM(t *testing.T) {
 	for _, cpu := range []bool{false, true} {

@@ -195,6 +195,15 @@ func (q *Queue) ordinaryRoomPlan(j *Job, m *Machine, batch bool) (*placementPlan
 	if best != nil && !q.addDeviceTierStops(best, j) {
 		return nil, false
 	}
+	if batch && j.MemoryCensoredOOMGrowthGB != nil {
+		// This retry waits for ordinary admission. A larger envelope grants
+		// no authority to stop another attempt, residency or preparation.
+		if best == nil || best.stops > 0 || len(best.jobs)+len(best.slots)+len(best.calls) > 0 {
+			return nil, false
+		}
+		best.preparations = false
+		return best, false
+	}
 	return best, best == nil && batch
 }
 func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool, yieldPlans ...map[string]*ScarceHostYield) *placementPlan {

@@ -340,6 +340,7 @@ type batchResourceKey struct {
 	cores                    int
 	shares                   bool
 	xpuSharing               bool
+	censoredOOMRecovery      bool
 }
 type batchResourceRoom struct {
 	machine  Machine
@@ -354,7 +355,7 @@ func resourceKey(j *Job) batchResourceKey {
 	if j.Spec.Resident != nil || len(j.LaunchCapacityWait) > 0 || len(j.Spec.RequirementReasons) > 0 || len(j.Extensions) > 0 {
 		id = j.ID
 	}
-	return batchResourceKey{j.Spec.Project, j.Spec.Class, j.Spec.Priority, id, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Needs.cores(), sharesDevice(j), fanOutDeviceSharing(j)}
+	return batchResourceKey{j.Spec.Project, j.Spec.Class, j.Spec.Priority, id, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Needs.cores(), sharesDevice(j), fanOutDeviceSharing(j), j.MemoryCensoredOOMGrowthGB != nil}
 }
 
 func (q *Queue) batchResourcesFitWithScan(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) bool {

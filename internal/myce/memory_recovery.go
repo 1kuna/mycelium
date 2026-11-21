@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 )
@@ -8,6 +9,7 @@ import (
 const memoryEvidenceRecovering = "memory_evidence_recovering"
 
 const measuredOOMRecoverySource = "exploratory OOM recovery from measured demand"
+const censoredHostOOMRecoverySource = "exploratory recovery from ceiling-censored host OOM"
 
 func measuredOOMRecovery(j *Job) (bound, lower float64) {
 	bound, lower = minimumHostMemoryGB, minimumHostMemoryGB
@@ -126,9 +128,85 @@ func (q *Queue) recoveryMemoryRoom(j *Job, m *Machine) (float64, string) {
 		why = "memory recovery needs measured host memory and a known allowance or physical capacity"
 	}
 	if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
-		room -= j.Spec.Needs.MemoryGB
+		device := j.Spec.Needs.MemoryGB
+		if j.MemoryCensoredOOMGrowthGB != nil && j.MemoryOOMFloor != nil {
+			device = j.MemoryOOMFloor.MemoryGB
+		}
+		room -= device
 	}
 	return max(0, room), why
+}
+
+func (q *Queue) censoredOOMMemory(j *Job, m *Machine, growth float64, inputs *MemorySizingInputs) (float64, string) {
+	room, why := q.recoveryMemoryRoom(j, m)
+	check := q.constrainedNativeCheckPeak(j, m)
+	if m.UnifiedMemory {
+		check = max(0, check-j.MemoryOOMFloor.MemoryGB-m.MemoryCeilingSlackGB)
+	}
+	*inputs = q.hostSizingInputs(m)
+	inputs.RecoveryCapacityGB, inputs.ConstrainedCheckHostGB = room, check
+	// A check's constrained peak supplies a floor only. If it establishes
+	// no demand above the failed ceiling, use the measured physical
+	// opportunity: a small observed growth step cannot bound censored work.
+	failed := j.MemoryOOMFloor.HostMemoryGB
+	bound := 0.0
+	if check <= failed {
+		opportunity := m.HostAvailableMemoryGB
+		if ledger := q.hostMemoryLedgers[m.ID]; ledger != nil {
+			opportunity = ledger.CapacityGB + max(0, ledger.ReservedGB-ledger.GrowthGB)
+		}
+		if inputs.IdleHistoryBoundGB != nil {
+			opportunity = *inputs.IdleHistoryBoundGB
+		}
+		if m.UnifiedMemory {
+			opportunity -= j.MemoryOOMFloor.MemoryGB
+		}
+		bound = max(bound, opportunity-m.MemoryCeilingSlackGB)
+	}
+	lower := max(failed, check)
+	if why == "" && lower > room {
+		why = fmt.Sprintf("ceiling-censored recovery needs %.3f GiB host RAM; target capacity is %.3f GiB; %s", lower, room, memoryCapacityRemedies)
+	}
+	return max(lower, min(room, max(bound, lower+growth))), why
+}
+
+// Checks keep their own observation identity. For a censored workload retry,
+// use the retained check peaks only as lower bounds for this frozen extension,
+// work and native target, with the original measurement's identity verified.
+func (q *Queue) constrainedNativeCheckPeak(j *Job, target *Machine) float64 {
+	e := qualifiedExtension(j, target)
+	if e == nil {
+		return 0
+	}
+	cache := q.memoryPlanning
+	if cache == nil {
+		cache = newMemoryPlanningCache()
+	}
+	cache.loadRetainedMemoryIndex(q)
+	native := machineTarget(target)
+	work := j.Spec.workType()
+	history := q.memoryHistory()
+	peak := 0.0
+	for key, entries := range cache.history.index[memoryHistoryKey{work, native.OS}] {
+		if !key.check || key.extension != e.Digest {
+			continue
+		}
+		for _, entry := range entries {
+			p := entry.provenance
+			if p.key.Target != native || q.clock.Now().Before(p.ended) {
+				continue
+			}
+			owner := history.s.Machines[p.machine]
+			if owner == nil || owner.Gone || history.unreported[owner.ID] {
+				continue
+			}
+			m := allocationMachine(owner, []string{p.key.Component})
+			if m != nil && m.UnifiedMemory == target.UnifiedMemory && retainedMemoryIdentity(p, m) {
+				peak = max(peak, entry.evidence.lower)
+			}
+		}
+	}
+	return peak
 }
 
 // memorySizingDeadEnd: every target that could otherwise run this auto-memory
