@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -13,6 +14,63 @@ import (
 	"testing"
 	"time"
 )
+
+func TestLaunchRefusalCompletionWireCompatibility(t *testing.T) {
+	type previousCause struct {
+		Operation        string `json:"operation"`
+		Class            string `json:"class"`
+		Predicate        string `json:"predicate"`
+		PrelaunchRefused bool   `json:"prelaunch_refused"`
+	}
+	result := Result{
+		Machine: "worker", Session: "session", Execution: Execution{ID: "job", Attempt: 3},
+		ReleaseOnly: true,
+		ExecutionCause: &RuntimeCause{Operation: "launch", Class: launchRefused,
+			Predicate: "launch_authorization", PrelaunchRefused: true, LaunchRefusal: launchRPCConflict},
+	}
+	for _, previous := range []bool{true, false} {
+		name := map[bool]string{true: "previous", false: "current"}[previous]
+		t.Run(name, func(t *testing.T) {
+			calls := make(chan bool, 3)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if previous {
+					var receipt struct {
+						Result
+						ExecutionCause *previousCause `json:"execution_cause"`
+					}
+					accepted := decode(w, r, &receipt)
+					calls <- accepted
+					if accepted && (receipt.Execution != result.Execution || receipt.Machine != result.Machine ||
+						receipt.Session != result.Session || !receipt.ReleaseOnly || receipt.ExecutionCause == nil ||
+						*receipt.ExecutionCause != (previousCause{"launch", launchRefused, "launch_authorization", true})) {
+						t.Errorf("previous queue lost release or refusal evidence: %+v", receipt)
+					}
+					return
+				}
+				var receipt Result
+				accepted := decode(w, r, &receipt)
+				calls <- accepted
+				if !accepted || receipt.ExecutionCause == nil || receipt.ExecutionCause.LaunchRefusal != launchRPCConflict {
+					t.Error("current queue lost the typed launch refusal")
+				}
+			}))
+			defer server.Close()
+			client := Client{URL: server.URL}
+			if err := client.Call(context.Background(), http.MethodPost, "/api/workers/complete", &result, nil); err != nil {
+				t.Fatal(err)
+			}
+			if previous && (len(calls) != 2 || <-calls || !<-calls) {
+				t.Fatal("expected one strict decode refusal and one accepted release")
+			}
+			if !previous && (len(calls) != 1 || !<-calls) {
+				t.Fatal("expected one accepted completion")
+			}
+			if result.ExecutionCause.LaunchRefusal != launchRPCConflict {
+				t.Fatal("retry changed the worker's retained result")
+			}
+		})
+	}
+}
 
 // #379: run the real native preparation path, never start a payload, then
 // acknowledge all three exact refusals and reopen the durable queue.

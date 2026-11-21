@@ -27,6 +27,31 @@ var launchRefusalMessages = map[string]string{
 
 var errAssignmentWithdrawn = errors.New("assignment withdrawn before command started")
 
+// Previous queues strictly decode completion before processing it. On that
+// refusal, omit the new boundary from the wire copy and keep exact release
+// custody, positive prelaunch proof, and the worker's durable diagnostic.
+func withoutLaunchRefusal(in any) (any, bool) {
+	result, ok := in.(Result)
+	if pointer, isPointer := in.(*Result); isPointer && pointer != nil {
+		result, ok = *pointer, true
+	}
+	if !ok {
+		return in, false
+	}
+	strip := func(cause *RuntimeCause) *RuntimeCause {
+		if cause == nil || cause.LaunchRefusal == "" {
+			return cause
+		}
+		copy := *cause
+		copy.LaunchRefusal = ""
+		return &copy
+	}
+	execution, cleanup := strip(result.ExecutionCause), strip(result.CleanupCause)
+	changed := execution != result.ExecutionCause || cleanup != result.CleanupCause
+	result.ExecutionCause, result.CleanupCause = execution, cleanup
+	return result, changed
+}
+
 // Preserve request_stale and HTTP 409 for existing callers. Only batch
 // launch reports whether the request passed the exact custody check.
 type batchLaunchConflict struct{ boundary string }
