@@ -1,0 +1,225 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/ModelIntervalPage",
+  "$defs": {
+    "ModelIntervalEvent": {
+      "properties": {
+        "sequence": {
+          "type": "integer"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "memory_peaks": {
+          "$ref": "#/$defs/ModelMemoryPeaks"
+        },
+        "model": {
+          "type": "string"
+        },
+        "attempt": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "device": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "class": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "string"
+        },
+        "tier": {
+          "$ref": "#/$defs/PriorityMatch"
+        },
+        "assigned_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "load_started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "stopped_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "released_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "sequence",
+        "at",
+        "kind",
+        "model",
+        "attempt",
+        "machine",
+        "host",
+        "session",
+        "device",
+        "platform",
+        "project",
+        "class",
+        "priority",
+        "tier"
+      ]
+    },
+    "ModelIntervalPage": {
+      "properties": {
+        "coverage_since": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "high_water": {
+          "type": "integer"
+        },
+        "next": {
+          "type": "integer"
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/ModelIntervalEvent"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "required": [
+        "coverage_since",
+        "high_water",
+        "next",
+        "has_more",
+        "entries"
+      ]
+    },
+    "ModelMemoryMeasurement": {
+      "properties": {
+        "peak_gb": {
+          "type": "number"
+        },
+        "source": {
+          "type": "string"
+        },
+        "sampled_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "samples": {
+          "type": "integer"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "constrained": {
+          "type": "boolean"
+        },
+        "pressure_unavailable": {
+          "type": "boolean"
+        },
+        "unavailable": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "samples",
+        "complete",
+        "constrained"
+      ]
+    },
+    "ModelMemoryPeaks": {
+      "properties": {
+        "load": {
+          "$ref": "#/$defs/ModelMemoryWindow"
+        },
+        "steady": {
+          "$ref": "#/$defs/ModelMemoryWindow"
+        },
+        "request": {
+          "$ref": "#/$defs/ModelMemoryWindow"
+        }
+      },
+      "type": "object"
+    },
+    "ModelMemoryWindow": {
+      "properties": {
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "ended_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "overlaps_other_requests": {
+          "type": "boolean"
+        },
+        "host": {
+          "$ref": "#/$defs/ModelMemoryMeasurement"
+        },
+        "device": {
+          "$ref": "#/$defs/ModelMemoryMeasurement"
+        }
+      },
+      "type": "object",
+      "required": [
+        "started_at",
+        "host",
+        "device"
+      ]
+    },
+    "PriorityMatch": {
+      "properties": {
+        "tier": {
+          "type": "string"
+        },
+        "index": {
+          "type": "integer"
+        },
+        "selector": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer"
+        }
+      },
+      "type": "object",
+      "required": [
+        "tier",
+        "index",
+        "selector",
+        "revision"
+      ]
+    }
+  }
+}

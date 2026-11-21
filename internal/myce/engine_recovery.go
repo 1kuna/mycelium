@@ -67,6 +67,18 @@ func (q *Queue) noteEngineFailure(s *ModelSlot) {
 func (q *Queue) applyEngineReport(key string, s *ModelSlot, r ModelReport) {
 	// Only exact-attempt reports reach here. A missing/failed proof withholds
 	// takeover, but never reroutes an already dispatched call through a worker.
+	if r.MemoryPeaks != nil {
+		peaks := *r.MemoryPeaks
+		loadComplete := peaks.Load != nil && peaks.Load.EndedAt != nil
+		alreadyComplete := s.MemoryPeaks != nil && s.MemoryPeaks.Load != nil && s.MemoryPeaks.Load.EndedAt != nil
+		if s.MemoryPeaks != nil {
+			peaks.Request = newestModelMemoryRequest(s.MemoryPeaks.Request, peaks.Request)
+		}
+		s.MemoryPeaks = &peaks
+		if loadComplete && !alreadyComplete {
+			q.recordModelInterval(s, "memory_load")
+		}
+	}
 	s.Custody = nil
 	if validModelCustody(r.Custody) && validModelBridgeURL(r.URL) {
 		v := *r.Custody
@@ -262,7 +274,7 @@ func (q *Queue) maintainEngineRetry(key string, s *ModelSlot, m *Machine, model 
 }
 
 func (q *Queue) beginEngineAttempt(s *ModelSlot, priority string) {
-	s.Custody, s.URL = nil, ""
+	s.Custody, s.URL, s.MemoryPeaks = nil, "", nil
 	s.State = "loading"
 	s.RetryReserved = false
 	s.LoadTimedOut = false
