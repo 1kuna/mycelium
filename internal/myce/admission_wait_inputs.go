@@ -99,6 +99,7 @@ func waitMachine(m Machine) Machine {
 	m.IOPressure, m.HygieneCollection, m.HostHealth = nil, nil, nil
 	m.MemoryObservation, m.ExternalMemory = nil, nil
 	m.Release, m.Fleet, m.Enrollment = nil, nil, nil
+	m.FleetProofIssue = ""
 	return m
 }
 

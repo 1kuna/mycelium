@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -179,6 +180,105 @@ func TestFleetRuntimeManagerMustOwnExactPID(t *testing.T) {
 	p, err = collectFleetRuntime(context.Background(), c, "boot-session", command(os.Getpid()))
 	if err != nil || p == nil || !p.ServiceHealthy || !p.RunnerSmoke || p.PID != os.Getpid() || p.Session != "boot-session" || len(p.SHA256) != 64 || p.StartGate != StartGateProtocol || p.AttemptProtocol != AttemptProtocol || p.ObservedAt.IsZero() {
 		t.Fatal("missing exact process evidence", p, err)
+	}
+}
+
+func TestFleetRuntimeRestartProofDiagnosticsThroughCheckin(t *testing.T) {
+	q, clock := fixture(t)
+	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+	defer server.Close()
+	client := Client{URL: server.URL, Token: "test"}
+	c := fleetRuntimeTestConfig(t)
+	c.Detection.OS = "darwin"
+	m := machine("worker", "fake")
+	previousSession := m.Session
+	m.Session = "replacement-session"
+	managerPID := os.Getpid() + 1
+	collect := func(ctx context.Context, c ServiceConfig, session string) (*FleetRuntimeProof, error) {
+		return collectFleetRuntimeAt(ctx, c, session, func(_ context.Context, name string, args ...string) ([]byte, error) {
+			if name != "launchctl" || len(args) != 2 || args[0] != "print" {
+				t.Fatalf("unexpected Darwin service probe: %s %v", name, args)
+			}
+			return []byte(fmt.Sprintf("service = {\n\tstate = running\n\truns = 2\n\tpid = %d\n\tother = {\n\t\tstate = inactive\n\t}\n}\n", managerPID)), nil
+		}, clock)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Apply completed observations deterministically, without launching another poll.
+	r := &workerFleetRuntime{clock: clock}
+	checkStatus := func(want FleetProofIssue) {
+		t.Helper()
+		completed := make(chan fleetPollResult, 1)
+		completed <- pollFleetRuntimeAt(context.Background(), c, client, collect, nil, hostID(&m), m.ID, m.Session, false, fleetPollResult{}, clock)
+		r.pending = completed
+		m.Fleet = r.observe(ctx, m, false)
+		if r.proofIssue() != want || (m.Fleet == nil) != (want != "") {
+			t.Fatalf("proof presence=%t issue=%q, want issue %q", m.Fleet != nil, r.proofIssue(), want)
+		}
+		var reply Reply
+		if err := client.Call(context.Background(), "POST", "/api/workers/checkin", Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, fleetProofIssue: r.proofIssue()}, &reply); err != nil {
+			t.Fatal(err)
+		}
+		var status CompactStatus
+		if err := client.Call(context.Background(), "GET", "/api/status", nil, &status); err != nil {
+			t.Fatal(err)
+		}
+		if len(status.Hyphas) != 1 || status.Hyphas[0].FleetProofIssue != want {
+			t.Fatalf("status hyphas=%+v, want issue %q", status.Hyphas, want)
+		}
+		if rendered := strings.Join(status.Lines(false), "\n"); want != "" && !strings.Contains(rendered, "fleet runtime proof unavailable: "+string(want)) {
+			t.Fatalf("missing proof issue in status: %s", rendered)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(c.State, fleetUpdateReceiptFile), []byte("invalid receipt"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	checkStatus(fleetProofReceiptInvalid)
+	oldProof := fleetTestProof(clock, previousSession, managerPID, false)
+	if err := writeFleetReceipt(c, fleetInstallReceipt{
+		Phase: "restarting", ConfigSHA256: oldProof.SHA256, BeforeSHA256: oldProof.SHA256,
+		BeforePID: oldProof.PID, BeforeRuntime: *oldProof, BeforeVersion: oldProof.Version,
+		Instruction: FleetUpdateInstruction{Host: hostID(&m), Machine: m.ID, Session: previousSession, Operation: "update", Revision: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	checkStatus(fleetProofManagerPID)
+	managerPID = os.Getpid()
+	clock.Advance(time.Second)
+	checkStatus("")
+	if m.Fleet.Session != m.Session || m.Fleet.PID != managerPID || !m.Fleet.ObservedAt.Equal(clock.Now()) || !fleetProofReady(m.Fleet) {
+		t.Fatalf("invalid replacement proof: %+v", m.Fleet)
+	}
+}
+
+func TestFleetRuntimeProofDiagnosticKeepsPredecessorCheckinJSON(t *testing.T) {
+	// Predecessors decode machine fields strictly and ignore extension headers.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(fleetProofIssueHeader) != string(fleetProofImageMapping) {
+			t.Error("missing fleet diagnostic header")
+		}
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(body["machine"], &fields); err != nil {
+			t.Error(err)
+		}
+		if _, ok := fields["fleet_proof_issue"]; ok {
+			t.Error("diagnostic would break strict predecessor machine decoding")
+		}
+		if _, ok := body["fleet_proof_issue"]; ok {
+			t.Error("diagnostic would break strict predecessor check-in decoding")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	c := Client{URL: server.URL}
+	if err := c.Call(context.Background(), "POST", "/api/workers/checkin", Checkin{Machine: Machine{ID: "worker"}, fleetProofIssue: fleetProofImageMapping}, nil); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -380,7 +480,7 @@ func TestFleetRuntimeCachedProofExpiresWithoutRenewingObservation(t *testing.T) 
 		t.Fatal("cached heartbeat renewed manager observation")
 	}
 	clock.Advance(time.Nanosecond)
-	if r.observe(ctx, m, false) != nil || r.generation != 1 {
+	if r.observe(ctx, m, false) != nil || r.generation != 1 || r.proofIssue() != fleetProofExpired {
 		t.Fatal("stale manager proof remained eligible")
 	}
 }

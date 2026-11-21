@@ -6,6 +6,52 @@ import (
 	"fmt"
 )
 
+// FleetProofIssue describes why a worker could not report its managed runtime
+// proof. It is advisory and never establishes managed identity or readiness.
+type FleetProofIssue string
+
+func (issue FleetProofIssue) Error() string { return string(issue) }
+
+const fleetProofIssueHeader = "X-Myce-Fleet-Proof-Issue"
+
+const (
+	fleetProofConfigMissing    FleetProofIssue = "installed_service_identity_unavailable"
+	fleetProofImageOpen        FleetProofIssue = "running_image_open_failed"
+	fleetProofImageStat        FleetProofIssue = "running_image_stat_failed"
+	fleetProofImageFormat      FleetProofIssue = "running_image_format_invalid"
+	fleetProofImageMapping     FleetProofIssue = "running_image_mapping_unavailable"
+	fleetProofImageMismatch    FleetProofIssue = "running_image_mapping_mismatch"
+	fleetProofImageHash        FleetProofIssue = "running_image_hash_failed"
+	fleetProofImageChanged     FleetProofIssue = "running_image_changed"
+	fleetProofReceiptInvalid   FleetProofIssue = "fleet_receipt_invalid"
+	fleetProofSmokeCleanup     FleetProofIssue = "runner_smoke_cleanup_failed"
+	fleetProofSmokeFailed      FleetProofIssue = "runner_smoke_failed"
+	fleetProofManagerUnhealthy FleetProofIssue = "service_manager_unhealthy"
+	fleetProofManagerPID       FleetProofIssue = "service_manager_pid_mismatch"
+	fleetProofCollectionFailed FleetProofIssue = "proof_collection_failed"
+	fleetProofPending          FleetProofIssue = "proof_pending"
+	fleetProofSessionMissing   FleetProofIssue = "proof_session_missing"
+	fleetProofSessionMismatch  FleetProofIssue = "proof_session_mismatch"
+	fleetProofTimeMissing      FleetProofIssue = "proof_observation_time_missing"
+	fleetProofTimeFuture       FleetProofIssue = "proof_observation_time_future"
+	fleetProofExpired          FleetProofIssue = "proof_observation_expired"
+	fleetProofAgeInvalid       FleetProofIssue = "proof_reported_age_invalid"
+)
+
+// Accept only fixed codes. Neither received headers nor errors from the OS may
+// inject arbitrary text into status or logs.
+func safeFleetProofIssue(issue FleetProofIssue) FleetProofIssue {
+	switch issue {
+	case fleetProofConfigMissing, fleetProofImageOpen, fleetProofImageStat, fleetProofImageFormat,
+		fleetProofImageMapping, fleetProofImageMismatch, fleetProofImageHash, fleetProofImageChanged,
+		fleetProofReceiptInvalid, fleetProofSmokeCleanup, fleetProofSmokeFailed, fleetProofManagerUnhealthy,
+		fleetProofManagerPID, fleetProofCollectionFailed, fleetProofPending, fleetProofSessionMissing,
+		fleetProofSessionMismatch, fleetProofTimeMissing, fleetProofTimeFuture, fleetProofExpired:
+		return issue
+	}
+	return ""
+}
+
 // Fixed predicate names only: never include received field values. Keep this
 // shared with fleetProofReady so diagnostics describe the actual readiness gate.
 func fleetProofFailure(p *FleetRuntimeProof) string {

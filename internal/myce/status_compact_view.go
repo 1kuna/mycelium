@@ -35,6 +35,7 @@ type CompactStatus struct {
 type CompactHypha struct {
 	ModelConfigHash   string             `json:"model_config_hash,omitempty"`
 	MemoryContainment *MemoryContainment `json:"memory_containment,omitempty"`
+	FleetProofIssue   FleetProofIssue    `json:"fleet_proof_issue,omitempty"`
 	ID                string             `json:"id"`
 	GPU               string             `json:"gpu"`
 	FreeMemoryGB      float64            `json:"free_memory_gb"`
@@ -125,7 +126,7 @@ func NewCompactStatus(s Snapshot) CompactStatus {
 		}
 	}
 	for _, m := range s.Machines {
-		h := CompactHypha{ID: m.ID, GPU: m.GPU, FreeMemoryGB: m.FreeMemoryGB, Availability: HyphaAvailability(m), Running: running[m.ID], ModelConfigHash: m.ModelConfigHash}
+		h := CompactHypha{ID: m.ID, GPU: m.GPU, FreeMemoryGB: m.FreeMemoryGB, Availability: HyphaAvailability(m), Running: running[m.ID], ModelConfigHash: m.ModelConfigHash, FleetProofIssue: m.FleetProofIssue}
 		h.MemoryContainment = m.MemoryContainment
 		h.ResultPublications = m.ResultPublications
 		if m.HostMemoryMeasured {
@@ -295,6 +296,9 @@ func (c CompactStatus) Lines(full bool) []string {
 		}
 		if h.Release != "" {
 			line += "; release " + h.Release
+		}
+		if h.FleetProofIssue != "" {
+			line += "; fleet runtime proof unavailable: " + string(h.FleetProofIssue)
 		}
 		out = append(out, line)
 		if h.MemoryContainment != nil {

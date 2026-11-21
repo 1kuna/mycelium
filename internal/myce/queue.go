@@ -1621,6 +1621,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 	c.Machine.ToolInventory, c.Machine.toolInventory = nil, nil
 	c = receivedDeviceTelemetry(c, q.clock.Now())
 	preparedMachine := cloneMachine(&c.Machine)
+	preparedMachine.FleetProofIssue = c.fleetProofIssue
 	reply := Reply{WorkerDiskBudgetProtocol: workerDiskBudgetProtocol, WorkerDiskHeadroomProtocol: workerDiskHeadroomProtocol, WorkerDiskTrendProtocol: workerDiskTrendProtocol, DeviceHealthProtocol: deviceHealthProtocol, DeviceRecoveryProtocol: deviceRecoveryProtocol, HostMountProgressProtocol: hostMountProgressProtocol, DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, HostMemorySampleProtocol: hostMemorySampleProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, HostForeignProtocol: hostForeignProtocol, ToolInventoryProtocol: toolInventoryProtocol, CheckpointExpiryProtocol: checkpointExpiryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
 	q.kickCheckpointShards()
 	reports := c.Attempts
@@ -1682,7 +1683,9 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			age := m.Fleet.ObservationAgeSeconds
 			if math.IsNaN(age) || math.IsInf(age, 0) || age < 0 || age >= fleetProofMaxAge.Seconds() {
 				m.Fleet = nil
+				m.FleetProofIssue = fleetProofAgeInvalid
 			} else {
+				m.FleetProofIssue = ""
 				m.Fleet.ObservedAt = q.clock.Now().Add(-time.Duration(age * float64(time.Second)))
 				var prev *FleetRuntimeProof
 				if old := q.s.Machines[m.ID]; old != nil {

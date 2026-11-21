@@ -27,7 +27,7 @@ func TestFleetDarwinUnmappedExecutableCannotProveRuntime(t *testing.T) {
 	}
 	// The bytes and Mach-O identity are identical; the new inode is not the
 	// image this process executed. A late pathname open must fail closed.
-	if err := verifyFleetRunningImage(copy); err == nil {
-		t.Fatal("unmapped executable certified as running image")
+	if err := verifyFleetRunningImage(copy); err != fleetProofImageMismatch {
+		t.Fatalf("unmapped executable did not report a mapping mismatch: %v", err)
 	}
 }
