@@ -303,10 +303,13 @@ source, coverage, constraint and unavailability labels before qualifying a
 budget. See the [engine memory contract](https://github.com/1kuna/mycelium/blob/main/docs/reference/models.md#resident-engine-memory-peaks).
 
 If native qualification holds a resident job, inspect the queue-owned check
-ID with `myce status CHECK_ID --json`. Supporting queues size cold probes
+ID with `myce status --json CHECK_ID`. Supporting queues size cold probes
 after reserving the engine and report resident device, host or core refusals
-in `admission_wait.latest.targets[].admission_decision.predicate`. Keep the
-parent and check IDs. The parent entry's size hint does not edit its queued check.
+in `admission_wait.latest.targets[].admission_decision.predicate`. The parent's
+`native_qualification` reason can show the check's host RAM comparison.
+`host_maintenance` names the owner who restores admission when compatible
+routes are drained. Keep the parent and check IDs. If you paused the parent,
+resume the same ID when your gate and fresh host capacity allow it.
 
 ## 6. Inputs
 

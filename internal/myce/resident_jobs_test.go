@@ -403,14 +403,23 @@ func TestResidentAutoCheckFitsAlongsideColdEngine(t *testing.T) {
 	if err := q.AddExtension(e); err != nil {
 		t.Fatal(err)
 	}
+	m.ExtensionFingerprint = "native-test"
 	r := newExtensionReport(e, &m, "kind:sample")
 	r.Setup = true
 	m.ExtensionReports = []ExtensionReport{r}
-	check(t, q, m, nil)
+	parent := submit(t, q, Spec{Name: "resident fan-out", Project: "test", Kind: "sample",
+		Workload: &Workload{InputShape: "tiny", Units: 1},
+		FanOut:   &FanOut{MaxConcurrency: 1, Pieces: []FanOutPiece{{Key: "first"}, {Key: "second"}}}})
+	offers := check(t, q, m, nil).ExtensionQualificationPlan
+	if len(offers) != 1 || offers[0].Report.Work != parent.Spec.workType() {
+		t.Fatalf("expected one native check offer, got %+v", offers)
+	}
+	report := offers[0].Report
 	queued := submit(t, q, Spec{Name: "extension-check", Project: "extension-check", Priority: "experiment",
 		Extension: extensionKey(e), ExtensionDigest: e.Digest, AllowedMachines: []string{m.ID},
+		SubmissionKey:  report.CheckID,
 		Needs:          ResourceNeeds{Memory: "auto"},
-		ExtensionCheck: &ExtensionCheckRequest{Work: "kind:sample", Directory: t.TempDir()}})
+		ExtensionCheck: &ExtensionCheckRequest{Work: report.Work, Directory: t.TempDir(), Automatic: &report}})
 	m.FreeMemoryGB = 23
 	clock.Advance(time.Second)
 	if run := check(t, q, m, nil).Job; run != nil {
@@ -428,6 +437,45 @@ func TestResidentAutoCheckFitsAlongsideColdEngine(t *testing.T) {
 		t.Fatalf("missing device rejection and combined demand: %+v", wait.AdmissionWait)
 	}
 	m.FreeMemoryGB = 30
+	m.HostAvailableMemoryGB = 13.071
+	clock.Advance(time.Second)
+	if run := check(t, q, m, nil).Job; run != nil || len(q.s.ModelSlots) != 0 {
+		t.Fatal("check or engine admitted without sufficient host RAM")
+	}
+	ram, err := q.jobSnapshot(parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ram.Hold == nil || ram.Hold.Kind != "native_qualification" ||
+		!strings.Contains(ram.Reason, ShortID(queued.ID)) ||
+		!strings.Contains(ram.Reason, "13.071 GiB available; 16.000 GiB for the engine and launch headroom") {
+		t.Fatalf("parent's RAM hold lost the check's admission reason: %+v (%s)", ram.Hold, ram.Reason)
+	}
+	host := hostID(&m)
+	if _, err := q.ChangeHostMaintenance(host, HostMaintenanceRequest{Action: "drain", DrainOwner: "test-maintenance"}); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	check(t, q, m, nil)
+	drained, err := q.jobSnapshot(parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drained.Hold == nil || drained.Hold.Kind != hostMaintenanceJobHold || drained.Hold.Owner != "operation owner" ||
+		!strings.Contains(drained.Reason, "waiting for drained host") || strings.Contains(drained.Reason, "host RAM") {
+		t.Fatalf("parent's maintenance hold lost the drain owner or used stale RAM evidence: %+v (%s)", drained.Hold, drained.Reason)
+	}
+	if parked := job(t, q, queued.ID); parked.State != "waiting" || parked.Attempt != 0 {
+		t.Fatalf("drain did not preserve the unstarted check: %s attempt %d", parked.State, parked.Attempt)
+	}
+	if _, err := q.ChangeHostMaintenance(host, HostMaintenanceRequest{Action: "resume", IfDrainOwner: "test-maintenance"}); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	if run := check(t, q, m, nil).Job; run != nil {
+		t.Fatal("ending maintenance did not free host RAM")
+	}
+	m.HostAvailableMemoryGB = 17.44
 	clock.Advance(time.Second)
 	run := check(t, q, m, nil).Job
 	if run == nil || run.ID != queued.ID || run.Attempt != 1 {

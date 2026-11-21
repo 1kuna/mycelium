@@ -132,19 +132,7 @@ func (q *Queue) jobHold(j *Job, resolving bool) (blocker *Hold) {
 		}
 	}()
 	if !openRoute && len(maintainedHosts) != 0 {
-		var reasons, owners, actions []string
-		for _, host := range slices.Sorted(maps.Keys(maintainedHosts)) {
-			h := q.maintenanceHold(host)
-			reasons = append(reasons, h.Reason)
-			owners = append(owners, h.Owner)
-			actions = append(actions, h.Next)
-		}
-		slices.Sort(owners)
-		h := newHold(hostMaintenanceJobHold, "")
-		h.Reason = strings.Join(reasons, "; ")
-		h.Owner = strings.Join(slices.Compact(owners), " or ")
-		h.Next = strings.Join(actions, "; ")
-		return h
+		return q.maintenanceJobHold(maintainedHosts)
 	}
 	slices.SortFunc(targets, func(a, b observation) int {
 		if a.fit.better(b.fit) {
@@ -234,17 +222,30 @@ func (q *Queue) jobHold(j *Job, resolving bool) (blocker *Hold) {
 		}
 		staleCompatible := false
 		compatible := false
+		var nativeMaintenance map[string]bool
 		var pending, verdict *Hold
 		for _, t := range targets {
-			if t.fit.excluded || t.m.Replacement != nil {
+			if t.fit.excluded || t.m.Replacement != nil || len(t.m.groupMembers) != 0 {
 				continue
 			}
 			for _, candidate := range extensionJobs(j, t.m, false) {
 				compatible = true
-				if !memorySizingTargetFits(candidate, t.m) || !q.structuralDemandPolicy(candidate, t.m) || !deviceAllowed(candidate, t.m) || q.diskHeadroomReason(candidate, t.m) != "" {
+				if !memorySizingTargetFits(candidate, t.m) || !q.structuralDemandPolicyIgnoringMaintenance(candidate, t.m) || q.diskHeadroomReason(candidate, t.m) != "" {
 					continue
 				}
 				if j.Spec.Resumable && !candidate.Extensions[0].Resumable {
+					continue
+				}
+				if host := hostID(t.m); q.maintenanceBlocked(host) {
+					view, _ := candidate.Extensions[0].forMachine(t.m)
+					_, baseline := view.baseline(candidate.Spec.workType(), t.m.GPU)
+					if len(view.Check) == 0 || !baseline || q.deviceAdmissionBlocked(t.m) {
+						continue
+					}
+					if nativeMaintenance == nil {
+						nativeMaintenance = map[string]bool{}
+					}
+					nativeMaintenance[host] = true
 					continue
 				}
 				if !q.inventoryFresh(q.s.Machines[t.m.ID]) {
@@ -268,6 +269,8 @@ func (q *Queue) jobHold(j *Job, resolving bool) (blocker *Hold) {
 		case staleCompatible:
 			b.retag("unknown_observation", ownerPolicy, "restore fresh observations from compatible hardware before deciding native qualification")
 			holdSource(b, "worker inventory")
+		case len(nativeMaintenance) != 0:
+			return q.maintenanceJobHold(nativeMaintenance)
 		case verdict != nil:
 			return verdict
 		case compatible:
@@ -318,6 +321,22 @@ func (q *Queue) jobHold(j *Job, resolving bool) (blocker *Hold) {
 	return b
 }
 
+func (q *Queue) maintenanceJobHold(hosts map[string]bool) *Hold {
+	var reasons, owners, actions []string
+	for _, host := range slices.Sorted(maps.Keys(hosts)) {
+		h := q.maintenanceHold(host)
+		reasons = append(reasons, h.Reason)
+		owners = append(owners, h.Owner)
+		actions = append(actions, h.Next)
+	}
+	slices.Sort(owners)
+	h := newHold(hostMaintenanceJobHold, "")
+	h.Reason = strings.Join(reasons, "; ")
+	h.Owner = strings.Join(slices.Compact(owners), " or ")
+	h.Next = strings.Join(actions, "; ")
+	return h
+}
+
 // Classify the check on this exact native target. Active work and dispatchable
 // offers outrank pending work and retained terminal reports on other targets.
 func (q *Queue) nativeCheckProgress(e Extension, work string, m *Machine, resolving bool) (hold *Hold, terminalReport, active bool) {
@@ -347,7 +366,13 @@ func (q *Queue) nativeCheckProgress(e Extension, work string, m *Machine, resolv
 			reason = "its native check " + ShortID(j.ID) + " on " + host + " is " + j.State
 			copy := *j
 			if h := q.waitHold(&copy); h != nil {
-				reason += ": " + compactLine(h.Detail)
+				detail := compactLine(h.Detail)
+				if h.Kind == memoryEvidenceRecovering || h.Kind == "host_memory_headroom" {
+					// A check is bound to one target. Keep the measured
+					// operands, which usually come last in the explanation.
+					detail = strings.Join(strings.Fields(h.Detail), " ")
+				}
+				reason += ": " + detail
 			}
 		}
 		return progress(reason, "queued native check job", "wait; nothing to do"), false, true

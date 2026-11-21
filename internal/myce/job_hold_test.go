@@ -82,7 +82,7 @@ func TestActionableBlockerImplementationCoverage(t *testing.T) {
 }
 
 func TestNativeQualificationHoldDispatchability(t *testing.T) {
-	for _, scenario := range []string{"shared", "failed", "alternative", "ready", "unprepared"} {
+	for _, scenario := range []string{"shared", "failed", "alternative", "drained_alternative", "ready", "unprepared"} {
 		t.Run(scenario, func(t *testing.T) {
 			q, clock := fixture(t)
 			e, _, m := variantsFixture(t, true)
@@ -106,7 +106,12 @@ func TestNativeQualificationHoldDispatchability(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if scenario == "alternative" {
+			if scenario == "drained_alternative" {
+				if _, err := q.ChangeHostMaintenance(hostID(&m), HostMaintenanceRequest{Action: "drain"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "alternative" || scenario == "drained_alternative" {
 				other := m
 				other.ID, other.HostID, other.Session = "eligible", "eligible", "eligible-session"
 				r = newExtensionReport(e, &other, "extension:"+e.Name)
@@ -139,7 +144,7 @@ func TestNativeQualificationHoldDispatchability(t *testing.T) {
 				if plans := q.extensionQualificationPlan(q.s.Machines[m.ID]); len(plans) != 0 {
 					t.Fatal("offered an ineligible check", plans)
 				}
-			case "alternative":
+			case "alternative", "drained_alternative":
 				if !strings.Contains(got.Hold.Reason, "on eligible at that host's next check-in") {
 					t.Fatal(got.Hold)
 				}
