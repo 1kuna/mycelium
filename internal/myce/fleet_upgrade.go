@@ -539,6 +539,7 @@ func (q *Queue) maintainFleetUpgrade() {
 	}
 	// Deferred hosts keep their exact policy/process/probe fences while other
 	// hosts advance. Unhealthy evidence still stops the entire operation.
+	awaitingProof := map[*fleetUpgradeHost]bool{}
 	for _, deferred := range u.Hosts {
 		if deferred.Phase != "deferred" {
 			continue
@@ -558,16 +559,11 @@ func (q *Queue) maintainFleetUpgrade() {
 			}
 			continue
 		}
-		if m == nil || m.CapabilityProfile == nil || m.Fleet == nil || m.Fleet.Session != m.Session || !q.fleetCurrent(m.Fleet, m.CapabilityProfile.OS, m.CapabilityProfile.Arch) || fleetHealthIdentity(m.Fleet) != deferred.StartIdentity || fleetProofFailure(m.Fleet) != "" {
-			q.fleetStop(deferred, "worker_start_runtime_changed")
-			return
-		}
-		if age, ok := q.fleetProofAge(m.Fleet); !ok || age >= fleetProofMaxAge {
-			q.fleetStop(deferred, "worker_start_not_verified")
-			return
-		}
-		if !q.fleetStartProbeValid(deferred, m, q.s.Jobs[deferred.StartProbe]) {
-			return
+		if !q.fleetDeferredStartProofReady(deferred, m) {
+			if u.State == "stopped" {
+				return
+			}
+			awaitingProof[deferred] = true
 		}
 	}
 	h := q.fleetActiveHost()
@@ -577,7 +573,7 @@ func (q *Queue) maintainFleetUpgrade() {
 			pending := slicesContainsPhase(u.Hosts, "pending")
 			nonQueuePending := slices.ContainsFunc(u.Hosts, func(host *fleetUpgradeHost) bool { return host.Phase == "pending" && !host.Queue })
 			for _, deferred := range u.Hosts {
-				if deferred.Phase != "deferred" {
+				if deferred.Phase != "deferred" || awaitingProof[deferred] {
 					continue
 				}
 				initial := deferred.StartIdentity == ""
@@ -607,7 +603,7 @@ func (q *Queue) maintainFleetUpgrade() {
 				break
 			}
 			if h == nil {
-				if !pending {
+				if !pending && len(awaitingProof) == 0 {
 					q.fleetFinishDeferred(u)
 				}
 				return

@@ -361,8 +361,32 @@ func TestFleetUpgradeStartProbeAdmissionReasons(t *testing.T) {
 }
 
 func TestFleetUpgradeDeferredProbePersistsAcrossQueueRestart(t *testing.T) {
+	for _, mode := range []string{"unchanged", "pid", "session", "image", "missing"} {
+		t.Run(mode, func(t *testing.T) {
+			testFleetUpgradeDeferredProbeRestart(t, mode)
+		})
+	}
+}
+
+func testFleetUpgradeDeferredProbeRestart(t *testing.T, mode string) {
+	t.Helper()
 	q, c, h := fleetAtStartProbe(t, 0)
 	probe, identity, operation := h.StartProbe, h.StartIdentity, q.s.FleetUpgrade.Operation
+	policy, stepAt := h.Policy, h.StepAt
+	worker := cloneMachine(q.s.Machines[h.Machine])
+	fleetTick(t, q)
+	fleetActivate(t, q, c)
+	fleetTick(t, q)
+	i := fleetInstructionFor(t, q)
+	if i.Machine != "@queue" {
+		t.Fatal("queue update should follow the other worker", i.Machine)
+	}
+	if err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "restarting"}); err != nil {
+		t.Fatal(err)
+	}
+	fleetRestart(t, q, c, i, true)
+	queueRuntime := q.fleetQueue
+
 	var path string
 	if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path); err != nil {
 		t.Fatal(err)
@@ -376,9 +400,92 @@ func TestFleetUpgradeDeferredProbePersistsAcrossQueueRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer restarted.Close()
+	fakeCheckpointAvailability(t, restarted, true)
 	h = restarted.s.FleetUpgrade.Hosts[0]
-	if h.Phase != "deferred" || h.Outcome != FleetHostDeferred || h.DeferredReason == "" || h.StartProbe != probe || h.StartIdentity != identity || h.WorkerDone || h.StartRevisited || restarted.s.FleetUpgrade.Operation != operation || len(restarted.s.Jobs) != 1 {
+	active := restarted.fleetActiveHost()
+	if h.Phase != "deferred" || h.Outcome != FleetHostDeferred || h.DeferredReason == "" || h.StartProbe != probe || h.StartIdentity != identity || h.WorkerDone || h.StartRevisited || !h.Owned ||
+		!reflect.DeepEqual(h.Policy, policy) || !h.StepAt.Equal(stepAt) || restarted.s.FleetUpgrade.Operation != operation || restarted.s.Machines[h.Machine].Fleet != nil ||
+		active == nil || active.Phase != "queue_health" {
 		t.Fatalf("restart lost deferred fences or return debt: %+v", h)
+	}
+	restarted.fleetQueue = queueRuntime
+	assertWaiting := func() {
+		t.Helper()
+		p := job(t, restarted, probe)
+		if restarted.s.FleetUpgrade.State != "running" || h.Phase != "deferred" || h.Failure != "" || h.WorkerDone || h.StartRevisited || h.StartAccepted != "" ||
+			h.StartProbe != probe || h.StartIdentity != identity || !h.StepAt.Equal(stepAt) || !reflect.DeepEqual(restarted.s.HostMaintenance[h.Host], policy) ||
+			p.State != "queued" || p.Attempt != 0 || !strings.Contains(h.Wait, "runtime proof") {
+			t.Fatalf("waiting for runtime proof changed deferred custody or acceptance: %+v, probe %s attempt %d", restarted.fleetUpgradeStatus(), p.State, p.Attempt)
+		}
+	}
+	fleetTick(t, restarted)
+	assertWaiting()
+
+	report := Checkin{Machine: worker, period: time.Second}
+	wantFailure, wantReason := "worker_start_runtime_changed", ""
+	switch mode {
+	case "pid":
+		report.Machine.Fleet.PID++
+		wantReason = "proof_pid_changed"
+	case "session":
+		report.Fresh, report.PreviousSession = true, worker.Session
+		report.Machine.Session += "-replacement"
+		report.Machine.Fleet.Session = report.Machine.Session
+		wantReason = "worker_session_changed"
+	case "image":
+		report.Machine.Fleet.SHA256 = strings.Repeat("b", 64)
+		wantReason = "proof_image_changed"
+	}
+	if wantReason != "" {
+		if _, err := restarted.Checkin(report); err != nil {
+			t.Fatal(err)
+		}
+		if active := restarted.fleetActiveHost(); active == nil || active.Phase != "queue_health" {
+			t.Fatal("changed runtime advanced the queue's health step", restarted.fleetUpgradeStatus())
+		}
+	} else {
+		c.Advance(fleetStableFor)
+		queueRuntime.Proof.ObservedAt = c.Now()
+		fleetTick(t, restarted)
+		if restarted.fleetActiveHost() != nil {
+			t.Fatal("queue did not finish its own health step", restarted.fleetUpgradeStatus())
+		}
+		fleetTick(t, restarted)
+		assertWaiting()
+		if mode == "unchanged" {
+			// The first cached report is too old for the relearning queue to
+			// accept. It still carries the exact same runtime identity.
+			report.Machine.Fleet.ObservationAgeSeconds = fleetRuntimeFreshFor.Seconds()
+			if _, err := restarted.Checkin(report); err != nil {
+				t.Fatal(err)
+			}
+			assertWaiting()
+			// A successor at the same age becomes fresh once this exact
+			// process teaches the queue its slower delivery cadence.
+			c.Advance(time.Second)
+			report.Machine.HostAvailableMemoryGB = 32
+			if _, err := restarted.Checkin(report); err != nil {
+				t.Fatal(err)
+			}
+			fleetCompleteStartProbe(t, restarted)
+			p := job(t, restarted, probe)
+			if restarted.s.FleetUpgrade.State != "complete" || !h.WorkerDone || h.StartAccepted != probe || p.Attempt != 1 ||
+				p.StartedAt == nil || p.State != "succeeded" || !p.ReleaseConfirmed || p.Session != worker.Session {
+				t.Fatalf("same runtime did not complete through the original probe: %+v", restarted.fleetUpgradeStatus())
+			}
+			return
+		}
+		deadline := stepAt.Add(fleetStepTimeout)
+		c.Advance(deadline.Sub(c.Now()) - time.Nanosecond)
+		fleetTick(t, restarted)
+		assertWaiting()
+		c.Advance(time.Nanosecond)
+		fleetTick(t, restarted)
+		wantFailure, wantReason = "worker_start_proof_unavailable", "no fleet runtime proof"
+	}
+	if restarted.s.FleetUpgrade.State != "stopped" || h.Failure != wantFailure || !strings.Contains(h.Wait, wantReason) || h.WorkerDone ||
+		!cancelled(job(t, restarted, probe)) || restarted.s.HostMaintenance[h.Host].DrainOwner != operation {
+		t.Fatalf("runtime failure did not stop with its proof reason and drain: %+v", restarted.fleetUpgradeStatus())
 	}
 }
 

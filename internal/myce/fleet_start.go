@@ -3,6 +3,8 @@ package myce
 import (
 	"fmt"
 	"slices"
+	"strconv"
+	"strings"
 )
 
 func fleetStartProbeSpec(machine string) Spec {
@@ -100,7 +102,7 @@ func (q *Queue) fleetVerifyStart(h *fleetUpgradeHost) bool {
 	}
 	if reason := q.fleetStartAdmissionReason(m, j); reason != "" {
 		h.Phase, h.Outcome, h.DeferredReason = "deferred", FleetHostDeferred, reason
-		h.Wait = fmt.Sprintf("start probe %s deferred: %s; will revisit after the other hosts", h.StartProbe, reason)
+		h.Wait = fleetStartDeferredWait(h)
 		h.ProgressAt = q.clock.Now()
 		return false
 	}
@@ -113,6 +115,69 @@ func (q *Queue) fleetVerifyStart(h *fleetUpgradeHost) bool {
 	}
 	h.Wait = fmt.Sprintf("waiting for start probe %s on upgraded worker session to start, succeed and release", h.StartProbe)
 	return false
+}
+
+func fleetStartDeferredWait(h *fleetUpgradeHost) string {
+	return fmt.Sprintf("start probe %s deferred: %s; will revisit after the other hosts", h.StartProbe, h.DeferredReason)
+}
+
+// Machine.Fleet is transient. The durable session and start identity still
+// fence a deferred probe while the queue waits for a new proof from that worker.
+func (q *Queue) fleetDeferredStartProofReady(h *fleetUpgradeHost, m *Machine) bool {
+	if reason := q.fleetDeferredRuntimeFailure(h, m); reason != "" {
+		q.fleetStop(h, "worker_start_runtime_changed")
+		h.Wait = reason + "; " + h.Wait
+		return false
+	}
+	if !q.fleetStartProbeValid(h, m, q.s.Jobs[h.StartProbe]) {
+		return false
+	}
+	if q.fleetProofFresh(m.Fleet) {
+		h.Wait = fleetStartDeferredWait(h)
+		return true
+	}
+	gap := q.fleetProofGap(m.Fleet)
+	if q.clock.Now().Sub(h.StepAt) >= fleetStepTimeout {
+		q.fleetStop(h, "worker_start_proof_unavailable")
+		h.Wait = gap + "; " + h.Wait
+		return false
+	}
+	h.Wait = "waiting for the deferred worker's next healthy runtime proof: " + gap
+	return false
+}
+
+func (q *Queue) fleetDeferredRuntimeFailure(h *fleetUpgradeHost, m *Machine) string {
+	if m == nil {
+		return "worker_record_missing"
+	}
+	if m.CapabilityProfile == nil {
+		return "worker_capability_profile_missing"
+	}
+	// The two suffix fields never contain slashes. Match the whole session
+	// even when its identifier contains slashes.
+	runtime, sessionMatches := strings.CutPrefix(h.StartIdentity, m.Session+"/")
+	pid, image, valid := strings.Cut(runtime, "/")
+	if !sessionMatches || !valid || strings.Contains(image, "/") {
+		return "worker_session_changed"
+	}
+	p := m.Fleet
+	if p == nil {
+		return ""
+	}
+	if reason := fleetProofFailure(p); reason != "" {
+		return reason
+	}
+	switch {
+	case p.Session != m.Session:
+		return "proof_session_mismatch"
+	case strconv.Itoa(p.PID) != pid:
+		return "proof_pid_changed"
+	case p.SHA256 != image:
+		return "proof_image_changed"
+	case !q.fleetCurrent(p, m.CapabilityProfile.OS, m.CapabilityProfile.Arch):
+		return "proof_release_mismatch"
+	}
+	return ""
 }
 
 // Deferral never excuses an execution failure, retry or stale runtime fence.

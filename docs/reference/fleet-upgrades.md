@@ -128,7 +128,12 @@ Worker health is followed by `worker_start`: a queue-owned CPU smoke must start,
 succeed and release, or a newly assigned useful job must reach Started on the
 verified replacement process/session/image. The queue snapshots existing attempt
 identities when this check begins; retained attempts cannot pass it by replaying
-Started. The snapshot and pending probe survive queue restart. Ordinary admission
+Started. The snapshot and pending probe survive queue restart. A capacity-deferred
+probe keeps its runtime identity and maintenance policy while the queue waits for
+the worker to report again. The queue may verify other hosts during this wait.
+Revisiting the deferred host and completing the rollout require fresh proof from
+the same process, judged against its proof cadence. The existing worker-start
+step deadline still applies while proof is unavailable. Ordinary admission
 resumes during this stage; no resource/policy bypass or smoke-induced stop is
 allowed. A failed check stops later hosts, cancels only its smoke and restores an
 operation-owned drain when current policy and open production work allow it.
@@ -177,8 +182,9 @@ Apply repairs locally through the authorized owner, then rerun
 | `worker_running_hash_mismatch`, `queue_running_hash_mismatch` | A new process runs other bytes. Compare the running and installed hashes in status; reinstall the release or approve a fixed one. |
 | `worker_update_not_verified`, `queue_update_not_verified` | No healthy new process in 15 minutes. Check the service is online, its updater's receipt (`fleet-update.json` in the state directory) and the service manager. |
 | `worker_start_not_verified` | The upgraded worker did not prove its CPU probe started, succeeded and released within 15 minutes after health passed. Inspect the job ID in `wait` and the `fleet-start-probe` job history, start/custody records and admission holds. Keep existing jobs and checkpoints; fix forward, then rerun. |
+| `worker_start_proof_unavailable` | A deferred worker's healthy runtime proof did not return within the worker-start step budget. Check the missing or stale proof detail in `wait` and restore the worker's check-ins before rerunning. |
 | `worker_start_probe_failed` | The probe failed, was cancelled, retried/lost or executed on another session. Inspect its exact attempt's finding and retained release obligations; rerun only after repair. |
-| `worker_start_runtime_changed` | The verified replacement process/session/image changed before acceptance. Restore healthy runtime evidence and rerun. An old probe never accepts a replacement process. |
+| `worker_start_runtime_changed` | Runtime identity or health contradicted the start check. For a deferred host, `wait` names the failed predicate. Restore healthy runtime evidence and rerun. An old probe never accepts a replacement process. |
 | `worker_start_maintenance_blocked` | An operator-owned drain or disable prevents ordinary probe admission. Keep that policy; its owner must resolve it before rerunning. |
 | `maintenance_changed` | Someone changed the host's maintenance during the update; their policy is kept. Rerun when ready. |
 | `drain_conflict`, `resume_conflict`, `maintenance_unavailable` | The host's maintenance policy changed between read and write. Check `myce host status HOST`, then rerun. |
