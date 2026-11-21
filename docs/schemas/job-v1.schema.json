@@ -3773,6 +3773,10 @@
           "type": "integer",
           "x-contract": "diagnostic"
         },
+        "memory_censored_oom_growth_gb": {
+          "type": "number",
+          "x-contract": "diagnostic"
+        },
         "memory_envelope": {
           "$ref": "#/$defs/JobMemoryEnvelope",
           "x-contract": "diagnostic"
@@ -4287,6 +4291,9 @@
         "refusal": {
           "type": "string"
         },
+        "sizing_inputs": {
+          "$ref": "#/$defs/MemorySizingInputs"
+        },
         "source": {
           "type": "string"
         }
@@ -4785,6 +4792,44 @@
         "reserve_gb",
         "own_growth_gb",
         "host_loss_gb"
+      ],
+      "type": "object"
+    },
+    "MemorySizingInputs": {
+      "properties": {
+        "allowance_gb": {
+          "type": "number"
+        },
+        "constrained_check_host_gb": {
+          "type": "number"
+        },
+        "drift_gb": {
+          "type": "number"
+        },
+        "idle_history_bound_gb": {
+          "type": "number"
+        },
+        "launch_gap_gb": {
+          "type": "number"
+        },
+        "ledger_remainder_gb": {
+          "type": "number"
+        },
+        "projected_remainder_gb": {
+          "type": "number"
+        },
+        "recovery_capacity_gb": {
+          "type": "number"
+        },
+        "slack_gb": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "ledger_remainder_gb",
+        "allowance_gb",
+        "slack_gb",
+        "launch_gap_gb"
       ],
       "type": "object"
     },
