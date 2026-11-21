@@ -126,6 +126,13 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 			q.recordStartRefusal(batch, fence)
 		}
 		rejected = ErrStale
+		if l.Kind == "batch" {
+			boundary := queueLaunchRefused
+			if batch == nil {
+				boundary = launchRPCStale
+			}
+			rejected = &batchLaunchConflict{boundary: boundary}
+		}
 	}
 	err := q.updateRequest(ctx, func() error {
 		q.maintain()
@@ -301,9 +308,16 @@ func (w Worker) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 		StartGate string `json:"start_gate"`
 	}
 	if _, err := w.controlHandshake("/api/workers/launch", l, &reply); err != nil {
-		return fmt.Errorf("%w: %w", errWorkerStartAuthorization, err)
+		err = fmt.Errorf("%w: %w", errWorkerStartAuthorization, err)
+		if l.Kind == "batch" {
+			err = &launchRPCError{err}
+		}
+		return err
 	}
 	if !reply.OK || reply.StartGate != startGateProtocol {
+		if l.Kind == "batch" {
+			return &launchRPCError{errWorkerStartAuthorization}
+		}
 		return errWorkerStartAuthorization
 	}
 	if l.Kind == "batch" && w.batchAdmission != nil {

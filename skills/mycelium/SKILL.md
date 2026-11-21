@@ -607,7 +607,14 @@ can't submit ahead.
 
 ## When a job fails or waits
 
-Use `myce status JOB_ID` for attempt history. An OOM or resource-limit stop
+Use `myce status JOB_ID` for attempt history. For a refused worker start,
+read `execution_cause.launch_refusal` on the exact attempt in `myce status
+--json JOB_ID`. It distinguishes detached custodian startup failure, assignment
+withdrawal, and stale or refused launch RPCs. For an obsolete result the worker
+journal records the boundary even if the queue rejects the outcome. A missing
+field leaves the boundary unknown. See the [status reference](https://github.com/1kuna/mycelium/blob/main/docs/status.md).
+
+An OOM or resource-limit stop
 belongs to the attempt, so it does not skip the machine type as a coverage
 finding. Status shows its memory limit in GiB and available cgroup peak,
 non-reclaimable peak and kernel events (`oom`, `oom_kill`, `oom_group_kill`).

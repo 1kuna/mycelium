@@ -58,6 +58,7 @@ type infrastructureFact struct {
 	Port             string           `json:"port,omitempty"`
 	Group            int              `json:"group,omitempty"`
 	Predicate        string           `json:"predicate,omitempty"`
+	LaunchRefusal    string           `json:"launch_refusal,omitempty"`
 	Admission        *AdmissionDetail `json:"admission,omitempty"`
 	PrelaunchRefused bool             `json:"prelaunch_refused,omitempty"`
 }
@@ -135,7 +136,11 @@ func (s *workerStore) startFailureAt(j Job, kind string, cause error, at time.Ti
 	// from an absent Started report. Persist this positive refusal proof with
 	// the facts so release-only replay carries it too.
 	prelaunch := kind == launchRefused && s.state.CustodyID == "" && s.state.PID == 0 && !s.state.LaunchPending && len(s.state.Groups) == 0 && s.state.Preparation == "" && s.state.Cgroup == ""
-	facts := memberOutcome{Infrastructure: []infrastructureFact{{Kind: kind, At: at, Predicate: launchFailurePredicate(kind, cause), Admission: admissionDetail(cause, j), PrelaunchRefused: prelaunch}}}
+	fact := infrastructureFact{Kind: kind, At: at, Predicate: launchFailurePredicate(kind, cause), Admission: admissionDetail(cause, j), PrelaunchRefused: prelaunch}
+	if prelaunch && fact.Predicate == "launch_authorization" {
+		fact.LaunchRefusal = launchRefusalBoundary(cause)
+	}
+	facts := memberOutcome{Infrastructure: []infrastructureFact{fact}}
 	s.state.LaunchOutcome = fmt.Sprintf("launch-%s-%d.outcome.json", j.ID, j.Attempt)
 	if err := saveWorkerJSON(s.dir, s.state.LaunchOutcome, facts); err != nil {
 		return errors.Join(cause, err)
@@ -277,6 +282,7 @@ func classifyAttemptOutcome(result Result, facts attemptCause) Result {
 			if !fact.At.IsZero() && fact.Predicate != "" {
 				cause := *result.ExecutionCause
 				cause.Predicate = fact.Predicate
+				cause.LaunchRefusal = fact.LaunchRefusal
 				cause.Admission = fact.Admission
 				cause.PrelaunchRefused = fact.PrelaunchRefused
 				result.ExecutionCause = safeRuntimeCause(&cause)
