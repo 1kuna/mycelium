@@ -50,6 +50,14 @@ func TestUploadFilePausedPATCH(t *testing.T) {
 			var accepted []byte
 			patches := 0
 			publicationRaced := false
+			dropConnection := func(w http.ResponseWriter) {
+				conn, _, err := w.(http.Hijacker).Hijack()
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				conn.Close()
+			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
 				if r.Method == "HEAD" {
@@ -95,9 +103,11 @@ func TestUploadFilePausedPATCH(t *testing.T) {
 					accepted = append(accepted, prefix[:n]...)
 					mu.Unlock()
 					time.Sleep(pause)
-					// For the longer pause the first connection must have stalled. Do not
-					// append its unacknowledged buffered bytes after a resume starts.
+					// Keep the accepted prefix and leave the PATCH unacknowledged.
+					// Returning alone can send an implicit 200 if the client has
+					// not yet closed the socket.
 					if pause > time.Second {
+						dropConnection(w)
 						return
 					}
 				}
@@ -110,12 +120,7 @@ func TestUploadFilePausedPATCH(t *testing.T) {
 				next := len(accepted)
 				mu.Unlock()
 				if scenario.lostAck && next == len(body) {
-					conn, _, err := w.(http.Hijacker).Hijack()
-					if err != nil {
-						t.Error(err)
-						return
-					}
-					conn.Close()
+					dropConnection(w)
 					return
 				}
 				w.Header().Set("Upload-Offset", strconv.Itoa(next))
