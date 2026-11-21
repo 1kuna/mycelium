@@ -350,7 +350,12 @@ pending cleanup is not a satisfied policy, even if the result succeeded. Retries
 restage inputs; startup recovers process custody and cleanup. Supporting Linux
 namespace workers with file core routing or the qualified Mycelium core router
 advertising `worker_data_ephemeral_v2` are required; v1 workers cannot run the
-expanded scope. Resumability, custom workdirs (including extension workdirs),
+expanded scope. A refusal or queued-job status naming `worker_data_ephemeral_v2`
+means the worker lacks ephemeral qualification. The reason identifies the
+missing namespace or core requirement when the worker has reported it. For a
+host-policy namespace refusal, see the
+[optional administrator action](https://github.com/1kuna/mycelium/blob/main/docs/native-isolation.md#optional-administrator-action-per-host-apparmor-user-namespaces).
+Resumability, custom workdirs (including extension workdirs),
 program jobs, extension checks, model servers/snapshots, resident model runtimes, diagnostics,
 `keep_on_failure` and alternate output delivery remain refused with
 `job_worker_data_unsupported`. Environment recipes, extension source/assets and
@@ -602,7 +607,14 @@ can't submit ahead.
 
 ## When a job fails or waits
 
-Use `myce status JOB_ID` for attempt history. An OOM or resource-limit stop
+Use `myce status JOB_ID` for attempt history. For a refused worker start,
+read `execution_cause.launch_refusal` on the exact attempt in `myce status
+--json JOB_ID`. It distinguishes detached custodian startup failure, assignment
+withdrawal, and stale or refused launch RPCs. For an obsolete result the worker
+journal records the boundary even if the queue rejects the outcome. A missing
+field leaves the boundary unknown. See the [status reference](https://github.com/1kuna/mycelium/blob/main/docs/status.md).
+
+An OOM or resource-limit stop
 belongs to the attempt, so it does not skip the machine type as a coverage
 finding. Status shows its memory limit in GiB and available cgroup peak,
 non-reclaimable peak and kernel events (`oom`, `oom_kill`, `oom_group_kill`).

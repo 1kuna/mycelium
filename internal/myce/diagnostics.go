@@ -156,6 +156,7 @@ type RuntimeCause struct {
 	PathDiagnostic    *PathDiagnostic            `json:"path_diagnostic,omitempty"`
 	Admission         *AdmissionDetail           `json:"admission,omitempty"`
 	PrelaunchRefused  bool                       `json:"prelaunch_refused,omitempty"`
+	LaunchRefusal     string                     `json:"launch_refusal,omitempty"`
 	Operation         string                     `json:"operation"`
 	Class             string                     `json:"class"`
 	ExitCode          *int                       `json:"exit_code,omitempty"`
@@ -202,7 +203,9 @@ func (c RuntimeCause) String() string {
 	if c.ExitCode != nil {
 		text = fmt.Sprintf("%s (exit %d)", text, *c.ExitCode)
 	}
-	if reason := launchPredicateMessages[c.Predicate]; reason != "" {
+	if reason := launchRefusalMessages[c.LaunchRefusal]; reason != "" {
+		text += "; " + c.LaunchRefusal + ": " + reason
+	} else if reason := launchPredicateMessages[c.Predicate]; reason != "" {
 		text += "; " + c.Predicate + ": " + reason
 	}
 	if d := safeAdmissionDetail(c.Admission); d != nil {
@@ -387,11 +390,29 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 	}
 	out.FileCapacity = nil
 	out.Predicate, out.Reason = "", ""
+	out.LaunchRefusal = ""
 	if e := safeFileCapacity(c); e != nil && c.Operation == "outputs" && (c.Class == "http_error" || c.Class == "limit_exceeded") {
 		out.FileCapacity, out.Predicate = e, c.Predicate
 	}
 	if reason := launchPredicateMessages[c.Predicate]; reason != "" {
 		out.Predicate, out.Reason = c.Predicate, reason
+	}
+	// Keep the existing predicate/class and proof for older queues. This
+	// diagnostic describes the boundary and grants no release authority.
+	local := out.PrelaunchRefused && c.Class == launchRefused && c.Predicate == "launch_authorization"
+	rpc := c.Operation == "start_authorization" && c.Predicate == "launch_authorization"
+	switch c.LaunchRefusal {
+	case custodianStartupFailed, assignmentWithdrawn, localLaunchRefused:
+		if local {
+			out.LaunchRefusal = c.LaunchRefusal
+		}
+	case launchRPCStale, queueLaunchRefused, launchRPCConflict, launchRPCFailed:
+		if rpc {
+			out.LaunchRefusal = c.LaunchRefusal
+		}
+	}
+	if out.LaunchRefusal != "" {
+		out.Reason = launchRefusalMessages[out.LaunchRefusal]
 	}
 	if out.Class != "command_exit" {
 		out.ExitCode = nil
