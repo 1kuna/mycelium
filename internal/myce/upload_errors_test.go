@@ -233,7 +233,11 @@ func TestFilesMissingUploadReconcilesPublication(t *testing.T) {
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
 				pauses := 0
-				c := Client{URL: api.URL, Token: "fixture", Pause: func(context.Context, time.Duration) error {
+				// The fixture synchronously publishes on the server before
+				// returning the simulated stale request. Preserve real HTTP
+				// without a socket deadline racing that fixture operation.
+				transport := fetchTransport(api.Client().Transport.RoundTrip)
+				c := Client{URL: api.URL, Token: "fixture", HTTP: &http.Client{Transport: transport}, Pause: func(context.Context, time.Duration) error {
 					pauses++
 					if outcome == "absent" {
 						cancel()
