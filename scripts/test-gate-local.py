@@ -1360,6 +1360,29 @@ sys.exit(m.main())
             self.assertFalse(receipt.exists())
             self.assertEqual(launch.call_count, 3)  # start, stage, run; no success inference.
 
+    def test_linux_failed_gate_returns_receipt_without_reading_console(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            archive = root / 'source.tar'
+            failures = root / 'linux-failures.txt'
+            with tarfile.open(archive, 'w'):
+                pass
+
+            def run(transport, command, **kwargs):
+                if kwargs.get('heartbeat'):
+                    return 1
+                if command[-1].endswith('/gate-failures.txt'):
+                    kwargs['stdout'].write(b'fixture/pkg: exit 1 (TestA)\n')
+                elif command[-1].endswith('/cleanup.json'):
+                    kwargs['stdout'].write(b'{"identity":"nonce","stopped":true,"status":1}')
+                return 0
+
+            with (patch.object(sys, 'argv', ['gate-linux.py', '--archive', str(archive),
+                    '--failures', str(failures), '--cleanup-id', 'nonce', '--', 'true']),
+                  patch.object(linux.Transport, 'run', run)):
+                self.assertEqual(linux.main(), 1)
+            self.assertEqual(failures.read_text(), 'fixture/pkg: exit 1 (TestA)\n')
+
     def test_linux_staging_has_cancellation_custody_before_first_side_effect(self):
         with tempfile.TemporaryDirectory() as folder:
             archive = Path(folder) / 'source.tar'

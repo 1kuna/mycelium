@@ -99,6 +99,7 @@ class SchedulerTests(unittest.TestCase):
             command = compile.call_args.args[0]
             self.assertEqual(compile.call_count, 1)
             self.assertEqual(command[3:10], ['go', 'test', '-c', '-race', '-vet=off', '-p', '1'])
+            self.assertIn('-json', command)
             self.assertIn(binaries['pkg/tests'][0], command)
             self.assertTrue(compile.call_args.kwargs['check'])
 
@@ -231,8 +232,12 @@ assert set(images) == {'fixture.invalid/gate'}, images
     def test_actual_failure_and_killed_watchdog_cannot_be_masked(self):
         for behavior in ('7', 'killed'):
             with self.subTest(behavior=behavior), tempfile.TemporaryDirectory() as folder:
-                status, output = self.finish(self.launch(Path(folder), [('failure', behavior), ('ok', '0')]))
+                report = Path(folder) / 'failures'
+                with patch.dict(os.environ, GATE_FAILURE_REPORT=str(report)):
+                    status, output = self.finish(self.launch(Path(folder), [('failure', behavior), ('ok', '0')]))
                 self.assertEqual(status, 125 if behavior == 'killed' else 1, output)
+                if behavior == 'killed':
+                    self.assertEqual(report.read_text(), 'failure: watchdog killed by signal SIGKILL\n')
 
     def test_stall_dominates_ordinary_failure_in_final_drain(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -472,10 +472,17 @@ func (w Worker) runModelCustodian(stop context.Context, spool string) error {
 		}
 		bridge = "http://" + net.JoinHostPort(u.Hostname(), fmt.Sprint(ln.Addr().(*net.TCPAddr).Port))
 	}
+	for _, device := range w.Machine.Devices {
+		if device.ID == r.Execution.Device {
+			w.selectedDevice = &device
+			break
+		}
+	}
 	engine := NewModelEngine(r.Prepared, engineDir, w.Clock)
 	if owned, ok := engine.(*LlamaEngine); ok {
 		owned.memoryCeilings, owned.memoryMachine, owned.memorySwapMaxBytes = w.memoryCeilings, w.Machine, w.MemorySwapMaxBytes
 		owned.memoryOOMScore.Store(int32(r.OOMScore))
+		owned.readinessWorker = &w
 	}
 	ctx, cancel := context.WithCancel(stop)
 	defer cancel()
@@ -489,7 +496,7 @@ func (w Worker) runModelCustodian(stop context.Context, spool string) error {
 	publish := func() error {
 		rt.mu.Lock()
 		rt.checkEngineHealth(m)
-		v.Report = ModelReport{Name: r.Original.Name, Device: m.device, Attempt: m.attempt, State: m.state, Error: m.err, InFlight: m.inflight, CallsMeasured: true, RuntimeFailed: m.runtimeFailed}
+		v.Report = ModelReport{Name: r.Original.Name, Device: m.device, Attempt: m.attempt, State: m.state, Error: m.err, InFlight: m.inflight, CallsMeasured: true, RuntimeFailed: m.runtimeFailed, MemoryPeaks: m.memorySnapshot()}
 		v.OOMScore = oomScore
 		if owned, ok := engine.(*LlamaEngine); ok {
 			v.OOMScore = int(owned.memoryOOMScore.Load())

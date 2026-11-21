@@ -295,6 +295,12 @@ acknowledged unload. Failed/cancelled inputs keep their normal isolated result
 and dependency rules. `worker_data: ephemeral` is refused with this opt-in;
 shared server memory and request spools are outside attempt-only cleanup.
 Qualify exact native outputs and load/steady/request memory peaks before production.
+Read `loaded_models[].memory_peaks` in `myce status --jobs recent --json` for
+the engine attempt, host and device. In authenticated `GET /api/models/intervals`, use
+the released interval after unload and match the response’s
+`X-Myce-Model-Request-ID` to its `memory_request` event. Check each window’s
+source, coverage, constraint and unavailability labels before qualifying a
+budget. See the [engine memory contract](https://github.com/1kuna/mycelium/blob/main/docs/reference/models.md#resident-engine-memory-peaks).
 
 ## 6. Inputs
 

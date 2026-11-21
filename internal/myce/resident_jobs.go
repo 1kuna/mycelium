@@ -317,6 +317,9 @@ func (w Worker) startResidentBridge(ctx context.Context, j Job, work string) (ma
 		for k, values := range proxyHeaders(response.Header) {
 			out.Header()[k] = values
 		}
+		if id := response.Header.Get(modelMemoryRequestHeader); id != "" {
+			out.Header().Set(modelMemoryRequestHeader, id)
+		}
 		out.WriteHeader(response.StatusCode)
 		_, _ = io.Copy(out, response.Body)
 	})
