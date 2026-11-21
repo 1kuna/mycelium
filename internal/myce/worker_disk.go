@@ -30,6 +30,11 @@ type DiskVolume struct {
 type DiskReading struct {
 	Volume                string
 	TotalBytes, FreeBytes uint64
+	BlockBytes            uint64
+}
+
+func diskVolumeID(host, volume string) string {
+	return identityHash(struct{ Host, Volume string }{host, volume})
 }
 
 var workerDiskProbe = localDiskReading
@@ -51,7 +56,8 @@ func localDiskReading(path string) (DiskReading, error) {
 		if err != nil {
 			return DiskReading{}, err
 		}
-		return DiskReading{Volume: fmt.Sprint(st.Fsid), TotalBytes: st.Blocks * diskBlockSize(&st), FreeBytes: st.Bavail * diskBlockSize(&st)}, nil
+		block := diskBlockSize(&st)
+		return DiskReading{Volume: fmt.Sprint(st.Fsid), TotalBytes: st.Blocks * block, FreeBytes: st.Bavail * block, BlockBytes: block}, nil
 	}
 }
 
@@ -131,7 +137,7 @@ func (w *Worker) sampleDisks(data, checkpoint string) []DiskVolume {
 		r := observation.reading
 		v := DiskVolume{Roots: []string{root.name}, TotalBytes: r.TotalBytes, FreeBytes: r.FreeBytes, SampledAt: observation.at, SampleIntervalSeconds: interval}
 		if !observation.at.IsZero() {
-			v.ID = identityHash(struct{ Host, Volume string }{hostID(&w.Machine), r.Volume})
+			v.ID = diskVolumeID(hostID(&w.Machine), r.Volume)
 			v.AgeSeconds = max(0, w.Clock.Now().Sub(observation.at).Seconds())
 		}
 		if err != nil {

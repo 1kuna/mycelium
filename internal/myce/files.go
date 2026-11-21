@@ -141,6 +141,7 @@ type FileStore struct {
 	mu                          sync.Mutex // In-memory creations only.
 	collectionMu                sync.Mutex // collection only; never held with q.mu or for I/O.
 	collection                  FileCollectionStatus
+	pressure                    atomic.Pointer[blockedFileStoreWrite]
 	uploadFilesMu               sync.RWMutex
 	creations                   map[string]*uploadCreation
 	allocationGeneration        uint64

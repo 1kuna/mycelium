@@ -171,6 +171,7 @@ type Worker struct {
 	batchMemory                 *atomic.Uint64
 	custodianIsolation          func(string) (string, error)        // Test seam for native manager membership only.
 	custodianAbsent             func(context.Context, string) error // Test seam for exact native manager absence.
+	custodianBirth              func(int) (string, error)           // Test seam for exact detached helper identity.
 }
 type workerFinish struct {
 	result Result
@@ -1454,6 +1455,7 @@ func (w Worker) Run(stop context.Context) error {
 	if err != nil {
 		return err
 	}
+	w.reconcileFinishedCompilerPins(stop, s, stores)
 	modelSession, err := retainedModelSession(s.dir, w.Machine.ID)
 	if err != nil {
 		return err

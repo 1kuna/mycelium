@@ -68,12 +68,25 @@ first until a fresh free-space read meets the current goal. It retains auxiliary
 gate state and leaves the entire cache alone while its use lock or any durable
 pin is held. The publishing worker releases both its own and the detached
 runner's pins after exact release. At startup, it can also reconcile a prior
-runner pin when a saved retired attempt names that exact custodian.
+runner pin when a saved retired attempt names that exact custodian. If the
+parent record is absent, a matching finished custodian result, exact helper
+death, native-manager absence and a matching compiler custody receipt can
+establish release. Active, incomplete and unidentified custody keeps its pin.
 Environment builders use a private compiler cache removed after their helper
 custody clears. Authored `GOCACHE`, sandbox/container caches and historical Go
 caches in the user's default cache directory remain external: report them and
 leave them intact. Changing an arbitrary cache path inside payload code cannot
 make it a managed cache.
+
+When the compiler cache and the queue file store share a filesystem, the
+retention lane also checks the queue's production reserve and its measured
+non-production write shortfall. The queue matches the registered worker
+session and the exact volume before returning a physical free-space target.
+An existing upload allocation contributes only its remaining commitment.
+The worker trims its own Go objects up to the measured shortfall rounded up to
+a filesystem allocation block, checking current free space between removals.
+Cache locks and pins still apply. A configured store allowance or project
+quota can require a separate capacity decision.
 
 `hygiene_collection.disk_budget` reports per-volume allocated Mycelium bytes,
 free/floor/reserved bytes, measured control growth, last-pass physical free-space

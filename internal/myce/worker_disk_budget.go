@@ -90,7 +90,7 @@ type diskBudgetCandidate struct {
 	used  time.Time
 	class diskCacheClass
 	evict func(context.Context) (bool, error)
-	trim  func(context.Context, func() (bool, error)) error
+	trim  func(context.Context, func() (bool, error), uint64) error
 }
 
 type diskCacheClass uint8
@@ -257,7 +257,7 @@ func (b *workerDiskBudget) reclaim(ctx context.Context, volume, path string, nee
 		// A failed proof never permits deletion. A cache comprising independent
 		// objects can trim only enough of them to satisfy this same live goal.
 		if candidate.trim != nil {
-			_ = candidate.trim(ctx, enough)
+			_ = candidate.trim(ctx, enough, 0)
 		} else {
 			_, _ = candidate.evict(ctx)
 		}

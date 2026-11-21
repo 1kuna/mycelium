@@ -57,12 +57,14 @@ func (q *Queue) reserveDeliveryResult(ctx context.Context, r Result) (err error)
 	var pressureStatus FileStoreStatus
 	var pressurePayloads map[string]storedPayload
 	var pressureGrowth uint64
+	var pressureStore *FileStore
 	measured := false
 	defer func() {
 		var refusal *HTTPError
 		if measured && (err == nil || errors.As(err, &refusal) && fileCapacityCode(refusal.Code)) {
 			attemptCtx := context.WithValue(ctx, fileStoreAttemptKey{}, fileStoreAttempt{Execution: r.Execution, Machine: r.Machine, Session: r.Session})
 			q.recordStorageWritePressure(attemptCtx, pressureStatus, pressurePayloads, r.OutputRefs, pressureGrowth, err != nil, r.ID)
+			pressureStore.noteBlockedWrite(attemptCtx, r.OutputRefs, r.ID, err)
 		}
 	}()
 	if err := r.OutputRefs.validate(); err != nil {
@@ -131,7 +133,7 @@ func (q *Queue) reserveDeliveryResult(ctx context.Context, r Result) (err error)
 			}
 			projected[ref.SHA256] = storedPayload{length: uint64(ref.SizeBytes)}
 		}
-		pressureStatus, pressurePayloads, pressureGrowth, measured = status, projected, need, true
+		pressureStore, pressureStatus, pressurePayloads, pressureGrowth, measured = store, status, projected, need, true
 		growth := need
 		need = addDiskBytes(need, q.outputReservations(projected, j.ID))
 		if err := q.fileStoreReserveRefusal(status, need, growth, q.outputReservationsFor(projected, j.ID, true), q.priorityMatch(j.Spec).Tier == "production"); err != nil {
