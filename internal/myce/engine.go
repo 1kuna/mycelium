@@ -66,7 +66,10 @@ func NewModelEngine(m Model, dir string, clock Clock) Engine {
 	if m.Engine == "fake" {
 		return &FakeEngine{}
 	}
-	return &ServerEngine{Dir: dir, Clock: clock}
+	if clock == nil {
+		clock = RealClock{}
+	}
+	return &ServerEngine{Dir: dir, Clock: clock, memoryPeaks: &modelMemoryTracker{clock: clock}}
 }
 
 type LlamaEngine struct {
@@ -74,6 +77,8 @@ type LlamaEngine struct {
 	readinessWorker    *Worker
 	memoryCeilings     *memoryCeilings
 	memoryAttempt      *memoryAttempt
+	memoryPeaks        *modelMemoryTracker
+	stopMemory         func() *AttemptMemoryPeak
 	memoryMachine      Machine
 	memorySwapMaxBytes int64
 
@@ -106,6 +111,14 @@ type LlamaEngine struct {
 func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 	progress := readinessFromContext(ctx)
 	loaded := false
+	if l.memoryPeaks != nil {
+		l.memoryPeaks.begin()
+		defer func() {
+			if !loaded {
+				l.memoryPeaks.stop()
+			}
+		}()
+	}
 	if progress == nil {
 		var finish func(bool)
 		ctx, progress, finish = superviseModelLoad(ctx, m, l.Dir, l.Clock)
@@ -233,14 +246,14 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 	}
 	e = checkLaunchGate(ctx)
 	if e == nil {
+		stopActivity := l.observeReadinessActivity(ctx, progress)
+		defer stopActivity()
 		_, e = writer.Write([]byte("start\n"))
 	}
 	if e != nil {
 		_ = l.Unload()
 		return e
 	}
-	stopActivity := l.observeReadinessActivity(ctx, progress)
-	defer stopActivity()
 	l.url = "http://127.0.0.1:" + strconv.Itoa(port)
 
 	hc := &http.Client{
@@ -275,6 +288,9 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 					return fmt.Errorf("server exited as health became ready: %v%s", l.waitErr, logHint)
 				default:
 					loaded = true
+					if l.memoryPeaks != nil {
+						l.memoryPeaks.ready()
+					}
 					l.startHealthMonitor(health)
 					return nil
 				}
@@ -317,6 +333,10 @@ func (l *LlamaEngine) Request(ctx context.Context, method, path string, headers 
 }
 
 func (l *LlamaEngine) Unload() error {
+	if l.memoryPeaks != nil {
+		l.memoryPeaks.stop()
+	}
+	defer l.finishMemoryObservation()
 	if l.monitorCancel != nil {
 		l.monitorCancel()
 		<-l.monitorDone
@@ -361,6 +381,7 @@ func (l *LlamaEngine) Unload() error {
 	if l.exited != nil {
 		<-l.exited
 	}
+	l.finishMemoryObservation()
 	e = errors.Join(e, stopErr, waitWorkerGroup(l.cmd.Process.Pid, l.Clock), l.memoryAttempt.cleanup(l.Clock))
 	if e == nil {
 		l.memoryAttempt = nil
@@ -376,6 +397,12 @@ func (l *LlamaEngine) Unload() error {
 		l.cmd = nil
 	}
 	return e
+}
+func (l *LlamaEngine) finishMemoryObservation() {
+	if l.stopMemory != nil {
+		l.stopMemory()
+		l.stopMemory = nil
+	}
 }
 func (l *LlamaEngine) runStopCommand(grace context.Context) error {
 	if len(l.stopCommand) > 0 {
@@ -686,6 +713,7 @@ func (rt *modelRuntime) report() ([]ModelReport, float64) {
 				_, report.HealthRevision, report.HealthDegraded = owned.runtimeHealth()
 			}
 		}
+		report.MemoryPeaks = m.memorySnapshot()
 		out = append(out, report)
 		if m.state != "unloaded" && m.state != "failed" {
 			memory += m.model.MemoryGB
@@ -1493,6 +1521,7 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, detached := m.engine.(*modelCustodian)
+	finishMemory := m.trackRequest(w, r.Header.Get(modelMemoryRequestHeader))
 	if detached {
 		m.proxyFlight++
 	} else {
@@ -1516,6 +1545,7 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 			rt.unload(m)
 		}
 	}()
+	defer finishMemory()
 	callCtx, cancel := context.WithTimeout(r.Context(), m.model.requestTimeout())
 	defer cancel()
 	if rt.availability != nil {
@@ -1567,7 +1597,7 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 			requestFailed()
 			return
 		}
-		copyProxyHeaders(w.Header(), res.Header)
+		copyModelWorkerResponseHeaders(w.Header(), res.Header)
 		w.WriteHeader(res.StatusCode)
 		_, _ = w.Write(response)
 		return
@@ -1578,7 +1608,7 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		requestFailed()
 		return
 	}
-	copyProxyHeaders(w.Header(), res.Header)
+	copyModelWorkerResponseHeaders(w.Header(), res.Header)
 	w.WriteHeader(res.StatusCode)
 	for {
 		if n > 0 {

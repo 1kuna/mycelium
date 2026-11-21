@@ -51,8 +51,46 @@ Accepted jobs retain their last duration and eligible memory peaks. Memory
 admission uses those observations with measured uncertainty; wall-time limits
 come only from the job's explicit contract. Native model qualification still
 needs representative load and request peaks, runtime overhead and OS headroom;
-laptop fixtures do not qualify real model capacity. Use the ordinary worker
-telemetry and attempt memory facts described in [status](../status.md).
+laptop fixtures do not qualify real model capacity. Use the engine-attributed
+peaks below together with worker telemetry and the calling job’s attempt facts.
+
+### Resident engine memory peaks
+
+Read `loaded_models[].memory_peaks` in `myce status --jobs recent --json` or
+authenticated `GET /api/status?jobs=recent`. Use the model, machine, device and engine attempt to select
+the right record. `load` covers engine startup through readiness, `steady`
+accumulates samples taken while ready with no routed requests active, and
+`request` is the latest completed activation. Requests include the upstream
+response body and streaming lifetime. An overlapping request window measures
+the whole engine during that call and sets `overlaps_other_requests`.
+
+Each window reports `host` and `device` measurements in GiB, with
+`peak_gb`, `source`, the latest `sampled_at`, `samples`, `complete` and
+`constrained`. `complete` requires at least two readings, no rejected reads,
+and first, last and inter-sample gaps within the existing missed-cycle
+tolerance. Busy time is excluded from idle coverage. Sampling can miss a
+transient spike, including an entire short request. An absent peak carries an
+`unavailable` reason. `pressure_unavailable` marks missing pressure evidence,
+and `constrained` makes the peak a lower bound on unconstrained demand.
+Cgroup events and host pressure can carry forward conservatively within the
+engine attempt.
+
+Linux cgroup host samples cover anonymous, kernel and shared memory. Native
+process RSS is available where the worker supports owned-process observations.
+CUDA and XPU use the available per-process device counters. Metal can expose
+the sampled process footprint beyond RSS, labeled with that source. The
+numbers describe the engine's absolute footprint in the window. On unified
+memory, consider the shared pool and the source before deriving a capacity
+budget. Placement continues to enforce the configured resident model budget
+and its existing live headroom checks. Use representative, complete,
+unconstrained samples to qualify a catalog budget.
+
+Successful routed responses expose `X-Myce-Model-Request-ID`. Match that ID to
+`memory_peaks.request.request_id` on `memory_request` interval events. The
+queue records a request event when it receives the exact worker receipt.
+Interrupted transports can lose the individual receipt; an accepted worker
+report can still carry the latest completed window. Older workers can omit
+`memory_peaks`.
 
 ## Durable model-engine interval history (#663)
 
@@ -71,6 +109,10 @@ A direct cleanup receipt without prior stop intent sets stop at receipt time.
 Class/tier changes use the scheduler's effective identity, including active
 production pins, and produce another event at their transition time, so a model
 promoted or demoted in place remains visible to overlap proofs.
+`memory_load` records the first finished load window. `memory_request` records
+the specific received request window. Accepted release events retain the last
+reported load, steady and request peaks after unload. The [generated intervals
+schema](../schemas/model-intervals-v1.schema.json) covers these optional fields.
 
 Begin with `after=0` and omit `high_water`. Follow `next` as `after`, retaining
 the first page's `high_water`, until `has_more=false`. `limit` is 1..256. Start

@@ -243,7 +243,13 @@ func processGroupResident(out []byte, groups map[int]bool) (uint64, int, error) 
 // waited process. Shared pages count once per process; compression, deliberate
 // session escape and spikes between observations prevent a hard bound. Host pressure rejects this sample's learning, but cannot
 // attribute the cause to this attempt or invalidate other hosts' learned peaks.
+type attemptMemorySampleSink func(start, at time.Time, sample *AttemptMemoryPeak, period time.Duration, device bool)
+
 func (w Worker) observeProcessMemory(groups func() []int, attempts ...*process) func() *AttemptMemoryPeak {
+	return w.observeProcessMemoryWith(groups, nil, attempts...)
+}
+
+func (w Worker) observeProcessMemoryWith(groups func() []int, sink attemptMemorySampleSink, attempts ...*process) func() *AttemptMemoryPeak {
 	var attempt *process
 	if len(attempts) > 0 {
 		attempt = attempts[0]
@@ -254,7 +260,7 @@ func (w Worker) observeProcessMemory(groups func() []int, attempts ...*process) 
 	}
 	guard := learnedMemoryGuard{}
 	probe := w.processMemory
-	footprint := false
+	footprint := sink != nil && w.Machine.GPU == "metal" && probe.OwnedFootprint != nil
 	if attempt != nil && attempt.job.Spec.Needs.cpuOnly() {
 		guard = w.learnedGuard(attempt.job)
 	} else if attempt != nil && w.footprintGuarded(attempt.job) {
@@ -278,6 +284,7 @@ func (w Worker) observeProcessMemory(groups func() []int, attempts ...*process) 
 		worst = *baseline
 	}
 	sample := func(enforce bool) {
+		started := clock.Now()
 		host, pressureErr := readPressure()
 		if pressureErr != nil {
 			host = nil
@@ -314,10 +321,20 @@ func (w Worker) observeProcessMemory(groups func() []int, attempts ...*process) 
 				}
 			}
 		} else if probe.Resident != nil {
-			bytes, members, err = probe.Resident(ids)
+			if sink != nil && attempt != nil {
+				bytes, members, err = readinessProcessResident(probe, attempt.rssRoots(), processBirth)
+			} else {
+				bytes, members, err = probe.Resident(ids)
+			}
 			sampleAt = clock.Now()
 		}
 		if err != nil || members == 0 {
+			if sink != nil && enforce {
+				sink(started, clock.Now(), &AttemptMemoryPeak{PressureUnavailable: !complete}, processMemorySamplePeriod, false)
+				if footprint {
+					sink(started, clock.Now(), &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNoSample}, processMemorySamplePeriod, true)
+				}
+			}
 			growth = processMemoryGrowth{}
 			if attempt != nil {
 				attempt.rssMemory.Store(nil)
@@ -337,6 +354,11 @@ func (w Worker) observeProcessMemory(groups func() []int, attempts ...*process) 
 			// when shared file pages make RSS the larger.
 			host, device := float64(resident)/(1<<30), max(0, gb-float64(resident)/(1<<30))
 			next.HostGB, next.DeviceGB, next.DeviceSource = &host, &device, deviceFootprintSource
+		}
+		if sink != nil && enforce {
+			next.PressureUnavailable = !complete
+			next.Constrained = guard.exceeded || complete && hostPressureEvidence(baseline, &worst, *next.HostGB, w.HostMemoryReserveGB, os.Getpagesize()).Reason != "eligible"
+			sink(started, clock.Now(), next, processMemorySamplePeriod, false)
 		}
 		mu.Lock()
 		peak = sampledMemoryPeak(peak, next)
@@ -404,9 +426,13 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 }
 
 func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func() []int, devicePeriod time.Duration, attempts ...*process) func() *AttemptMemoryPeak {
+	return w.observeAttemptMemoryWith(a, j, groups, devicePeriod, nil, attempts...)
+}
+
+func (w Worker) observeAttemptMemoryWith(a *memoryAttempt, j Job, groups func() []int, devicePeriod time.Duration, sink attemptMemorySampleSink, attempts ...*process) func() *AttemptMemoryPeak {
 	deviceTelemetry := !j.Spec.Needs.cpuOnly() && backendFor(w.Machine.GPU).attemptMemory != nil
 	if a == nil && w.processMemory != nil && groups != nil {
-		return w.observeProcessMemory(groups, attempts...)
+		return w.observeProcessMemoryWith(groups, sink, attempts...)
 	}
 	if a == nil {
 		if deviceTelemetry {
@@ -431,7 +457,7 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 	// commands whose observer is installed just after exec. No baseline means
 	// diagnostic counters only, never permission to shrink a GPU envelope.
 	cudaHost := unifiedCUDA(&w.Machine) && deviceTelemetry && len(w.selectedDevices) <= 1
-	gpuHost := cudaHost || backendFor(w.Machine.GPU).deviceHostMemory && !w.Machine.UnifiedMemory && w.selectedDevice != nil && w.selectedDevice.pciAddress != "" && !j.Spec.Needs.cpuOnly() && len(w.selectedDevices) == 0
+	gpuHost := sink == nil && (cudaHost || backendFor(w.Machine.GPU).deviceHostMemory && !w.Machine.UnifiedMemory && w.selectedDevice != nil && w.selectedDevice.pciAddress != "" && !j.Spec.Needs.cpuOnly() && len(w.selectedDevices) == 0)
 	completeGPUHost := gpuHost && a.hostBaseline != nil && a.rootBaseline != nil
 	hostRejection := ""
 	rejectHost := func(reason string) {
@@ -549,6 +575,7 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 						guard.exceeded = guarded.stopRSS(clock.Now(), roots, evidence)
 					}
 				}
+				started := clock.Now()
 				sample := a.peak()
 				if sample != nil && sample.HostGB != nil {
 					margin := growth.observe(clock.Now(), hostMemoryPeakGB(sample))
@@ -558,12 +585,27 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 				hostSampled = hostSampled || sample != nil && sample.HostGB != nil
 				record(sample)
 				sampleHost(sample)
+				if sink != nil {
+					observation := AttemptMemoryPeak{}
+					if sample != nil {
+						observation = *sample
+					}
+					observation.PressureUnavailable = !pressureKnown
+					if pressureKnown && observation.HostGB != nil {
+						now := clock.Now()
+						elapsed := now.Sub(a.pressureStart)
+						evidence := hostPressureEvidence(a.hostBaseline, &worstHost, *observation.HostGB, w.HostMemoryReserveGB, a.pageSize)
+						observation.Constrained = observation.constrained() || evidence.Reason != "eligible" ||
+							memoryStallPressure(a.hostBaseline.psiTotalUS, worstHost.psiTotalUS, elapsed) || memoryStallPressure(*a.pressureBaseline, groupTotal, elapsed)
+					}
+					sink(started, clock.Now(), &observation, attemptMemorySamplePeriod, false)
+				}
 			}
 		}
 	}()
 	var device <-chan deviceMemoryResult
 	if deviceTelemetry {
-		device = w.observeDeviceMemory(ctx, func() (map[int]bool, map[int]bool, error) {
+		device = w.observeDeviceMemoryWith(ctx, func() (map[int]bool, map[int]bool, error) {
 			ids := map[int]bool{}
 			err := a.processIDs(ids)
 			known := map[int]bool{}
@@ -574,7 +616,7 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 				}
 			}
 			return ids, known, err
-		}, a.fs, devicePeriod, clock, a)
+		}, a.fs, devicePeriod, clock, a, sink)
 	}
 	var once sync.Once
 	return func() *AttemptMemoryPeak {
@@ -933,6 +975,10 @@ type deviceMemoryResult struct {
 // inventory returns exact attempt PIDs and other known attempts' PIDs. Only
 // the former contribute to the peak. The latter are not foreign workload.
 func (w Worker) observeDeviceMemory(ctx context.Context, inventory func() (map[int]bool, map[int]bool, error), fs memoryFS, period time.Duration, clock Clock, a *memoryAttempt, ticks ...<-chan time.Time) <-chan deviceMemoryResult {
+	return w.observeDeviceMemoryWith(ctx, inventory, fs, period, clock, a, nil, ticks...)
+}
+
+func (w Worker) observeDeviceMemoryWith(ctx context.Context, inventory func() (map[int]bool, map[int]bool, error), fs memoryFS, period time.Duration, clock Clock, a *memoryAttempt, sink attemptMemorySampleSink, ticks ...<-chan time.Time) <-chan deviceMemoryResult {
 	result := make(chan deviceMemoryResult, 1)
 	started := clock.Now()
 	go func() {
@@ -962,9 +1008,16 @@ func (w Worker) observeDeviceMemory(ctx context.Context, inventory func() (map[i
 			case <-ctx.Done():
 				return
 			case <-sampleTick:
+				started := clock.Now()
+				report := func(sample *AttemptMemoryPeak) {
+					if sink != nil && ctx.Err() == nil {
+						sink(started, clock.Now(), sample, period, true)
+					}
+				}
 				ids, known, err := inventory()
 				if err != nil {
 					sampling.incomplete = true
+					report(&AttemptMemoryPeak{DeviceUnavailable: deviceMemoryInventory})
 					peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryInventory})
 					continue
 				}
@@ -979,6 +1032,7 @@ func (w Worker) observeDeviceMemory(ctx context.Context, inventory func() (map[i
 				if errors.Is(err, errDeviceMemoryNotReported) {
 					sampling.incomplete = true // Reconciliation is not a driver counter.
 					unreported = true
+					report(&AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNotReported})
 					if !unifiedCUDA(&w.Machine) || a == nil {
 						continue
 					}
@@ -994,10 +1048,15 @@ func (w Worker) observeDeviceMemory(ctx context.Context, inventory func() (map[i
 				if err != nil {
 					sampling.incomplete = true
 					if !errors.Is(err, errAttemptMemoryPending) {
+						report(&AttemptMemoryPeak{DeviceUnavailable: deviceMemoryUnsupported})
 						peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryUnsupported})
 						return
 					}
+					report(&AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNoSample})
 					continue
+				}
+				if !exclusive && source != deviceUnifiedResidentSource {
+					report(&AttemptMemoryPeak{DeviceGB: &gb, DeviceSource: source})
 				}
 				now := clock.Now()
 				sampling.observe(now, gb, period)
