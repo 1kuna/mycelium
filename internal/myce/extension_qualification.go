@@ -72,41 +72,69 @@ func (q *Queue) automaticCheckRetryable(machine string, r ExtensionReport) bool 
 	if !strings.HasPrefix(r.CheckID, "auto-") || r.Qualified || r.CheckState != "failed" {
 		return false
 	}
-	record := q.s.Submissions[submissionDigest("extension-check", r.CheckID)]
-	if record == nil {
-		return false
-	}
-	j := record.Job
-	if j == nil {
-		j = q.s.Jobs[record.JobID]
-	}
+	j := q.qualificationCheckJob(r.CheckID)
 	return j != nil && j.Machine == machine && automaticCheckNoVerdict(j)
 }
 
-// Receipt projections omit cold terminal jobs. Retain only the accepted scalar
-// proof needed by current native reports, never their frozen payload or logs.
-func (q *Queue) qualificationRetryInputs() map[string]*submissionRecord {
+// Receipt projections omit cold terminal jobs. Retain only the accepted
+// facts needed by current native reports, never their frozen payload or logs.
+func (q *Queue) qualificationReportInputs() map[string]*submissionRecord {
 	inputs := map[string]*submissionRecord{}
 	for _, owner := range q.s.Machines {
 		for _, m := range q.machineTargets(owner) {
 			for _, r := range m.ExtensionReports {
-				if !q.automaticCheckRetryable(m.ID, r) || r.CheckState != "failed" {
+				if r.CheckState != "failed" || !strings.HasPrefix(r.CheckID, "auto-") || r.Qualified {
 					continue
 				}
 				key := submissionDigest("extension-check", r.CheckID)
-				record := q.s.Submissions[key]
-				j := record.Job
+				j := q.qualificationCheckJob(r.CheckID)
 				if j == nil {
-					j = q.s.Jobs[record.JobID]
+					continue
 				}
-				c := j.ExecutionCause
-				inputs[key] = &submissionRecord{JobID: j.ID, Job: &Job{ID: j.ID, Machine: j.Machine, State: j.State, Attempt: j.Attempt,
-					StartedAt: j.StartedAt, ReleaseConfirmed: j.ReleaseConfirmed, ExecutionEvidence: safeExecutionEvidence(j.ExecutionEvidence, j.Attempt),
-					ExecutionCause: &RuntimeCause{Operation: c.Operation, Class: c.Class, Predicate: c.Predicate, PrelaunchRefused: c.PrelaunchRefused}}}
+				proof := &Job{ID: j.ID, Machine: j.Machine, State: j.State, Attempt: j.Attempt,
+					StartedAt: j.StartedAt, ReleaseConfirmed: j.ReleaseConfirmed,
+					NativeCheckFailures: j.NativeCheckFailures}
+				proof.Spec.ExtensionCheck = &ExtensionCheckRequest{Automatic: automaticExtensionCheck(j)}
+				if q.automaticCheckRetryable(m.ID, r) {
+					c := j.ExecutionCause
+					proof.ExecutionEvidence = safeExecutionEvidence(j.ExecutionEvidence, j.Attempt)
+					proof.ExecutionCause = &RuntimeCause{Operation: c.Operation, Class: c.Class, Predicate: c.Predicate, PrelaunchRefused: c.PrelaunchRefused}
+				}
+				inputs[key] = &submissionRecord{JobID: j.ID, Job: proof}
 			}
 		}
 	}
 	return inputs
+}
+
+func (q *Queue) qualificationCheckJob(key string) *Job {
+	record := q.s.Submissions[submissionDigest("extension-check", key)]
+	if record == nil {
+		return nil
+	}
+	if record.Job != nil {
+		return record.Job
+	}
+	return q.s.Jobs[record.JobID]
+}
+
+func (q *Queue) qualificationCheckFailure(machine string, r ExtensionReport) *NativeCheckFailure {
+	if !strings.HasPrefix(r.CheckID, "auto-") || r.CheckState != "failed" {
+		return nil
+	}
+	j := q.qualificationCheckJob(r.CheckID)
+	if j == nil || j.State != "failed" || (j.Attempt != 0 && j.Machine != machine) {
+		return nil
+	}
+	if check := automaticExtensionCheck(j); check == nil || extensionReportIdentity(*check) != extensionReportIdentity(r) {
+		return nil
+	}
+	for _, f := range j.NativeCheckFailures {
+		if f.JobID == j.ID && f.Attempt == j.Attempt {
+			return &f
+		}
+	}
+	return &NativeCheckFailure{JobID: j.ID, Attempt: j.Attempt}
 }
 
 // The base key, or a successor whose every predecessor has no native verdict.
@@ -482,16 +510,17 @@ func (w Worker) reconcileExtensionQualification(ctx context.Context, plan Extens
 // compatible variant lacks a native check/baseline or has a failed verdict.
 // Pending preparation, pending or cancelled checks and unknown inventory are
 // the queue's own work and stay waits.
-func (q *Queue) extensionDeadEnd(j *Job) string {
+func (q *Queue) extensionDeadEnd(j *Job) (string, []NativeCheckFailure) {
 	if !j.Spec.extensionJob() || len(j.Extensions) == 0 {
-		return ""
+		return "", nil
 	}
 	for _, name := range j.Spec.AllowedMachines {
 		if q.s.Machines[name] == nil {
-			return "" // a named worker may still join
+			return "", nil // a named worker may still join
 		}
 	}
 	var dead []string
+	var failures []NativeCheckFailure
 	compatible := false
 	fleet := map[string]bool{}
 	for _, owner := range q.s.Machines {
@@ -499,7 +528,7 @@ func (q *Queue) extensionDeadEnd(j *Job) string {
 			continue
 		}
 		if owner.CapabilityProfile == nil {
-			return "" // unknown OS/arch cannot rule out a variant
+			return "", nil // unknown OS/arch cannot rule out a variant
 		}
 		for _, t := range possibleTargets(owner) {
 			fleet[targetLabel(t)] = true
@@ -511,20 +540,24 @@ func (q *Queue) extensionDeadEnd(j *Job) string {
 					continue
 				}
 				compatible = true
-				why := q.qualificationDeadEnd(candidate, e, m, owner)
+				why, failure := q.qualificationDeadEnd(candidate, e, m, owner)
 				if why == "" {
-					return ""
+					return "", nil
 				}
 				dead = append(dead, why)
+				if failure != nil {
+					failures = append(failures, *failure)
+				}
 			}
 		}
 	}
 	if compatible {
 		slices.Sort(dead)
-		return dead[0]
+		slices.SortFunc(failures, func(a, b NativeCheckFailure) int { return strings.Compare(a.JobID, b.JobID) })
+		return dead[0], slices.Compact(failures)
 	}
 	if len(fleet) == 0 {
-		return ""
+		return "", nil
 	}
 	var declared []string
 	for _, e := range j.Extensions {
@@ -535,7 +568,7 @@ func (q *Queue) extensionDeadEnd(j *Job) string {
 			for _, p := range e.platforms() {
 				for label := range fleet {
 					if strings.HasSuffix(label, "/"+p) {
-						return "" // a legacy implementation can serve a known host whose device is absent now
+						return "", nil // a legacy implementation can serve a known host whose device is absent now
 					}
 				}
 				declared = append(declared, "*/*/"+p)
@@ -544,7 +577,7 @@ func (q *Queue) extensionDeadEnd(j *Job) string {
 		for _, v := range e.Variants {
 			label := targetLabel(v.Target)
 			if fleet[label] {
-				return "" // the host is known; its device may report again
+				return "", nil // the host is known; its device may report again
 			}
 			declared = append(declared, label)
 		}
@@ -555,9 +588,9 @@ func (q *Queue) extensionDeadEnd(j *Job) string {
 	}
 	slices.Sort(known)
 	if darwinDeveloperToolsRequired(j) {
-		return "dead end: " + darwinToolsReason + "; action: " + darwinToolsAction
+		return "dead end: " + darwinToolsReason + "; action: " + darwinToolsAction, nil
 	}
-	return fmt.Sprintf("dead end: no registered implementation matches a known host (declared %s; hosts offer %s); action: register a variant for one of the offered targets and resubmit", strings.Join(placementStrings(declared), ", "), strings.Join(known, ", "))
+	return fmt.Sprintf("dead end: no registered implementation matches a known host (declared %s; hosts offer %s); action: register a variant for one of the offered targets and resubmit", strings.Join(placementStrings(declared), ", "), strings.Join(known, ", ")), nil
 }
 
 // Targets a host can offer even while a device is briefly unreported.
@@ -579,24 +612,24 @@ func possibleTargets(owner *Machine) []ExecutionTarget {
 	return out
 }
 
-func (q *Queue) qualificationDeadEnd(j *Job, e Extension, m, owner *Machine) string {
+func (q *Queue) qualificationDeadEnd(j *Job, e Extension, m, owner *Machine) (string, *NativeCheckFailure) {
 	if qualifiedExtension(j, m) != nil {
-		return ""
+		return "", nil
 	}
 	view, ok := e.forMachine(m)
 	if !ok {
-		return ""
+		return "", nil
 	}
 	work, label := j.Spec.workType(), e.Name+"@"+e.Version
 	target := targetLabel(machineTarget(m))
 	if len(view.Check) == 0 {
-		return fmt.Sprintf("dead end: %s declares no native check for %s on %s, so it cannot be qualified; action: add a check command and baselines[%s], register a new version and resubmit", label, work, target, work)
+		return fmt.Sprintf("dead end: %s declares no native check for %s on %s, so it cannot be qualified; action: add a check command and baselines[%s], register a new version and resubmit", label, work, target, work), nil
 	}
 	if _, ok := view.baseline(work, m.GPU); !ok {
-		return fmt.Sprintf("dead end: %s declares no native baseline for %s on %s, so it cannot be qualified; action: add baselines[%s], register a new version and resubmit", label, work, target, work)
+		return fmt.Sprintf("dead end: %s declares no native baseline for %s on %s, so it cannot be qualified; action: add baselines[%s], register a new version and resubmit", label, work, target, work), nil
 	}
 	if !q.inventoryFresh(owner) {
-		return ""
+		return "", nil
 	}
 	// The queue's exact native check needs the variant's resource floors too.
 	// Compare permanent capacity, never another job's current reservations.
@@ -613,7 +646,7 @@ func (q *Queue) qualificationDeadEnd(j *Job, e Extension, m, owner *Machine) str
 			}
 		}
 		if !capable {
-			return "dead end: no known host can fit the native check's resource requirements; action: reduce its resource requirements or provide a capable host and resubmit"
+			return "dead end: no known host can fit the native check's resource requirements; action: reduce its resource requirements or provide a capable host and resubmit", nil
 		}
 	}
 	for _, r := range m.ExtensionReports {
@@ -622,9 +655,9 @@ func (q *Queue) qualificationDeadEnd(j *Job, e Extension, m, owner *Machine) str
 		}
 		auto := strings.HasPrefix(r.CheckID, "auto-")
 		if auto && r.CheckState == "failed" && !q.automaticCheckRetryable(m.ID, r) || !auto && r.CheckID != "" && strings.HasPrefix(r.Reason, "check failed") {
-			return fmt.Sprintf("dead end: the native check for %s failed on %s (%s); action: fix the implementation or its check, register a new version and resubmit", label, hostID(m), r.Reason)
+			return fmt.Sprintf("dead end: the native check for %s failed on %s (%s); action: fix the implementation or its check, register a new version and resubmit", label, hostID(m), r.Reason), q.qualificationCheckFailure(m.ID, r)
 		}
-		return ""
+		return "", nil
 	}
-	return ""
+	return "", nil
 }

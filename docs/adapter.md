@@ -357,6 +357,28 @@ host/device pins from future authored submissions and resolve again. Genuine
 hardware/validation restrictions keep their `requirement_reasons`. Existing
 accepted work is not cancelled or rewritten to move it.
 
+#### Report a qualification error
+
+A check can write one JSON object on its own log line before exiting nonzero.
+Keep that line within 512 bytes and near the end of the failing attempt's log.
+Mycelium reads the last valid record within its bounded log tail. For example
+
+```json
+{"code":"native_stage_failed","exception_type":"ModuleNotFoundError","missing_module":"example.renderer"}
+```
+
+`code` is required. Use a lowercase identifier of at most 64 characters
+starting with a letter, with digits and underscores allowed after that.
+`exception_type` and `missing_module` are optional dotted identifiers of at
+most 128 characters. Each component starts with an ASCII letter or underscore
+and can also contain digits. Put only public diagnostic identifiers in these
+fields. Other fields and raw log text stay in the check log.
+
+When the recorded failure blocks useful work, its status names the automatic
+check job and attempt with any available diagnostic fields. Follow the
+`myce logs CHECK_ID` hint, fix and register a new implementation version, then
+resubmit a failed useful job with a new key.
+
 ### Require full Xcode and the iOS Simulator SDK
 
 Use the existing entry qualification contract, which also works before workers

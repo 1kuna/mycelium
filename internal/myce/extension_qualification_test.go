@@ -57,6 +57,20 @@ func reconcileQualification(t *testing.T, w Worker, plan ExtensionQualificationP
 	}
 }
 
+func assertNativeCheckFinding(t *testing.T, text, checkID string) {
+	t.Helper()
+	for _, part := range []string{checkID, "attempt 1", "native_stage_failed", "ModuleNotFoundError", "example.stage"} {
+		if !strings.Contains(text, part) {
+			t.Fatalf("qualification finding missing %q: %s", part, text)
+		}
+	}
+	for _, part := range []string{"private-value", "Traceback", "/private/source.py", "bad/path"} {
+		if strings.Contains(text, part) {
+			t.Fatalf("qualification finding exposed %q: %s", part, text)
+		}
+	}
+}
+
 func TestExtensionFirstDemandQualification(t *testing.T) {
 	t.Run("cold adoption accepted comparison and warm evidence", func(t *testing.T) {
 		q, w, e, demand, prepare, plans := qualificationFixture(t)
@@ -184,6 +198,15 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 				if err := q.Started(result(assigned, false)); err != nil {
 					t.Fatal(err)
 				}
+				for _, text := range []string{
+					"{\"code\":\"native_stage_failed\",\"exception_type\":\"ModuleNotFoundError\",",
+					"\"missing_module\":\"example.stage\",\"stderr\":\"private-value\"}\nTraceback: /private/source.py\n",
+					"{\"code\":\"bad/path\",\"missing_module\":\"ignored\"}\n",
+				} {
+					if err := q.AppendLog(LogChunk{Result: result(assigned, false), Text: text}); err != nil {
+						t.Fatal(err)
+					}
+				}
 				finish(t, q, assigned, false)
 			case "prelaunch refusal", "unproven refusal", "stale refusal":
 				r := result(assigned, false)
@@ -261,7 +284,8 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					action, source := nativeFailureAction, nativeFailureSource
+					action := "read `myce logs " + assigned.ID + "`, then fix the implementation or check, register a new version, and resubmit with a new key"
+					source := nativeFailureSource
 					if outcome == "prelaunch refusal" {
 						action, source = "wait for the automatic retry", "accepted release and exact-attempt execution evidence"
 						if report.Hold == nil || report.Hold.Kind != "native_qualification" || !strings.Contains(report.Hold.Reason, "refused before launch") {
@@ -269,6 +293,9 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 						}
 					}
 					assertCompatibilityAction(t, q, demand.ID, report, action, source)
+					if outcome == "failed" {
+						assertNativeCheckFinding(t, report.Hold.Reason, assigned.ID)
+					}
 				}
 				var successor *ExtensionQualificationPlan
 				for _, offered := range check(t, q, w.Machine, nil).ExtensionQualificationPlan {
@@ -295,9 +322,20 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 						if got := job(t, q, id); got.State != "failed" || got.DiagnosticCode != deadEndWait || !strings.Contains(got.Reason, "native check") || !strings.Contains(got.Reason, "action: ") {
 							t.Fatal("failed check left its useful job waiting", got.Spec.Name, got.State, got.Reason)
 						}
-						got, err := q.jobSnapshot(id)
-						if err != nil || got.Finding == nil || got.Finding.Action != nativeFailureAction || !strings.Contains(got.Finding.What, nativeFailureSource) {
+						got, err := w.Client.GetJob(context.Background(), id)
+						if err != nil || got.Finding == nil || !strings.Contains(got.Finding.Action, "myce logs "+assigned.ID) || !strings.Contains(got.Finding.What, nativeFailureSource) {
 							t.Fatalf("terminal status lost its qualification action: %+v (%v)", got.Finding, err)
+						}
+						if outcome == "failed" {
+							assertNativeCheckFinding(t, JobReason(got), assigned.ID)
+							if len(got.NativeCheckFailures) != 1 || got.NativeCheckFailures[0] != (NativeCheckFailure{JobID: assigned.ID, Attempt: assigned.Attempt, Code: "native_stage_failed", ExceptionType: "ModuleNotFoundError", MissingModule: "example.stage"}) {
+								t.Fatalf("GET lost typed qualification evidence: %+v", got.NativeCheckFailures)
+							}
+							states, err := w.Client.WaitBatch(context.Background(), []string{id}, nil, 0)
+							if err != nil || len(states.Jobs) != 1 || states.Jobs[0].State != "failed" {
+								t.Fatalf("wait missed failed job: %+v (%v)", states, err)
+							}
+							assertNativeCheckFinding(t, states.Jobs[0].Finding.Text(), assigned.ID)
 						}
 					}
 				} else {

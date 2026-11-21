@@ -456,7 +456,7 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 					s.Submissions[key] = r
 				}
 			}
-			for key, r := range q.qualificationRetryInputs() {
+			for key, r := range q.qualificationReportInputs() {
 				s.Submissions[key] = r
 			}
 		}

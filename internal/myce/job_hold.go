@@ -359,8 +359,14 @@ func (q *Queue) nativeCheckProgress(e Extension, work string, m *Machine, resolv
 			releasedRefusal = releasedRefusal || r.CheckState == "failed"
 			continue
 		}
-		h := withAction(newHold("no_eligible_host", ""), ownerConsumer, nativeFailureAction)
-		h.Reason = "no eligible host can currently receive a native check; " + nativeFailureReason
+		reason, action := nativeFailureReason, nativeFailureAction
+		if failure := q.qualificationCheckFailure(m.ID, r); failure != nil {
+			var evidence string
+			evidence, action = nativeCheckFailureText([]NativeCheckFailure{*failure})
+			reason += ": " + evidence
+		}
+		h := withAction(newHold("no_eligible_host", ""), ownerConsumer, action)
+		h.Reason = "no eligible host can currently receive a native check; " + reason
 		return holdSource(h, nativeFailureSource), true, false
 	}
 	reason, source := "native qualification on "+host+" is waiting for preparation or dispatch eligibility; no check has been submitted", "worker preparation and check admission"

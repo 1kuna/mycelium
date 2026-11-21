@@ -718,9 +718,9 @@ func (g *readGeneration) liveInputs(ctx context.Context) (state, error) {
 	return g.nativeCheckInputs(ctx, g.liveState)
 }
 
-// Failed checks referenced by current inventory may carry no-execution proof.
-// Fetch only those immutable answers, outside q.mu, rather than decoding the
-// retained history for every queued receipt. The maps in liveState stay shared.
+// Fetch failed checks referenced by current inventory for failure diagnostics
+// and no-execution proof. Decode only those immutable answers, outside q.mu.
+// The maps in liveState stay shared.
 func (g *readGeneration) nativeCheckInputs(ctx context.Context, s state) (state, error) {
 	var extra map[string]*submissionRecord
 	visit := func(reports []ExtensionReport) error {
@@ -752,7 +752,7 @@ func (g *readGeneration) nativeCheckInputs(ctx context.Context, s state) (state,
 					return err
 				}
 			}
-			if automaticCheckNoVerdict(answer.Job) {
+			if answer.Job != nil && answer.Job.State == "failed" {
 				if extra == nil {
 					extra = map[string]*submissionRecord{}
 				}
