@@ -317,32 +317,70 @@ func TestFileReleaseStalePlanAndPublicationGrace(t *testing.T) {
 	if p.ID != fresh.ID || p.ReclaimableBytes != ref.SizeBytes {
 		t.Fatal("grace aging staled the reviewed plan", p)
 	}
+	if err := c.HasFile(context.Background(), ref); err != nil {
+		t.Fatal(err)
+	}
+	_, err := releaseApply(q, p)
+	releaseCode(t, err, "file_release_stale")
+	if job(t, q, j.ID).FilesExpired {
+		t.Fatal("republished collection candidate expired under a stale plan")
+	}
+	p = releasePlan(t, q, fresh.Selection)
 	other := spec("experiment")
 	other.Project = "other"
 	other.Files = FileManifest{"new": ref}
 	submit(t, q, other)
-	_, err := releaseApply(q, p)
+	_, err = releaseApply(q, p)
 	releaseCode(t, err, "file_release_stale")
 	if job(t, q, j.ID).FilesExpired {
 		t.Fatal("stale plan mutated expiry")
 	}
-	p = releasePlan(t, q, fresh.Selection)
-	if err = c.HasFile(context.Background(), ref); err != nil {
+}
+
+func TestFileReleaseSharedPublicationKeepsReviewedPlan(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	a, _, empty := releaseTerminal(t, q, c, "")
+	b, _, shared := releaseTerminal(t, q, c, "shared")
+	other := spec("experiment")
+	other.Project = "other"
+	other.Files = FileManifest{"empty": empty, "shared": shared}
+	kept := submit(t, q, other)
+	clock.Advance(filePublicationGrace + time.Second)
+	p := releasePlan(t, q, releaseSelection(a, b))
+	for _, blob := range p.Blobs {
+		if blob.CollectionEligible || blob.PublicationProtected {
+			t.Fatalf("want a referenced blob outside publication grace: %+v", blob)
+		}
+	}
+	for _, ref := range []FileRef{empty, shared} {
+		if err := c.HasFile(context.Background(), ref); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refreshed := releasePlan(t, q, p.Selection)
+	for i, blob := range refreshed.Blobs {
+		if !blob.PublicationProtected || !blob.ModifiedAt.After(p.Blobs[i].ModifiedAt) {
+			t.Fatalf("HEAD did not refresh the publication: %+v", blob)
+		}
+	}
+	if refreshed.ID != p.ID || refreshed.ReclaimableBytes != 0 {
+		t.Fatal("republishing shared content changed the reviewed plan", refreshed)
+	}
+	if _, err := releaseApply(q, p); err != nil {
 		t.Fatal(err)
 	}
-	_, err = releaseApply(q, p)
-	releaseCode(t, err, "file_release_stale")
-	// Freshly reviewed zero-byte plans can expire selected identities while other
-	// references/publication grace keep the shared bytes safe.
-	p = releasePlan(t, q, fresh.Selection)
-	if _, err = releaseApply(q, p); err != nil {
+	if !job(t, q, a.ID).FilesExpired || !job(t, q, b.ID).FilesExpired || job(t, q, kept.ID).FilesExpired {
+		t.Fatal("apply did not expire precisely the selected jobs")
+	}
+	clock.Advance(filePublicationGrace + time.Second)
+	if err := q.reclaimPublishedFiles(); err != nil {
 		t.Fatal(err)
 	}
-	if err = q.reclaimPublishedFiles(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = os.Stat(q.files.blob(ref)); err != nil {
-		t.Fatal(err)
+	for _, ref := range []FileRef{empty, shared} {
+		if _, err := os.Stat(q.files.blob(ref)); err != nil {
+			t.Fatal("shared content was not preserved", err)
+		}
 	}
 }
 
@@ -425,9 +463,47 @@ func TestFileReleaseAPIGraceAgingAndTypedRefusals(t *testing.T) {
 	}
 	refusal(call("/api/files/release/apply", FileReleaseApply{Selection: plan.Selection, PlanID: plan.ID, AcceptExpiry: true}, nil), "file_release_protected")
 	var he *HTTPError
-	if err := call("/api/files/release/apply", FileReleaseApply{Selection: plan.Selection, PlanID: plan.ID}, nil); !errors.As(err, &he) || he.Code != "file_release_invalid" || he.Message != rejectionMessages["file_release_invalid"] {
+	if err := call("/api/files/release/apply", FileReleaseApply{Selection: plan.Selection, PlanID: plan.ID}, nil); !errors.As(err, &he) || he.Status != 400 || he.Code != "file_release_invalid" || he.Message != "review a plan and explicitly accept expiry before applying" {
 		t.Fatalf("want typed file_release_invalid, got %v", err)
 	}
+}
+
+func TestFileReleaseAPIPlanRefusalNamesFailedCheck(t *testing.T) {
+	q, _ := fixture(t)
+	c := retentionClient(t, q)
+	a, _, _ := releaseTerminal(t, q, c, "valid")
+	b, _, ref := releaseTerminal(t, q, c, "unreadable")
+	plan := func(selection FileReleaseSelection) (FileReleasePlan, error) {
+		var p FileReleasePlan
+		err := c.Call(context.Background(), "POST", "/api/files/release/plan", selection, &p)
+		return p, err
+	}
+	refusal := func(selection FileReleaseSelection, message string) {
+		t.Helper()
+		_, err := plan(selection)
+		var he *HTTPError
+		if !errors.As(err, &he) || he.Status != 400 || he.Code != "file_release_invalid" || he.Message != message {
+			t.Fatalf("want a sanitized 400 with %q, got %v", message, err)
+		}
+	}
+	refusal(FileReleaseSelection{Project: "owner"}, "release requires a project and explicit job IDs")
+	const unavailable = "selected job is unavailable or belongs to another project"
+	refusal(FileReleaseSelection{Project: "other", Jobs: []string{a.ID}}, unavailable)
+	refusal(FileReleaseSelection{Project: "other", Jobs: []string{"unknown"}}, unavailable)
+
+	path := q.files.blob(ref)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	selection := releaseSelection(a, b)
+	p, err := plan(selection)
+	if err != nil || len(p.Blobs) != 2 || !slices.ContainsFunc(p.Blobs, func(b FileReleaseBlob) bool { return b.SHA256 == ref.SHA256 && !b.Present }) {
+		t.Fatalf("absent content should be reported in a successful plan: %+v, %v", p, err)
+	}
+	if err = os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	refusal(selection, "stored release content is not a regular file")
 }
 
 func TestFileReleaseReferenceChangeDuringCommit(t *testing.T) {
