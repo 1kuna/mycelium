@@ -7,11 +7,12 @@ import (
 	"time"
 )
 
-// Keep the most recent physically refused write as demand evidence. Attempt
-// and input-claim owners can be checked again. A preflight with no durable
-// owner contributes to one fresh, co-located pressure measurement.
+// A smaller retry must not displace a larger blocked write before hygiene
+// sees it. Revalidate against current allocations and ownership at the poll.
+// A preflight without a durable owner can supply at most one measured trim.
 type blockedFileStoreWrite struct {
 	at         time.Time
+	growth     uint64
 	files      FileManifest
 	attempt    fileStoreAttempt
 	claim      string
@@ -36,8 +37,13 @@ func (s *FileStore) noteBlockedWrite(ctx context.Context, files FileManifest, ex
 	if attempt.ID == "" && submission.Project == "" {
 		return
 	}
-	demand := &blockedFileStoreWrite{at: e.ObservedAt, files: maps.Clone(files), attempt: attempt, claim: claim, submission: submission, exclude: exclude}
-	for old := s.pressure.Load(); old == nil || !old.at.After(demand.at); old = s.pressure.Load() {
+	demand := &blockedFileStoreWrite{at: e.ObservedAt, growth: e.GrowthBytes, files: maps.Clone(files), attempt: attempt, claim: claim, submission: submission, exclude: exclude}
+	for {
+		old := s.pressure.Load()
+		if old != nil && (old.growth > demand.growth ||
+			old.growth == demand.growth && old.at.After(demand.at)) {
+			return
+		}
 		if s.pressure.CompareAndSwap(old, demand) {
 			return
 		}
@@ -92,14 +98,17 @@ func (q *Queue) localFileStorePressure(ctx context.Context, machine, session, vo
 		return workerFileStorePressure{}
 	}
 	need := q.storeNeedWithReserve(payloads, 0, "")
-	if demand != nil && growth > 0 && q.blockedFileStoreWriteStillOrdinary(ctx, demand, growth) {
-		// A preflight without a durable owner can authorize a single bounded
-		// trim. A new refusal supplies fresh evidence if the submitter returns.
-		if demand.attempt.ID != "" || demand.claim != "" || store.pressure.CompareAndSwap(demand, nil) {
-			separateWrite := q.storeNeedWithReserve(projected, growth, demand.exclude)
-			if separateWrite <= status.allowanceFree {
-				need = max(need, separateWrite)
-			}
+	if demand != nil {
+		var writeNeed uint64
+		if growth > 0 && q.blockedFileStoreWriteStillOrdinary(ctx, demand, growth) {
+			writeNeed = q.storeNeedWithReserve(projected, growth, demand.exclude)
+		}
+		if writeNeed <= status.volumeFree || writeNeed > status.allowanceFree {
+			// Retire demand that has arrived, fits, or can no longer justify
+			// physical relief so it cannot mask a later smaller refusal.
+			store.pressure.CompareAndSwap(demand, nil)
+		} else if demand.attempt.ID != "" || demand.claim != "" || store.pressure.CompareAndSwap(demand, nil) {
+			need = max(need, writeNeed)
 		}
 	}
 	if need > status.allowanceFree || need <= status.volumeFree {
