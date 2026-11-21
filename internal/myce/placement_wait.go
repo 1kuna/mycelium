@@ -14,6 +14,8 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 		return newHold(memoryEvidenceRecovering, why)
 	}
 	var reasons []string
+	var ephemeralRefusals []string
+	targets := 0
 	// One kind when every blocked target agrees; mixed causes are capacity.
 	kinds := map[string]bool{}
 	specific := false
@@ -45,6 +47,7 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 			if unrelated {
 				continue
 			}
+			targets++
 			var blocked []string
 			block := func(kind, why string) {
 				blocked = append(blocked, why)
@@ -57,7 +60,11 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 				block("capability", targetFitReason("tools", candidate, m))
 			}
 			if !nativeNetworkFits(candidate, m) {
-				block("capability", targetFitReason("native network isolation", candidate, m))
+				reason := targetFitReason("native network isolation", candidate, m)
+				block("capability", reason)
+				if candidate.Spec.ephemeral() {
+					ephemeralRefusals = append(ephemeralRefusals, reason)
+				}
 			}
 			if why := q.sharedHostAdmissionRefusal(candidate, m); why != "" {
 				block("capability", why)
@@ -127,6 +134,12 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 		// Preserve authored placement context when a pinned host's temporary
 		// blocker is more specific than the ordinary allowed-machine wait.
 		reason = "waiting for allowed machines: " + strings.Join(j.Spec.AllowedMachines, ", ") + "; " + reason
+	}
+	if len(ephemeralRefusals) > 0 && len(ephemeralRefusals) == targets {
+		h := newHold(ephemeralIsolationHold, reason)
+		slices.Sort(ephemeralRefusals)
+		h.Reason = strings.Join(slices.Compact(ephemeralRefusals), "; ")
+		return h
 	}
 	kind := "capacity"
 	if len(kinds) == 1 {

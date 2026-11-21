@@ -508,10 +508,10 @@ func TestEphemeralPlacementRefusalAndWaitReason(t *testing.T) {
 			api := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 			defer api.Close()
 			got, err := (Client{URL: api.URL, Token: "test"}).GetJob(context.Background(), j.ID)
-			if err != nil || got.Hold == nil || got.State != "queued" {
+			if err != nil || got.Hold == nil || got.Hold.Kind != ephemeralIsolationHold || got.State != "queued" {
 				t.Fatalf("expected queued job with a hold, got %+v, %v", got, err)
 			}
-			assertReason("job GET", got.Hold.FullText())
+			assertReason("job GET", got.Reason)
 			assertReason("myce status", JobReason(got))
 		})
 	}

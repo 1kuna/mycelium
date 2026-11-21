@@ -301,7 +301,7 @@ func (q *Queue) statusWaitingReason(j *Job) string {
 		}
 		return reason
 	}
-	if j.Hold != nil && j.Hold.Kind == "native_qualification" {
+	if j.Hold != nil && (j.Hold.Kind == "native_qualification" || j.Hold.Kind == ephemeralIsolationHold) {
 		return j.Hold.Reason
 	}
 	return q.statusWaitingReasonDetail(j)

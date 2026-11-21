@@ -58,6 +58,7 @@ func (h Hold) operatorAction() bool { return h.Owner == ownerOperator }
 
 const (
 	hostMaintenanceJobHold = "host_maintenance"
+	ephemeralIsolationHold = "ephemeral_isolation"
 
 	ownerQueue    = "queue"
 	ownerOperator = "operator"
@@ -108,6 +109,7 @@ var holdKinds = map[string]holdKind{
 	"shared_input_unreported":  {ownerQueue, "waiting for workers to report shared-input cache capacity", "an eligible worker reports its cache capacity", "wait; nothing to do"},
 	"extension":                {ownerConsumer, "no eligible host has a qualified extension for this work", "an extension is installed and qualified on an eligible host", "register an implementation that covers an eligible host (myce portability); the queue runs the native check to qualify it"},
 	"capability":               {ownerConsumer, "no eligible host has a required capability", "a host with the capability is eligible", "drop the capability requirement, or add a capable host"},
+	ephemeralIsolationHold:     {ownerOperator, "no eligible host qualifies for ephemeral worker data", "an eligible worker reports qualified ephemeral isolation", "ask the worker operator to qualify an eligible host"},
 	"no_eligible_host":         {ownerConsumer, "no host can run this job right now", "an eligible host with enough capacity is online", "check the job's needs and allowed machines"},
 	"waiting_for_worker":       {ownerQueue, "waiting for a worker to take this job", "an eligible worker checks in", "wait; nothing to do"},
 	"model_engine":             {ownerQueue, "waiting for a model engine to recover", "the model engine on an eligible worker is ready", "wait; check the named worker if this persists"},
