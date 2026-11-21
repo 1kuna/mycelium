@@ -188,7 +188,7 @@ func (w Worker) startCustodian(ctx context.Context, s *workerStore, j Job) (*pro
 	}
 	// No token in arguments, environment or durable launch records. The helper
 	// reads the same private installed configuration as the ordinary service.
-	if err := launchCustodian(ctx, *w.ServiceConfig, dir, id); err != nil {
+	if err := launchAttemptCustodian(ctx, *w.ServiceConfig, dir, id, Execution{ID: j.ID, Attempt: j.Attempt}); err != nil {
 		return nil, fmt.Errorf("%w: detached attempt launch unconfirmed: %v", errWorkerCheckpoint, err)
 	}
 	p, err := w.adoptCustodian(s)
@@ -668,15 +668,19 @@ func (w Worker) runCustodian(stop context.Context) error {
 
 // Only the publishing worker retires control records, after exact release and
 // result acknowledgement. Ordinary spool receipts retain the attempt history.
-func cleanupCustodian(dir, id string) {
+func cleanupCustodian(dir, id string, result Result) {
 	if !validCustodianID(id) {
 		return
 	}
-	retireCustodian(id)
+	keepLogs := retireAttemptCustodian(dir, id, result)
 	for _, kind := range []string{"request", "snapshot", "state", "control", "ledger", "gate", "gate-receipt"} {
 		_ = os.Remove(filepath.Join(dir, custodianName(id, kind)))
 	}
-	for _, suffix := range []string{".plist", ".log", ".lock"} {
+	suffixes := []string{".plist", ".lock"}
+	if !keepLogs {
+		suffixes = append(suffixes, ".log", ".stderr")
+	}
+	for _, suffix := range suffixes {
 		_ = os.Remove(filepath.Join(dir, "custodian-"+id+suffix))
 	}
 }
