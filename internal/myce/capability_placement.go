@@ -188,7 +188,8 @@ func (q *Queue) retryOOM(j *Job) {
 			j.MemoryCensoredOOMGrowthGB = &growth
 			// The cgroup ceiling includes slack and, on unified hosts, the
 			// device reservation. Advance only the host part of that vector.
-			q.retryHostOOMWithFloor(j, j.Spec.Needs.HostMemoryGB+minimumHostMemoryGB, !bounded)
+			overshoot := max(0, *peak.CgroupGB-j.MemoryEnvelope.HostGB)
+			q.retryHostOOMWithFloor(j, j.Spec.Needs.HostMemoryGB+overshoot+minimumHostMemoryGB, !bounded)
 			return
 		}
 		j.MemoryCensoredOOMGrowthGB = nil
@@ -333,7 +334,7 @@ func censoredHostOOMPeak(j *Job) *AttemptMemoryPeak {
 	}
 	// The worker rounds memory.max down to a kernel page. Accept that
 	// rounding interval without interpreting lower member caps as host OOMs.
-	if *p.CgroupGB >= e.HostGB-minimumHostMemoryGB && *p.CgroupGB <= e.HostGB {
+	if *p.CgroupGB >= e.HostGB-minimumHostMemoryGB {
 		return p
 	}
 	return nil

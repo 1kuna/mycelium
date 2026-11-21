@@ -172,6 +172,11 @@ func TestCensoredHostOOMRequiresMatchingCeilingAndAttempt(t *testing.T) {
 	if censoredHostOOMPeak(&j) != peak {
 		t.Fatal("kernel page rounding hid host ceiling evidence")
 	}
+	above := ceiling + 2*minimumHostMemoryGB
+	peak.CgroupGB = &above
+	if censoredHostOOMPeak(&j) != peak {
+		t.Fatal("overshoot hid host ceiling evidence")
+	}
 	peak.Events = &MemoryEventCounts{Max: 1}
 	if censoredHostOOMPeak(&j) != nil {
 		t.Fatal("ceiling pressure without kernel OOM selected recovery")
