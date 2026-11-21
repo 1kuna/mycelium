@@ -109,6 +109,10 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 	instance := f.String("instance", "", "Linux worker instance")
 	root := f.String("root", "", "installation root")
 	dry := f.Bool("dry-run", false, "print plan without installing")
+	var installedReleaseManifest string
+	if action == "install" && role == "worker" {
+		f.StringVar(&installedReleaseManifest, "installed-release-manifest", "", "signed manifest for the installed release when its executable mapping is private")
+	}
 	redetect := f.Bool("redetect", false, "re-detect hardware without changing saved selectors or per-device budgets")
 	f.Bool("force", false, "deprecated compatibility option; explicit flags authorize changes")
 	f.BoolFunc("local-disable-receipts", "retired; reinstall without this option", func(string) error { return myce.ErrLegacyLocalDisableReceipts })
@@ -212,6 +216,9 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 		return err
 	} else if explicit["config"] {
 		return errors.New("--config must select an existing installation; use --root for a fresh install")
+	}
+	if explicit["installed-release-manifest"] && (installed == nil || installedReleaseManifest == "") {
+		return errors.New("--installed-release-manifest requires an existing worker and a signed manifest file")
 	}
 	var c myce.ServiceConfig
 	var hardware *myce.HardwarePreflight
@@ -348,6 +355,7 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 		c.RequireMountedNAS = true
 	}
 	d := c.Detection
+	c.InstalledReleaseManifest = installedReleaseManifest
 	if role == "worker" {
 		if err := myce.ValidateOnboardingModelSelection(ctx, c, probe.Command); err != nil {
 			return err

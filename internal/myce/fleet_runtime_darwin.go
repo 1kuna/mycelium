@@ -20,6 +20,14 @@ func openFleetRunningImage() (*os.File, error) {
 }
 
 func verifyFleetRunningImage(file *os.File) error {
+	return verifyInstallServiceImage(context.Background(), os.Getpid(), file, func(ctx context.Context, path string, args ...string) ([]byte, error) {
+		cmd := exec.CommandContext(ctx, path, args...)
+		cmd.Env = withoutMyceToken(os.Environ())
+		return cmd.Output()
+	})
+}
+
+func verifyInstallServiceImage(ctx context.Context, pid int, file *os.File, command func(context.Context, string, ...string) ([]byte, error)) error {
 	image, err := macho.NewFile(file)
 	if err != nil || image.Type != macho.TypeExec {
 		return fleetProofImageFormat
@@ -37,11 +45,9 @@ func verifyFleetRunningImage(file *os.File) error {
 	// closed and a swap afterwards still hashes the original mapped image.
 	// The one-time 5s observation budget bounds a broken OS tool's startup
 	// cost; missing evidence withholds fleet support while join can proceed.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "/usr/sbin/lsof", "-b", "-a", "-p", strconv.Itoa(os.Getpid()), "-d", "txt", "-F", "fDi")
-	cmd.Env = withoutMyceToken(os.Environ())
-	output, err := cmd.Output()
+	output, err := command(ctx, "/usr/sbin/lsof", "-b", "-a", "-p", strconv.Itoa(pid), "-d", "txt", "-F", "fDi")
 	if err != nil {
 		return fleetProofImageMapping
 	}

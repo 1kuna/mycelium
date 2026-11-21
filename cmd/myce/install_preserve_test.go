@@ -123,13 +123,17 @@ func savedInstallFixture(t *testing.T, roles ...string) (myce.ServiceConfig, myc
 		t.Fatal(err)
 	}
 	// Set every persistent field, including fields without a CLI option, away
-	// from its default. SaveSettingsOnly is invocation-only (json:"-").
+	// from its default. Invocation-only fields have no saved value to preserve.
 	v := reflect.ValueOf(&c).Elem()
 	for i := 0; i < v.NumField(); i++ {
 		f := v.Field(i)
-		name := v.Type().Field(i).Name
+		field := v.Type().Field(i)
+		if field.Tag.Get("json") == "-" {
+			continue
+		}
+		name := field.Name
 		switch name {
-		case "Version", "Force", "SaveSettingsOnly", "LocalDisableReceipts", "PrivateDevices", "RequireMemoryCeilings", "Detection", "Role", "Config", "Binary", "Credentials", "State", "Service", "HostID", "Name", "Queue", "NAS":
+		case "Version", "LocalDisableReceipts", "PrivateDevices", "RequireMemoryCeilings", "Detection", "Role", "Config", "Binary", "Credentials", "State", "Service", "HostID", "Name", "Queue", "NAS":
 			continue
 		}
 		switch f.Kind() {

@@ -3,7 +3,10 @@ package myce
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -22,7 +25,8 @@ type ReleaseSlotIdentity struct {
 }
 
 type slotReconciliation struct {
-	Running        FleetRuntimeProof   `json:"running"`
+	Running        *FleetRuntimeProof  `json:"running,omitempty"`
+	Recovery       *quietWorkerSlot    `json:"quiet_worker_recovery,omitempty"`
 	Slot           ReleaseSlotIdentity `json:"slot"`
 	RollbackTarget string              `json:"rollback_target"`
 }
@@ -51,24 +55,42 @@ func qualifyReleaseSlot(c ServiceConfig, running FleetRuntimeProof, slot Release
 }
 
 func readReleaseSlot(path string) (ReleaseSlotIdentity, error) {
+	return readVerifiedReleaseSlot(path, nil)
+}
+
+func readVerifiedReleaseSlot(path string, verify func(*os.File) error) (ReleaseSlotIdentity, error) {
 	st, err := os.Lstat(path)
 	if err != nil || !st.Mode().IsRegular() {
 		return ReleaseSlotIdentity{}, fmt.Errorf("fleet_binary_unavailable")
 	}
-	hash, err := FileSHA256(path)
+	f, err := os.Open(path)
 	if err != nil {
+		return ReleaseSlotIdentity{}, err
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil || !os.SameFile(st, opened) {
+		return ReleaseSlotIdentity{}, fmt.Errorf("fleet_install_changed")
+	}
+	if verify != nil {
+		if err := verify(f); err != nil {
+			return ReleaseSlotIdentity{}, err
+		}
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, f); err != nil {
 		return ReleaseSlotIdentity{}, err
 	}
 	after, err := os.Lstat(path)
 	if err != nil || !os.SameFile(st, after) || st.Size() != after.Size() || !st.ModTime().Equal(after.ModTime()) {
 		return ReleaseSlotIdentity{}, fmt.Errorf("fleet_install_changed")
 	}
-	return ReleaseSlotIdentity{SHA256: hash, Size: st.Size()}, nil
+	return ReleaseSlotIdentity{SHA256: hex.EncodeToString(hash.Sum(nil)), Size: st.Size()}, nil
 }
 
 // Existing fleet-capable workers can reconcile via the ordinary installer.
 // Legacy/non-fleet installs retain their existing install path.
-func preflightInstallSlot(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error)) (*slotReconciliation, error) {
+func preflightInstallSlot(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error), imageProbe installImageProbe) (*slotReconciliation, error) {
 	if c.Role != "worker" || c.HostID == "" {
 		return nil, nil
 	}
@@ -92,17 +114,42 @@ func preflightInstallSlot(ctx context.Context, c ServiceConfig, command func(con
 	}
 	client = fleetNoRedirect(client)
 	defer client.HTTP.CloseIdleConnections()
-	var status HostMaintenanceStatus
-	if err = client.Call(ctx, "GET", "/api/hosts/"+url.PathEscape(c.HostID)+"/maintenance", nil, &status); err != nil {
+	readHost := func() (HostMaintenanceStatus, MaintenanceWorker, error) {
+		var status HostMaintenanceStatus
+		err := client.Call(ctx, "GET", "/api/hosts/"+url.PathEscape(c.HostID)+"/maintenance", nil, &status)
+		for _, w := range status.Workers {
+			if w.Machine.ID == c.Name {
+				return status, w, err
+			}
+		}
+		return status, MaintenanceWorker{}, err
+	}
+	status, worker, err := readHost()
+	if err != nil {
 		return nil, err
 	}
-	var running *FleetRuntimeProof
-	for _, w := range status.Workers {
-		if w.Machine.ID == c.Name && w.Fresh && w.Machine.Fleet != nil && w.Machine.Fleet.Session == w.Machine.Session && fleetProofReady(w.Machine.Fleet) {
-			running = w.Machine.Fleet
+	running := worker.Machine.Fleet
+	if running == nil && c.Enrollment {
+		slot, err := reconcileQuietWorkerSlot(ctx, c, command, imageProbe, status, worker, func(slot ReleaseSlotIdentity) bool {
+			return signedInstalledSlot(ctx, c, client, key, slot)
+		})
+		if err != nil {
+			return nil, err
 		}
+		// Recheck queue custody after local inspection, including slow slot I/O.
+		status, worker, err = readHost()
+		if err != nil {
+			return nil, err
+		}
+		if err = checkQuietWorkerQueue(c, status, worker); err != nil {
+			return nil, err
+		}
+		if !slot.Recovery.matches(status.Policy) || worker.Machine.Session != slot.Recovery.Session || worker.Machine.Release.Version != slot.Slot.Version {
+			return nil, errFleetRecoveryChanged
+		}
+		return slot, nil
 	}
-	if running == nil {
+	if !worker.Fresh || running == nil || running.Session != worker.Machine.Session || !fleetProofReady(running) {
 		return nil, fmt.Errorf("fleet_existing_service_unavailable")
 	}
 	identity, err := EnrollmentServiceHealth(ctx, c, command)
@@ -115,7 +162,7 @@ func preflightInstallSlot(ctx context.Context, c ServiceConfig, command func(con
 	}
 	if slot.SHA256 == running.SHA256 {
 		slot.Version = running.Version
-		return &slotReconciliation{Running: *running, Slot: slot, RollbackTarget: "installed_slot"}, nil
+		return &slotReconciliation{Running: running, Slot: slot, RollbackTarget: "installed_slot"}, nil
 	}
 	var approved EnrollmentRelease
 	if err = client.Call(ctx, "GET", "/api/invites/release", nil, &approved); err != nil {
@@ -125,7 +172,7 @@ func preflightInstallSlot(ctx context.Context, c ServiceConfig, command func(con
 	if err != nil {
 		return nil, err
 	}
-	return &slotReconciliation{Running: *running, Slot: slot, RollbackTarget: "installed_slot"}, nil
+	return &slotReconciliation{Running: running, Slot: slot, RollbackTarget: "installed_slot"}, nil
 }
 
 // Atomic slot publication changes file identity. Reuse a hash only while local
