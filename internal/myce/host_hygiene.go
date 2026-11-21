@@ -479,9 +479,10 @@ func startWorkerHealth(ctx context.Context, w Worker, root *workerStore) (*hostH
 		m.mounts[role] = &hostMountProbe{period: m.mountPeriod, root: role, path: path, clock: m.clock, probe: recoveryMountProbe(w, role, path), storage: m, timing: probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}}
 	}
 	m.timing = probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}
+	// Copy the initial timing before reports can update the monitor's copy.
+	lane := hostProbeLane[HostHealthReading]{clock: w.Clock, timing: m.timing}
 	go func() {
 		defer close(m.done)
-		lane := hostProbeLane[HostHealthReading]{clock: w.Clock, timing: m.timing}
 		for {
 			if completed, err := lane.step(ctx, m.source); completed {
 				_ = m.record(ctx, lane.at, lane.value, err, lane.observation)
