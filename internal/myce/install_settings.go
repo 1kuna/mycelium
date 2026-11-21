@@ -146,6 +146,8 @@ func InstallSettings() []InstallSetting {
 	return []InstallSetting{
 		// Invocation evidence only: no flag, persistence or configuration authority.
 		{Field: "storageWarning"},
+		// The worker reinstall command owns this per-invocation evidence path.
+		{Field: "InstalledReleaseManifest"},
 		installContext(installSetting("save-settings-only", "SaveSettingsOnly", "save existing Linux queue config and generated unit without reload or activation (override retirement)", func(c *ServiceConfig) *bool { return &c.SaveSettingsOnly }, installAny[bool]), func(c ServiceConfig) error {
 			if c.SaveSettingsOnly && (c.Role != "queue" || c.Detection.OS != "linux") {
 				return errors.New("--save-settings-only requires a Linux queue")

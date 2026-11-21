@@ -141,6 +141,37 @@ The stage reuses the 15-minute service-step budget. A same-release rerun retries
 unaccepted current bytes before other pending workers. Successful status names
 the proving assignment in `wait`. This is queue-side behavior.
 
+## Local recovery when a worker sends no runtime proof
+
+The [ordinary installer](../operations.md#recover-a-worker-missing-fleet-runtime-proof)
+can recover an active, enrolled worker that still sends fresh check-ins. Fleet
+upgrade authorization still requires its normal runtime proof. The local
+installer uses these checks in preview and again just before it stops the
+selected service:
+
+- The queue's drain or disable and fresh quiescence account for attempts,
+  releases, preparations, engines and calls. Locally retained attempts and
+  detached owners can precede a check-in, so their spool records also block.
+- The local enrollment receipt matches the queue's worker, session and
+  reported release. The service manager's healthy process must match the
+  receipt PID, and its process birth and manager identity must agree across
+  the installer checks. This protects against stopping a replacement process.
+- The installed file must match the service's kernel executable mapping and
+  the installer's rollback snapshot. This detects an unrelated or recently
+  swapped slot without executing it. If Linux credential protection hides
+  the mapping, the saved slot must match a signature under the pinned publisher
+  key, the queue-reported installed version, and the platform artifact's exact
+  hash and size. The installer checks a retained managed update receipt or
+  current queue approval, or accepts an explicit `--installed-release-manifest`
+  for a prior release. The private `slot-reconciliation.json` records which
+  evidence qualified the saved rollback slot.
+
+The installer keeps the existing queue maintenance policy and serializes with
+the local fleet helper. Keep the drain or disable in force through activation.
+The queue's catalog-transition fence can supply fresh identity evidence from a
+drained worker on the previous catalog. A queue that rejects those check-ins
+cannot supply that evidence.
+
 ## Failure codes and repairs
 
 Apply repairs locally through the authorized owner, then rerun
@@ -160,8 +191,8 @@ Apply repairs locally through the authorized owner, then rerun
 | `worker_unmanaged`, `worker_target_incompatible`, `worker_downgrade_refused` | The worker has no fresh runtime proof, no artifact for its platform, or is newer than the release. |
 | `service_health_failed`, `storage_preflight_failed` | Aliases of `fleet_health_failed` and `fleet_storage_preflight_failed` below. |
 
-Codes reported by a service's updater (`failure_code`; arbitrary text is never
-shown):
+Local installer and service updater failures. Updater reports expose a fixed
+`failure_code`.
 
 | Code | Next step |
 | --- | --- |
@@ -176,7 +207,12 @@ shown):
 | `fleet_candidate_invalid` | The candidate does not run or reports another version, target or protocol. Publish a corrected release. |
 | `fleet_version_refused` | Downgrade or same-version different bytes; compare running, installed and approved versions. |
 | `fleet_install_changed` | The installed bytes or settings are neither the running nor the release's. Reinstall through the installer owner. |
-| `fleet_binary_unavailable`, `fleet_existing_service_unavailable`, `fleet_recovery_runtime_changed` | Restore the installed binary and the running service; the service restarted or stopped under the updater. |
+| `fleet_binary_unavailable`, `fleet_existing_service_unavailable` | Restore the installed binary and verify the running service. For an enrolled worker sending no runtime proof, follow the local recovery procedure above. |
+| `fleet_recovery_not_quiescent` | Keep the host drained or disabled. Wait for queue and local custody to release, and confirm fresh worker check-ins. |
+| `fleet_recovery_worker_unproven` | Verify the selected worker, its fresh enrollment session and the service-manager PID. |
+| `fleet_recovery_slot_mismatch` | Verify the installed slot matches the active service's kernel executable mapping. Inspect an interrupted publication or unusable process observation before retrying. |
+| `fleet_recovery_manifest_required` | Linux hides the executable mapping and the signed installed slot could not be verified. Supply the installed release's signed manifest with `--installed-release-manifest` and check the slot's version, hash and size. |
+| `fleet_recovery_runtime_changed` | Check the selected service, session and host drain again. The operation's original evidence changed. |
 | `fleet_config_invalid`, `fleet_service_invalid`, `fleet_install_invalid`, `fleet_state_invalid`, `fleet_local_file_invalid`, `fleet_preflight_failed` | Repair saved settings, file permissions or the private state directory through the installer. |
 | `fleet_storage_preflight_failed` | Repair the named state or NAS root or mount through the storage owner. |
 | `fleet_credentials_unavailable`, `fleet_queue_invalid` | Repair saved credentials or the queue address through the enrollment owner. |
