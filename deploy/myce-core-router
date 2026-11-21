@@ -15,8 +15,11 @@ from pathlib import Path
 CONFIG = '/etc/myce-crash.json'
 ROOT = '/var/lib/myce-crash'
 PROTOCOL = 'myce-core-router ephemeral-v1'
+EXECUTION_PROTOCOL = 'myce-core-router ephemeral-v2'
 PATTERN = '|/usr/local/libexec/myce-core-router -p%p -s%s -c%c -d%d -P%P -u%u -g%g -F%F -- %E'
 TTL = 72 * 60 * 60
+ATTEMPT = re.compile(r'attempt-[0-9a-f]{32}')
+SCOPE = re.compile(r'myce-attempt-([0-9a-f]{32})\.scope')
 
 def event(message):
     syslog.openlog('myce-core-router')
@@ -103,24 +106,49 @@ def membership(pid):
                 return line[3:]
     raise ValueError('cgroup v2 membership unavailable')
 
-def worker_route(cfg, cgroup):
-    matches = [w for w in cfg['workers']
-               if cgroup == w['cgroup'] or cgroup.startswith(w['cgroup'] + '/')]
-    if len(matches) != 1:
-        raise ValueError('worker routing is absent or ambiguous')
-    return matches[0]
+def detached_slice(worker):
+    parent = Path(worker['cgroup']).parent
+    if parent.name.endswith('.slice'):
+        return str(parent / (parent.name.removesuffix('.slice') + '-jobs.slice'))
 
-def attempt_policy(worker, cgroup):
-    relative = cgroup[len(worker['cgroup']) + 1:]
+
+def worker_route(cfg, cgroup):
+    matches = []
+    for worker in cfg['workers']:
+        for root in (worker['cgroup'], detached_slice(worker)):
+            if root and (cgroup == root or cgroup.startswith(root + '/')):
+                matches.append((worker, root))
+    if len(matches) > 1:
+        raise ValueError('worker routing is ambiguous')
+    return matches[0] if matches else None
+
+def attempt_policy(worker, root, cgroup):
+    relative = cgroup[len(root) + 1:]
+    state_dir = Path(worker['state_dir'])
+    if root == worker['cgroup']:
+        paths = state_dir.glob('state-attempt-*.json')
+        if relative.startswith('shared-execution/'):
+            root += '/shared-execution'
+            relative = relative.removeprefix('shared-execution/')
+    else:
+        scope, _, relative = relative.partition('/')
+        match = SCOPE.fullmatch(scope)
+        if match is None:
+            raise ValueError('detached attempt scope unavailable')
+        root += '/' + scope
+        paths = [state_dir / ('custodian-' + match[1] + '.state.json')]
     identity = relative.split('/')[0]
-    if not re.fullmatch(r'attempt-[0-9a-f]{32}', identity):
+    if not ATTEMPT.fullmatch(identity):
         raise ValueError('attempt membership unavailable')
-    expected = '/sys/fs/cgroup' + worker['cgroup'] + '/' + identity
+    expected = '/sys/fs/cgroup' + root + '/' + identity
     # The worker publishes this state before releasing the payload exec gate.
     # Never read process environment, command line, maps or memory for routing.
-    for path in Path(worker['state_dir']).glob('state-attempt-*.json'):
+    for path in paths:
         try:
-            with path.open() as source:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd) as source:
+                if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                    continue
                 state = json.loads(source.read(4 * 1024 * 1024))
             job = state.get('job') or {}
             if (state.get('identity') == identity[8:] and state.get('cgroup') == expected
@@ -130,7 +158,7 @@ def attempt_policy(worker, cgroup):
                 if policy not in ('', 'ephemeral'):
                     raise ValueError('unknown attempt policy')
                 return policy == 'ephemeral', identity
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
             continue
     raise ValueError('exact attempt policy unavailable')
 
@@ -139,21 +167,33 @@ def route(cfg, args):
     signal = next((a[2:] for a in args if re.fullmatch(r'-s[0-9]+', a)), '0')
     # Failure to identify a process must never send its memory to another handler.
     cgroup = membership(pid)
-    roots = [w['cgroup'] for w in cfg['workers']]
-    if not any(cgroup == root or cgroup.startswith(root + '/') for root in roots):
+    routing = worker_route(cfg, cgroup)
+    if routing is None:
         old = shlex.split(cfg['previous_core_pattern'][1:])
         os.execv(old[0], [old[0]] + args)  # Preserve stdin and the kernel's %F pidfd.
         return 0
-    worker = worker_route(cfg, cgroup)
-    ephemeral, attempt = attempt_policy(worker, cgroup)
+    worker, root = routing
+    ephemeral, attempt = attempt_policy(worker, root, cgroup)
     if ephemeral:
         os.close(0)  # Do not read, drain, spool, hash or forward even one core byte.
         suppression_evidence(pid, signal, cgroup, attempt)
         return 0
     return capture(cfg, pid)
 
-def qualify(cfg, state_dir=None):
-    worker = worker_route(cfg, membership('self'))
+def qualify(cfg, state_dir=None, execution_cgroup=None):
+    current = membership('self').removesuffix('/worker')
+    routing = worker_route(cfg, current)
+    if routing is None:
+        raise ValueError('worker routing is absent')
+    worker, root = routing
+    if current == worker['cgroup']:
+        possible = (root, root + '/shared-execution', detached_slice(worker))
+        if execution_cgroup is not None and (execution_cgroup not in possible
+                                              or worker_route(cfg, execution_cgroup)[0] is not worker):
+            raise ValueError('worker execution cgroup is unqualified')
+    elif (root == worker['cgroup'] or not SCOPE.fullmatch(current[len(root) + 1:])
+          or execution_cgroup not in (None, current)):
+        raise ValueError('detached attempt cgroup is unqualified')
     if state_dir is not None and os.path.realpath(state_dir) != os.path.realpath(worker['state_dir']):
         raise ValueError('worker state directory differs')
     if not os.path.isdir(worker['state_dir']):
@@ -163,7 +203,7 @@ def qualify(cfg, state_dir=None):
     # Nonzero pipe limit keeps /proc/PID available until the handler exits.
     if int(Path('/proc/sys/kernel/core_pipe_limit').read_text()) <= 0:
         raise ValueError('core_pipe_limit must be nonzero')
-    print(PROTOCOL)
+    print(EXECUTION_PROTOCOL if execution_cgroup is not None else PROTOCOL)
 
 def configuration():
     cfg = json.loads(Path(CONFIG).read_text())

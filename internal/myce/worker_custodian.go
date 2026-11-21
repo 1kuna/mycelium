@@ -31,6 +31,10 @@ func (w Worker) detachedAttemptSupported() bool {
 	return workerCustodians && !(runtime.GOOS == "linux" && w.Machine.SharedHost != nil)
 }
 
+func (w Worker) detachesAssignedAttempts() bool {
+	return w.detachedAttemptSupported() && w.ServiceConfig != nil && w.ServiceConfig.Config != "" && w.ServiceConfig.Binary != "" && w.Custodian == ""
+}
+
 type custodianRequest struct {
 	Protocol        int         `json:"protocol"`
 	ID              string      `json:"id"`

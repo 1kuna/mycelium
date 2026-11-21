@@ -450,6 +450,12 @@ func TestEphemeralPlacementRefusalAndWaitReason(t *testing.T) {
 			want:    []string{ephemeralCapability, "core route is unqualified"},
 		},
 		{
+			name:    "detached core route",
+			caps:    []string{"native_isolation_namespace", nativeCICapability},
+			refusal: ephemeralDetachedUnqualified,
+			want:    []string{ephemeralCapability, "delegated cgroup for detached attempts is unqualified"},
+		},
+		{
 			name:    "unknown worker report",
 			caps:    []string{"native_isolation_namespace", nativeCICapability},
 			refusal: "/private/worker-probe",

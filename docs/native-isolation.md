@@ -564,7 +564,10 @@ profile myce-userns "/ABSOLUTE/INSTALL/PATH/myce" flags=(unconfined) {
 Replace the attachment placeholder with the actual resolved installed binary
 path, not a shell variable, wildcard, source checkout or symlink alias. Review
 existing attached profiles first; do not replace a stricter profile with this
-permissive one. With the administrator-reviewed file installed, load it and
+permissive one. `myce install` and `myce fleet upgrade` replace the executable
+at the same installed path, so the attachment persists across release upgrades.
+Recheck it after any change to the install root or service executable. With
+the administrator-reviewed file installed, load it and
 restart the worker so it executes under the new attachment:
 
 ```sh
@@ -580,6 +583,12 @@ restarted service's profile label and namespace probe, including inherited
 policy/any separate attachment for `bwrap` and `nsenter`; report failure rather
 than widening the global policy. The option does not supply missing tools,
 Landlock/seccomp, GPU mapping or an outbound transport.
+
+For ephemeral jobs, also verify the worker's core routing. A worker that
+launches detached attempts qualifies the job slice before advertising
+`worker_data_ephemeral_v2`. Each custodian then checks its own scope before
+staging inputs. Run the [ephemeral crash fixture](operations.md#linux-core-routing-for-ephemeral-attempts)
+through that launch path before accepting it on the host.
 
 **Risk:** `flags=(unconfined)` is intentionally permissive: it adds no general
 AppArmor file, network or process confinement. `userns,` exempts this executable

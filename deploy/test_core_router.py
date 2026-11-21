@@ -29,8 +29,13 @@ class CoreRouterTests(unittest.TestCase):
         self.state = self.root / 'state'
         self.state.mkdir()
         self.identity = 'a' * 32
-        self.group = '/service/attempt-' + self.identity
-        self.cfg = {'workers': [{'cgroup': '/service', 'state_dir': str(self.state)}],
+        self.slice = '/user.slice/example.slice/example-worker.slice'
+        self.service = self.slice + '/myce-worker.service'
+        self.detached = self.slice + '/example-worker-jobs.slice'
+        self.scope_id = 'b' * 32
+        self.scope = self.detached + '/myce-attempt-' + self.scope_id + '.scope'
+        self.group = self.service + '/attempt-' + self.identity
+        self.cfg = {'workers': [{'cgroup': self.service, 'state_dir': str(self.state)}],
                     'budget_bytes': 1024 * 1024,
                     'previous_core_pattern': '|/usr/share/apport/apport -P%P'}
         self.record = {'identity': self.identity, 'cgroup': '/sys/fs/cgroup' + self.group,
@@ -40,13 +45,25 @@ class CoreRouterTests(unittest.TestCase):
         self.save()
         self.addCleanup(patch.stopall)
         patch.object(router, 'ROOT', str(self.store)).start()
-        patch.object(router, 'membership', return_value=self.group + '/main').start()
+        self.membership = patch.object(router, 'membership', return_value=self.group + '/main').start()
         self.events = patch.object(router, 'event').start()
 
     def save(self):
         self.path.write_text(json.dumps(self.record))
 
+    def use_detached_scope(self):
+        self.group = self.scope + '/attempt-' + self.identity
+        self.membership.return_value = self.group + '/sidecar-fixture/descendant'
+        self.path = self.state / ('custodian-' + self.scope_id + '.state.json')
+        self.record['cgroup'] = '/sys/fs/cgroup' + self.group
+        self.save()
+
     def test_ephemeral_stream_is_closed_unread_with_metadata_only(self):
+        self.assert_stream_closed_unread()
+        self.use_detached_scope()
+        self.assert_stream_closed_unread()
+
+    def assert_stream_closed_unread(self):
         # A real open pipe, with no bytes or EOF: reading/draining would hang.
         code = '''import importlib.machinery, json, sys
 r = importlib.machinery.SourceFileLoader('router', sys.argv[1]).load_module()
@@ -58,7 +75,7 @@ sys.exit(r.route(json.loads(sys.argv[2]), ['-P42', '-s11']))
         read, write = os.pipe()
         try:
             p = subprocess.Popen([sys.executable, '-c', code, str(SOURCE), json.dumps(self.cfg),
-                                  self.group + '/main', str(self.store)], stdin=read,
+                                  self.membership.return_value, str(self.store)], stdin=read,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
                 out, err = p.communicate(timeout=5)
@@ -67,7 +84,7 @@ sys.exit(r.route(json.loads(sys.argv[2]), ['-P42', '-s11']))
                     p.kill()
                     p.wait()
             self.assertEqual(p.returncode, 0, err)
-            self.assertEqual(json.loads(out), [42, '11', self.group + '/main', 'attempt-' + self.identity])
+            self.assertEqual(json.loads(out), [42, '11', self.membership.return_value, 'attempt-' + self.identity])
             self.assertEqual(list(self.store.iterdir()), [self.store / 'keep'])
         finally:
             os.close(read)
@@ -98,6 +115,14 @@ sys.exit(r.route(json.loads(sys.argv[2]), ['-P42', '-s11']))
             self.assertEqual(router.route(self.cfg, ['-P42', '-s11']), 0)
         self.assertEqual(list(self.store.glob('core-*')), cores)
 
+    def test_detached_ordinary_attempt_retains_bounded_capture(self):
+        self.use_detached_scope()
+        self.record['job']['spec'] = {}
+        self.save()
+        with patch.object(router, 'capture', return_value=0) as capture:
+            self.assertEqual(router.route(self.cfg, ['-P42', '-s11']), 0)
+        capture.assert_called_once_with(self.cfg, 42)
+
     def test_partial_ordinary_core_is_removed_on_overflow(self):
         with patch.object(router, 'allocated', side_effect=[0, 0, 1024 * 1024 + 1]), patch.object(router.os, 'read', side_effect=[b'first', b'second']):
             self.assertEqual(router.capture(self.cfg, 42), 0)
@@ -123,8 +148,27 @@ sys.exit(r.route(json.loads(sys.argv[2]), ['-P42', '-s11']))
         with self.assertRaises(ValueError):
             router.route(self.cfg, ['-P42', '-s11'])
 
+    def test_missing_or_wrong_detached_state_discards_unread(self):
+        self.use_detached_scope()
+        self.record['job']['spec'] = {}  # An ordinary record for a different scope cannot permit capture.
+        wrong = self.path.with_name('custodian-' + 'c' * 32 + '.state.json')
+        wrong.write_text(json.dumps(self.record))
+        self.path.unlink()
+        with patch.object(router, 'capture', side_effect=AssertionError('core captured')), patch.object(router.os, 'execv', side_effect=AssertionError('core forwarded')):
+            with self.assertRaises(ValueError):
+                router.route(self.cfg, ['-P42', '-s11'])
+            self.path.symlink_to(wrong)
+            with self.assertRaises(ValueError):
+                router.route(self.cfg, ['-P42', '-s11'])
+            self.path.unlink()
+            self.record['cgroup'] = '/sys/fs/cgroup' + self.detached + '/myce-attempt-' + 'c' * 32 + '.scope/attempt-' + self.identity
+            self.save()
+            with self.assertRaises(ValueError):
+                router.route(self.cfg, ['-P42', '-s11'])
+
     def test_qualification_requires_matching_state_and_proc_lifetime(self):
         from types import SimpleNamespace
+        self.membership.return_value = self.service + '/worker'
         patch.object(router.os, 'stat', return_value=SimpleNamespace(st_mode=stat.S_IFSOCK)).start()
         patch.object(router.os.path, 'isdir', return_value=True).start()
         with patch.object(router.Path, 'read_text', return_value='10'), patch('builtins.print') as output:
@@ -134,6 +178,24 @@ sys.exit(r.route(json.loads(sys.argv[2]), ['-P42', '-s11']))
                 router.qualify(self.cfg, str(self.root))
         with patch.object(router.Path, 'read_text', return_value='0'), self.assertRaises(ValueError):
             router.qualify(self.cfg, str(self.state))
+
+    def test_qualification_checks_planned_slice_and_actual_custodian_scope(self):
+        from types import SimpleNamespace
+        patch.object(router.os, 'stat', return_value=SimpleNamespace(st_mode=stat.S_IFSOCK)).start()
+        patch.object(router.os.path, 'isdir', return_value=True).start()
+        for current, wanted in [(self.service, self.detached), (self.scope, self.scope),
+                                (self.service, self.service + '/shared-execution')]:
+            with self.subTest(current=current, wanted=wanted):
+                self.membership.return_value = current + '/worker'
+                argv = ['router', '--qualify', str(self.state), wanted]
+                with patch.object(router, 'configuration', return_value=self.cfg), patch.object(sys, 'argv', argv), patch.object(router.Path, 'read_text', return_value='10'), patch('builtins.print') as output:
+                    self.assertEqual(router.main(), 0)
+                    output.assert_called_once_with(router.EXECUTION_PROTOCOL)
+                    with self.assertRaises(ValueError):
+                        router.qualify(self.cfg, str(self.state), wanted + '-other')
+        self.membership.return_value = self.detached + '-other/' + Path(self.scope).name
+        with self.assertRaises(ValueError):
+            router.qualify(self.cfg, str(self.state), self.scope)
 
     def test_config_failure_never_delegates(self):
         with patch.object(router, 'CONFIG', str(self.root / 'missing')), patch.object(router.os, 'execv', side_effect=AssertionError('core forwarded')):

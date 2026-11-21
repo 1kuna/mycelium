@@ -26,6 +26,8 @@ func ephemeralHostReason(m *Machine) string {
 		return "ephemeral worker data is supported only on Linux"
 	case ephemeralCoreRouteUnqualified:
 		return "the Linux core route is unqualified"
+	case ephemeralDetachedUnqualified:
+		return "the Linux core route or delegated cgroup for detached attempts is unqualified"
 	case ephemeralCoreLimitUnqualified:
 		return "the Linux core-limit helper is unqualified"
 	}
