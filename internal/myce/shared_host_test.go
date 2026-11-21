@@ -506,21 +506,38 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 		}
 	})
 	c := d.Client()
-	// The background parent also services the fixture queue. Give the whole
-	// journey the same I/O budget as its awaits under contention.
-	ctx, cancel := context.WithTimeout(t.Context(), testWaitTimeout)
-	defer cancel()
+	call := func(method, path string, body, out any) error {
+		ctx, cancel := context.WithTimeout(t.Context(), testWaitTimeout)
+		defer cancel()
+		return c.Call(ctx, method, path, body, out)
+	}
+	// The background parent also services the queue. Observe each execution
+	// through the normal wait API so repeated GETs do not contend with launch.
+	waitForJob := func(kind string, j Job) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), testWaitTimeout)
+		defer cancel()
+		finished, err := c.Wait(ctx, j.ID)
+		if err != nil {
+			t.Fatalf("%s: %v", kind, err)
+		}
+		if finished.State != "succeeded" {
+			var logs []Log
+			err := call("GET", "/api/jobs/"+j.ID+"/logs", nil, &logs)
+			t.Fatalf("%s failed: %+v; logs=%+v (read: %v)", kind, finished, logs, err)
+		}
+	}
 	path := "/api/hosts/dev-host/maintenance"
 	var status HostMaintenanceStatus
 	await(t, func() bool {
-		if err := c.Call(ctx, "GET", path, nil, &status); err != nil {
+		if err := call("GET", path, nil, &status); err != nil {
 			t.Fatal(err)
 		}
 		return len(status.Workers) == 1 && status.Workers[0].Fresh && status.ExternalMemory != nil
 	})
 	change := func(r HostMaintenanceRequest) {
 		t.Helper()
-		if err := c.Call(ctx, "POST", path, r, &status); err != nil {
+		if err := call("POST", path, r, &status); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -535,22 +552,14 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 		ordinary.Run.Command = []string{"sh", "-c", fmt.Sprintf(
 			`test "$(ps -o pri= -p $$)" %s 4 && sh -c 'test "$(ps -o pri= -p $$)" %s 4'`, comparison, comparison)}
 		var j Job
-		if err := c.Call(ctx, "POST", "/api/jobs", ordinary, &j); err != nil {
+		if err := call("POST", "/api/jobs", ordinary, &j); err != nil {
 			t.Fatal(err)
 		}
-		await(t, func() bool {
-			if err := c.Call(ctx, "GET", "/api/jobs/"+j.ID, nil, &j); err != nil {
-				t.Fatal(err)
-			}
-			if j.State == "failed" {
-				t.Fatalf("unprofiled payload changed inherited priority band (control background=%s): state=%s reason=%s", controlBackground, j.State, j.Reason)
-			}
-			return j.State == "succeeded"
-		})
+		waitForJob("unprofiled payload (control background="+controlBackground+")", j)
 	}
 	change(HostMaintenanceRequest{Action: "drain"})
 	await(t, func() bool {
-		if err := c.Call(ctx, "GET", path, nil, &status); err != nil {
+		if err := call("GET", path, nil, &status); err != nil {
 			t.Fatal(err)
 		}
 		return status.Quiescent
@@ -562,27 +571,13 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 	s := cpuSpec(1, .01)
 	s.Run.Env = map[string]string{"GOMAXPROCS": "64"}
 	priorityCheck := backgroundCheck + `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "$GOMAXPROCS" = 1 && test "${MYCE_TOKEN+x}" != x || { printf 'priority check: nice=%s GOMAXPROCS=%s token-present=%s\n' "$n" "$GOMAXPROCS" "${MYCE_TOKEN+x}" >&2; exit 42; }; `
-	failed := func(kind string, j Job) {
-		t.Helper()
-		var logs []Log
-		err := c.Call(ctx, "GET", "/api/jobs/"+j.ID+"/logs", nil, &logs)
-		t.Fatalf("%s failed: %+v; logs=%+v (read: %v)", kind, j, logs, err)
-	}
 	s.Run.Command = []string{"sh", "-c", priorityCheck + `printf shared-host-ok`}
 	var j Job
-	if err := c.Call(ctx, "POST", "/api/jobs", s, &j); err != nil {
+	if err := call("POST", "/api/jobs", s, &j); err != nil {
 		t.Fatal(err)
 	}
-	await(t, func() bool {
-		if err := c.Call(ctx, "GET", "/api/jobs/"+j.ID, nil, &j); err != nil {
-			t.Fatal(err)
-		}
-		if j.State == "failed" {
-			failed("native command", j)
-		}
-		return j.State == "succeeded"
-	})
-	if err := c.Call(ctx, "GET", path, nil, &status); err != nil {
+	waitForJob("native command", j)
+	if err := call("GET", path, nil, &status); err != nil {
 		t.Fatal(err)
 	}
 	if status.Workers[0].Machine.SharedHost == nil || !status.Policy.LastResort {
@@ -592,18 +587,10 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 	// main payload. Its marker proves the helper checked priority and token too.
 	s.Run.Sidecars = []NativeSidecar{{Name: "helper", Env: map[string]string{"GOMAXPROCS": "64"}, Command: []string{"sh", "-c", priorityCheck + `touch helper-ready; while :; do sleep 1; done`}}}
 	s.Run.Command = []string{"sh", "-c", priorityCheck + `while test ! -f helper-ready; do sleep .01; done`}
-	if err := c.Call(ctx, "POST", "/api/jobs", s, &j); err != nil {
+	if err := call("POST", "/api/jobs", s, &j); err != nil {
 		t.Fatal(err)
 	}
-	await(t, func() bool {
-		if err := c.Call(ctx, "GET", "/api/jobs/"+j.ID, nil, &j); err != nil {
-			t.Fatal(err)
-		}
-		if j.State == "failed" {
-			failed("native group", j)
-		}
-		return j.State == "succeeded"
-	})
+	waitForJob("native group", j)
 	if priority, err := syscall.Getpriority(syscall.PRIO_PROCESS, os.Getpid()); err != nil || priority != controlPriority {
 		t.Fatal("payload priority changed worker control", priority, controlPriority, err)
 	}
