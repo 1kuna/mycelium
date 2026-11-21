@@ -15,9 +15,9 @@ import (
 	"time"
 )
 
-// A busy queue can spend the old whole-finalization budget before PATCH even
-// starts. Advance the client/queue clock while holding the real queue mutex;
-// ownerError checks that clock against the context deadline, without sleeping.
+// A busy queue can spend the old whole-finalization budget servicing an upload.
+// Advance the client/queue clock while the real queue mutex blocks a small
+// output's creation upload, without spending the equivalent wall time.
 func TestFinalizationUploadBusyQueue(t *testing.T) {
 	q, clock := fixture(t)
 	// Go contexts use wall-clock deadlines. Align the injected clock once, then
@@ -41,28 +41,11 @@ func TestFinalizationUploadBusyQueue(t *testing.T) {
 	if err := os.WriteFile(path, []byte("finished output"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	blocked, patches := false, 0
+	creates, patches := 0, 0
 	c.Clock = clock
 	c.HTTP = &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
-		if !blocked && r.Method == "HEAD" && strings.HasPrefix(r.URL.Path, "/api/files/blobs/") {
-			blocked = true
-			q.mu.Lock()
-			type response struct {
-				res *http.Response
-				err error
-			}
-			done := make(chan response, 1)
-			go func() {
-				res, err := http.DefaultTransport.RoundTrip(r)
-				done <- response{res, err}
-			}()
-			func() {
-				defer q.mu.Unlock()
-				await(t, func() bool { return q.mu.waiting.Load() > 0 })
-				clock.Advance(time.Minute)
-			}()
-			got := <-done
-			return got.res, got.err
+		if r.Method == "POST" && r.URL.Path == "/api/files/uploads/" && r.Header.Get("Content-Type") == "application/offset+octet-stream" {
+			creates++
 		}
 		if r.Method == "PATCH" {
 			patches++
@@ -70,12 +53,31 @@ func TestFinalizationUploadBusyQueue(t *testing.T) {
 		return http.DefaultTransport.RoundTrip(r)
 	})}
 	w := Worker{Client: c, Clock: clock}
-	finished, err := w.finishFileResultContext(context.Background(), *j, result(j, true), t.TempDir())
+	type outcome struct {
+		result Result
+		err    error
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	parent := t.TempDir()
+	done := make(chan outcome, 1)
+	func() {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		go func() {
+			finished, err := w.finishFileResultContext(ctx, *j, result(j, true), parent)
+			done <- outcome{finished, err}
+		}()
+		await(t, func() bool { return q.mu.waiting.Load() > 0 })
+		clock.Advance(time.Minute)
+	}()
+	gotResult := <-done
+	finished, err := gotResult.result, gotResult.err
 	if err != nil || !finished.Success || finished.ExecutionCause != nil {
 		t.Fatalf("busy queue interrupted finalization: %+v %v", finished, err)
 	}
-	if !blocked || patches != 1 {
-		t.Fatalf("want one publication after queue service, blocked=%t patches=%d", blocked, patches)
+	if creates != 1 || patches != 0 {
+		t.Fatalf("want one creation upload after queue service, creates=%d patches=%d", creates, patches)
 	}
 	if err := q.Complete(finished); err != nil {
 		t.Fatal(err)
@@ -85,9 +87,9 @@ func TestFinalizationUploadBusyQueue(t *testing.T) {
 		t.Fatalf("output not accepted: %+v %v", got, err)
 	}
 	// Losing the attempt owner still ends publication and retains its bytes.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	finished, err = w.finishFileResultContext(ctx, *j, result(j, true), t.TempDir())
+	cancelled, stop := context.WithCancel(context.Background())
+	stop()
+	finished, err = w.finishFileResultContext(cancelled, *j, result(j, true), t.TempDir())
 	if !errors.Is(err, context.Canceled) || !finished.Success {
 		t.Fatalf("owner cancellation lost: %+v %v", finished, err)
 	}

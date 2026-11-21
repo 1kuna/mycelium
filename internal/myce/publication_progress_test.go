@@ -41,15 +41,15 @@ func testReleasedRecoveryAdmitsNewWork(t *testing.T, mode string) {
 	}
 	old := harnessJob(t, "saved-result", "", "false")
 	old.Machine, old.Session = w.Machine.ID, root.state.Session
-	var ref FileRef
+	const output = "saved output"
 	if mode == "output" {
 		h.blockLog = ""
 		old.Spec.Run.Workdir = t.TempDir()
 		path := filepath.Join(old.Spec.Run.Workdir, "output.txt")
-		if err := os.WriteFile(path, []byte("saved output"), 0600); err != nil {
+		if err := os.WriteFile(path, []byte(output), 0600); err != nil {
 			t.Fatal(err)
 		}
-		ref, err = IdentifyFile(path)
+		ref, err := IdentifyFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -72,15 +72,21 @@ func testReleasedRecoveryAdmitsNewWork(t *testing.T, mode string) {
 	next := harnessJob(t, "replacement", "", "true")
 	var offered atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		if mode == "output" && req.Method == "HEAD" && strings.HasPrefix(req.URL.Path, "/api/files/blobs/") {
+		if mode == "output" && req.Method == "POST" && req.URL.Path == "/api/files/uploads/" {
+			body, err := io.ReadAll(req.Body)
+			if err != nil || string(body) != output || req.Header.Get("Content-Type") != "application/offset+octet-stream" {
+				t.Errorf("unexpected creation upload: body=%q, err=%v", body, err)
+				http.Error(rw, "invalid creation upload", http.StatusBadRequest)
+				return
+			}
 			h.once.Do(func() { close(h.logEntered) })
 			select {
 			case <-h.unblock:
 			case <-req.Context().Done():
 				return
 			}
-			rw.Header().Set("Content-Length", "12")
-			rw.Header().Set("ETag", `"`+ref.SHA256+`"`)
+			rw.Header().Set("Upload-Offset", fmt.Sprint(len(output)))
+			rw.WriteHeader(http.StatusCreated)
 			return
 		}
 		if req.URL.Path != "/api/workers/checkin" {
@@ -108,6 +114,12 @@ func testReleasedRecoveryAdmitsNewWork(t *testing.T, mode string) {
 	}))
 	defer server.Close()
 	w.Client.URL = server.URL
+	if mode == "output" {
+		// This fixture controls when the upload request completes. Keep loopback
+		// HTTP and owner cancellation without the socket stall detector racing
+		// the replacement's startup on a loaded test host.
+		w.Client.HTTP = &http.Client{Transport: fetchTransport(server.Client().Transport.RoundTrip)}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
@@ -124,20 +136,19 @@ func testReleasedRecoveryAdmitsNewWork(t *testing.T, mode string) {
 		}
 	}()
 	await(t, func() bool { clock.Advance(time.Millisecond * 10); return h.completed(next.ID) })
-	select {
-	case <-h.logEntered:
-	default:
-		t.Fatal("old result was never replayed")
-	}
 	blocking := "POST /api/workers/log"
 	if mode == "output" {
-		blocking = "HEAD /api/files/blobs/:id"
+		blocking = "POST /api/files/uploads/"
 	}
-	// Replacement completion does not synchronize the next heartbeat. Keep
-	// publication blocked and wait for its operation to be reported, rather
-	// than requiring that report to precede the independent replacement.
+	// Replacement completion does not synchronize publication or the next
+	// heartbeat. Wait for the blocked request and its reported operation.
 	await(t, func() bool {
 		clock.Advance(time.Millisecond * 10)
+		select {
+		case <-h.logEntered:
+		default:
+			return false
+		}
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		for _, c := range h.reports {
