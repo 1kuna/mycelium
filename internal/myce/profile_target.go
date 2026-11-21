@@ -87,6 +87,9 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 		}
 		return variantParityAction
 	case "native network isolation":
+		if j.Spec.ephemeral() && !contains(m.Capabilities, ephemeralCapability) {
+			return ephemeralCapability + " worker capability required: " + ephemeralHostReason(m)
+		}
 		if nativeCIRequired(j) && nativeBoundaryReported(m) && !contains(m.Capabilities, nativeCICapability) {
 			return "isolation: ci requires native_isolation_ci; upgrade this worker to a release supporting the ci mode"
 		}

@@ -689,6 +689,7 @@ type Machine struct {
 	SharedInputCache    *SharedInputCapacity `json:"shared_input_cache,omitempty"`
 
 	Capabilities                []string              `json:"capabilities,omitempty"`
+	EphemeralRefusal            ephemeralRefusal      `json:"ephemeral_refusal,omitempty"`
 	NativeIsolationWarning      string                `json:"native_isolation_warning,omitempty"`
 	MaxJobs                     int                   `json:"max_jobs,omitempty"`
 	AdmissionReason             string                `json:"admission_reason,omitempty"`

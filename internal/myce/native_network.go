@@ -18,6 +18,31 @@ func nativeNetworkFits(j *Job, m *Machine) bool {
 	return !nativeCIRequired(j) || contains(m.Capabilities, nativeCICapability)
 }
 
+const ephemeralRequirements = "ephemeral worker data requires Linux PID/mount user namespaces and a qualified core route"
+
+func ephemeralHostReason(m *Machine) string {
+	switch m.EphemeralRefusal {
+	case ephemeralLinuxRequired:
+		return "ephemeral worker data is supported only on Linux"
+	case ephemeralCoreRouteUnqualified:
+		return "the Linux core route is unqualified"
+	case ephemeralCoreLimitUnqualified:
+		return "the Linux core-limit helper is unqualified"
+	}
+	// Older Linux workers advertise Landlock only after a namespace policy
+	// denial. A bare missing capability cannot establish a concrete cause.
+	if m.EphemeralRefusal == ephemeralNamespacePolicy || contains(m.Capabilities, "native_isolation_landlock") {
+		return "Linux PID/mount user namespaces were refused by host policy (see docs/native-isolation.md#optional-administrator-action-per-host-apparmor-user-namespaces for the AppArmor administrator option)"
+	}
+	if m.EphemeralRefusal == ephemeralNamespaceRequired {
+		return "Linux PID/mount user namespaces are unqualified"
+	}
+	if os := machineTarget(m).OS; os != "" && os != "linux" {
+		return "ephemeral worker data is supported only on Linux"
+	}
+	return ephemeralRequirements
+}
+
 func nativeBoundaryReported(m *Machine) bool {
 	return contains(m.Capabilities, "native_isolation_landlock") || contains(m.Capabilities, "native_isolation_namespace") || contains(m.Capabilities, "native_isolation_seatbelt")
 }

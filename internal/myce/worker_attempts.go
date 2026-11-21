@@ -1417,7 +1417,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				return c == ephemeralCapability || c == ephemeralLegacyCapability || c == "native_network" || c == "native_sidecars" || c == "native_network_partial" || strings.HasPrefix(c, "native_isolation_")
 			})
 			m.Capabilities = append(m.Capabilities, w.nativeIsolationCapabilities()...)
-			if w.checkEphemeralSupport() == nil {
+			refusal, supportErr := w.checkEphemeralSupport()
+			m.EphemeralRefusal = refusal
+			if supportErr == nil {
 				// Keep accepting the older queue's plain-command contract during
 				// a rolling upgrade; v2 queues require the expanded contract.
 				m.Capabilities = append(m.Capabilities, ephemeralLegacyCapability, ephemeralCapability)

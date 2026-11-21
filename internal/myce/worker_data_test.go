@@ -430,6 +430,93 @@ func TestEphemeralValidationAndOlderWorkerFence(t *testing.T) {
 	}
 }
 
+func TestEphemeralPlacementRefusalAndWaitReason(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		caps    []string
+		refusal ephemeralRefusal
+		want    []string
+		omit    string
+	}{
+		{
+			name: "namespace policy",
+			caps: []string{"native_isolation_landlock", nativeCICapability},
+			want: []string{ephemeralCapability, "host policy", "docs/native-isolation.md#optional-administrator-action-per-host-apparmor-user-namespaces"},
+		},
+		{
+			name:    "core route",
+			caps:    []string{"native_isolation_namespace", nativeCICapability},
+			refusal: ephemeralCoreRouteUnqualified,
+			want:    []string{ephemeralCapability, "core route is unqualified"},
+		},
+		{
+			name:    "unknown worker report",
+			caps:    []string{"native_isolation_namespace", nativeCICapability},
+			refusal: "/private/worker-probe",
+			want:    []string{ephemeralCapability, "requires Linux PID/mount user namespaces and a qualified core route"},
+			omit:    "/private/worker-probe",
+		},
+		{
+			name: "kernel boundary",
+			caps: []string{ephemeralCapability, nativeCICapability},
+			want: []string{"native_isolation_unavailable", "supported native kernel boundary"},
+			omit: ephemeralCapability,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, _ := fixture(t)
+			if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "files"), 1<<20, true); err != nil {
+				t.Fatal(err)
+			}
+			m := ephemeralMachine()
+			s := ephemeralSpec()
+			check(t, q, m, nil)
+			j := submit(t, q, s)
+
+			m.Capabilities, m.EphemeralRefusal = tc.caps, tc.refusal
+			if assigned := check(t, q, m, nil).Job; assigned != nil {
+				t.Fatal("assigned to an unqualified worker", assigned.ID)
+			}
+			assertReason := func(surface, reason string) {
+				t.Helper()
+				for _, want := range tc.want {
+					if !strings.Contains(reason, want) {
+						t.Errorf("%s reason %q missing %q", surface, reason, want)
+					}
+				}
+				if !contains(tc.caps, ephemeralCapability) && strings.Contains(reason, "native_isolation_unavailable") {
+					t.Errorf("%s mistook a missing ephemeral capability for a missing kernel boundary: %q", surface, reason)
+				}
+				if tc.omit != "" && strings.Contains(reason, tc.omit) {
+					t.Errorf("%s reason %q included %q", surface, reason, tc.omit)
+				}
+			}
+			if !contains(tc.caps, ephemeralCapability) {
+				_, err := q.Submit(s)
+				var apiErr *HTTPError
+				if !errors.As(err, &apiErr) || apiErr.Code != "job_worker_data_unsupported" {
+					t.Fatalf("expected a typed submission refusal, got %v", err)
+				}
+				assertReason("submit", apiErr.Message)
+			}
+			report, err := q.Resolve(ResolveRequest{Spec: s})
+			if err != nil || len(report.Targets) != 1 || report.Targets[0].Eligible {
+				t.Fatalf("expected one refused target, got %+v, %v", report.Targets, err)
+			}
+			assertReason("resolve", report.Targets[0].Reason)
+
+			api := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+			defer api.Close()
+			got, err := (Client{URL: api.URL, Token: "test"}).GetJob(context.Background(), j.ID)
+			if err != nil || got.Hold == nil || got.State != "queued" {
+				t.Fatalf("expected queued job with a hold, got %+v, %v", got, err)
+			}
+			assertReason("job GET", got.Hold.FullText())
+			assertReason("myce status", JobReason(got))
+		})
+	}
+}
+
 func TestEphemeralManagedCompositionValidation(t *testing.T) {
 	for _, kind := range []string{"environment", "sidecar", "execution", "after", "pieces", "extension"} {
 		t.Run(kind, func(t *testing.T) {

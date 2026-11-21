@@ -22,39 +22,55 @@ func ephemeralCoreRoute(stateDirs ...string) error {
 	return checkEphemeralCoreRoute(pattern, err, state, qualifyCoreRouter)
 }
 
-var ephemeralCoreProbe = sync.OnceValue(func() error {
-	if nativeLinuxDetection().mode != "namespace" {
-		return errors.New("ephemeral worker data requires native PID/mount namespaces; fallback confinement is unsupported")
-	}
+var ephemeralCoreProbe = sync.OnceValues(func() (ephemeralRefusal, error) {
 	if err := ephemeralCoreRoute(); err != nil {
-		return err
+		return ephemeralCoreRouteUnqualified, err
 	}
 	args, err := nativePolicyArgs(nativeLinuxPolicy{Read: []string{"/usr", "/bin", "/lib", "/lib64"}, Ephemeral: true}, []string{"/bin/sh", "-c", `test "$(ulimit -c)" = 0 && test "$(ulimit -H -c)" = 0`})
 	if err != nil {
-		return err
+		return ephemeralCoreLimitUnqualified, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err = exec.CommandContext(ctx, args[0], args[1:]...).Run(); err != nil {
-		return errors.New("ephemeral core-limit helper probe failed")
+		return ephemeralCoreLimitUnqualified, errors.New("ephemeral core-limit helper probe failed")
 	}
-	return nil
+	return "", nil
 })
 
 func ephemeralSupport(stateDirs ...string) error {
 	if err := ephemeralCoreRoute(stateDirs...); err != nil {
 		return err
 	}
-	return ephemeralCoreProbe()
-}
-
-func (w Worker) ephemeralWorkerSupport() error {
-	pattern, err := os.ReadFile("/proc/sys/kernel/core_pattern")
-	if err := checkEphemeralCoreRoute(pattern, err, w.StateDir, qualifyCoreRouter); err != nil {
+	if _, err := ephemeralNamespaceSupport(); err != nil {
 		return err
 	}
+	_, err := ephemeralCoreProbe()
+	return err
+}
+
+func ephemeralNamespaceSupport() (ephemeralRefusal, error) {
+	support := nativeLinuxDetection()
+	if support.mode == "namespace" {
+		return "", nil
+	}
+	refusal := ephemeralNamespaceRequired
+	if support.reason == "namespace_policy_denied" {
+		refusal = ephemeralNamespacePolicy
+	}
+	return refusal, errors.New("ephemeral worker data requires native PID/mount namespaces; fallback confinement is unsupported")
+}
+
+func (w Worker) ephemeralWorkerSupport() (ephemeralRefusal, error) {
+	if refusal, err := ephemeralNamespaceSupport(); err != nil {
+		return refusal, err
+	}
+	pattern, err := os.ReadFile("/proc/sys/kernel/core_pattern")
+	if err := checkEphemeralCoreRoute(pattern, err, w.StateDir, qualifyCoreRouter); err != nil {
+		return ephemeralCoreRouteUnqualified, err
+	}
 	if strings.TrimSpace(string(pattern)) == myceCorePattern && w.memoryCeilings == nil {
-		return errors.New("ephemeral core routing requires delegated attempt cgroups")
+		return ephemeralCoreRouteUnqualified, errors.New("ephemeral core routing requires delegated attempt cgroups")
 	}
 	return ephemeralCoreProbe()
 }
