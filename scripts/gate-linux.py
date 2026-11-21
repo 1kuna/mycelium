@@ -105,6 +105,7 @@ def main():
                         help='runtime archive with already frozen instrumentation')
     parser.add_argument('--input', action='append', default=[])
     parser.add_argument('--report', type=Path)
+    parser.add_argument('--failures', type=Path)
     parser.add_argument('--cleanup-receipt', type=Path)
     parser.add_argument('--cleanup-id', default=uuid.uuid4().hex)
     parser.add_argument('--cores', type=int, default=4)
@@ -139,6 +140,11 @@ def main():
             args.cleanup_id, str(args.cores), *command)
         status = transport.run(launch, heartbeat=True, check=False)
         transport.guest = False
+        if status and status != 255 and args.failures:
+            with args.failures.open('wb') as output:
+                transport.shell('cat', remote + '/.reports/gate-failures.txt', stdout=output, check=False)
+            if not args.failures.stat().st_size:
+                args.failures.write_text(f'Linux leg: {receipts.exit_reason(status)}\n')
         if status < 0 or status in (125, 255):
             return 125
         with tempfile.TemporaryFile() as stream:

@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """Partition the native full-test inventory; timing hints never select coverage."""
+import importlib.util
 import json
 import math
 from pathlib import Path
 import re
 import subprocess
 import sys
+
+
+_receipt_spec = importlib.util.spec_from_file_location('gate_receipt', Path(__file__).with_name('gate-receipt.py'))
+receipts = importlib.util.module_from_spec(_receipt_spec)
+_receipt_spec.loader.exec_module(receipts)
 
 
 def partition(names: list[str], durations: dict[str, float], count: int) -> list[list[str]]:
@@ -57,6 +63,9 @@ def native_roots(package: str, binary=None) -> list[str]:
     sys.stdout.buffer.write(output)
     sys.stdout.buffer.flush()
     if child.returncode:
+        if child.returncode < 0:
+            # The dead watchdog had no chance to write its own receipt.
+            receipts.failure('inventory:' + package, 'watchdog killed by ' + receipts.exit_reason(child.returncode))
         raise SystemExit(125 if child.returncode < 0 else child.returncode)
     names = []
     for line in output.splitlines():

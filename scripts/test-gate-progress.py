@@ -17,7 +17,8 @@ spec.loader.exec_module(progress)
 
 
 class ProgressTests(unittest.TestCase):
-    def execute(self, root, times, expected=None, command=None, status=0, start=True, startup=None):
+    def execute(self, root, times, expected=None, command=None, status=0, start=True, startup=None,
+                label='package:selection'):
         cache, report = root / 'cache', root / 'report'
         now = [0.0]
         child = Mock()
@@ -25,7 +26,7 @@ class ProgressTests(unittest.TestCase):
         child.stdout.fileno.return_value = 123
         if expected is not None:
             cache.mkdir(exist_ok=True)
-            identity = progress.history_identity('package:selection', command or ['go', 'test', './pkg'])
+            identity = progress.history_identity(label, command or ['go', 'test', './pkg'])
             key = progress.hashlib.sha256(json.dumps(identity).encode()).hexdigest()
             (cache / (key + '.json')).write_text(json.dumps(dict(count=1, expected_seconds=expected,
                 startup_samples=[expected if startup is None else startup])))
@@ -48,7 +49,7 @@ class ProgressTests(unittest.TestCase):
               patch.object(progress.os, 'read', side_effect=lambda *_: chunks.pop(0)),
               patch.object(progress.custody, 'stop_fixtures', return_value=True),
               patch.object(sys, 'stdout', output)):
-            code = progress.run('package:selection', command or ['go', 'test', './pkg'],
+            code = progress.run(label, command or ['go', 'test', './pkg'],
                                 cache, report, clock=lambda: now[0])
         self.launched_environment = launch.call_args.kwargs.get('env')
         self.launched_directory = launch.call_args.kwargs.get('cwd')
@@ -179,8 +180,11 @@ class ProgressTests(unittest.TestCase):
             self.assertAlmostEqual(record['startup_limit_seconds'], 3.6)
             self.assertEqual(record['startup_gap_seconds'], 1)
             self.assertEqual(record['stopped_phase'], 'test')
-            code, _, record = self.execute(root, [(3.6, None)],
-                expected=.25, startup=1.2, command=command)
+            report = root / 'failures'
+            with patch.dict(os.environ, GATE_FAILURE_REPORT=str(report)):
+                code, _, record = self.execute(root, [(3.6, None)],
+                    expected=.25, startup=1.2, command=command)
+            self.assertIn('watchdog during startup (exit 124) before first test', report.read_text())
             self.assertEqual(code, 124)
             self.assertEqual(record['stopped_phase'], 'startup')
 
@@ -250,6 +254,33 @@ class ProgressTests(unittest.TestCase):
         self.assertIsNone(self.launched_environment)
         self.assertEqual(record['progress_kind'], 'output')
 
+    def test_failure_receipt_keeps_package_test_or_pre_test_reason(self):
+        cases = (
+            ([dict(Action='output', Output='test2json: signal: killed\n'), dict(Action='fail')],
+             'fixture/pkg: signal: killed (exit 1) before first test'),
+            ([dict(Action='build-fail', ImportPath='fixture/dependency'),
+              dict(Action='fail', FailedBuild='fixture/dependency')],
+             'fixture/pkg: build failure in fixture/dependency'),
+            ([dict(Action='run', Test='TestParent/child'), dict(Action='fail', Test='TestParent/child'),
+              dict(Action='fail')],
+             'fixture/pkg: exit 1 (TestParent/child)'),
+            ([dict(Action='run', Test='TestSlow'),
+              dict(Action='output', Test='TestSlow', Output='panic: test timed out after 1h0m0s\n')],
+             'fixture/pkg: test timed out after 1h0m0s (exit 1) (TestSlow)'),
+        )
+        for events, summary in cases:
+            with self.subTest(summary=summary), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                report = root / 'failures'
+                # The receipt survives unrelated later output, with no need
+                # to read the watchdog's console capture.
+                data = ''.join(json.dumps(event) + '\n' for event in events).encode()
+                with patch.dict(os.environ, GATE_FAILURE_REPORT=str(report)):
+                    status, _, _ = self.execute(root, [(1, data), (2, b'')], status=1,
+                                                label='test:fixture/pkg:.*')
+                self.assertEqual(status, 1)
+                self.assertEqual(report.read_text(), summary + '\n')
+
     def test_nested_execution_quota_limits_parallelism(self):
         files = {'/proc/self/cgroup': '0::/worker/job',
                  '/sys/fs/cgroup/worker/cpu.max': '150000 100000'}
@@ -303,13 +334,16 @@ class ProgressTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             env = dict(os.environ, GATE_TIMING_CACHE=str(root / 'cache'),
-                       GATE_TIMING_REPORT=str(root / 'report'))
+                       GATE_TIMING_REPORT=str(root / 'report'), GATE_FAILURE_REPORT=str(root / 'failures'))
             run = subprocess.run([sys.executable, str(Path(progress.__file__)), 'fixture',
-                                  sys.executable, '-c', 'print("progress"); raise SystemExit(7)'],
+                                  sys.executable, '-c',
+                                  'import os; assert "GATE_FAILURE_REPORT" not in os.environ; '
+                                  'print("progress"); raise SystemExit(7)'],
                                  env=env, capture_output=True, text=True, timeout=10)
             self.assertEqual(run.returncode, 7, run.stderr)
             self.assertIn('progress', run.stdout)
             self.assertEqual(json.loads((root / 'report').read_text())['exit'], 7)
+            self.assertEqual((root / 'failures').read_text(), 'fixture: exit 7\n')
             self.assertEqual(list((root / 'cache').iterdir()), [])
 
 
