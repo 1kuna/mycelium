@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 )
 
 type cacheReferenceRequest struct {
@@ -16,8 +17,9 @@ type workerDiskDemandRequest struct {
 	Session string `json:"session"`
 }
 type workerDiskDemand struct {
-	Roots []string `json:"roots"`
-	Bytes uint64   `json:"bytes"`
+	Roots     []string                 `json:"roots"`
+	Bytes     uint64                   `json:"bytes"`
+	FileStore *workerFileStorePressure `json:"file_store,omitempty"`
 }
 
 func (a API) registerCacheReferences(mux *requestMux) {
@@ -26,7 +28,14 @@ func (a API) registerCacheReferences(mux *requestMux) {
 		if !decode(w, r, &request) {
 			return
 		}
-		respond(w, a.Queue.workerDiskDemand(r.Context(), request), nil)
+		demands := a.Queue.workerDiskDemand(r.Context(), request)
+		if volume := r.URL.Query().Get("compiler_volume"); volume != "" {
+			pressure := a.Queue.localFileStorePressure(r.Context(), request.Machine, request.Session, volume)
+			if pressure.ShortfallBytes > 0 {
+				demands = append(demands, workerDiskDemand{FileStore: &pressure})
+			}
+		}
+		respond(w, demands, nil)
 	})
 	mux.HandleFunc("POST /api/workers/cache-reference", func(w http.ResponseWriter, r *http.Request) {
 		var request cacheReferenceRequest
@@ -87,8 +96,16 @@ func (w Worker) reclaimPendingDisk(ctx context.Context) {
 	if w.diskBudget == nil {
 		return
 	}
+	var compilerVolume string
+	path := "/api/workers/disk-demand"
+	if w.compilerCache != nil {
+		if disk, err := w.diskBudget.probe(w.compilerCache.cache.Root); err == nil && disk.Volume != "" {
+			compilerVolume = disk.Volume
+			path += "?" + url.Values{"compiler_volume": {diskVolumeID(hostID(&w.Machine), compilerVolume)}}.Encode()
+		}
+	}
 	var demands []workerDiskDemand
-	if err := w.Client.Call(ctx, "POST", "/api/workers/disk-demand", workerDiskDemandRequest{Machine: w.Machine.ID, Session: w.Machine.Session}, &demands); err != nil {
+	if err := w.Client.Call(ctx, "POST", path, workerDiskDemandRequest{Machine: w.Machine.ID, Session: w.Machine.Session}, &demands); err != nil {
 		return
 	}
 	paths := map[string]string{"data": w.diskBudget.inventoryDir}
@@ -104,6 +121,10 @@ func (w Worker) reclaimPendingDisk(ctx context.Context) {
 		}
 	}
 	for _, demand := range demands {
+		if demand.FileStore != nil && compilerVolume != "" {
+			w.diskBudget.trimForFileStore(ctx, w.compilerCache, compilerVolume, *demand.FileStore)
+			continue
+		}
 		for _, role := range demand.Roots {
 			if path := paths[role]; path != "" {
 				release, err := w.diskBudget.reserve(ctx, path, demand.Bytes, 0)

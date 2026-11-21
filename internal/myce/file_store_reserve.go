@@ -190,9 +190,12 @@ func (q *Queue) admitFileUpload(ctx context.Context, status FileStoreStatus, pro
 		return 0, err
 	}
 	ordinary, err := q.fileUploadAdmission(ctx, status, projected, files, need, growth)
+	store := q.files
 	q.mu.RUnlock()
 	if err == nil {
 		q.recordStorageWritePressure(ctx, status, projected, files, growth, false, "")
+	} else if store != nil {
+		store.noteBlockedWrite(ctx, files, "", err)
 	}
 	return ordinary, err
 }
@@ -246,6 +249,8 @@ func (q *Queue) admitFileCreation(ctx context.Context, view *fileCapacitySnapsho
 	q.mu.RUnlock()
 	if err == nil {
 		q.recordStorageWritePressure(ctx, status, payloads, files, growth, false, "")
+	} else {
+		s.noteBlockedWrite(ctx, files, "", err)
 	}
 	return ordinary, err
 }

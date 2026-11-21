@@ -36,6 +36,7 @@ type FileStoreStatus struct {
 	Error                            string                  `json:"error,omitempty"`
 	// Which bound set FreeBytes, for refusal explanations; not public status.
 	allowanceFree, volumeFree, diskTotal uint64
+	diskVolume                           string
 	uploadRemaining                      uint64
 }
 
@@ -209,6 +210,7 @@ func (s *FileStore) diskCapacity(ctx context.Context) (FileStoreStatus, map[stri
 	storeFree := status.LimitBytes - min(status.LimitBytes, allocated)
 	unavailable := addDiskBytes(status.FloorBytes, remaining)
 	status.allowanceFree, status.volumeFree, status.diskTotal = storeFree, disk.FreeBytes-min(disk.FreeBytes, unavailable), disk.TotalBytes
+	status.diskVolume = disk.Volume
 	status.FreeBytes = min(status.allowanceFree, status.volumeFree)
 	status.uploadRemaining = remaining
 	return status, payloads, nil

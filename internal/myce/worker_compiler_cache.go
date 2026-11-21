@@ -83,7 +83,7 @@ func (c *workerCompilerCache) budgetCandidates(ctx context.Context) ([]diskBudge
 	if !info.IsDir() {
 		return nil, nil
 	}
-	return []diskBudgetCandidate{{path: path, used: info.ModTime(), trim: func(ctx context.Context, enough func() (bool, error)) error {
+	return []diskBudgetCandidate{{path: path, used: info.ModTime(), trim: func(ctx context.Context, enough func() (bool, error), limit uint64) error {
 		lock, err := c.cache.tryLock(key + ".use")
 		if err != nil || lock == nil {
 			return err
@@ -100,13 +100,13 @@ func (c *workerCompilerCache) budgetCandidates(ctx context.Context) ([]diskBudge
 		if !os.SameFile(info, current) || !info.ModTime().Equal(current.ModTime()) {
 			return nil
 		}
-		return trimCompilerObjects(ctx, path, current, enough)
+		return trimCompilerObjects(ctx, path, current, enough, limit)
 	}}}, nil
 }
 
 // Go stores independent action and data files in 256 hex shards. Trim only
 // known regular objects. Gate tooling can keep auxiliary state beside them.
-func trimCompilerObjects(ctx context.Context, path string, info fs.FileInfo, enough func() (bool, error)) error {
+func trimCompilerObjects(ctx context.Context, path string, info fs.FileInfo, enough func() (bool, error), limit uint64) error {
 	root, err := os.OpenRoot(path)
 	if err != nil {
 		return err
@@ -120,6 +120,7 @@ func trimCompilerObjects(ctx context.Context, path string, info fs.FileInfo, eno
 	type object struct {
 		path string
 		used time.Time
+		info fs.FileInfo
 	}
 	var objects []object
 	for shard := range 256 {
@@ -143,20 +144,40 @@ func trimCompilerObjects(ctx context.Context, path string, info fs.FileInfo, eno
 			}
 			stat, err := entry.Info()
 			if err == nil && stat.Mode().IsRegular() && stat.Sys().(*syscall.Stat_t).Dev == device {
-				objects = append(objects, object{filepath.Join(name, file), stat.ModTime()})
+				objects = append(objects, object{filepath.Join(name, file), stat.ModTime(), stat})
 			}
 		}
 	}
 	sort.SliceStable(objects, func(i, j int) bool { return objects[i].used.Before(objects[j].used) })
+	var removed uint64
 	for _, entry := range objects {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := root.Remove(entry.path); err != nil {
-			continue
-		}
 		if enough, err := enough(); enough || err != nil {
 			return err
+		}
+		if limit > 0 {
+			info, err := root.Lstat(entry.path)
+			if err != nil || !os.SameFile(entry.info, info) || !info.ModTime().Equal(entry.used) {
+				continue
+			}
+			stat := info.Sys().(*syscall.Stat_t)
+			if stat.Nlink != 1 || stat.Blocks <= 0 {
+				continue
+			}
+			bytes := uint64(stat.Blocks) * 512
+			if bytes > limit-removed {
+				continue
+			}
+			if err := root.Remove(entry.path); err == nil {
+				removed += bytes
+				if removed >= limit {
+					return nil
+				}
+			}
+		} else {
+			_ = root.Remove(entry.path)
 		}
 	}
 	return nil
