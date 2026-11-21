@@ -24,7 +24,23 @@ func (l *LlamaEngine) observeReadinessActivity(ctx context.Context, p *readiness
 	resources := w.observeResources(owned, memory)
 	deviceCtx, cancelDevice := context.WithCancel(ctx)
 	var deviceDone <-chan deviceMemoryResult
-	if memory != nil && backendFor(w.Machine.GPU).attemptMemory != nil {
+	deviceTelemetry := memory != nil && backendFor(w.Machine.GPU).attemptMemory != nil
+	if l.memoryPeaks != nil {
+		switch {
+		case deviceTelemetry, memory == nil && w.Machine.GPU == "metal" && w.processMemory != nil && w.processMemory.OwnedFootprint != nil:
+			l.memoryPeaks.setDeviceUnavailable(modelMemoryNoSample)
+		case backendFor(w.Machine.GPU).attemptMemory != nil:
+			l.memoryPeaks.setDeviceUnavailable(deviceMemoryNoCgroup)
+		default:
+			l.memoryPeaks.setDeviceUnavailable(deviceMemoryUnsupported)
+		}
+		j := Job{Spec: Spec{Needs: ResourceNeeds{Platform: Platform{Required: []string{w.Machine.GPU}}}}}
+		if memory != nil {
+			l.stopMemory = w.observeAttemptMemoryWith(memory, j, nil, deviceMemorySamplePeriod, l.memoryPeaks.observe)
+		} else {
+			l.stopMemory = w.observeAttemptMemoryWith(nil, j, func() []int { return []int{owned.cmd.Process.Pid} }, deviceMemorySamplePeriod, l.memoryPeaks.observe, owned)
+		}
+	} else if deviceTelemetry {
 		a := memory
 		deviceDone = w.observeDeviceMemory(deviceCtx, func() (map[int]bool, map[int]bool, error) {
 			ids := map[int]bool{}
@@ -33,6 +49,9 @@ func (l *LlamaEngine) observeReadinessActivity(ctx context.Context, p *readiness
 		}, a.fs, deviceMemorySamplePeriod, p.clock, a)
 	}
 	source := readinessActivitySource(resources.snapshot, func() (*float64, *float64) {
+		if l.memoryPeaks != nil {
+			return l.memoryPeaks.activity()
+		}
 		if sample := memory.currentHostMemory(p.clock); sample != nil {
 			return &sample.NonreclaimableGB, sample.DeviceGB
 		}
@@ -49,7 +68,7 @@ func (l *LlamaEngine) observeReadinessActivity(ctx context.Context, p *readiness
 	// Silence cannot be established before the next shared sensor observation.
 	// Two sampling periods allow one interval plus observation scheduling jitter;
 	// this is an observability floor, never a deadline on an unknown cold load.
-	p.activityPeriod = readinessSensorPeriod(memory != nil, runtime.GOOS, deviceDone != nil)
+	p.activityPeriod = readinessSensorPeriod(memory != nil, runtime.GOOS, deviceTelemetry)
 	p.osObserver, p.activitySource = true, source
 	p.mu.Unlock()
 	var once sync.Once
