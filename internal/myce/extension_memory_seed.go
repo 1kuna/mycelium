@@ -30,7 +30,7 @@ func (q *Queue) priorVersionMemory(j *Job, m *Machine, estimate memoryEstimate) 
 	var points []*WorkObservation
 	var latest time.Time
 	for _, old := range q.memoryHistory().s.Extensions {
-		if old.Name != current.Name || old.Digest == current.Digest {
+		if old.Name != current.Name || old.Digest == current.Digest || !sameResidentMemoryContract(j.Spec.Resident, old.Resident) {
 			continue
 		}
 		ordered := extensionSemver(old.Version) != "" && extensionSemver(current.Version) != ""
@@ -102,6 +102,16 @@ func (q *Queue) priorVersionMemory(j *Job, m *Machine, estimate memoryEstimate) 
 	return memoryEstimate{key: estimate.key, host: peak, device: peak, hostFactor: 1, deviceFactor: 1,
 		measuredHostGB: host, constrainedGB: lower, samples: n, source: priorVersionMemorySource, refusal: refusal,
 		deviceUncalibrated: device == 0 && !j.Spec.Needs.cpuOnly()}
+}
+
+// A predecessor can have engine memory inside its attempt unless its
+// extension declares a resident model. Match that declaration before using
+// its peak to size a driver with a separate engine charge.
+func sameResidentMemoryContract(job, predecessor *ResidentBinding) bool {
+	if job == nil || predecessor == nil {
+		return job == predecessor
+	}
+	return job.Model == predecessor.Model
 }
 
 func checkSharesWorkload(current Extension, v ExtensionVariant, old Extension, prior ExtensionVariant) bool {

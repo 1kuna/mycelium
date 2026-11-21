@@ -98,6 +98,78 @@ func TestNewVersionSeedsFromPriorAcceptedMemory(t *testing.T) {
 	}
 }
 
+func TestResidentVersionProbesWithoutStandalonePredecessorPeak(t *testing.T) {
+	q, clock, m, _ := residentFixture(t)
+	model := q.models.Models[0]
+	model.MemoryGB, model.HostMemoryGB = 24, 16
+	if err := q.ConfigureModels(ModelConfig{Models: []Model{model}}); err != nil {
+		t.Fatal(err)
+	}
+	m.ModelConfigHash = modelConfigHash(q.models)
+	m.TotalMemoryGB, m.FreeMemoryGB = 30, 30
+	m.HostMemoryBudgetGB, m.HostAvailableMemoryGB = 24, 17.4
+	m.MemoryEnforcement = cgroupMemoryEnforcement
+	m.ExtensionFingerprint = "test-memory-identity"
+	m.Devices = []MachineDevice{{ID: "0", Platform: "fake", Identity: "card", Selector: "0",
+		MemoryMode: "dedicated", MemoryMeasured: true, TotalMemoryGB: 30, BudgetGB: 30, FreeMemoryGB: 30,
+		ExtensionFingerprint: m.ExtensionFingerprint}}
+	target := m.Devices[0].machine(m)
+	old := compositionExtension(t, false)
+	old.Resumable = false
+	old.Variants[0].Target = machineTarget(&target)
+	old.Variants[0].Needs = ResourceNeeds{CPUCores: 1, Memory: "auto"}
+	old.Variants[0].References = map[string]WorkReference{
+		"extension:sample": {InputShape: "tiny", Unit: "records", Units: 1},
+	}
+	old = freezeComposition(t, old)
+	if err := q.AddExtension(old); err != nil {
+		t.Fatal(err)
+	}
+	s := Spec{Name: "sample-stage", Project: "test", Extension: extensionKey(old),
+		Needs: ResourceNeeds{Memory: "auto"}, Workload: &Workload{InputShape: "tiny", Units: 1}}
+	report := newExtensionReport(old, &target, s.workType())
+	report.Setup, report.Qualified, report.CheckID = true, true, "standalone-check"
+	m.Devices[0].ExtensionReports = []ExtensionReport{report}
+	queued := submit(t, q, s)
+	run := assignedJob(machineCheck(t, q, m))
+	if run == nil || run.ID != queued.ID {
+		t.Fatal("standalone predecessor did not start")
+	}
+	if err := q.Started(result(run, false)); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	peak, growth := 4.947, .388
+	r := result(run, true)
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, CgroupGB: &peak, GrowthGB: &growth}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+
+	next := old
+	next.Version, next.Resident = "2", &ResidentBinding{Model: model.Name}
+	next = freezeComposition(t, next)
+	if err := q.AddExtension(next); err != nil {
+		t.Fatal(err)
+	}
+	s.Extension = extensionKey(next)
+	report = newExtensionReport(next, &target, s.workType())
+	report.Setup, report.Qualified, report.CheckID = true, true, "resident-check"
+	m.Devices[0].ExtensionReports = append(m.Devices[0].ExtensionReports, report)
+	clock.Advance(time.Second)
+	queued = submit(t, q, s)
+	assigned := assignedJob(machineCheck(t, q, m))
+	if assigned == nil || assigned.ID != queued.ID {
+		wait := job(t, q, queued.ID)
+		t.Fatalf("resident driver did not probe beside the engine: %s, memory=%+v", wait.Reason, wait.LastMemoryAdmission)
+	}
+	env := assigned.MemoryEnvelope
+	if env.Source != "exploratory first run" || env.Evidence != 0 || env.HostGB <= 0 ||
+		env.HostGB+model.HostMemoryGB > m.HostAvailableMemoryGB || env.DeviceGB+model.MemoryGB != m.FreeMemoryGB {
+		t.Fatalf("resident driver did not get a cold engine-aware envelope: %+v", env)
+	}
+}
+
 func TestNewVersionSeedRetainsCurrentVersionOOM(t *testing.T) {
 	q, clock, m, s := observationFixture(t)
 	s.Needs.Memory, s.Workload = "auto", nil
