@@ -40,23 +40,23 @@ func nativeNamespaceExec(args, env []string) error {
 	return unix.Exec(args[0], args, env)
 }
 
-func nativeNamespaceMonitorFileArgs(bwrap string, args []string, work string) ([]string, error) {
+func nativeNamespaceMonitorFileArgs(bwrap string, options, command []string, work string) ([]string, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, err
 	}
-	path, digest, err := writeNativeLaunchFile(work, []byte(strings.Join(args, "\x00")+"\x00"))
+	path, digest, err := writeNativeLaunchFile(work, []byte(strings.Join(options, "\x00")+"\x00"))
 	if err != nil {
 		return nil, err
 	}
-	return []string{executable, "_native-exec", "namespace-monitor-file", bwrap, path, digest}, nil
+	return append([]string{executable, "_native-exec", "namespace-monitor-file", bwrap, path, digest}, command...), nil
 }
 
-// Bubblewrap accepts NUL-separated options from an FD. Do not turn the mount
-// grants back into exec arguments: /tmp-backed binding sets can grow those too.
+// Bubblewrap expands NUL-separated options from an FD and takes the command
+// from its outer argv. The mount grants can be too large for exec argv.
 func nativeNamespaceMonitorFile(args []string) error {
-	if len(args) != 3 {
-		return errors.New("native namespace monitor requires argument metadata")
+	if len(args) < 4 {
+		return errors.New("native namespace monitor requires option metadata and a command")
 	}
 	data, err := readNativeLaunchFile(args[1], args[2])
 	if err != nil {
@@ -80,7 +80,7 @@ func nativeNamespaceMonitorFile(args []string) error {
 	if _, err := unix.FcntlInt(f.Fd(), unix.F_SETFD, 0); err != nil {
 		return err
 	}
-	return nativeNamespaceMonitor([]string{args[0], "--args", strconv.Itoa(fd)})
+	return nativeNamespaceMonitor(append([]string{args[0], "--args", strconv.Itoa(fd), "--"}, args[3:]...))
 }
 
 // The namespace init is a descendant of the existing PGID anchor. Custody,
@@ -124,10 +124,9 @@ func (w Worker) prepareNativeGroupIsolation(cmd *exec.Cmd, spool, work string, e
 		n.close()
 		return nil, err
 	}
-	args := append(nativeBwrapPolicyArgs(p), "--info-fd", "3", "--")
-	args = append(args, executable, "_native-exec", "namespace-anchor", "/bin/sh", "-c", `printf R >&4; exec 4>&-; exec "$@"`, "myce-namespace-ready")
-	args = append(args, cmd.Args...)
-	args, err = nativeNamespaceMonitorFileArgs(s.bwrap, args, work)
+	options := append(nativeBwrapPolicyArgs(p), "--info-fd", "3")
+	command := append([]string{executable, "_native-exec", "namespace-anchor", "/bin/sh", "-c", `printf R >&4; exec 4>&-; exec "$@"`, "myce-namespace-ready"}, cmd.Args...)
+	args, err := nativeNamespaceMonitorFileArgs(s.bwrap, options, command, work)
 	if err != nil {
 		n.close()
 		return nil, err
