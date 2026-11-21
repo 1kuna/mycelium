@@ -2747,7 +2747,10 @@ on observed targets), `native_qualification` (a declared implementation needs it
 exact native check, which the queue runs itself), and `production_parity`
 (reference-output parity required). A `native_qualification` reason names the
 check job and what it waits on, or says the queue submits it at the host's next
-check-in. The queue offers that check whenever the job could use the host once
+check-in. A host-memory sizing wait carries the check's full capacity comparison.
+When maintenance blocks the compatible native check routes, the parent reports
+`host_maintenance` and names the maintenance owner. An open route that can
+make progress takes precedence. The queue offers a check whenever the job could use the host once
 it has room, not only while the host is free, so a busy host cannot starve it;
 the check then waits in ordinary admission. A worker restart does not cancel a
 pending check before the host reports its identity again, and a cancelled

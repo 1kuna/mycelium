@@ -212,7 +212,11 @@ func (q *Queue) extensionQualificationDemands(m *Machine, only *Extension) map[s
 // ran. The check, once submitted, still passes every admission hold itself.
 // Dead-end judgements use the same view: a busy host is still a host.
 func (q *Queue) structuralDemandPolicy(j *Job, m *Machine) bool {
-	if q.sharedHostAdmissionRefusal(j, m) != "" || q.variantParityHold(j, m) != nil || !dependencyReady(j) || m.Recovering || cancelled(j) || q.maintenanceBlocked(hostID(m)) || !logPolicyFits(j.Spec.Logs, m) || availabilityBlocked(m) || !q.jobAllowsMachine(j, m.ID) {
+	return !q.maintenanceBlocked(hostID(m)) && q.structuralDemandPolicyIgnoringMaintenance(j, m)
+}
+
+func (q *Queue) structuralDemandPolicyIgnoringMaintenance(j *Job, m *Machine) bool {
+	if q.sharedHostAdmissionRefusal(j, m) != "" || q.variantParityHold(j, m) != nil || !dependencyReady(j) || m.Recovering || cancelled(j) || !logPolicyFits(j.Spec.Logs, m) || availabilityBlocked(m) || !q.jobAllowsMachine(j, m.ID) {
 		return false
 	}
 	if model, ok := q.model(j.Spec.Needs.Model); ok && (!logPolicyFits(model.Logs, m) || !modelFenceAllows(model, m) || !q.projectAllows(model.Project, m.ID)) {
