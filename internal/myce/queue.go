@@ -236,6 +236,7 @@ type Queue struct {
 	productionGrace time.Duration
 	wake            chan struct{}
 	models          ModelConfig
+	modelHash       string
 	calls           map[string]*ModelCall
 	lock            *os.File
 	mu              queueMutex
@@ -1725,10 +1726,15 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		if m.ID == "" || m.Session == "" || !validGPU(m.GPU) || !validMemoryValue(m.TotalMemoryGB) || m.FreeMemoryGB < 0 || math.IsNaN(m.FreeMemoryGB) || math.IsInf(m.FreeMemoryGB, 0) {
 			return errors.New("invalid machine report")
 		}
-		if m.ModelURL != "" && len(q.models.Models) > 0 && m.ModelConfigHash != modelConfigHash(q.models) {
+		old := q.s.Machines[m.ID]
+		if old != nil && m.ModelConfigHash == "" && q.catalogStale(old) {
 			return errors.New("worker model config does not match queue")
 		}
-		old := q.s.Machines[m.ID]
+		catalogStale := q.catalogStale(&m)
+		if catalogStale && (old == nil || hostID(old) != hostID(&m) || !q.maintenanceBlocked(hostID(&m)) ||
+			len(reports) != 0 || !modelReportsQuiescent(c.ModelReports) || hostPreparing(&m) || len(q.hostObligations(hostID(&m))) != 0) {
+			return errors.New("worker model config does not match queue")
+		}
 		if old != nil && old.Session != m.Session && q.retainWorkerHandover(old) {
 			return errors.New("planned worker takeover retains exact prior-session custody; recover that session before replacing it")
 		}
@@ -1772,8 +1778,10 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 				}
 			}
 		}
-		q.reconcileHostReleases(c)
-		releaseStops = q.unheldCopyStops(c.Machine.ID, c.Machine.Session, reports)
+		if !catalogStale {
+			q.reconcileHostReleases(c)
+			releaseStops = q.unheldCopyStops(c.Machine.ID, c.Machine.Session, reports)
+		}
 		if m.TotalMemoryGB == 0 {
 			m.TotalMemoryGB = m.FreeMemoryGB
 			if old != nil {
@@ -1864,6 +1872,21 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			q.discontinueContactCadence(m.ID)
 		}
 		q.acceptContactPeriod(&m, c.period, c.contact)
+		if catalogStale {
+			// Keep installer custody evidence current. A drained worker with the
+			// previous catalog must not enter reconciliation or receive any plans.
+			m.ModelURL, m.AdmissionReason = "", "model_catalog_stale"
+			budget, _ := q.measuredHostMemoryBudget(&m, budget)
+			reply.HostMemoryBudget = &budget
+			reply.AdmissionBlocked, reply.Leave = true, m.Leaving
+			reply.FleetInstructionProtocol = fleetInstructionProtocol
+			reply.CustodianProtocol = custodianProtocol
+			q.s.LastWorkerContact = m.LastSeen
+			if m.Leaving && !c.Recovering {
+				m.Gone = true
+			}
+			return nil
+		}
 		body.next("checkin_memory")
 		q.recordExternalMemory(&m)
 		if q.hostMemorySamples == nil {

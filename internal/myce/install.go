@@ -369,39 +369,57 @@ func InstallWithRollback(ctx context.Context, c ServiceConfig, executable, token
 	return rollback, err
 }
 
-func installWithFiles(ctx context.Context, c ServiceConfig, executable, token string, command func(context.Context, string, ...string) ([]byte, error), files installFiles) (result error) {
+// PreflightInstall checks the ordinary install's read-only prerequisites. The
+// transaction repeats them at install time and keeps its own rollback snapshot.
+func PreflightInstall(ctx context.Context, c ServiceConfig, executable, token string, command func(context.Context, string, ...string) ([]byte, error)) error {
+	plan, err := prepareInstall(ctx, c, executable, token, command, installFiles{})
+	if err != nil || c.SaveSettingsOnly {
+		return err
+	}
+	_, err = prepareInstallStorage(ctx, plan.config, command, installStoragePreview, nil)
+	return err
+}
+
+type installPreparation struct {
+	config         ServiceConfig
+	transaction    *installTransaction
+	roots          []string
+	existing       bool
+	invitation     *Invitation
+	reconciliation *slotReconciliation
+	executable     []byte
+}
+
+func prepareInstall(ctx context.Context, c ServiceConfig, executable, token string, command func(context.Context, string, ...string) ([]byte, error), files installFiles) (installPreparation, error) {
 	if os.Geteuid() == 0 {
-		return ErrHostIdentity
+		return installPreparation{}, ErrHostIdentity
 	}
 	if c.Detection.OS == "linux" && (c.Role == "worker" && !ValidWorkerUnit(filepath.Base(c.Service)) || c.Role != "worker" && (c.Role != "queue" || filepath.Base(c.Service) != "myce-queue.service")) {
-		return errors.New("refusing non-Mycelium service unit")
+		return installPreparation{}, errors.New("refusing non-Mycelium service unit")
 	}
 
 	if err := CheckMachineInstallGate(c); err != nil {
-		return err
+		return installPreparation{}, err
 	}
 	if err := c.ValidateInstallPolicies(); err != nil {
-		return err
+		return installPreparation{}, err
 	}
 
 	roots, err := c.StateRoots()
 	if err != nil {
-		return err
+		return installPreparation{}, err
 	}
 	if err := CheckStateRoots(roots...); err != nil {
-		return err
+		return installPreparation{}, err
 	}
 	if command == nil {
-		return errors.New("service runner unavailable")
+		return installPreparation{}, errors.New("service runner unavailable")
 	}
 	if err := c.ValidateInstall(); err != nil {
-		return err
-	}
-	if err := EnsureXPUHealthAccess(ctx, c, command); err != nil {
-		return err
+		return installPreparation{}, err
 	}
 	if _, err := InstallUnitPlan(ctx, c, command); err != nil {
-		return err
+		return installPreparation{}, err
 	}
 	c.Version = 1
 	existing := false
@@ -409,48 +427,42 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 	if _, err := os.Lstat(c.Config); err == nil {
 		old, err := ReadServiceConfig(c.Config)
 		if err != nil {
-			return err
+			return installPreparation{}, err
 		}
 		if err := ValidateInstallIdentity(old, c); err != nil {
-			return err
+			return installPreparation{}, err
 		}
 		existing = true
 		installed = old
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
+		return installPreparation{}, err
 	}
 	if c.SaveSettingsOnly {
 		if !existing {
-			return errors.New("--save-settings-only requires an existing queue installation")
+			return installPreparation{}, errors.New("--save-settings-only requires an existing queue installation")
 		}
-		return saveQueueInstallSettings(ctx, c, files, command)
-	}
-	// Refuse known queue overrides before publication (and therefore without
-	// rollback restarting the old service). Recheck after daemon-reload too.
-	if existing && c.Detection.OS == "linux" && c.Role == "queue" {
-		if err := validateInstallDropIns(ctx, c, command); err != nil {
-			return err
-		}
+		tx, err := snapshotInstall(ctx, c, files, command)
+		return installPreparation{config: c, transaction: tx}, err
 	}
 	if existing && c.Detection.OS == "darwin" {
 		if err := validateDarwinUpgradeIdentity(ctx, c.Binary, executable, command); err != nil {
-			return err
+			return installPreparation{}, err
 		}
 	}
 	var invitation *Invitation
 	if existing && installed.JoiningFile != "" {
 		if c.JoiningFile != installed.JoiningFile {
-			return errors.New("address repair must preserve the installed joining authority and certificate pin")
+			return installPreparation{}, errors.New("address repair must preserve the installed joining authority and certificate pin")
 		}
 		i, err := ReadInvitation(installed.JoiningFile)
 		if err != nil {
-			return err
+			return installPreparation{}, err
 		}
 		// Also repair a previous reinstall that changed config.Queue alone.
 		if c.Queue != installed.Queue || strings.HasPrefix(c.Queue, "https://") && c.Queue != i.Address {
 			client, err := ResolveJoining(ctx, i, c.Queue, nil)
 			if err != nil {
-				return fmt.Errorf("cannot update joining address using the saved certificate pin: %w", err)
+				return installPreparation{}, fmt.Errorf("cannot update joining address using the saved certificate pin: %w", err)
 			}
 			client.HTTP.CloseIdleConnections()
 			i.Address = c.Queue
@@ -459,25 +471,24 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 	}
 	if c.JoiningFile != "" && !existing {
 		if c.Role != "worker" || c.EnvironmentFile != "" {
-			return errors.New("joining invitation requires a worker without EnvironmentFile")
+			return installPreparation{}, errors.New("joining invitation requires a worker without EnvironmentFile")
 		}
 		i, err := ReadInvitation(c.JoiningFile)
 		if err != nil {
-			return err
+			return installPreparation{}, err
 		}
 		i.Address = c.Queue // Save the verified origin only with the installed authority.
 		invitation = &i
-		token = i.Token
 		c.JoiningFile = filepath.Join(filepath.Dir(c.Config), "joining.json")
 	}
 	for _, path := range []string{c.Config, c.Binary, c.Credentials, c.Service} {
 		st, err := os.Lstat(path)
 		if err == nil {
 			if !existing || !st.Mode().IsRegular() {
-				return fmt.Errorf("refusing unexpected installed path %s", path)
+				return installPreparation{}, fmt.Errorf("refusing unexpected installed path %s", path)
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
+			return installPreparation{}, err
 		}
 	}
 	var reconciliation *slotReconciliation
@@ -486,8 +497,15 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		reconciliationConfig.Queue = c.Queue // Address repair already verified the saved certificate pin.
 		reconciliation, err = preflightInstallSlot(ctx, reconciliationConfig, command)
 		if err != nil {
-			return err
+			return installPreparation{}, err
 		}
+	}
+	if c.EnvironmentFile == "" && !existing && invitation == nil && token == "" {
+		return installPreparation{}, errors.New("set MYCE_TOKEN before installing")
+	}
+	data, err := os.ReadFile(executable)
+	if err != nil {
+		return installPreparation{}, err
 	}
 	extraPaths := []string{filepath.Join(c.State, installStorageReceiptFile)}
 	if invitation != nil {
@@ -498,8 +516,41 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 	}
 	tx, err := snapshotInstall(ctx, c, files, command, extraPaths...)
 	if err != nil {
+		return installPreparation{}, err
+	}
+	// Preview effective overrides before publication and check again after reload.
+	if c.Detection.OS == "linux" {
+		if err := validateInstallDropIns(ctx, c, command, tx.retired...); err != nil {
+			return installPreparation{}, err
+		}
+	}
+	if reconciliation != nil {
+		// The rollback snapshot must contain exactly the qualified slot bytes.
+		original := tx.originals[c.Binary]
+		if fleetBytesHash(original.data) != reconciliation.Slot.SHA256 || int64(len(original.data)) != reconciliation.Slot.Size {
+			return installPreparation{}, errors.New("fleet_install_changed")
+		}
+	}
+	return installPreparation{
+		config: c, transaction: tx, roots: roots, existing: existing,
+		invitation: invitation, reconciliation: reconciliation, executable: data,
+	}, nil
+}
+
+func installWithFiles(ctx context.Context, c ServiceConfig, executable, token string, command func(context.Context, string, ...string) ([]byte, error), files installFiles) (result error) {
+	plan, err := prepareInstall(ctx, c, executable, token, command, files)
+	if err != nil {
 		return err
 	}
+	c, tx := plan.config, plan.transaction
+	if c.SaveSettingsOnly {
+		return saveQueueInstallSettings(ctx, c, tx)
+	}
+	if err := EnsureXPUHealthAccess(ctx, c, command); err != nil {
+		return err
+	}
+	existing, invitation, reconciliation := plan.existing, plan.invitation, plan.reconciliation
+
 	defer func() {
 		if result != nil && len(tx.published) > 0 {
 			result = errors.Join(result, tx.restore(ctx))
@@ -509,15 +560,11 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 			}
 		}
 	}()
-	warning, err := prepareInstallStorage(ctx, c, command, false, files.storageFS)
+	warning, err := prepareInstallStorage(ctx, c, command, installStorageWrite, files.storageFS)
 	if err != nil {
 		return err
 	}
-	if err := PrepareStateRoots(roots...); err != nil {
-		return err
-	}
-	data, err := os.ReadFile(executable)
-	if err != nil {
+	if err := PrepareStateRoots(plan.roots...); err != nil {
 		return err
 	}
 	for _, path := range []string{filepath.Dir(c.Config), filepath.Dir(c.Service), c.State} {
@@ -530,11 +577,6 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		return err
 	}
 	if reconciliation != nil {
-		// The rollback snapshot must contain exactly the qualified slot bytes.
-		original := tx.originals[c.Binary]
-		if fleetBytesHash(original.data) != reconciliation.Slot.SHA256 || int64(len(original.data)) != reconciliation.Slot.Size {
-			return errors.New("fleet_install_changed")
-		}
 		current, err := readReleaseSlot(c.Binary)
 		if err != nil || current.SHA256 != reconciliation.Slot.SHA256 {
 			return errors.New("fleet_install_changed")
@@ -552,7 +594,7 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 	}
 
 	// Publication and recovery share the complete pre-install snapshot.
-	if err = tx.put(c.Binary, data, 0700); err != nil {
+	if err = tx.put(c.Binary, plan.executable, 0700); err != nil {
 		return err
 	}
 	configData, err := json.MarshalIndent(c, "", "  ")
@@ -575,9 +617,6 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		return err
 	}
 	if c.EnvironmentFile == "" && !existing && invitation == nil {
-		if token == "" {
-			return errors.New("set MYCE_TOKEN before installing")
-		}
 		credentialData := []byte("MYCE_TOKEN=" + strconv.Quote(token) + "\nMYCE_QUEUE=" + strconv.Quote(c.Queue) + "\n")
 		if err = tx.put(c.Credentials, credentialData, 0600); err != nil {
 			return err

@@ -106,7 +106,7 @@ func TestInstallStorageClassifiesMisconfigurationAndReachability(t *testing.T) {
 				if preflight {
 					warning, err = preflightFleetStorageResult(context.Background(), c, command, &fs)
 				} else {
-					warning, err = prepareInstallStorage(context.Background(), c, command, false, &fs)
+					warning, err = prepareInstallStorage(context.Background(), c, command, installStorageWrite, &fs)
 				}
 				if fault.transient {
 					if err != nil || warning == nil || warning.Errno != int(fault.errno) {

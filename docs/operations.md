@@ -189,8 +189,8 @@ the separate qualification described there.
   machine. The defaults are `/mnt/nas` on Linux and `/Volumes/NAS` on macOS;
   otherwise pass `--nas PATH`. Mycelium never mounts a drive or falls back to
   local disk, so a missing mount stops the install with `nas_not_configured`.
-  The dry run does not check the mount. Run `ls NAS_PATH` yourself and confirm
-  it shows the shared drive's contents before installing.
+  The dry run checks required mount inventory and existing path metadata.
+  Installation verifies that it can write, sync and rename on the shared drive.
 - **GPU drivers already working:** for Nvidia, `nvidia-smi` lists the card. For
   Intel GPUs on Linux, the Level Zero/oneAPI runtime is installed. Apple GPUs
   need nothing. CPU-only machines are fine.
@@ -380,8 +380,15 @@ the config and finish installation. This also repairs older interrupted installs
 that wrote only the config. The pin and credentials are preserved exactly.
 A pin mismatch refuses the repair without changing installed files; this
 path cannot replace the authority or rotate its pin. Changing an address requires
-the new queue endpoint to be reachable. Preview with `--dry-run` to inspect the
-config change without verification or writes.
+the new queue endpoint to be reachable. `--dry-run` verifies the saved pin and
+credential against that endpoint and shows the proposed config change.
+
+`--dry-run` runs read-only install checks, including current service-manager
+state, release-slot custody, rollback artifact readability and storage metadata.
+It can fail on the same read-only refusal as a real install. The real installer
+rechecks those conditions and verifies NAS writes, directory creation, lingering
+changes, GPU access provisioning, service-context hardware and manager activation.
+After reloading the unit, it checks the resulting effective drop-ins again.
 
 Install, onboarding preflight and fleet updates check NAS reachability, but a
 stalled operation or transient I/O/reachability error is a warning. It does not
@@ -456,6 +463,38 @@ manifest signed by it. Approval storage failures return HTTP 500
 Saved configs accept the retired local-control fields during overlay and omit
 them when rewritten; runtime options and secret references remain intact. Old state is never converted or
 silently cleared. See [fresh install](#archive-old-state-and-install-fresh).
+
+### Change the model catalog
+
+1. Stage the new catalog at a separate path on each applicable machine. Keep
+   the previous file available for recovery. Preview the queue and worker
+   installs with `--model-config NEW_CATALOG --dry-run` and their saved configs.
+2. Run `myce host drain HOST --wait` for every worker host, including the queue
+   host if it runs a worker. Keep each host drained or disabled through the
+   transition. Wait for running attempts, model engines and preparations to
+   release before activating the new catalog on the queue.
+3. Run `myce install queue --config QUEUE_CONFIG --model-config NEW_CATALOG`
+   using a queue binary with catalog-transition support. Verify the queue is
+   healthy. Known quiescent, drained workers on the previous catalog can still
+   report service identity. The queue issues them no work and refuses to resume
+   their hosts while they report the previous hash.
+4. On each worker, rerun the preview against the updated queue, then run
+   `myce install worker --config WORKER_CONFIG --model-config NEW_CATALOG`.
+   The installer handles the service restart. `myce host status HOST` prints
+   JSON. Check for a fresh worker and a changed `machine.model_config_hash`.
+   Confirm that it matches across workers. `myce status --json` also shows the
+   worker hashes. Keep a worker that still reports the old hash or the
+   `model_catalog_stale` admission reason drained and retry the matching
+   reinstall. Resume only drains you took once the workers on the host report
+   the new hash.
+
+On earlier queue releases that reject old-catalog check-ins, an active stale
+worker can fail install with `fleet_existing_service_unavailable`. Drain and
+verify custody is settled before switching the queue. For each worker, stop
+its selected service through the service manager before running the matching
+reinstall. If custody was never verified, restore the previous queue catalog
+while admission stays drained and verify release before proceeding. A signed
+binary-only upgrade preserves the configured catalog and cannot fix a mismatch.
 
 ### Legacy EnvironmentFile workers
 

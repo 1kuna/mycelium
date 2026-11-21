@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,7 +33,7 @@ func ValidateInstallIdentity(old, next ServiceConfig) error {
 	return nil
 }
 
-func validateInstallDropIns(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error)) error {
+func validateInstallDropIns(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error), retired ...string) error {
 	starts := []string{""} // The base unit's command remains until an empty reset.
 	overridden := false
 	for _, unit := range []string{filepath.Base(c.Service)} {
@@ -41,6 +42,9 @@ func validateInstallDropIns(ctx context.Context, c ServiceConfig, command func(c
 			return errors.New("cannot inspect effective service drop-ins")
 		}
 		for _, path := range strings.Fields(string(b)) {
+			if slices.Contains(retired, path) {
+				continue
+			}
 			if !filepath.IsAbs(path) || strings.Contains(path, "\\") {
 				return errors.New("cannot inspect effective service drop-ins")
 			}
@@ -251,11 +255,7 @@ func compareQueueExecStart(c ServiceConfig, start string) error {
 
 // Preparation publishes only settings and the base unit. It never changes the
 // binary, credentials or manager state, including on failure.
-func saveQueueInstallSettings(ctx context.Context, c ServiceConfig, files installFiles, command func(context.Context, string, ...string) ([]byte, error)) (result error) {
-	tx, err := snapshotInstall(ctx, c, files, command)
-	if err != nil {
-		return err
-	}
+func saveQueueInstallSettings(ctx context.Context, c ServiceConfig, tx *installTransaction) (result error) {
 	defer func() {
 		if result != nil {
 			result = errors.Join(result, tx.restoreFiles())
@@ -290,14 +290,20 @@ func validateInstallEnvironment(c ServiceConfig, directive, value string) error 
 		// Only assignments actually present there are owned by that source.
 		path := c.GPUEnvironmentFile()
 		st, err := os.Stat(path)
-		if err != nil || !st.Mode().IsRegular() || st.Size() > 1<<20 {
-			return errors.New("cannot inspect generated service runtime environment")
+		var data string
+		if errors.Is(err, os.ErrNotExist) {
+			data = gpuRuntimeEnvironment(os.Environ()) // First install generates this file.
+		} else {
+			if err != nil || !st.Mode().IsRegular() || st.Size() > 1<<20 {
+				return errors.New("cannot inspect generated service runtime environment")
+			}
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return errors.New("cannot inspect generated service runtime environment")
+			}
+			data = string(b)
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return errors.New("cannot inspect generated service runtime environment")
-		}
-		for _, line := range strings.Split(string(data), "\n") {
+		for _, line := range strings.Split(data, "\n") {
 			name, _, assignment := strings.Cut(strings.TrimSpace(line), "=")
 			if assignment && !strings.HasPrefix(name, "#") {
 				owned[name] = true

@@ -11,7 +11,7 @@ import (
 func TestInstallNASProbeReusesFixedEntries(t *testing.T) {
 	c := ServiceConfig{NAS: t.TempDir(), Role: "queue"}
 	for i := 0; i < 3; i++ {
-		if err := prepareInstallNASMode(context.Background(), c, nil, false); err != nil {
+		if err := prepareInstallNASMode(context.Background(), c, nil, installStorageWrite); err != nil {
 			t.Fatal(err)
 		}
 	}

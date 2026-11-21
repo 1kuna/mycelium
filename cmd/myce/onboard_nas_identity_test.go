@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,8 +25,30 @@ func TestOnboardingSelectsOnlyClusterNAS(t *testing.T) {
 				t.Fatal(err)
 			}
 			first, second := filepath.Join(home, "mounted first"), filepath.Join(home, "mounted second")
+			for _, mount := range []string{first, second} {
+				if err := os.Mkdir(mount, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			trust, err := myce.LoadJoiningIdentity(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			server, _, err := myce.ServeJoining(listener, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}), trust)
+			if err != nil {
+				listener.Close()
+				t.Fatal(err)
+			}
+			defer server.Close()
+			address := "https://" + listener.Addr().String()
 			identity := fmt.Sprintf("%x", sha256.Sum256([]byte("smb://storage.invalid/share")))
-			authority := map[string]any{"version": 1, "fingerprint": strings.Repeat("a", 64), "token": "fixture", "address": "https://queue.invalid", "nas_identity": map[string]string{"fingerprint": identity, "checkpoint_path": "mycelium/checkpoints"}}
+			authority := map[string]any{"version": 1, "fingerprint": trust.Fingerprint(), "token": "fixture", "address": address, "nas_identity": map[string]string{"fingerprint": identity, "checkpoint_path": "mycelium/checkpoints"}}
 			path := filepath.Join(home, "invitation.json")
 			data, _ := json.Marshal(authority)
 			if err := os.WriteFile(path, data, 0600); err != nil {
@@ -39,12 +63,15 @@ func TestOnboardingSelectsOnlyClusterNAS(t *testing.T) {
 				inventory += "//different-user@storage.invalid/share on " + second + " (smbfs, nodev)\n"
 			}
 			p := myce.MachineProbe{OS: "darwin", Arch: "arm64", Command: func(_ context.Context, name string, _ ...string) ([]byte, error) {
+				if name == "launchctl" {
+					return nil, nil
+				}
 				if name != "myce:mounts-nowait" {
 					t.Fatalf("unexpected command %s", name)
 				}
 				return []byte(inventory), nil
 			}}
-			args := []string{"install", "worker", "--gpu", "cpu", "--joining-file", path, "--dry-run", "--environment-cache-bytes", "1048576"}
+			args := []string{"install", "worker", "--gpu", "cpu", "--joining-file", path, "--queue", address, "--dry-run", "--environment-cache-bytes", "1048576"}
 			if mode == "override" {
 				args = append(args, "--nas", second)
 			}
