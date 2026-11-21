@@ -762,15 +762,20 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 		prepared, stagingFields := stagingWireInput(in, c.stagingWire != nil && c.stagingWire.Load())
 		wireIn, faultFields := faultWireInput(prepared, c.faultWire != nil && c.faultWire.Load())
 		err := c.callWatched(ctx, method, path, wireIn, out)
-		var rejected *HTTPError
-		if (faultFields || stagingFields) && errors.As(err, &rejected) && rejected.Status == 400 && rejected.Code == "request_invalid" {
+		if method == http.MethodPost && path == "/api/workers/complete" && requestDecodeRefused(err) {
+			if legacy, changed := withoutLaunchRefusal(wireIn); changed {
+				wireIn = legacy
+				err = c.callWatched(ctx, method, path, wireIn, out)
+			}
+		}
+		if (faultFields || stagingFields) && requestDecodeRefused(err) {
 			if c.faultWire != nil {
 				c.faultWire.Store(false)
 			}
 			if c.stagingWire != nil {
 				c.stagingWire.Store(false)
 			}
-			legacy, _ := faultWireInput(in, false)
+			legacy, _ := faultWireInput(wireIn, false)
 			legacy, _ = stagingWireInput(legacy, false)
 			err = c.callWatched(ctx, method, path, legacy, out)
 		}
@@ -797,6 +802,11 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 			return &clientRetryStopped{err, stopped}
 		}
 	}
+}
+
+func requestDecodeRefused(err error) bool {
+	var rejected *HTTPError
+	return errors.As(err, &rejected) && rejected.Status == http.StatusBadRequest && rejected.Code == "request_invalid"
 }
 
 // These POSTs change nothing, or replay identically (an extension registration
