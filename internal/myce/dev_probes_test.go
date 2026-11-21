@@ -130,7 +130,7 @@ func TestDevProbeQueueRestart(t *testing.T) {
 	if err := d.Client().Call(ctx, "POST", "/api/hosts/dev-host/maintenance", HostMaintenanceRequest{Action: "disable", Stop: true}, nil); err == nil {
 		t.Fatal("offline maintenance succeeded")
 	}
-	clock := d.Queue.clock
+	clock, models := d.Queue.clock, d.Queue.models
 	if err = d.Queue.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -140,6 +140,10 @@ func TestDevProbeQueueRestart(t *testing.T) {
 	}
 	fakeCheckpointAvailability(t, q, true)
 	d.Queue = q
+	// Queue startup reloads the authored catalog before serving check-ins.
+	if err := q.ConfigureModels(models); err != nil {
+		t.Fatal(err)
+	}
 	listener, err := net.Listen("tcp", strings.TrimPrefix(d.URL, "http://"))
 	if err != nil {
 		t.Fatal(err)
