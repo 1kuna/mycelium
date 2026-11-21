@@ -91,12 +91,14 @@ def run(entries, cores, command, environment=None):
     finally:
         # Watchdogs handle TERM with their existing package custody cleanup.
         # The whole-run gate-budget supervisor remains the final fixture fence.
+        terminated = set()
         for child in pending:
             if child.poll() is None:
                 child.terminate()
+                terminated.add(child)
         for child, (label, _) in pending.items():
             result = child.wait()
-            if result < 0:
+            if result < 0 and (result != -signal.SIGTERM or child not in terminated):
                 receipts.failure(label, 'watchdog killed by ' + receipts.exit_reason(result))
             if result < 0 or result in (124, 125):
                 status = merge_status(status, result)
