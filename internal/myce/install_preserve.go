@@ -391,8 +391,9 @@ func installEnvironmentWords(value string) ([]string, error) {
 
 // installFiles is a per-invocation fault seam, never a global filesystem hook.
 type installFiles struct {
-	storageFS *onboardingStorageFS // Per-invocation storage fault seam.
-	retain    func(*installTransaction)
+	storageFS  *onboardingStorageFS // Per-invocation storage fault seam.
+	imageProbe installImageProbe    // Mapped service image observation for installer fixtures.
+	retain     func(*installTransaction)
 	// Persist ownership before publication, including across a process crash.
 	publication func(path string, data []byte, mode os.FileMode, removed bool) error
 
