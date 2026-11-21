@@ -260,8 +260,7 @@ func compareReleaseJSON(a, b any) int {
 func (q *Queue) fileReleasePlan(ctx context.Context, selection FileReleaseSelection) (FileReleasePlan, string, *FileStore, error) {
 	unlock := requestReadLock(ctx, &q.mu)
 	plan, err := q.fileReleaseMetadata(selection)
-	store, now, retention := q.files, q.clock.Now(), q.fileRetention
-	publicationHorizon, expiredGrace := q.s.PublicationHorizon, q.expiredFilePublicationGrace()
+	store, age := q.files, q.filePublicationAge(q.clock.Now())
 	unlock()
 	metadata := fileReleaseDigest(plan)
 	if err != nil {
@@ -295,13 +294,9 @@ func (q *Queue) fileReleasePlan(ctx context.Context, selection FileReleaseSelect
 		}
 		b.Present, b.SizeBytes, b.ModifiedAt = true, st.Size(), st.ModTime()
 		stored[i].Present, stored[i].SizeBytes, stored[i].ModifiedAt = true, st.Size(), st.ModTime()
-		publicationCutoff, expiredCutoff, orphanCutoff := now.Add(-publicationHorizon), now.Add(-expiredGrace), now.Add(-retention)
-		b.PublicationProtected = st.ModTime().After(publicationCutoff)
-		if !b.BundleTracked {
-			b.PublicationProtected = st.ModTime().After(expiredCutoff)
-		}
-		b.BundleProtected = b.BundleProtected || b.BundleTracked && !b.CollectionEligible && st.ModTime().After(orphanCutoff)
-		if b.CollectionEligible && !b.BundleProtected && filePayloadAgeEligible(st, publicationCutoff, expiredCutoff, orphanCutoff, b.BundleTracked, b.CollectionEligible) {
+		b.PublicationProtected = age.protects(st.ModTime(), !b.BundleTracked)
+		b.BundleProtected = b.BundleProtected || b.BundleTracked && !b.CollectionEligible && st.ModTime().After(age.now.Add(-age.retention))
+		if b.CollectionEligible && !b.BundleProtected && age.payloadEligible(st, b.BundleTracked, b.CollectionEligible) {
 			b.ReclaimableBytes = b.SizeBytes
 			plan.ReclaimableBytes += b.SizeBytes
 		}
@@ -310,7 +305,7 @@ func (q *Queue) fileReleasePlan(ctx context.Context, selection FileReleaseSelect
 		Metadata string
 		Stored   []storedContent
 	}{metadata, stored})
-	plan.GeneratedAt = now
+	plan.GeneratedAt = age.now
 	return plan, metadata, store, nil
 }
 

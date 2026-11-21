@@ -70,12 +70,14 @@ checkpoint generation, catalog models, extensions and environments. It runs from
 pruning or result acknowledgment; owners release early with `myce file release`
 (below). Collection takes one record at a time, yields to waiting control work,
 and records completed reclamation on the existing job, so later passes do not
-revisit those hashes. Publication and successful blob
-HEAD verification refresh a durable mtime; collection waits six hours after that
-refresh. This covers the gap from the first file through later multi-GB uploads,
-slow NAS, or a queue outage/deploy before submit/complete. Only refreshed blobs
-receive the grace; a new committed reference then keeps the bytes.
-This publication grace does not extend an expired job's result-recovery window.
+revisit those hashes. Publication and successful blob HEAD verification refresh a
+durable mtime. Grace follows measured first settlements of input claims. A peak
+stays in use while it is within the configured retention window or its own
+measured duration. When existing observations age out, the latest measurement
+supplies grace. Publications at or before the first new measurement after an
+upgrade keep their prior protection. Ordinary expired job files cap grace at
+the configured retention window. A committed reference keeps the bytes, and
+the job's result-recovery deadline still applies.
 
 Storage removal/stat failures are logged and retried on the next pass; they do
 not stop queue maintenance. A busy publication/verification fence logs
@@ -85,7 +87,7 @@ or Python `upload_file` are eligible for orphan reclamation. Their eligibility a
 publish time survive restart in the existing queue SQLite state. They must have no
 job, keyed-answer, checkpoint, catalog/model, extension, environment or pending
 reclamation reference, and both publish time and mtime must be older than the
-configured retention window, outside the six-hour publication grace. A committed
+configured retention window and the publication grace. A committed
 job reference clears the marker; terminal-job retention then applies. Unmarked
 imports (`myce file put`, Go `UploadFile`, models and older clients) are never
 orphan-swept, even if no model catalog is loaded or an entry is removed. Reusing an
@@ -368,9 +370,9 @@ Expired or selected releasable job files do not keep a separate bundle-retention
 floor, and count in `reclaimable_bytes` once publication grace and all keeping
 references have cleared. `bundle_protected` describes that separate floor;
 retained owners remain listed under `references`.
-Absent blobs contribute zero. Recently published/HEAD-refreshed blobs retain the
-ordinary six-hour publication grace. An eligible plan can reclaim zero bytes
-while still expiring the selected identities.
+Absent blobs contribute zero. Recently published or HEAD-verified blobs keep
+their measured publication grace. An eligible plan can reclaim zero bytes while
+still expiring the selected identities.
 
 `collection_eligible` uses the collector's pending reclamation and keeping
 references. Importing identical bytes after completed reclamation does not

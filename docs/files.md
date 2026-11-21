@@ -305,12 +305,9 @@ blob HEAD. A claim commits the file's full declared length against the project's
 quota before any bytes arrive. Concurrent claims are checked in one SQLite
 transaction. Each digest counts once per project, including unfinished and
 abandoned inputs, and once in global physical usage. Submission transfers the
-claim into ordinary job attribution; a settled validation receipt remains valid
-for the six-hour publication grace so concurrent deduplicated transfers finish.
-The receipt adds no quota charge or retention; owner release works as before.
-Unused, unallocated claims expire after the existing six-hour publication grace;
-allocated inputs retain attribution until submission or ordinary file collection.
-Claims without bytes are reconciled after that grace. No claim deletes bytes.
+claim into ordinary job attribution. Settled validation receipts remain usable
+for deduplicated concurrent transfers and add no quota charge or keeping
+reference. Ordinary file collection can remove receipts for collected bytes.
 
 Local project policy may set `max_retained_file_bytes`,
 `max_added_file_bytes_24h`, and `reserved_file_bytes` (all default zero/off).
@@ -687,12 +684,11 @@ result still returns `result_expired`; increasing a window cannot restore alread
 removed bytes. Logs follow the same omitted/explicit distinction. Neither policy
 deletes intent, custody ledgers, wait/error facts or keyed replay answers.
 
-Unsettled input claims protect exact bytes across upload/HEAD/submission requests.
-Lifecycle locks and dependency revisions fence collection; measured claim-to-submit
-delays supply publication protection. There is no six-hour or one-day default.
-Only a claim's first settlement is measured; a reused claim's age is not a
-publication delay. For an expired job's files that protection never outlasts the
-file retention, so a recent HEAD cannot keep them past 3 days (#1375).
+Unsettled input claims protect exact bytes across upload, HEAD and submission
+requests. Lifecycle locks and dependency revisions fence collection. Grace
+uses recent measurements of claim-to-submit delay from first settlements.
+See [publication grace](reference/file-store.md#stored-job-file-retention)
+for the measurement window and upgrade behavior.
 Open work, checkpoints, catalogs, recovered results without a deadline and retained
 replay bundles keep their references.
 

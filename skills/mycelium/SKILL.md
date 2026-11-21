@@ -960,7 +960,9 @@ Code bundles held as inputs follow explicit release and the project's
 bundles after publication grace when no keeping reference remains. Live, queued,
 unexpired or other projects' retained jobs still protect shared bytes, as do
 checkpoint, model, extension and environment custody. Apply schedules collection;
-it does not prove bytes were deleted. See the
+check status to confirm space was freed. A positive `pending_candidates` count
+can include files still in measured publication grace. Use `reclaimable_bytes`
+to see which bytes can be collected now. See the
 [file-store release contract](https://github.com/1kuna/mycelium/blob/main/docs/reference/file-store.md#project-owner-early-file-release-465).
 
 After a batch, run `myce efficiency --project NAME` once. It shows named-host
