@@ -3801,6 +3801,16 @@
           "$ref": "#/$defs/ModelLimits",
           "x-contract": "diagnostic"
         },
+        "native_check_failures": {
+          "items": {
+            "$ref": "#/$defs/NativeCheckFailure"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
         "oom_capacity": {
           "$ref": "#/$defs/SizeHint",
           "x-contract": "diagnostic"
@@ -5050,6 +5060,30 @@
       "required": [
         "repo",
         "revision"
+      ],
+      "type": "object"
+    },
+    "NativeCheckFailure": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "code": {
+          "type": "string"
+        },
+        "exception_type": {
+          "type": "string"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "missing_module": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id",
+        "attempt"
       ],
       "type": "object"
     },
