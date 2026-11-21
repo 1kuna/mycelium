@@ -8,13 +8,17 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"mycelium/internal/myce"
 )
 
 func TestFileReleaseCommand(t *testing.T) {
-	plan := myce.FileReleasePlan{ID: "reviewed", Selection: myce.FileReleaseSelection{Project: "example", Jobs: []string{"done"}}}
+	plan := myce.FileReleasePlan{
+		ID: "reviewed", Selection: myce.FileReleaseSelection{Project: "example", Jobs: []string{"done"}},
+		CollectionCandidates: []string{"candidate-fingerprint"},
+	}
 	var applied int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer fixture" {
@@ -29,7 +33,8 @@ func TestFileReleaseCommand(t *testing.T) {
 			json.NewEncoder(w).Encode(plan)
 		case "/api/files/release/apply":
 			var got myce.FileReleaseApply
-			if err := json.NewDecoder(r.Body).Decode(&got); err != nil || !got.AcceptExpiry || got.PlanID != plan.ID || got.Selection.Project != "example" {
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil || !got.AcceptExpiry || got.PlanID != plan.ID || got.Selection.Project != "example" ||
+				!slices.Equal(got.CollectionCandidates, plan.CollectionCandidates) {
 				t.Error(got, err)
 			}
 			applied++

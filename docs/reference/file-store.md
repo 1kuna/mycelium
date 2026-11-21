@@ -338,19 +338,21 @@ myce file release apply --accept-expiry release-plan.json
 
 Both commands accept the usual installed authority options (`--config`,
 `--joining-file`, `--queue`). Keep the saved plan/receipt private when it contains
-private project or file names. The API equivalents are
+private project or file names. Supply each ID as a separate argument. For a shell
+array, use `"${jobs[@]}"`. Duplicate IDs are accepted and counted once.
+
+The API equivalents are
 `POST /api/files/release/plan` with `{project, jobs}` and
 `POST /api/files/release/apply` with
-`{selection: {project, jobs}, plan_id, accept_expiry: true}`. A plan is a
-read-only snapshot, not a reservation. Its digest identifies the reviewed
-custody, references and stored content; it is not a signature or an
-authorization token. The digest binds presence and size for every selected blob.
-It binds the publication time only for blobs that are `collection_eligible`
-after the proposed release. Republishing or HEAD-refreshing shared blobs with
-keeping references updates their displayed publication time without invalidating
-the plan. When publication grace elapses, a new plan can show more
-`reclaimable_bytes` under the same digest. Regenerate unapplied plans saved before
-the queue upgraded to this digest rule.
+`{selection: {project, jobs}, plan_id, accept_expiry: true, collection_candidates}`.
+Copy `selection`, the plan's `id` as `plan_id`, and any
+`collection_candidates` from the reviewed response. The CLI does this from the
+saved file. API callers that omit the candidate fingerprints can apply when the
+live digest matches. A plan is a read-only snapshot and reserves no files. The
+digest binds selected files and custody, presence and size for every selected
+blob, and publication time and bundle tracking for collection-eligible blobs.
+When publication grace elapses, a new plan can show more `reclaimable_bytes`
+under the same digest. Regenerate unapplied plans saved before the queue upgrade.
 
 The plan lists each job's state, release/retention state, original expiry deadline,
 input/result/shared-input/dependency/diagnostic/fan-out manifests, and delivery
@@ -383,11 +385,13 @@ references. Importing identical bytes after completed reclamation does not
 re-enroll them through the old job's manifests, so a new plan counts zero bytes
 for that content unless another pending reclamation owns it.
 
-Apply requires explicit acceptance and recomputes the reviewed plan, then fences
-custody and reference metadata again in the expiry transaction. HTTP 409
-`file_release_stale` means regenerate and review a new plan; nothing was expired.
-For an active project, apply soon after planning: a new job sharing selected
-content adds a reference and stales the plan.
+Apply requires explicit acceptance. It checks the reviewed job custody and
+collection scope again in the expiry transaction. More keeping references leave
+the plan valid even if a blob becomes ineligible for collection. Republishing or
+HEAD-refreshing a blob that stays ineligible also leaves the plan valid.
+A newly eligible blob, changed publication time for a blob that remains
+eligible, or changed selected job custody invalidates the review. HTTP 409
+`file_release_stale` means nothing was expired. Generate and review a new plan.
 HTTP 409 `file_release_protected` means a selected job is live, has unresolved
 physical custody or lacks required verified delivery. Include only eligible jobs
 in the next plan. Other projects' retained references can block physical removal
@@ -395,6 +399,8 @@ without blocking expiry of your selected job references.
 HTTP 400 `file_release_invalid` gives the failed check, such as an unavailable
 selection, unconfigured store, or unreadable stored metadata. The response gives
 the same selection error for an unknown job and a job outside the project.
+An ID with embedded whitespace gets a separate error explaining how to pass
+multiple IDs.
 
 A successful apply returns `collection: scheduled`: it durably sets the existing
 job file-expiry/reclamation state, preserving identities, manifests and a small

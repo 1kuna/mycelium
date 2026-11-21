@@ -50,7 +50,7 @@ func releasePlan(t *testing.T, q *Queue, s FileReleaseSelection) FileReleasePlan
 	return p
 }
 func releaseApply(q *Queue, p FileReleasePlan) (FileReleaseResult, error) {
-	return q.ApplyFileRelease(context.Background(), FileReleaseApply{Selection: p.Selection, PlanID: p.ID, AcceptExpiry: true})
+	return q.ApplyFileRelease(context.Background(), FileReleaseApply{Selection: p.Selection, PlanID: p.ID, AcceptExpiry: true, CollectionCandidates: p.CollectionCandidates})
 }
 func releaseCode(t *testing.T, err error, code string) {
 	t.Helper()
@@ -327,10 +327,47 @@ func TestFileReleaseStalePlanAndPublicationGrace(t *testing.T) {
 	}
 	p = releasePlan(t, q, fresh.Selection)
 	other := spec("experiment")
-	other.Project = "other"
+	other.Project = "owner"
 	other.Files = FileManifest{"new": ref}
-	submit(t, q, other)
-	_, err = releaseApply(q, p)
+	keeper := submit(t, q, other)
+	protected := releasePlan(t, q, p.Selection)
+	if protected.Blobs[0].CollectionEligible {
+		t.Fatal("new keeper did not protect content", protected)
+	}
+	invalidProof := p
+	invalidProof.CollectionCandidates = []string{strings.Repeat("0", 64)}
+	_, err = releaseApply(q, invalidProof)
+	releaseCode(t, err, "file_release_stale")
+	if _, err = releaseApply(q, p); err != nil {
+		t.Fatal("new keeper invalidated a reviewed plan", err)
+	}
+	clock.Advance(filePublicationGrace + time.Second)
+	if err = q.reclaimPublishedFiles(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(q.files.blob(ref)); err != nil || job(t, q, keeper.ID).FilesExpired {
+		t.Fatal("new keeper lost its content", err)
+	}
+}
+
+func TestFileReleaseLosingLastReferenceWidensPlan(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	j, _, _ := releaseTerminal(t, q, c, "shared")
+	keeper, _, _ := releaseTerminal(t, q, c, "shared")
+	clock.Advance(filePublicationGrace + time.Second)
+	p := releasePlan(t, q, releaseSelection(j))
+	if p.Blobs[0].CollectionEligible {
+		t.Fatal("keeper was omitted", p)
+	}
+	if _, err := releaseApply(q, releasePlan(t, q, releaseSelection(keeper))); err != nil {
+		t.Fatal(err)
+	}
+	current := releasePlan(t, q, p.Selection)
+	if !current.Blobs[0].CollectionEligible || current.ReclaimableBytes == 0 {
+		t.Fatal("removing the last keeper did not widen the plan", current)
+	}
+	_, err := releaseApply(q, p)
 	releaseCode(t, err, "file_release_stale")
 	if job(t, q, j.ID).FilesExpired {
 		t.Fatal("stale plan mutated expiry")
@@ -358,10 +395,13 @@ func TestFileReleaseSharedPublicationKeepsReviewedPlan(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	other.Project = "owner"
+	added := submit(t, q, other)
 	refreshed := releasePlan(t, q, p.Selection)
 	for i, blob := range refreshed.Blobs {
-		if !blob.PublicationProtected || !blob.ModifiedAt.After(p.Blobs[i].ModifiedAt) {
-			t.Fatalf("HEAD did not refresh the publication: %+v", blob)
+		if !blob.PublicationProtected || !blob.ModifiedAt.After(p.Blobs[i].ModifiedAt) ||
+			blob.CollectionEligible || len(blob.References) != 2 || !slices.ContainsFunc(blob.References, func(r FileKeepingReference) bool { return r.JobID == added.ID }) {
+			t.Fatalf("expected refreshed shared content with the new keeper: %+v", blob)
 		}
 	}
 	if refreshed.ID != p.ID || refreshed.ReclaimableBytes != 0 {
@@ -490,12 +530,29 @@ func TestFileReleaseAPIPlanRefusalNamesFailedCheck(t *testing.T) {
 	const unavailable = "selected job is unavailable or belongs to another project"
 	refusal(FileReleaseSelection{Project: "other", Jobs: []string{a.ID}}, unavailable)
 	refusal(FileReleaseSelection{Project: "other", Jobs: []string{"unknown"}}, unavailable)
+	refusal(FileReleaseSelection{Project: "owner", Jobs: []string{a.ID + " " + b.ID + " "}}, "pass each selected job ID separately; job IDs cannot contain whitespace")
+	single, err := plan(releaseSelection(a))
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicate, err := plan(releaseSelection(a, a))
+	if err != nil || duplicate.ID != single.ID || !slices.Equal(duplicate.Selection.Jobs, []string{a.ID}) {
+		t.Fatalf("duplicate ID must be accepted as one selection: %+v, %v", duplicate.Selection, err)
+	}
 
 	path := q.files.blob(ref)
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
 	selection := releaseSelection(a, b)
+	q.mu.RLock()
+	revision := q.retainedMemoryRevision
+	_, err = q.fileReleaseMetadata(selection, true)
+	revisionChanged := q.retainedMemoryRevision != revision
+	q.mu.RUnlock()
+	if err != nil || revisionChanged {
+		t.Fatalf("reading retained jobs must not invalidate queue state: %v", err)
+	}
 	p, err := plan(selection)
 	if err != nil || len(p.Blobs) != 2 || !slices.ContainsFunc(p.Blobs, func(b FileReleaseBlob) bool { return b.SHA256 == ref.SHA256 && !b.Present }) {
 		t.Fatalf("absent content should be reported in a successful plan: %+v, %v", p, err)
@@ -507,42 +564,69 @@ func TestFileReleaseAPIPlanRefusalNamesFailedCheck(t *testing.T) {
 }
 
 func TestFileReleaseReferenceChangeDuringCommit(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
-	j, _, ref := releaseTerminal(t, q, c, "concurrent")
-	clock.Advance(filePublicationGrace + time.Second)
-	p := releasePlan(t, q, releaseSelection(j))
-	// The existing checkpoint probe runs after plan inspection and before the
-	// commit lock. Hold it to publish another owner in that exact interval.
-	entered, unblock := make(chan struct{}), make(chan struct{})
-	var calls atomic.Int32
-	q.checkpointProbe = func() bool {
-		if calls.Add(1) == 1 {
-			close(entered)
-			<-unblock
-		}
-		return true
-	}
-	done := make(chan error, 1)
-	go func() { _, err := releaseApply(q, p); done <- err }()
-	select {
-	case <-entered:
-	case <-time.After(testWaitTimeout):
-		t.Fatal("apply did not reach commit")
-	}
-	other := spec("experiment")
-	other.Project = "other"
-	other.Files = FileManifest{"shared": ref}
-	submit(t, q, other) // Also proves control/reference publication owns no bulk lock.
-	close(unblock)
-	select {
-	case err := <-done:
-		releaseCode(t, err, "file_release_stale")
-	case <-time.After(testWaitTimeout):
-		t.Fatal("apply stalled")
-	}
-	if job(t, q, j.ID).FilesExpired {
-		t.Fatal("newly protected owner expired")
+	for _, moreProtection := range []bool{true, false} {
+		t.Run(fmt.Sprintf("adds_protection=%t", moreProtection), func(t *testing.T) {
+			q, clock := fixture(t)
+			c := retentionClient(t, q)
+			j, _, ref := releaseTerminal(t, q, c, "concurrent")
+			var keeper *Job
+			if !moreProtection {
+				keeper, _, _ = releaseTerminal(t, q, c, "concurrent")
+			}
+			clock.Advance(filePublicationGrace + time.Second)
+			p := releasePlan(t, q, releaseSelection(j))
+			// Hold apply after plan inspection and before the commit lock.
+			drainAdmissionWait(t, q)
+			entered, unblock := make(chan struct{}), make(chan struct{})
+			var calls atomic.Int32
+			q.checkpointProbe = func() bool {
+				if calls.Add(1) == 1 {
+					close(entered)
+					<-unblock
+				}
+				return true
+			}
+			done := make(chan error, 1)
+			go func() { _, err := releaseApply(q, p); done <- err }()
+			select {
+			case <-entered:
+			case <-time.After(testWaitTimeout):
+				close(unblock)
+				t.Fatal("apply did not reach commit")
+			}
+			if moreProtection {
+				other := spec("experiment")
+				other.Project = "other"
+				other.Files = FileManifest{"shared": ref}
+				submit(t, q, other)
+			} else if err := q.update(func() error {
+				q.acceptFileExpiry(q.touchJob(keeper.ID), "fixture")
+				return nil
+			}); err != nil {
+				close(unblock)
+				t.Fatal(err)
+			}
+			close(unblock)
+			select {
+			case err := <-done:
+				if !moreProtection {
+					releaseCode(t, err, "file_release_stale")
+				} else if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(testWaitTimeout):
+				t.Fatal("apply stalled")
+			}
+			if job(t, q, j.ID).FilesExpired != moreProtection {
+				t.Fatal("apply expired the wrong job scope")
+			}
+			if err := q.reclaimPublishedFiles(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(q.files.blob(ref)); err != nil {
+				t.Fatal("the keeper lost the stored content", err)
+			}
+		})
 	}
 }
 
