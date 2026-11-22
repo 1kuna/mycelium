@@ -125,6 +125,14 @@ Review the job and claim IDs in `files[].holders` before releasing anything:
 | Registered model files, resident model sources, extension bundles and environment recipe assets | Registry and job-history custody follow their own lifetimes. There is no consumer early release for these holders. |
 | Worker model snapshots and built environment caches, or NAS-backed files | These are outside the queue file store and use their respective worker or NAS lifetimes. |
 
+Claim release requires inactivity across the upload and submission handoff.
+The queue uses the configured interrupted-upload idle window and measured
+publication grace, starting from the latest claim issuance, transfer activity,
+or published-blob refresh. `file_release_protected` means that custody is
+still current. Setting file retention to zero disables this idle release.
+Job release retries must use the same reviewed selection. If the queue returns
+`file_release_stale` for an older receipt, review a fresh plan.
+
 Use `myce status --json` to verify collection. `file_store.used_bytes` is the
 sum of `held_published_bytes`, `pending_collection_bytes`,
 `unreferenced_published_bytes`, and `open_upload_bytes`.

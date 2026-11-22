@@ -476,7 +476,7 @@ func (a filePublicationAge) interruptedUploadIdle(modified time.Time, claims []F
 		return false
 	}
 	for _, claim := range claims {
-		if claim.At.After(cutoff) {
+		if claim.lastIssuance().After(cutoff) {
 			return false
 		}
 	}

@@ -600,7 +600,7 @@ func TestFileReleaseReferenceChangeDuringCommit(t *testing.T) {
 				other.Files = FileManifest{"shared": ref}
 				submit(t, q, other)
 			} else if err := q.update(func() error {
-				q.acceptFileExpiry(q.touchJob(keeper.ID), "fixture")
+				q.acceptFileExpiry(q.touchJob(keeper.ID), "fixture", "")
 				return nil
 			}); err != nil {
 				close(unblock)
@@ -818,5 +818,51 @@ func TestFileReleaseReintroducedContentAccounting(t *testing.T) {
 	}
 	if reclaimed != 0 {
 		t.Fatal("reintroduced content was re-enrolled for collection")
+	}
+}
+
+func TestFileReleaseReplayRequiresExactCheckpointSelection(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	_, ref := retentionJobInput(t, c, "replayed-checkpoint")
+	j, _, _ := releaseTerminal(t, q, c, "ordinary-release")
+	if err := q.update(func() error {
+		q.touchJob(j.ID).FileCheckpoints = map[int]FileCheckpoint{1: {Files: FileManifest{"save": ref}}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(filePublicationGrace + time.Second)
+	ordinary := releasePlan(t, q, releaseSelection(j))
+	accepted, err := releaseApply(q, ordinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replay, err := releaseApply(q, ordinary); err != nil || replay != accepted {
+		t.Fatal("same selection could not recover its receipt", replay, err)
+	}
+	changed := ordinary
+	changed.Selection.IncludeCheckpoints = true
+	replay, err := releaseApply(q, changed)
+	releaseCode(t, err, "file_release_stale")
+	if replay.PlanID != "" || job(t, q, j.ID).FileReclamation.LegacyCheckpointsExpired {
+		t.Fatal("changed selection acknowledged or expired the checkpoint", replay)
+	}
+	if err := q.update(func() error {
+		e := fileReleaseEntry(q.touchJob(j.ID), ordinary.ID)
+		e.FileReleaseSelectionSHA256 = ""
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = releaseApply(q, ordinary)
+	releaseCode(t, err, "file_release_stale") // An older receipt has no stored selection.
+	withCheckpoint := releasePlan(t, q, changed.Selection)
+	if _, err := releaseApply(q, withCheckpoint); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	if _, err := releaseApply(q, withCheckpoint); err != nil {
+		t.Fatal("exact checkpoint selection could not recover its receipt", err)
 	}
 }

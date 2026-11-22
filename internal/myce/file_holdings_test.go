@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -184,6 +185,9 @@ func TestFileReleaseInputClaimPreservesOtherCustodyAndRollingQuota(t *testing.T)
 	ctx := context.Background()
 	q, clock := fixture(t)
 	c := retentionClient(t, q)
+	if err := q.ConfigureFileRetention(time.Hour); err != nil {
+		t.Fatal(err)
+	}
 	setQuotaPolicy(t, q, "owner", ProjectPolicy{MaxAddedFileBytes24h: 64})
 	path, ref := policyInput(t, "claimed")
 	owner := WithFileStoreSubmission(ctx, Spec{Project: "owner"})
@@ -205,6 +209,10 @@ func TestFileReleaseInputClaimPreservesOtherCustodyAndRollingQuota(t *testing.T)
 	_, err = release(req)
 	releaseCode(t, err, "file_release_invalid")
 	req.Project = "owner"
+	clock.Advance(time.Hour + time.Second)
+	_, err = release(req)
+	releaseCode(t, err, "file_release_protected")
+	clock.Advance(filePublicationGrace - time.Hour)
 	first, err := release(req)
 	if err != nil || first.ClaimID != claim.ID || !first.ReleasedAt.Equal(clock.Now()) {
 		t.Fatal(first, err)
@@ -237,19 +245,88 @@ func TestFileReleaseLegacyPartialClaimKeepsCollectionAuthority(t *testing.T) {
 	if err := q.update(func() error { delete(q.s.JobInputUploads, claim.File.SHA256); return nil }); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := q.ReleaseFileInputClaim(ctx, FileInputClaimRelease{Project: "owner", ClaimID: claim.ID, AcceptExpiry: true}); err == nil {
+		t.Fatal("recent partial transfer was released")
+	}
+	clock.Advance(max(testFileRetention, filePublicationGrace) + time.Second)
 	for _, release := range []FileInputClaim{claim, imported} {
 		if _, err := q.ReleaseFileInputClaim(ctx, FileInputClaimRelease{Project: "owner", ClaimID: release.ID, AcceptExpiry: true}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if status := q.fileStoreStatus(ctx); status.OpenUploadBytes != 4 || status.ReclaimableBytes != 0 {
-		t.Fatalf("release must leave written bytes until idle collection: %+v", status)
+	if status := q.fileStoreStatus(ctx); status.OpenUploadBytes != 4 || status.ReclaimableBytes != 2 {
+		t.Fatalf("release must leave written bytes for idle collection: %+v", status)
 	}
-	clock.Advance(max(testFileRetention, filePublicationGrace) + time.Second)
 	if err := q.reclaimInterruptedUploads(); err != nil {
 		t.Fatal(err)
 	}
 	if got := q.fileStoreStatus(ctx); got.OpenUploadBytes != 2 || got.ReclaimableBytes != 0 {
 		t.Fatalf("collection must remove only the positively identified input: %+v", got)
+	}
+}
+
+func TestFileReleaseInputClaimProtectsUploadAndSubmitGaps(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	path, ref := policyInput(t, strings.Repeat("a", fileUploadChunkSize+1))
+	q.files.limit = ref.SizeBytes * 2
+	ctx := WithFileStoreSubmission(context.Background(), Spec{Project: "owner"})
+	claim, err := q.claimFileInput(ctx, Spec{Project: "owner"}, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The operator saw the old claim before a second submitter took it up.
+	clock.Advance(testFileRetention + time.Second)
+	var checked []string
+	protect := func(phase string) {
+		// The response can arrive before the server releases its request fence.
+		// Exercise the inter-request gap, beyond that per-request protection.
+		q.fileLifecycle.Lock()
+		q.fileLifecycle.Unlock()
+		_, err := q.ReleaseFileInputClaim(ctx, FileInputClaimRelease{Project: "owner", ClaimID: claim.ID, AcceptExpiry: true})
+		releaseCode(t, err, "file_release_protected")
+		checked = append(checked, phase)
+	}
+	var patches int
+	c.HTTP = &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodPatch && patches == 0 {
+			clock.Advance(testFileRetention - time.Second)
+		}
+		reply, err := http.DefaultTransport.RoundTrip(r)
+		if err != nil {
+			return nil, err
+		}
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/files/input-claims":
+			protect("claim reissued before transfer")
+		case r.Method == http.MethodPatch && reply.StatusCode == http.StatusNoContent:
+			patches++
+			if patches == 1 {
+				q.fileLifecycle.Lock()
+				q.fileLifecycle.Unlock()
+				clock.Advance(2 * time.Second) // The issuance alone is now idle.
+				protect("between PATCH requests")
+			}
+		case r.Method == http.MethodHead && strings.HasPrefix(r.URL.Path, "/api/files/blobs/") &&
+			reply.StatusCode == http.StatusOK && patches == 2:
+			protect("after verification before submission")
+		}
+		return reply, nil
+	})}
+	defer c.HTTP.CloseIdleConnections()
+	if err := c.UploadJobInput(ctx, path, ref); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(checked, ", "); got != "claim reissued before transfer, between PATCH requests, after verification before submission" {
+		t.Fatal("did not exercise every handoff gap", got)
+	}
+	var submitted Job
+	s := spec("experiment")
+	s.Project, s.Files = "owner", FileManifest{"input": ref}
+	if err := c.Call(ctx, "POST", "/api/jobs", s, &submitted); err != nil || submitted.ID == "" {
+		t.Fatal("submission lost its uploaded input", err)
+	}
+	if stored := q.s.FileInputClaims[claim.ID]; stored.SettledAt.IsZero() || stored.Released {
+		t.Fatal("submission did not settle the same preserved claim", stored)
 	}
 }

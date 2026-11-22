@@ -86,9 +86,10 @@ const fileReleaseLedgerKind = "file_expiry_accepted"
 
 // Both explicit owner release and authored delivery retention enroll the same
 // durable collector transaction. Neither path deletes bytes or bypasses pins.
-func (q *Queue) acceptFileExpiry(j *Job, reason string) {
+func (q *Queue) acceptFileExpiry(j *Job, reason, selectionSHA256 string) {
 	e := ledgerAttempt(j, fileReleaseLedgerKind, reason)
 	e.Release = q.observedRelease(j)
+	e.FileReleaseSelectionSHA256 = selectionSHA256
 	q.appendJobLedger(j, e)
 	j.FilesExpired = true
 	enrollFileReclamation(j)
@@ -105,22 +106,25 @@ func fileReleaseEntry(j *Job, planID string) *JobLedgerEntry {
 }
 
 // q.mu held. Validate the complete group before acknowledging a replay.
-func (q *Queue) fileReleaseReplay(selection FileReleaseSelection, planID string) (FileReleaseResult, bool) {
+func (q *Queue) fileReleaseReplay(selection FileReleaseSelection, planID, selectionSHA256 string) (FileReleaseResult, error) {
 	var result FileReleaseResult
 	for _, id := range selection.Jobs {
 		j := q.retainedJob(id)
 		if j == nil || j.Spec.Project != selection.Project {
-			return result, false
+			return FileReleaseResult{}, nil
 		}
 		e := fileReleaseEntry(j, planID)
 		if e == nil {
-			return result, false
+			return FileReleaseResult{}, nil
+		}
+		if e.FileReleaseSelectionSHA256 != selectionSHA256 {
+			return FileReleaseResult{}, fileReleaseError("file_release_stale", "release receipt does not bind this selection; generate and review a new plan")
 		}
 		if result.PlanID == "" {
 			result = FileReleaseResult{PlanID: planID, AcceptedAt: e.At, Collection: "scheduled"}
 		}
 	}
-	return result, true
+	return result, nil
 }
 
 type FileReleaseApply struct {
@@ -384,11 +388,12 @@ func (q *Queue) ApplyFileRelease(ctx context.Context, req FileReleaseApply) (Fil
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
 	// Replay is checked before re-planning because collection may already have run.
+	selectionSHA256 := fileReleaseDigest(selection)
 	unlock := requestReadLock(ctx, &q.mu)
-	result, replay := q.fileReleaseReplay(selection, req.PlanID)
+	result, err = q.fileReleaseReplay(selection, req.PlanID, selectionSHA256)
 	unlock()
-	if replay {
-		return result, nil
+	if err != nil || result.PlanID != "" {
+		return result, err
 	}
 	snapshot, err := q.fileReleasePlan(ctx, selection)
 	if err != nil {
@@ -414,9 +419,10 @@ func (q *Queue) ApplyFileRelease(ctx context.Context, req FileReleaseApply) (Fil
 		}
 	}
 	err = q.updateRequest(ctx, func() error {
-		if receipt, replay := q.fileReleaseReplay(selection, req.PlanID); replay {
+		receipt, replayErr := q.fileReleaseReplay(selection, req.PlanID, selectionSHA256)
+		if replayErr != nil || receipt.PlanID != "" {
 			result = receipt
-			return nil
+			return replayErr
 		}
 		current, e := q.fileReleaseMetadata(selection, false)
 		stale := fileReleaseError("file_release_stale", "release collection scope or custody changed; generate and review a new plan")
@@ -432,13 +438,13 @@ func (q *Queue) ApplyFileRelease(ctx context.Context, req FileReleaseApply) (Fil
 		}
 		for _, id := range selection.Jobs {
 			j := q.retainedJob(id)
-			q.acceptFileExpiry(j, req.PlanID)
+			q.acceptFileExpiry(j, req.PlanID, selectionSHA256)
 			if selection.IncludeCheckpoints {
 				enrollLegacyCheckpointReclamation(j)
 			}
 		}
-		result, _ = q.fileReleaseReplay(selection, req.PlanID)
-		return nil
+		result, replayErr = q.fileReleaseReplay(selection, req.PlanID, selectionSHA256)
+		return replayErr
 	}, nil)
 	return result, err
 }

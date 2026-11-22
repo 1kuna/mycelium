@@ -1,0 +1,179 @@
+package myce
+
+// Compile against each predecessor and candidate to exercise the real SQLite
+// codec and maintenance with the same scenario. Only the clock is synthetic.
+import (
+	"context"
+	"errors"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+type holdingsUpgradeClock struct{ at time.Time }
+
+func (c *holdingsUpgradeClock) Now() time.Time { return c.at }
+
+func TestFileHoldingsUpgradeProcess(t *testing.T) {
+	ctx := context.Background()
+	mode := os.Getenv("UPGRADE_MODE")
+	root := os.Getenv("UPGRADE_ROOT")
+	clock := &holdingsUpgradeClock{at: time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)}
+	afterPrune := clock.at.Add(jobRecordRetention + time.Minute)
+	if mode == "verify" {
+		clock.at = afterPrune.Add(DefaultFileRetention + time.Minute)
+	}
+	q, err := Open(filepath.Join(root, "queue.db"), filepath.Join(root, "checkpoints"), clock,
+		WithFileStore(filepath.Join(root, "files"), 1<<20, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	if err := q.ConfigureLogRetention(0); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.ConfigureFileRetention(DefaultFileRetention); err != nil {
+		t.Fatal(err)
+	}
+	refs := map[string]FileRef{}
+	for _, kind := range []string{"replay", "full", "claim", "pending"} {
+		path := filepath.Join(root, kind)
+		if mode == "seed" {
+			if err := os.WriteFile(path, []byte("holdings-upgrade-"+kind), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ref, err := IdentifyFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		refs[kind] = ref
+	}
+	spec := func(key string, files FileManifest) Spec {
+		return Spec{Project: "upgrade-fixture", SubmissionKey: key, Name: key, Priority: "experiment",
+			Run: RunSpec{Command: []string{"true"}}, Needs: ResourceNeeds{Platform: Platform{Any: true}}, Files: files}
+	}
+	find := func(key string) *submissionRecord { return q.s.Submissions[submissionDigest("upgrade-fixture", key)] }
+	hasBlob := func(kind string) {
+		t.Helper()
+		if err := q.files.verify(ctx, refs[kind]); err != nil {
+			t.Fatalf("%s blob missing or changed: %v", kind, err)
+		}
+	}
+	if mode == "seed" {
+		api := httptest.NewServer(API{Queue: q, Token: "upgrade-fixture"}.Handler())
+		defer api.Close()
+		c := Client{URL: api.URL, Token: "upgrade-fixture"}
+		upload := func(ctx context.Context, kind string) {
+			t.Helper()
+			if err := c.UploadJobInput(ctx, filepath.Join(root, kind), refs[kind]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		finish := func(key string, files FileManifest) string {
+			t.Helper()
+			j, err := q.Submit(spec(key, files))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := q.update(func() error {
+				j := q.touchJob(j.ID)
+				now := clock.Now()
+				j.State, j.FinishedAt, j.ReleaseConfirmed = "succeeded", &now, true
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			return j.ID
+		}
+		expire := func(id string) {
+			t.Helper()
+			plan, err := q.PlanFileRelease(ctx, FileReleaseSelection{Project: "upgrade-fixture", Jobs: []string{id}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, err := q.ApplyFileRelease(ctx, FileReleaseApply{Selection: plan.Selection, PlanID: plan.ID, AcceptExpiry: true,
+				CollectionCandidates: plan.CollectionCandidates}); err != nil || got.Collection != "scheduled" {
+				t.Fatal("release did not schedule collection", err)
+			}
+		}
+		upload(ctx, "replay")
+		expire(finish("replay", FileManifest{"input": refs["replay"]}))
+		clock.at = afterPrune
+		if err := q.pruneJobHistory(); err != nil {
+			t.Fatal(err)
+		}
+		// Older queues also persist full keyed answers from the older history
+		// removal path. Preserve that exact authoritative shape with the old
+		// queue's normal update and submission encoders.
+		upload(ctx, "full")
+		full := finish("full", FileManifest{"input": refs["full"]})
+		if err := q.update(func() error { q.deleteJob(full); return nil }); err != nil {
+			t.Fatal(err)
+		}
+		upload(WithFileStoreSubmission(ctx, Spec{Project: "upgrade-fixture"}), "claim")
+		upload(ctx, "pending")
+		expire(finish("pending", FileManifest{"own": refs["pending"], "shared": refs["full"]}))
+	} else if mode != "verify" {
+		t.Fatal("fixture mode must be seed or verify")
+	}
+
+	replay, full, pending := find("replay"), find("full"), find("pending")
+	if replay == nil || replay.RemovedAt == nil || q.s.Jobs[replay.JobID] != nil ||
+		replay.Job == nil || replay.Job.Spec.Files["input"] != refs["replay"] ||
+		replay.Job.FileReclamation != nil || !q.s.RetiredJobFiles[refs["replay"].SHA256] {
+		t.Fatal("fixture is missing the skeletal replay and retired digest")
+	}
+	if summary, err := q.expiredJobSummary(ctx, replay.JobID); err != nil || summary == nil {
+		t.Fatal("fixture is missing the durable history summary", err)
+	}
+	if full == nil || full.RemovedAt == nil || q.s.Jobs[full.JobID] != nil || full.Job == nil ||
+		!full.Job.ReleaseConfirmed || full.Job.Spec.Files["input"] != refs["full"] {
+		t.Fatal("fixture is missing the full keyed answer")
+	}
+	if summary, err := q.expiredJobSummary(ctx, full.JobID); err != nil || summary != nil {
+		t.Fatal("full keyed answer unexpectedly has a summary", err)
+	}
+	if pending == nil || pending.Job == nil || pending.Job.FileReclamation == nil ||
+		len(pending.Job.FileReclamation.Pending) != 2 {
+		t.Fatal("fixture is missing pending job reclamation")
+	}
+	claimHeld := func() bool {
+		for _, claim := range q.s.FileInputClaims {
+			if claim.File == refs["claim"] && claim.Project == "upgrade-fixture" && claim.SettledAt.IsZero() {
+				return true
+			}
+		}
+		return false
+	}
+	if !claimHeld() {
+		t.Fatal("fixture is missing the unsettled claim")
+	}
+	for kind := range refs {
+		hasBlob(kind)
+	}
+	if mode == "seed" {
+		t.Logf("seeded %s at %s: skeletal and full keyed answers, unsettled claim, pending exclusive and shared files", BuildVersion, BuildCommit)
+		return
+	}
+
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"replay", "pending"} {
+		if _, err := os.Stat(q.files.blob(refs[kind])); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("first collection did not remove authorized %s blob: %v", kind, err)
+		}
+	}
+	hasBlob("full")
+	hasBlob("claim")
+	if !claimHeld() {
+		t.Fatal("first collection lost the unsettled claim")
+	}
+	if got := find("pending").Job.FileReclamation.Pending; len(got) != 1 || got[0] != refs["full"].SHA256 {
+		t.Fatal("first collection did not preserve the shared file's pending custody", got)
+	}
+	t.Logf("candidate first collection preserved the full keyed answer and unsettled claim, reclaimed only the two authorized digests")
+}

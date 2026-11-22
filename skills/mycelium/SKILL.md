@@ -1036,7 +1036,9 @@ to the plan for legacy queue checkpoint generations of finished jobs you no
 longer need. Local-first checkpoints follow their existing grace and custody
 rules. For an abandoned `input_claim`, use
 `myce file release claim --project NAME --accept-expiry CLAIM_ID` with the
-holder's `name`. For a settled claim, release the finished job.
+holder's `name`. A claim stays protected through the configured upload idle
+window and measured upload-to-submission grace, including after reuse. For a
+settled claim, release the finished job.
 
 Use `myce status --json` to verify collection. `pending_collection_bytes` counts
 published candidates, including those in publication grace, and
