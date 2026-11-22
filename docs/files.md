@@ -222,18 +222,23 @@ or pending until it returns; queue timeout or a fresh session does not certify
 removal. Failed ephemeral output copies are not retained for manual recovery.
 
 Supported scope: offline non-resumable commands and extensions, prepared
-environments, sidecars/member limits, `after` dependencies and fan-out children,
-managed `{work}` and declared outputs. The policy selects the stronger `ci`
+environments, sidecars/member limits, `after` dependencies, fan-out children,
+managed `{work}` and declared outputs. Plain commands can read declared model
+snapshots as shared software through the existing read-only bindings. Runtime
+cache and request-spool writes belong in private work or scratch.
+The policy selects the stronger `ci`
 boundary even for an extension registered with a weaker isolation policy.
 Submission checks frozen extension variants as well as the job. It refuses
-program jobs/usage files, extension-check publication, model servers/snapshots,
+program jobs/usage files, extension-check publication, catalog model servers,
+resident model runtimes,
 custom workdirs (including extension-owned workdirs), resumability,
 diagnostics/`keep_on_failure`, alternate output delivery and fleets with no
 supporting worker, with `job_worker_data_unsupported`. The worker rechecks the
 lowered execution before staging customer inputs.
 Execution requires `worker_data_ephemeral_v2`: Linux PID/mount namespaces and
 a readable file core route, or the qualified Mycelium core router, and an exec
-helper that passed a core-limit probe.
+helper that passed a core-limit probe. Snapshot-backed jobs also require
+`worker_data_ephemeral_model_snapshots_v1`.
 Placement refusals and queued-job status name the missing capability. When
 worker evidence identifies the cause, the reason names namespace qualification,
 the core route or the core-limit helper. If host policy refused user namespaces,

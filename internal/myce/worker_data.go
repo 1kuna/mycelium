@@ -19,6 +19,9 @@ import (
 const (
 	ephemeralCapability       = "worker_data_ephemeral_v2"
 	ephemeralLegacyCapability = "worker_data_ephemeral_v1"
+	// Older v2 workers bypassed all shared staging for ephemeral attempts,
+	// including the declared model snapshot bindings.
+	ephemeralSnapshotsCapability = "worker_data_ephemeral_model_snapshots_v1"
 )
 
 // Only bounded codes cross the inventory boundary. Launch errors stay local
@@ -46,6 +49,23 @@ func safeEphemeralRefusal(r ephemeralRefusal) ephemeralRefusal {
 
 func (s Spec) ephemeral() bool { return s.WorkerData == "ephemeral" }
 
+func (s Spec) ephemeralRequiredCapability() string {
+	if len(s.ModelSnapshots) != 0 {
+		return ephemeralSnapshotsCapability
+	}
+	return ephemeralCapability
+}
+
+func ephemeralWorkerRefusal(s Spec, m *Machine) string {
+	if !contains(m.Capabilities, ephemeralCapability) {
+		return ephemeralHostReason(m)
+	}
+	if len(s.ModelSnapshots) != 0 && !contains(m.Capabilities, ephemeralSnapshotsCapability) {
+		return "the worker release must support declared model snapshots with ephemeral worker data"
+	}
+	return ""
+}
+
 // The policy opts into the ci boundary, including extension-owned executions.
 func validateWorkerData(s Spec) error {
 	if s.WorkerData == "" {
@@ -62,9 +82,6 @@ func validateWorkerData(s Spec) error {
 	}
 	if s.Program != nil || s.ExtensionCheck != nil {
 		return errors.New("ephemeral worker data does not cover program usage files or extension-check publication")
-	}
-	if s.Needs.Model != "" || len(s.ModelSnapshots) != 0 {
-		return errors.New("ephemeral worker data does not cover model servers or model snapshots")
 	}
 	if s.OutputDelivery != "" || s.Diagnostics != nil || len(s.KeepOnFailure) != 0 {
 		return errors.New("ephemeral worker data does not cover alternate output delivery, diagnostics or keep_on_failure")
@@ -119,13 +136,13 @@ func validateEphemeralExecution(s Spec) error {
 		return nil
 	}
 	if s.Resident != nil {
-		return errors.New("ephemeral worker data does not cover resident model runtimes")
+		return errors.New("ephemeral worker data does not cover resident model runtimes: shared server memory and request spools are outside attempt cleanup")
 	}
 	if s.Needs.Network {
 		return errors.New("ephemeral commands currently require offline execution")
 	}
 	if s.Needs.Model != "" {
-		return errors.New("ephemeral worker data does not cover model servers")
+		return errors.New("ephemeral worker data does not cover model servers: shared server memory and request spools are outside attempt cleanup")
 	}
 	if s.Run.Workdir != "" && s.Run.Workdir != "{work}" || s.Execution != nil && s.Execution.Main.Workdir != "" && s.Execution.Main.Workdir != "{work}" {
 		return errors.New("ephemeral worker data requires the managed {work} directory, including extension main and sidecars")
@@ -139,7 +156,7 @@ func validateEphemeralExtensions(s Spec, extensions []Extension) error {
 	}
 	for _, e := range extensions {
 		if e.Resident != nil {
-			return errors.New("ephemeral worker data does not cover extension resident model runtimes")
+			return errors.New("ephemeral worker data does not cover extension resident model runtimes: shared server memory and request spools are outside attempt cleanup")
 		}
 		for _, v := range e.Variants {
 			candidate := s
@@ -180,11 +197,11 @@ func (w Worker) copyAttemptInput(ctx context.Context, j Job, ref FileRef, dest s
 	defer release()
 	return w.Client.recoverInputTransfer(ctx, ref, "private_input", func(one Client) error { return one.DownloadFile(ctx, ref, dest) })
 }
-func (w Worker) acquireEphemeralInputs(ctx context.Context, j Job) (map[string]string, func(), error) {
+func (w Worker) acquireEphemeralInputs(ctx context.Context, j Job) (map[string]string, error) {
 	env := map[string]string{}
 	owner, ok := ctx.Value(sharedInputOwnerKey{}).(*workerStore)
 	if !ok {
-		return nil, nil, errors.New("private inputs require exact attempt custody")
+		return nil, errors.New("private inputs require exact attempt custody")
 	}
 	root := ephemeralRoot(owner.dir, j)
 	// StateDir is canonical in the running worker. No shared cache methods run.
@@ -192,7 +209,7 @@ func (w Worker) acquireEphemeralInputs(ctx context.Context, j Job) (map[string]s
 		stage := filepath.Join(root, "shared", name)
 		ready, err := completedSharedStage(ctx, stage)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if ready {
 			env["MYCE_INPUT_"+strings.ToUpper(name)] = filepath.Join(stage, "data")
@@ -201,10 +218,10 @@ func (w Worker) acquireEphemeralInputs(ctx context.Context, j Job) (map[string]s
 		// No detached writer or payload owns this private stage yet. Reset an
 		// interrupted extraction rather than copying over a read-only partial tree.
 		if err := removeSharedEntry(stage); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if err := os.MkdirAll(stage, 0700); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		c := SharedInputCache{Client: w.Client}
 		bytes := uint64(input.bytes())
@@ -213,16 +230,16 @@ func (w Worker) acquireEphemeralInputs(ctx context.Context, j Job) (map[string]s
 		}
 		release, err := w.diskBudget.reserve(ctx, stage, bytes, 0)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		err = c.populateInput(ctx, input, w.CheckpointRoot, stage)
 		release()
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		env["MYCE_INPUT_"+strings.ToUpper(name)] = filepath.Join(stage, "data")
 	}
-	return env, func() {}, nil
+	return env, nil
 }
 
 // Paths are relative to the worker spool, never private host paths. Bytes are
@@ -441,14 +458,14 @@ func (w Worker) finishEphemeralAttempt(ctx context.Context, s *workerStore, conn
 		_ = w.Client.Call(ctx, "POST", "/api/workers/complete", pending, nil)
 		return false, err
 	}
+	if err := s.releaseAttemptCachePins(); err != nil {
+		return false, err
+	}
 	released := *s.state.Result
 	released.ReleaseOnly = true
 	released.WorkerDataCleanup = s.state.WorkerDataCleanup
 	released.OutputRefs = nil
 	if err := w.Client.Call(ctx, "POST", "/api/workers/complete", released, nil); err != nil {
-		return false, err
-	}
-	if err := s.releaseAttemptCachePins(); err != nil {
 		return false, err
 	}
 	s.state.Job, s.state.Result = nil, nil

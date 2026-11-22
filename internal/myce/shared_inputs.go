@@ -132,10 +132,36 @@ func validateSharedInputs(s Spec) error {
 	return nil
 }
 func (w Worker) acquireSharedInputs(ctx context.Context, j Job) (map[string]string, func(), error) {
-	if j.Spec.ephemeral() {
-		return w.acquireEphemeralInputs(ctx, j)
-	}
 	ctx = w.storageIOContext(ctx)
+	var env map[string]string
+	var inputRelease func()
+	var err error
+	if j.Spec.ephemeral() {
+		env, err = w.acquireEphemeralInputs(ctx, j)
+		inputRelease = func() {}
+	} else {
+		env, inputRelease, err = w.acquireCachedSharedInputs(ctx, j)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	// Model preparation receives only the software declaration. The worker
+	// grants the exact acquired data paths read-only under CI isolation.
+	models, releases, err := w.acquireModelSnapshots(ctx, j)
+	if err != nil {
+		inputRelease()
+		return nil, nil, err
+	}
+	maps.Copy(env, models)
+	return env, func() {
+		for i := len(releases) - 1; i >= 0; i-- {
+			releases[i]()
+		}
+		inputRelease()
+	}, nil
+}
+
+func (w Worker) acquireCachedSharedInputs(ctx context.Context, j Job) (map[string]string, func(), error) {
 	env := map[string]string{}
 	releases := []func(){}
 	release := func() {
@@ -160,13 +186,6 @@ func (w Worker) acquireSharedInputs(ctx context.Context, j Job) (map[string]stri
 		releases = append(releases, done)
 		env["MYCE_INPUT_"+strings.ToUpper(n)] = path
 	}
-	models, modelReleases, err := w.acquireModelSnapshots(ctx, j)
-	if err != nil {
-		release()
-		return nil, nil, err
-	}
-	releases = append(releases, modelReleases...)
-	maps.Copy(env, models)
 	return env, release, nil
 }
 
@@ -174,8 +193,14 @@ func (w Worker) acquireSharedInputs(ctx context.Context, j Job) (map[string]stri
 func (s Spec) StoredInputFiles() FileManifest { return submissionFiles(s) }
 
 func sharedInputsFit(s Spec, m *Machine) bool {
-	if len(s.ModelSnapshots) > 0 && (m == nil || !contains(m.Capabilities, modelSnapshotsCapability)) {
-		return false
+	if len(s.ModelSnapshots) > 0 {
+		if m == nil || !contains(m.Capabilities, modelSnapshotsCapability) {
+			return false
+		}
+		// Assignment redelivery also checks staging capabilities.
+		if s.ephemeral() && ephemeralWorkerRefusal(s, m) != "" {
+			return false
+		}
 	}
 	return len(s.SharedInputs) == 0 || m != nil && contains(m.Capabilities, "shared_inputs_v1") && (!s.extensionJob() || contains(m.Capabilities, "extension_shared_inputs_v1"))
 }

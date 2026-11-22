@@ -5,7 +5,10 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -336,6 +339,82 @@ printf '%s' "$MYCE_MODEL_BASE" > result`
 			t.Fatal(got.State, got.Reason)
 		}
 	})
+	t.Run("ephemeral reuse and verified removal", func(t *testing.T) {
+		if err := ephemeralSupport(filepath.Join(state, "workers", "fake-1")); err != nil {
+			t.Skip("ephemeral dev requires a qualified Linux boundary:", err)
+		}
+		spool := filepath.Join(state, "workers", "fake-1")
+		cache := filepath.Join(spool, "file-cache", "model-snapshots")
+		submitAndRelease := func(s Spec) Job {
+			j, err := c.Submit(ctx, s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			finished := awaitTerminal(t, ctx, c, j.ID)
+			if finished.State != "succeeded" {
+				t.Fatal(finished.State, JobReasonDetail(&finished))
+			}
+			probeWait(t, ctx, func() bool {
+				finished = *job(t, d.Queue, j.ID)
+				return finished.ReleaseConfirmed
+			})
+			return finished
+		}
+		modelPath := func(j Job) string {
+			out := filepath.Join(t.TempDir(), "result")
+			if err := c.DownloadResult(ctx, j.ID, "result", out); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return string(data)
+		}
+		warmSpec := declare("org/tiny", tinyRevision, `test -r "$MYCE_MODEL_BASE/model.safetensors"; printf '%s' "$MYCE_MODEL_BASE" > result`)
+		warmPath := modelPath(submitAndRelease(warmSpec))
+		baseline := snapshotCacheContents(t, cache)
+		if err := os.Rename(repo, repo+".offline"); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := os.Rename(repo+".offline", repo); err != nil {
+				t.Error(err)
+			}
+		}()
+		const private = "private-fixture-image-bytes"
+		_, ref := retentionJobInput(t, c, private)
+		s := declare("org/tiny", tinyRevision, `
+test "$(cat "$MYCE_MODEL_BASE/model.safetensors")" = "`+tinyWeights+`"
+if (cat image.bin > "$MYCE_MODEL_BASE/private-copy") 2>/dev/null; then exit 31; fi
+if (cat image.bin > "$MYCE_MODEL_BASE/model.safetensors") 2>/dev/null; then exit 32; fi
+if cat "$MYCE_MODEL_BASE/../ready.json" >/dev/null 2>&1; then exit 33; fi
+cp image.bin "$TMPDIR/temp"
+cp image.bin "$HOME/request-spool"
+cp image.bin "$MYCE_CHECKPOINT_DIR/save"
+cat image.bin > result
+printf 'delivered fixture log\n'`)
+		s.Advanced = &Advanced{WorkerData: "ephemeral"}
+		s.Files = FileManifest{"image.bin": ref}
+		finished := submitAndRelease(s)
+		if !cleanupComplete(finished.WorkerDataCleanup) || len(finished.AttemptHistory) != 1 || !cleanupComplete(finished.AttemptHistory[0].WorkerDataCleanup) {
+			t.Fatalf("missing complete cleanup receipt: %+v", finished.WorkerDataCleanup)
+		}
+		for _, removal := range finished.WorkerDataCleanup.Paths {
+			if _, err := os.Lstat(filepath.Join(spool, removal.Path)); !errors.Is(err, os.ErrNotExist) || removal.Bytes == 0 {
+				t.Fatal("release lacks verified removal", removal, err)
+			}
+		}
+		if data := modelPath(finished); data != private {
+			t.Fatal("durable result did not contain the managed input")
+		}
+		if !maps.Equal(baseline, snapshotCacheContents(t, cache)) {
+			t.Fatal("ephemeral job changed the shared snapshot cache")
+		}
+		if reused := modelPath(submitAndRelease(warmSpec)); reused != warmPath || !maps.Equal(baseline, snapshotCacheContents(t, cache)) {
+			t.Fatal("later job did not reuse the unchanged snapshot with its source offline")
+		}
+	})
 	for _, refused := range []struct{ name, repo, revision, want string }{
 		{"wrong revision", "org/moved", tinyRevision, "no such repository revision"},
 		{"missing repository", "org/absent", tinyRevision, "no such repository revision"},
@@ -371,6 +450,41 @@ printf '%s' "$MYCE_MODEL_BASE" > result`
 	if data, _ := os.ReadFile(outside); string(data) != "not a model blob" {
 		t.Fatal("escape target changed")
 	}
+}
+
+// Compare paths, modes and bytes including cache metadata. Cache access times
+// may change when a snapshot's use lock is released.
+func snapshotCacheContents(t *testing.T, root string) map[string]string {
+	t.Helper()
+	tree := map[string]string{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		key, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		tree[key] = info.Mode().String()
+		switch {
+		case d.IsDir():
+			return nil
+		case info.Mode().IsRegular():
+			data, err := os.ReadFile(path)
+			tree[key] += ":" + string(data)
+			return err
+		default:
+			return fmt.Errorf("unexpected file type in model cache: %s", key)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tree
 }
 
 // snapshotWorker wires the worker's real file-transfer caches: a tiny file
