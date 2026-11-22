@@ -40,6 +40,7 @@ type FleetHostStatus struct {
 	Host           string                   `json:"host"`
 	Phase          string                   `json:"phase"`
 	Wait           string                   `json:"wait,omitempty"`
+	TakeoverWait   string                   `json:"takeover_wait,omitempty"` // Most recent natural wait, retained after progress.
 	Failure        string                   `json:"failure,omitempty"`
 	FailureCode    string                   `json:"failure_code,omitempty"`
 	ProgressAt     time.Time                `json:"progress_at"`
@@ -429,11 +430,11 @@ func (q *Queue) fleetDrainTemporary(host string) bool {
 	return false
 }
 
-// The queue restart ends every model HTTP stream, so new calls wait while its
-// host's step runs.
+// The queue restart ends every model HTTP stream. Its worker can replace its
+// own binary first, including while the queue is still serving calls.
 func (q *Queue) fleetPausesCalls() bool {
 	h := q.fleetActiveHost()
-	return h != nil && h.Queue && !h.QueueDone
+	return h != nil && h.Queue && !h.QueueDone && (h.WorkerDone || h.Machine == "")
 }
 
 // fleetSelectHost picks the next pending host: hosts idle now first, hosts
@@ -484,8 +485,10 @@ func (q *Queue) fleetSelectHost(u *fleetUpgrade) *fleetUpgradeHost {
 			wait = "the queue's host goes last"
 		} else if failure != "" {
 			wait = "waiting for a fresh worker runtime proof"
-		} else if reason := q.productionDrainBlocker(h.Host); reason != "" && !critical && !h.Owned && !q.maintenanceBlocked(h.Host) && q.fleetAdoptionReason(h) != "" {
-			wait = "waiting for open production work: " + reason + "; host admission remains enabled"
+		} else if reason := q.productionDrainBlocker(h.Host); reason != "" && !critical && !h.Owned && !q.maintenanceBlocked(h.Host) {
+			if adoptionReason := q.fleetAdoptionReason(h); adoptionReason != "" {
+				wait = "waiting for open production work: " + reason + "; host admission remains enabled; takeover unavailable: " + adoptionReason
+			}
 		}
 		if wait != h.Wait {
 			h.Wait, h.ProgressAt = wait, q.clock.Now()
@@ -737,7 +740,11 @@ func (q *Queue) fleetDrain(u *fleetUpgrade, h *fleetUpgradeHost) bool {
 		h.Phase, h.StepAt = "worker_start", q.clock.Now()
 		return true
 	}
-	takeover := h.Queue && h.WorkerDone || q.fleetAdoptionReason(h) == ""
+	adoptionReason := ""
+	if !h.Queue || !h.WorkerDone {
+		adoptionReason = q.fleetAdoptionReason(h)
+	}
+	takeover := adoptionReason == ""
 	if takeover {
 		h.Takeover = true
 	}
@@ -748,11 +755,17 @@ func (q *Queue) fleetDrain(u *fleetUpgrade, h *fleetUpgradeHost) bool {
 	// persisted planned-stop deadline. Critical interruption remains explicit.
 	h.PlannedStops = nil
 	if !takeover && !q.fleetHostQuiet(h) {
-		h.Wait = "waiting for running work to finish naturally: " + q.fleetAdoptionReason(h)
+		h.Wait = "waiting for running work to finish naturally: " + adoptionReason
+		if fleetUrgency(u.Urgency) == "normal" {
+			h.TakeoverWait = adoptionReason
+		}
 		return false
 	}
-	if h.Queue && !h.QueueDone && len(q.calls) > 0 {
+	if q.fleetPausesCalls() && len(q.calls) > 0 {
 		h.Wait = "waiting for model calls and streams to finish"
+		if fleetUrgency(u.Urgency) == "normal" {
+			h.TakeoverWait = "queue process owns active model calls or streams"
+		}
 		return false
 	}
 	h.Wait, h.StepAt, h.HealthSince, h.HealthIdentity = "", q.clock.Now(), time.Time{}, ""

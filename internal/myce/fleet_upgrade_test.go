@@ -225,8 +225,8 @@ func TestFleetUpgradeHostOrderQueueHostLast(t *testing.T) {
 			fleetHeartbeatAdvance(t, q, c)
 			continue
 		}
-		if h.Queue && !h.QueueDone && !q.fleetPausesCalls() {
-			t.Fatal("queue host step must pause new model calls")
+		if h.Queue && q.fleetPausesCalls() != (h.Phase == "queue_update") {
+			t.Fatal("only the queue service step should pause model calls")
 		}
 		order = append(order, fleetActivate(t, q, c))
 	}
