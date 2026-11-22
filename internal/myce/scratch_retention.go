@@ -42,11 +42,9 @@ func (a API) registerAttemptFiles(mux *requestMux) {
 		unlock()
 		respondOperation(w, disposition, nil, "attempt_files_invalid")
 	})
-	// One retention pass asks about all of its folders at once. Each answer
-	// takes q.mu for one metadata lookup, exactly as the single-folder route
-	// does, and releases it before the next, so a long list never holds the
-	// mutex for the whole batch. Answers are read-only; the worker still waits
-	// out its own marker before removing anything.
+	// One retention pass takes one queue turn. All answers use the same
+	// committed custody state, and the worker still checks its local marker
+	// before removing anything.
 	mux.HandleFunc("POST /api/workers/attempt-files/batch", func(w http.ResponseWriter, r *http.Request) {
 		var request AttemptFilesBatchRequest
 		if !decode(w, r, &request) {
@@ -56,18 +54,8 @@ func (a API) registerAttemptFiles(mux *requestMux) {
 			respondOperation(w, nil, errors.New("exact jobs, attempts and machine required"), "attempt_files_invalid")
 			return
 		}
-		q := a.Queue
-		reply := AttemptFilesBatchReply{Dispositions: make([]AttemptFilesDisposition, 0, len(request.Attempts))}
-		for _, e := range request.Attempts {
-			if err := r.Context().Err(); err != nil {
-				respondOperation(w, nil, err, "attempt_files_invalid")
-				return
-			}
-			unlock := requestLock(r.Context(), &q.mu)
-			reply.Dispositions = append(reply.Dispositions, q.attemptFilesDisposition(AttemptFilesRequest{Execution: Execution{ID: e.ID, Attempt: e.Attempt}, Machine: request.Machine}))
-			unlock()
-		}
-		respondOperation(w, reply, nil, "attempt_files_invalid")
+		reply, err := a.Queue.attemptFilesBatch(r.Context(), request)
+		respondOperation(w, reply, err, "attempt_files_invalid")
 	})
 }
 
@@ -80,6 +68,25 @@ type AttemptFilesBatchRequest struct {
 
 type AttemptFilesBatchReply struct {
 	Dispositions []AttemptFilesDisposition `json:"dispositions"`
+}
+
+func (q *Queue) attemptFilesBatch(ctx context.Context, request AttemptFilesBatchRequest) (AttemptFilesBatchReply, error) {
+	reply := AttemptFilesBatchReply{Dispositions: make([]AttemptFilesDisposition, 0, len(request.Attempts))}
+	if len(request.Attempts) == 0 {
+		return reply, nil
+	}
+	unlock, err := requestObservationLock(ctx, &q.mu)
+	if err != nil {
+		return AttemptFilesBatchReply{}, err
+	}
+	defer unlock()
+	for _, e := range request.Attempts {
+		if err := ctx.Err(); err != nil {
+			return AttemptFilesBatchReply{}, err
+		}
+		reply.Dispositions = append(reply.Dispositions, q.attemptFilesDisposition(AttemptFilesRequest{Execution: e, Machine: request.Machine}))
+	}
+	return reply, nil
 }
 
 // q.mu held; metadata only. A positive file policy is the existing operator's
