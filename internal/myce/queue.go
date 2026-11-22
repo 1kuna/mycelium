@@ -1045,17 +1045,18 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 				if m.Gone {
 					continue
 				}
-				if contains(m.Capabilities, ephemeralCapability) {
+				refusal := ephemeralWorkerRefusal(s, m)
+				if refusal == "" {
 					capable = true
 					break
 				}
-				refusals[ephemeralHostReason(m)] = true
+				refusals[refusal] = true
 			}
 			if !capable {
 				if len(refusals) == 0 {
 					refusals[ephemeralRequirements] = true
 				}
-				return rejectFieldRule("job_worker_data_unsupported", errors.New("no worker advertises "+ephemeralCapability+": "+strings.Join(slices.Sorted(maps.Keys(refusals)), "; ")))
+				return rejectFieldRule("job_worker_data_unsupported", errors.New("no worker advertises "+s.ephemeralRequiredCapability()+": "+strings.Join(slices.Sorted(maps.Keys(refusals)), "; ")))
 			}
 		}
 		if s.OutputDelivery == asyncNAS {

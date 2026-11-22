@@ -111,6 +111,11 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 	case "target":
 		if !sharedInputsFit(j.Spec, m) {
 			if len(j.Spec.ModelSnapshots) > 0 {
+				if j.Spec.ephemeral() {
+					if refusal := ephemeralWorkerRefusal(j.Spec, m); refusal != "" {
+						return j.Spec.ephemeralRequiredCapability() + " worker capability required: " + refusal
+					}
+				}
 				return modelSnapshotsCapability + " worker capability required (a worker with a shared model root)"
 			}
 			return "shared_inputs_v1 worker capability required"

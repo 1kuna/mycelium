@@ -298,8 +298,10 @@ Make requests sequentially within an attempt. Pending same-stage jobs retain
 the loaded engine; otherwise measured load cost/demand spacing determine idle
 release. Memory pressure or production demand can reclaim it earlier through
 acknowledged unload. Failed/cancelled inputs keep their normal isolated result
-and dependency rules. `worker_data: ephemeral` is refused with this opt-in;
-shared server memory and request spools are outside attempt-only cleanup.
+and dependency rules. `worker_data: ephemeral` refuses model servers and
+resident engines because shared server memory and request spools are outside
+attempt cleanup. For private inputs, load declared `model_snapshots` inside
+the offline command and use its private scratch for any request spool.
 Qualify exact native outputs and load/steady/request memory peaks before production.
 Read `loaded_models[].memory_peaks` in `myce status --jobs recent --json` for
 the engine attempt, host and device. In authenticated `GET /api/models/intervals`, use
@@ -363,7 +365,11 @@ without persistent payload caches, retains successful output bytes until durable
 queue acceptance, then verifies removal of local inputs, extracted/shared data,
 scratch/temp/private home (including sidecars), checkpoints, outputs and delivered
 logs before release. Environment caches, extension source and model caches stay
-read-only. Ephemeral attempts never read, pin or populate persistent payload
+read-only. A plain command can declare a model snapshot and read the verified,
+shared software at `MYCE_MODEL_<NAME>` or through `MYCE_BINDINGS_FILE`. The
+sandbox grants access to the acquired snapshot data only. Direct runtime caches,
+generated indexes and request spools to private work or `MYCE_SCRATCH_DIR`.
+Ephemeral attempts never read, pin or populate persistent payload
 caches, even for a warm hash pinned by another job; that other job's independent
 copy stays under its own retention. This does not purge earlier ordinary jobs.
 Check job `worker_data_cleanup` and the attempt-history receipt: `failed` or
@@ -371,15 +377,16 @@ pending cleanup is not a satisfied policy, even if the result succeeded. Retries
 restage inputs; startup recovers process custody and cleanup. Supporting Linux
 namespace workers with file core routing or the qualified Mycelium core router
 advertising `worker_data_ephemeral_v2` are required; v1 workers cannot run the
-expanded scope. A refusal or queued-job status naming `worker_data_ephemeral_v2`
-means the worker lacks ephemeral qualification. The reason identifies the
-missing namespace or core requirement when the worker has reported it. A
+expanded scope. Snapshot jobs also require a worker advertising
+`worker_data_ephemeral_model_snapshots_v1`. A refusal or queued-job status naming
+one of these capabilities identifies missing worker support. The reason identifies
+the missing worker release, namespace or core requirement when available. A
 detached core-route refusal means the worker's job scopes still need operator
 qualification. For a
 host-policy namespace refusal, see the
 [optional administrator action](https://github.com/1kuna/mycelium/blob/main/docs/native-isolation.md#optional-administrator-action-per-host-apparmor-user-namespaces).
 Resumability, custom workdirs (including extension workdirs),
-program jobs, extension checks, model servers/snapshots, resident model runtimes, diagnostics,
+program jobs, extension checks, model servers, resident model runtimes, diagnostics,
 `keep_on_failure` and alternate output delivery remain refused with
 `job_worker_data_unsupported`. Environment recipes, extension source/assets and
 authored settings are shared software/metadata: put customer data only in

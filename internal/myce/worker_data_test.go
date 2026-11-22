@@ -288,6 +288,12 @@ func TestEphemeralStoredSharedArchiveAndWarmCacheBypass(t *testing.T) {
 	}
 	defer storedRelease()
 	j.Spec.SharedInputs["stored"] = stored
+	modelRoot := t.TempDir()
+	tinyModel(t, modelRoot)
+	modelWorker := snapshotWorker(t, modelRoot, w.Clock)
+	w.ModelRoot, w.modelSnapshots, w.modelIndex = modelRoot, modelWorker.modelSnapshots, modelWorker.modelIndex
+	modelJob := snapshotJob("org/tiny")
+	j.Spec.ModelSnapshots, j.ModelLimits = modelJob.Spec.ModelSnapshots, modelJob.ModelLimits
 	t.Cleanup(func() { _ = removeSharedEntry(w.sharedInputs.cache.Root) })
 	evidence := w.sharedInputs.evidence()
 	ctx := context.WithValue(context.Background(), sharedInputOwnerKey{}, s)
@@ -296,7 +302,9 @@ func TestEphemeralStoredSharedArchiveAndWarmCacheBypass(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer release()
-	if _, done, err := w.acquireSharedInputs(ctx, j); err != nil {
+	payloadOnly := j
+	payloadOnly.Spec.ModelSnapshots = nil
+	if _, done, err := w.acquireSharedInputs(ctx, payloadOnly); err != nil {
 		t.Fatal("private staging retry", err)
 	} else {
 		done()
@@ -310,8 +318,19 @@ func TestEphemeralStoredSharedArchiveAndWarmCacheBypass(t *testing.T) {
 	if w.sharedInputs.evidence() != evidence || env["MYCE_INPUT_RUNTIME"] == warmPath {
 		t.Fatal("private input acquired the ordinary cache")
 	}
+	snapshot := env["MYCE_MODEL_BASE"]
+	modelFile := filepath.Join(snapshot, "model.safetensors")
+	if !nativePathContains(w.modelSnapshots.cache.Root, snapshot) {
+		t.Fatal("snapshot is outside the shared software cache", snapshot)
+	}
+	if uses, err := s.readSharedInputUses(); err != nil || len(uses) != 1 || uses[0].Root != w.modelSnapshots.cache.Root {
+		t.Fatal("expected attempt custody for the model cache only", uses, err)
+	}
 	if err := w.removeEphemeralPaths(s, false); err != nil {
 		t.Fatal("read-only extracted tree not removed", err)
+	}
+	if data, err := os.ReadFile(modelFile); err != nil || string(data) != tinyWeights {
+		t.Fatal("attempt cleanup modified the shared model", string(data), err)
 	}
 	if data, err := os.ReadFile(filepath.Join(warmPath, "bin/run")); err != nil || string(data) != "hello" {
 		t.Fatal("ordinary concurrent input was removed", err)
@@ -387,7 +406,7 @@ func TestEphemeralValidationAndOlderWorkerFence(t *testing.T) {
 	if _, err := base.FoldAdvanced(); err != nil || !base.ephemeral() || base.Validate() != nil || AdvancedStatus(&base).WorkerData != "ephemeral" {
 		t.Fatal("advanced policy not normalized", err)
 	}
-	cases := []func(*Spec){func(s *Spec) { s.Resident = &ResidentBinding{Model: "shared-engine"} }, func(s *Spec) { s.Resumable = true }, func(s *Spec) { s.Run.Workdir = "/tmp/custom" }, func(s *Spec) { s.Needs.Model = "server" }, func(s *Spec) { s.ModelSnapshots = map[string]ModelSnapshot{"model": {}} }, func(s *Spec) { s.WorkerData = "other" }, func(s *Spec) { s.Outputs = nil }, func(s *Spec) { s.Isolation = "unsandboxed"; s.Reason = "test" }, func(s *Spec) { s.Needs.Network = true }}
+	cases := []func(*Spec){func(s *Spec) { s.Resident = &ResidentBinding{Model: "shared-engine"} }, func(s *Spec) { s.Resumable = true }, func(s *Spec) { s.Run.Workdir = "/tmp/custom" }, func(s *Spec) { s.Needs.Model = "server" }, func(s *Spec) { s.WorkerData = "other" }, func(s *Spec) { s.Outputs = nil }, func(s *Spec) { s.Isolation = "unsandboxed"; s.Reason = "test" }, func(s *Spec) { s.Needs.Network = true }}
 	for i, mutate := range cases {
 		s := ephemeralSpec()
 		mutate(&s)
@@ -395,6 +414,9 @@ func TestEphemeralValidationAndOlderWorkerFence(t *testing.T) {
 		var rejection *rejectionError
 		if !errors.As(err, &rejection) || rejection.code != "job_worker_data_unsupported" {
 			t.Fatal("not a typed refusal", i, err)
+		}
+		if (s.Needs.Model != "" || s.Resident != nil) && !strings.Contains(err.Error(), "shared server memory and request spools are outside attempt cleanup") {
+			t.Fatal("model server refusal omitted its cleanup reason", err)
 		}
 	}
 	j := Job{Spec: ephemeralSpec()}
@@ -415,6 +437,31 @@ func TestEphemeralValidationAndOlderWorkerFence(t *testing.T) {
 	q, _ := fixture(t)
 	if _, err := q.Submit(ephemeralSpec()); err == nil {
 		t.Fatal("submission without store/capability accepted")
+	}
+	j.Spec.ModelSnapshots = snapshotJob("org/tiny").Spec.ModelSnapshots
+	if err := j.Spec.Validate(); err != nil {
+		t.Fatal("declared model snapshot refused", err)
+	}
+	if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
+		t.Fatal(err)
+	}
+	m.Capabilities = append(m.Capabilities, modelSnapshotsCapability)
+	check(t, q, m, nil)
+	if executionTargetMatches(j.Spec, &m) {
+		t.Fatal("older v2 worker can receive an ephemeral snapshot job without staging its model")
+	}
+	if _, err := q.Submit(j.Spec); err == nil || !strings.Contains(err.Error(), ephemeralSnapshotsCapability) {
+		t.Fatal("submission without snapshot-capable ephemeral workers was not refused", err)
+	}
+	m.Capabilities = append(m.Capabilities, ephemeralSnapshotsCapability)
+	check(t, q, m, nil)
+	submitted := submit(t, q, j.Spec)
+	if assigned := check(t, q, m, nil).Job; assigned == nil || assigned.ID != submitted.ID {
+		t.Fatal("snapshot-capable worker did not receive the ephemeral job", assigned)
+	}
+	m.Capabilities = slices.DeleteFunc(m.Capabilities, func(c string) bool { return c == ephemeralSnapshotsCapability })
+	if offered := check(t, q, m, nil).Job; offered != nil {
+		t.Fatal("ephemeral snapshot assignment reoffered to older worker", offered.ID)
 	}
 	// Ordinary behavior keeps using the cache, proving the new path is opt-in.
 	_, _, w, s := ephemeralFixture(t)
