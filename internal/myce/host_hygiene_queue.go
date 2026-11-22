@@ -62,7 +62,7 @@ func (q *Queue) detectHostHygiene() {
 		// restart alerted every host at once (live: eight 5-host bursts in two
 		// days). The age is the queue's outage, not host harm. Admission still
 		// refuses; the alert waits for the report or the end of restart grace.
-		if reason != "host_probe_unknown" || !q.unreported[m.ID] || !q.inRestartGrace(now) {
+		if reason != "host_probe_unknown" || !q.restartProtectsWorker(m, now) {
 			q.observeHealth("hygiene/"+m.ID, reason != "", hostDegradedSustain(m), HealthAlert{Kind: "host_degraded", Host: hostID(m), Reason: reason})
 		}
 		q.detectDiskExhaustionForecast(m)

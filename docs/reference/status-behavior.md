@@ -2037,10 +2037,10 @@ Matching-session contact cannot renew a negotiated observation. `availability.pr
 skew. `host_health.probe` applies the same frozen validity to health evidence;
 `host_probe_unknown` withholds admission when it expires or the source fails.
 After a queue restart, persisted health evidence falls back to wall age, so each
-host stays `host_probe_unknown` for admission until its first report. From the
-release containing the restart fix, that state raises no `host_degraded` alert
-while the worker is unreported and restart grace lasts. Earlier releases alerted
-every host at each restart. A worker still silent when grace ends alerts as usual.
+host stays `host_probe_unknown` for admission until its first report. The queue
+suppresses the corresponding `host_degraded` observation while an unreported
+worker has [restart report protection](scheduling-mechanisms.md#queue-restart-recovery).
+A worker still silent when that protection expires alerts as usual.
 Older workers retain legacy age rules until upgraded. See
 [adaptive host observations](../host-probes.md).
 

@@ -417,7 +417,7 @@ func (q *Queue) detectHealth() {
 		maintenance := q.s.HostMaintenance[host].Mode
 		intentional := m.Leaving || maintenance == "disabled" || maintenance == "drained" || maintenance == "draining"
 		stale := !q.workerFresh(m, now)
-		if q.unreported[m.ID] && q.inRestartGrace(now) {
+		if q.restartProtectsWorker(m, now) {
 			stale = false
 		}
 		unhealthy := (q.s.HostMaintenance[host].SharedHost != nil && !q.sharedPressureFresh(m)) || len(m.UnavailableRoots) > 0 || m.MemoryError != "" || m.HostMemoryError != "" || m.InventoryReason != "" || slices.ContainsFunc(m.Devices, func(d MachineDevice) bool { return d.Reason != "" })

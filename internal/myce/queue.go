@@ -276,6 +276,7 @@ type Queue struct {
 
 	restartControlUntil  time.Duration // Available startup service, not blocked wall time.
 	restartGraceDuration time.Duration
+	restartService       restartServiceWindow
 	contactTransaction   *contactTransaction // Lazy, per-worker undo while q.mu owns a transaction.
 
 	persistencePageBytes    int
@@ -508,6 +509,7 @@ func (q *Queue) beginRestartGrace(d time.Duration) {
 	q.restartUntil = q.clock.Now().Add(d)
 	q.restartControlUntil = q.controlNow() + d
 	q.restartGraceDuration = d
+	q.restartService = restartServiceWindow{}
 }
 
 const DefaultProductionInfrastructureRetries = 2
@@ -758,6 +760,7 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 		oldUnreported[id] = v
 	}
 	oldQuiet := q.networkQuiet
+	oldRestartService := q.restartService
 	contacts := &contactTransaction{}
 	q.contactTransaction = contacts
 	defer func() { q.contactTransaction = nil }()
@@ -817,6 +820,7 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 		q.calls = oldCalls
 		q.unreported = oldUnreported
 		q.networkQuiet = oldQuiet
+		q.restartService = oldRestartService
 		q.rollbackContacts(contacts)
 		q.rollbackRecords(old)
 		q.hostMemoryLedgers = nil // Never retain diagnostic inputs from an aborted writer.
@@ -1459,7 +1463,7 @@ func (q *Queue) maintain() {
 		if q.retainWorkerHandover(m) {
 			continue // Service replacement cannot turn live custody into a retry.
 		}
-		grace := unreported && q.inRestartGrace(now)
+		grace := q.restartProtectsWorker(m, now)
 		restartExpired := unreported && !grace
 		if !m.Gone && !grace && (restartExpired || (!q.networkQuiet && q.workerSuspect(m, now) && now.Sub(q.lastContact(m, now)) >= q.machineLossTimeout(m.ID))) {
 			q.touchMachine(m.ID)
@@ -1964,6 +1968,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		q.acceptFaultEvidence(&m)
 		q.quarantineDeviceAttempts(&m)
 		body.next("checkin_maintain")
+		q.observeRestartService(c.contact)
 		q.maintain()
 		body.next("checkin_attempts")
 		reply.FleetInstructionProtocol, reply.FleetInstructionWaiting = fleetInstructionProtocol, q.fleetInstructionWaiting(hostID(&m))

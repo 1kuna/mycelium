@@ -646,6 +646,16 @@ func TestRestartGraceStatusDuringSustainedControlOccupancy(t *testing.T) {
 	for _, m := range workers {
 		check(t, q, m, nil)
 	}
+	s := spec("production")
+	s.AllowedMachines = []string{silent.ID}
+	submit(t, q, s)
+	attempt := check(t, q, silent, nil).Job
+	if attempt == nil {
+		t.Fatal("no production assignment")
+	}
+	if err := q.Started(result(attempt, true)); err != nil {
+		t.Fatal(err)
+	}
 	check(t, q, peer, nil)
 	if _, err := q.ChangeHostMaintenance(drained.HostID, HostMaintenanceRequest{Action: "drain"}); err != nil {
 		t.Fatal(err)
@@ -683,15 +693,12 @@ func TestRestartGraceStatusDuringSustainedControlOccupancy(t *testing.T) {
 	clock.Advance(idle)
 	// Back-to-back control service can keep the clock continuously occupied
 	// even while the peer keeps completing valid check-ins.
-	func() {
-		q.mu.control.begin()
-		defer q.mu.control.end(func() {})
-		for range 3 {
-			clock.Advance(time.Hour)
-			check(t, q, peer, nil)
-		}
-		assertStatus(RestartGraceStatus{Active: true, AccruedSeconds: idle.Seconds(), RemainingSeconds: (RestartGrace - idle).Seconds()}, warning)
-	}()
+	q.mu.control.begin()
+	defer q.mu.control.end(func() {})
+	check(t, q, peer, nil)
+	clock.Advance(RestartGrace - time.Nanosecond)
+	check(t, q, peer, nil)
+	assertStatus(RestartGraceStatus{Active: true, AccruedSeconds: (RestartGrace - time.Nanosecond).Seconds(), RemainingSeconds: time.Nanosecond.Seconds()}, warning)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
@@ -704,16 +711,12 @@ func TestRestartGraceStatusDuringSustainedControlOccupancy(t *testing.T) {
 		t.Fatalf("silent-worker health alert started during grace: %+v", c)
 	}
 
-	clock.Advance(RestartGrace - idle)
-	// A status read can observe the expired timer before maintenance marks
-	// the workers gone. Reading either status shape does not run maintenance.
-	assertStatus(RestartGraceStatus{AccruedSeconds: RestartGrace.Seconds()}, "")
-	for _, worker := range workers {
-		if q.s.Machines[worker.ID].Gone {
-			t.Fatalf("status mutated worker %s", worker.ID)
-		}
-	}
+	clock.Advance(time.Nanosecond)
 	check(t, q, peer, nil)
+	snapshot, err := q.statusSnapshot()
+	if err != nil || snapshot.RestartGrace == nil || *snapshot.RestartGrace != (RestartGraceStatus{AccruedSeconds: RestartGrace.Seconds()}) || snapshot.Warning != "" {
+		t.Fatalf("status did not observe expiry at the exact bound: %+v, warning=%q, %v", snapshot.RestartGrace, snapshot.Warning, err)
+	}
 	for _, worker := range workers {
 		if !q.s.Machines[worker.ID].Gone {
 			t.Fatalf("%s was not marked gone after grace", worker.ID)
@@ -722,10 +725,121 @@ func TestRestartGraceStatusDuringSustainedControlOccupancy(t *testing.T) {
 	if c := q.s.Health.Conditions["host/"+silent.ID]; c.Since.IsZero() {
 		t.Fatal("silent enabled worker did not start its health alert timer after grace")
 	}
+	clock.Advance(hostDegradedSustain(q.s.Machines[silent.ID]))
+	check(t, q, peer, nil)
+	assertStatus(RestartGraceStatus{AccruedSeconds: RestartGrace.Seconds()}, "")
+	events := alertsOf(q, "production_attempt_lost")
+	if got := q.s.Jobs[attempt.ID]; got.State != "queued" || got.Losses != 1 || got.InfrastructureRetries != 1 ||
+		len(events) != 1 || events[0].JobID != attempt.ID || events[0].Attempt != attempt.Attempt {
+		t.Fatalf("restart loss was not charged and alerted exactly once: job=%+v alerts=%+v", got, events)
+	}
+	hostAlerts := alertsOf(q, "host_unhealthy_or_stale")
+	if len(hostAlerts) != 1 || hostAlerts[0].Host != hostID(&silent) || hostAlerts[0].Reason != "host_silent" {
+		t.Fatalf("expected only the enabled worker's silence alert: %+v", hostAlerts)
+	}
 	for _, worker := range []Machine{drained, disabled} {
 		if c := q.s.Health.Conditions["host/"+worker.ID]; !c.Since.IsZero() {
 			t.Fatalf("maintenance worker %s started a stale health alert: %+v", worker.ID, c)
 		}
+	}
+	for range 3 {
+		clock.Advance(time.Hour)
+		check(t, q, peer, nil)
+	}
+	assertStatus(RestartGraceStatus{AccruedSeconds: RestartGrace.Seconds()}, "")
+	if got := q.s.Jobs[attempt.ID]; got.Losses != 1 || got.InfrastructureRetries != 1 {
+		t.Fatalf("sustained control occupancy changed settled loss: %+v", got)
+	}
+}
+
+func TestRestartGraceRetainsSlowPendingReport(t *testing.T) {
+	q, clock, worker, peer, attempt := adaptiveLossFixture(t, "production")
+	const p90, tail = 5339 * time.Millisecond, 9198 * time.Millisecond // #1066 r6.34.
+	reportWorker := func(contact *checkinContact, settle func(bool)) {
+		t.Helper()
+		c := keyedFixtureCheckin(Checkin{Machine: worker, period: time.Second,
+			Running: &Execution{ID: attempt.ID, Attempt: attempt.Attempt}, contact: contact})
+		reply, err := q.checkinContext(context.Background(), c)
+		settle(err == nil)
+		if err != nil || fixtureReply(c, reply).Stop {
+			t.Fatalf("worker could not reconcile its attempt: %+v, %v", reply, err)
+		}
+	}
+	for _, delay := range []time.Duration{p90, p90, tail, p90} {
+		clock.Advance(time.Second)
+		contact, settle := q.trackWorkerCheckin(worker.ID, worker.Session, time.Second, true)
+		q.mu.Lock()
+		clock.Advance(delay)
+		q.mu.Unlock()
+		reportWorker(contact, settle)
+	}
+	evidence := q.s.ContactEvidence[worker.ID]
+	if evidence.ArrivalAllowance <= evidence.Allowance {
+		t.Fatalf("delivered cadence did not capture slow service: %+v", evidence)
+	}
+
+	q = reopenQueue(t, q, clock)
+	q.SetRestartGrace(2 * time.Second) // Exercise the measured extension on a short configured window.
+	q.mu.control.begin()
+	defer q.mu.control.end(func() {})
+	first, settleFirst := q.trackWorkerCheckin(peer.ID, peer.Session, time.Second, true)
+	clock.Advance(p90)
+	_, err := q.checkinContext(context.Background(), keyedFixtureCheckin(Checkin{
+		Machine: peer, period: time.Second, contact: first,
+	}))
+	settleFirst(err == nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDeadline := clock.Now().Add(evidence.ArrivalAllowance + p90)
+	if !q.restartService.until.Equal(wantDeadline) {
+		t.Fatalf("deadline = %v, want saved arrival allowance plus observed delay through %v", q.restartService.until, wantDeadline)
+	}
+
+	// A late peer response whose request arrived early cannot spend a stall.
+	clock.Advance(wantDeadline.Sub(clock.Now()) - time.Nanosecond)
+	early, settleEarly := q.trackWorkerCheckin(peer.ID, peer.Session, time.Second, true)
+	clock.Advance(tail)
+	_, err = q.checkinContext(context.Background(), keyedFixtureCheckin(Checkin{
+		Machine: peer, period: time.Second, contact: early,
+	}))
+	settleEarly(err == nil)
+	if err != nil || !q.inRestartGrace(clock.Now()) || q.s.Machines[worker.ID].Gone {
+		t.Fatalf("late completion spent the remaining grace: %v", err)
+	}
+
+	pending, settle := q.trackWorkerCheckin(worker.ID, worker.Session, time.Second, true)
+	clock.Advance(tail)
+	check(t, q, peer, nil)
+	if q.inRestartGrace(clock.Now()) || q.s.Machines[worker.ID].Gone {
+		t.Fatal("an exact pending arrival must retain custody after the timer expires")
+	}
+	reportWorker(pending, settle)
+	if got := q.s.Jobs[attempt.ID]; q.unreported[worker.ID] || got.State != "running" ||
+		got.Attempt != attempt.Attempt || got.Losses != 0 || got.InfrastructureRetries != 0 {
+		t.Fatalf("late live worker lost its exact attempt: %+v", got)
+	}
+}
+
+func TestRestartGraceExpiryRetainsExactHandover(t *testing.T) {
+	q, clock, worker, peer, attempt := adaptiveLossFixture(t, "production")
+	if err := q.update(func() error {
+		q.s.WorkerHandovers = map[string]workerHandover{worker.ID: {
+			Session: worker.Session, Attempts: []Execution{{ID: attempt.ID, Attempt: attempt.Attempt}},
+		}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	q = reopenQueue(t, q, clock)
+	q.mu.control.begin()
+	defer q.mu.control.end(func() {})
+	check(t, q, peer, nil)
+	clock.Advance(RestartGrace)
+	check(t, q, peer, nil)
+	if got := q.s.Jobs[attempt.ID]; q.inRestartGrace(clock.Now()) || q.s.Machines[worker.ID].Gone ||
+		got.State != "running" || got.Attempt != attempt.Attempt || got.Losses != 0 || got.InfrastructureRetries != 0 {
+		t.Fatalf("an exact handover lost protection at restart grace expiry: %+v", got)
 	}
 }
 
@@ -1089,5 +1203,10 @@ func TestControlClockDetachedSourcesPreserveRestartGrace(t *testing.T) {
 		if !v.inRestartGrace(v.clock.Now()) {
 			t.Fatal("detached source lost remaining service grace")
 		}
+	}
+	clock.Advance(RestartGrace)
+	snapshot, err := q.statusSnapshot()
+	if err != nil || snapshot.RestartGrace == nil || snapshot.RestartGrace.Active || q.s.Machines["worker"].Gone {
+		t.Fatalf("status must observe idle expiry without marking the worker gone: %+v, %v", snapshot.RestartGrace, err)
 	}
 }

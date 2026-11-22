@@ -82,14 +82,39 @@ still confirmed loss, so a wedged loop's attempts are retried. Suspicion and
 cadence learning still use check-ins only, so a stalled loop is still suspect
 and receives no new work.
 
-Continuous saturation or a wholly unreachable fleet has no finite trustworthy
-**confirmed-loss** bound: retain custody until control service or connectivity
-supplies evidence. If even maintenance cannot execute, neither diagnostic
-publication nor a useful relaunch can have a finite execution bound. Suspicion
-is computed at every subsequent observation; its elapsed-time threshold does
-not stop with the control clock. The explicit startup recovery grace also excludes blocked queue service so
-workers can reconcile before it expires. Genuine loss preserves exact
-attempt fencing and the existing retry budgets, and never proves release.
+In steady state, continuous saturation or a wholly unreachable fleet has no
+finite trustworthy confirmed-loss bound. Custody waits for evidence from
+control opportunity and connectivity. Suspicion still ages with wall time.
+Confirmed loss preserves exact attempt fencing and existing retry budgets.
+Release requires its own proof.
+
+#### Queue restart recovery
+
+Before the queue accepts its first reconciliation check-in, only idle control
+opportunity spends startup grace. A stalled startup can therefore retain a
+worker's original attempt even when the configured grace has passed in wall
+time. Once a check-in commits, an additional window starts. Its length is the
+largest of the configured grace, two send intervals of the reporting worker
+and the saved session-matched loss and wall-arrival allowances of workers
+still due to report, plus the observed time to process that first check-in.
+Older records can supply the saved loss allowance alone.
+
+The first check-in fixes the deadline. Each subsequent committed check-in
+advances the window to that request's arrival time. A request that arrived
+before a stall cannot spend the stalled interval by completing late.
+Maintenance can mark silent workers gone as soon as either the startup
+opportunity or the check-in window expires. A current-session report still
+being processed protects its worker. A cancelled request can protect that
+session until its measured reconnect delay elapses in wall time. Exact
+pending handovers retain their own custody protection. With neither usable
+idle opportunity nor a check-in reaching the deadline, the queue needs
+further evidence to expire the window.
+
+The restart warning and startup network-recovery suppression use the same
+timer. An unreported worker's stale health inputs and unknown-probe alert
+use the same per-worker protection as loss marking. Planned maintenance
+continues to exempt stale health alerts. The start-control refusal exception
+ends with the timer and still requires exact proof of no execution.
 
 Fleet, maintenance, placement, inventory and stale-host diagnostics use the same
 confirmed-contact and suspicion calculations, frozen at status capture time. LastSeen remains an actual
