@@ -6,10 +6,162 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestProjectFileHoldingsClaimReleaseEligibility(t *testing.T) {
+	ctx := context.Background()
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	const idleWindow, grace = time.Hour, 2 * time.Hour
+	if err := q.ConfigureFileRetention(idleWindow); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.update(func() error { q.recordPublicationTiming(clock.Now(), grace); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	_, published := retentionJobInput(t, c, "published-claim")
+	keeper := spec("experiment")
+	keeper.Project = "other"
+	keeper.Files = FileManifest{"input": published}
+	submit(t, q, keeper)
+	partial, _ := claimedCapacityPartial(t, q, c, "partial-claim", jobInputUploadPurpose)
+	absent := creationRef("absent-claim")
+	issue := func(ref FileRef) FileInputClaim {
+		t.Helper()
+		claim, err := q.claimFileInput(ctx, Spec{Project: "owner", Class: "experiment"}, ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return claim
+	}
+	claims := map[string]FileInputClaim{
+		"published": issue(published),
+		"uploading": partial,
+		"absent":    issue(absent),
+	}
+	q.fileLifecycle.Lock()
+	q.fileLifecycle.Unlock()
+	read := func() ProjectFileHoldings {
+		t.Helper()
+		var report ProjectFileHoldings
+		if err := c.Call(ctx, "GET", "/api/files/holdings?project=owner", nil, &report); err != nil {
+			t.Fatal(err)
+		}
+		return report
+	}
+	release := func(claim FileInputClaim) error {
+		var out FileInputClaimReleaseResult
+		return c.Call(ctx, "POST", "/api/files/release/claim", FileInputClaimRelease{
+			Project: "owner", ClaimID: claim.ID, AcceptExpiry: true,
+		}, &out)
+	}
+	check := func(activity time.Time, eligibility, reason string) {
+		t.Helper()
+		report := read()
+		if !report.CapturedAt.Equal(clock.Now()) || len(report.Files) != len(claims) {
+			t.Fatalf("unexpected snapshot: %+v", report)
+		}
+		for _, file := range report.Files {
+			claim, ok := claims[file.State]
+			if !ok || file.SHA256 != claim.File.SHA256 || len(file.InputClaims) != 1 ||
+				file.DurableCustody != (file.State == "published") {
+				t.Fatalf("unexpected file custody: %+v", file)
+			}
+			got := file.InputClaims[0]
+			if got.ClaimID != claim.ID || !got.LastActivity.Equal(activity) ||
+				got.IdleSeconds == nil || *got.IdleSeconds != clock.Now().Sub(activity).Seconds() ||
+				got.Eligibility != eligibility || got.Reason != reason || !got.EligibleAt.Equal(activity.Add(grace)) {
+				t.Fatalf("%s claim: %+v", file.State, got)
+			}
+		}
+		for i := 0; i < 2; i++ {
+			if next := read(); !reflect.DeepEqual(next, report) {
+				t.Fatalf("holdings read %d changed the snapshot: %+v", i, next)
+			}
+		}
+		for _, claim := range claims {
+			err := release(claim)
+			if eligibility == "eligible" {
+				if err != nil {
+					t.Fatalf("release refused eligible claim %s: %v", claim.ID, err)
+				}
+			} else {
+				releaseCode(t, err, "file_release_protected")
+			}
+		}
+	}
+	start := clock.Now()
+	check(start, "protected", "upload_idle_window")
+	clock.Advance(idleWindow)
+	check(start, "protected", "publication_grace")
+	if next := issue(absent); next.ID != claims["absent"].ID {
+		t.Fatalf("expected to reissue absent claim, got %s", next.ID)
+	}
+	if err := q.files.refreshBlob(q.files.blob(published)); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.files.refreshUpload(partial.File.SHA256); err != nil {
+		t.Fatal(err)
+	}
+	refresh := clock.Now()
+	check(refresh, "protected", "upload_idle_window")
+	clock.Advance(grace - time.Second)
+	check(refresh, "protected", "publication_grace")
+	clock.Advance(time.Second)
+	check(refresh, "eligible", "idle_windows_elapsed")
+	if report := read(); len(report.Files) != 0 {
+		t.Fatalf("released claims still counted: %+v", report)
+	}
+}
+
+func TestProjectFileHoldingsClaimActivityAndCustodyUnavailable(t *testing.T) {
+	ctx := context.Background()
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	claim, _ := claimedCapacityPartial(t, q, c, "partial-claim", jobInputUploadPurpose)
+	clock.Advance(max(testFileRetention, filePublicationGrace))
+	req := FileInputClaimRelease{Project: "owner", ClaimID: claim.ID, AcceptExpiry: true}
+	check := func(reason string) {
+		t.Helper()
+		report, err := q.ProjectFileHoldings(ctx, req.Project)
+		if err != nil || len(report.Files) != 1 || len(report.Files[0].InputClaims) != 1 {
+			t.Fatalf("unexpected holdings: %+v, %v", report, err)
+		}
+		got := report.Files[0].InputClaims[0]
+		if got.Eligibility != "unknown" || got.Reason != reason {
+			t.Fatalf("unexpected claim eligibility: %+v", got)
+		}
+		_, err = q.ReleaseFileInputClaim(ctx, req)
+		releaseCode(t, err, "file_release_busy")
+	}
+	q.fileLifecycle.RLock()
+	check("publication_busy")
+	q.fileLifecycle.RUnlock()
+
+	if err := q.update(func() error { delete(q.s.JobInputUploads, claim.File.SHA256); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	meta := filepath.Join(q.files.root, "uploads", claim.File.SHA256+".info")
+	if err := os.WriteFile(meta, []byte("invalid upload metadata"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(meta, claim.At, claim.At); err != nil {
+		t.Fatal(err)
+	}
+	check("custody_unavailable")
+	if err := os.Remove(meta); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(meta, 0700); err != nil {
+		t.Fatal(err)
+	}
+	check("activity_unavailable")
+}
 
 func TestProjectFileHoldingsAndCollectionAccounting(t *testing.T) {
 	ctx := context.Background()

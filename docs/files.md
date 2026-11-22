@@ -128,8 +128,25 @@ Review the job and claim IDs in `files[].holders` before releasing anything:
 Claim release requires inactivity across the upload and submission handoff.
 The queue uses the configured interrupted-upload idle window and measured
 publication grace, starting from the latest claim issuance, transfer activity,
-or published-blob refresh. `file_release_protected` means that custody is
-still current. Setting file retention to zero disables this idle release.
+or published-blob refresh. Each digest with unsettled claims lists
+`input_claims` by `claim_id`, matching the corresponding holder's `name`.
+`last_activity` and `idle_seconds` describe the observed activity at
+`captured_at`. `release_eligibility` is `eligible`, `protected`, or
+`unknown`, with a machine-readable `reason`. `eligible_at` is the deadline
+under the observed activity and grace when an age deadline is available.
+When activity or custody is uncertain, review a fresh snapshot. A busy
+publication fence can also make release temporarily unavailable. Holdings
+reads leave activity and custody unchanged. Explicit release rechecks both
+windows and current custody, and returns `file_release_protected` while
+either window remains. Setting file retention to zero disables idle release.
+
+`durable_custody` is true when another keeping reference, such as a job or
+catalog entry, protects the digest independently of its claims. Other
+unsettled claims can also continue holding a published digest. Release
+retires a claim and ordinary collection determines when its bytes are reclaimed.
+If payload metadata is unavailable, that digest has `state: "unknown"` and
+the stored-byte totals include only payloads that could be observed.
+
 Job release retries must use the same reviewed selection. If the queue returns
 `file_release_stale` for an older receipt, review a fresh plan.
 

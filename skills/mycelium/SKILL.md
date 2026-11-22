@@ -1044,11 +1044,19 @@ can reduce what apply collects without invalidating the plan. If apply reports
 `file_release_stale`, generate and review a new plan. Add `--include-checkpoints`
 to the plan for legacy queue checkpoint generations of finished jobs you no
 longer need. Local-first checkpoints follow their existing grace and custody
-rules. For an abandoned `input_claim`, use
-`myce file release claim --project NAME --accept-expiry CLAIM_ID` with the
-holder's `name`. A claim stays protected through the configured upload idle
-window and measured upload-to-submission grace, including after reuse. For a
-settled claim, release the finished job.
+rules. Check `files[].input_claims` for each unsettled claim's `last_activity`,
+`idle_seconds`, `release_eligibility`, and `reason` at `captured_at`.
+`eligible_at` shows when the upload idle window and publication grace will
+both have elapsed under the observed activity and grace. Reissuing a claim
+or using its payload can refresh activity. Take a fresh holdings snapshot if
+eligibility is unknown or its fields are missing. Holdings reads preserve
+activity and custody. For an abandoned claim marked `eligible`, use
+`myce file release claim --project NAME --accept-expiry CLAIM_ID` with its
+`claim_id`, also shown as the `input_claim` holder's `name`. Release rechecks
+eligibility. A digest with `durable_custody: true` still has a separate keeping
+reference. Other unsettled claims can also keep the bytes, and any reclaim
+happens through ordinary collection. For a settled claim, release the finished
+job.
 
 Use `myce status --json` to verify collection. `pending_collection_bytes` counts
 published candidates, including those in publication grace, and

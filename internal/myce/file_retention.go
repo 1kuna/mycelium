@@ -871,11 +871,16 @@ func (q *Queue) filePublicationAge(now time.Time) filePublicationAge {
 	return age
 }
 
-func (a filePublicationAge) protects(modified time.Time, expiredJobFile bool) bool {
+func (a filePublicationAge) grace(modified time.Time) time.Duration {
 	grace := a.legacy
 	if !a.measuredSince.IsZero() && modified.After(a.measuredSince) {
 		grace = a.recent
 	}
+	return grace
+}
+
+func (a filePublicationAge) protects(modified time.Time, expiredJobFile bool) bool {
+	grace := a.grace(modified)
 	if expiredJobFile && a.retention > 0 {
 		grace = min(grace, a.retention)
 	}

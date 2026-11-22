@@ -279,6 +279,33 @@ type FileInputClaimReleaseResult struct {
 	ReleasedAt time.Time `json:"released_at"`
 }
 
+// Queue custody needed to decide whether release must inspect a legacy upload.
+// Caller holds q.mu.
+func (q *Queue) inputClaimNeedsLegacyCustody(claim FileInputClaim) bool {
+	_, marked := q.jobUploadMarker(claim.File.SHA256)
+	_, bundle := q.s.BundleUploads[claim.File.SHA256]
+	return claim.Allocated && !marked && !bundle
+}
+
+const claimReleaseAgeElapsed = "idle_windows_elapsed"
+
+// Both windows must elapse from the same last activity. The latest deadline
+// uses the grace applicable to that activity at the time of evaluation.
+func (a filePublicationAge) inputClaimReleaseAge(lastActivity time.Time) (reason string, eligibleAt time.Time) {
+	if a.retention == 0 {
+		return "idle_release_disabled", time.Time{}
+	}
+	eligibleAt = lastActivity.Add(max(a.retention, a.grace(lastActivity)))
+	switch {
+	case a.interruptedUploadIdle(lastActivity, nil):
+		return claimReleaseAgeElapsed, eligibleAt
+	case lastActivity.After(a.now.Add(-a.retention)):
+		return "upload_idle_window", eligibleAt
+	default:
+		return "publication_grace", eligibleAt
+	}
+}
+
 func (q *Queue) ReleaseFileInputClaim(ctx context.Context, req FileInputClaimRelease) (FileInputClaimReleaseResult, error) {
 	var result FileInputClaimReleaseResult
 	if !validFileProject(req.Project) || req.ClaimID == "" || !req.AcceptExpiry {
@@ -293,8 +320,7 @@ func (q *Queue) ReleaseFileInputClaim(ctx context.Context, req FileInputClaimRel
 	unlock := requestReadLock(ctx, &q.mu)
 	claim, found := q.s.FileInputClaims[req.ClaimID]
 	store := q.files
-	_, marked := q.jobUploadMarker(claim.File.SHA256)
-	_, bundle := q.s.BundleUploads[claim.File.SHA256]
+	needsLegacy := q.inputClaimNeedsLegacyCustody(claim)
 	unlock()
 	if !found || claim.Project != req.Project {
 		return result, fileReleaseInvalid("claim is unavailable or belongs to another project")
@@ -308,7 +334,7 @@ func (q *Queue) ReleaseFileInputClaim(ctx context.Context, req FileInputClaimRel
 	if store == nil {
 		return result, &HTTPError{Status: http.StatusServiceUnavailable, Code: "file_store_unavailable", Message: "queue file store inventory unavailable"}
 	}
-	lastActivity, err := store.inputClaimActivity(claim)
+	payload, err := store.observeClaimPayload(claim.File)
 	if err != nil {
 		return result, fileReleaseError("file_release_busy", "cannot read input transfer activity; retry claim release")
 	}
@@ -316,7 +342,7 @@ func (q *Queue) ReleaseFileInputClaim(ctx context.Context, req FileInputClaimRel
 	// collection authority only for an exact legacy partial transfer. A claim
 	// reusing unmarked published content cannot authorize collecting it.
 	markPartial := false
-	if claim.Allocated && !marked && !bundle {
+	if needsLegacy {
 		var err error
 		markPartial, err = store.legacyPartialInput(ctx, claim.File)
 		if err != nil {
@@ -331,7 +357,7 @@ func (q *Queue) ReleaseFileInputClaim(ctx context.Context, req FileInputClaimRel
 		// The configured interrupted-upload idle window and measured
 		// upload-to-submission grace both have to elapse. Lifecycle exclusion
 		// alone would cover each request but miss the gaps between them.
-		if !q.filePublicationAge(q.clock.Now()).interruptedUploadIdle(lastActivity, nil) {
+		if reason, _ := q.filePublicationAge(q.clock.Now()).inputClaimReleaseAge(payload.lastActivity(claim)); reason != claimReleaseAgeElapsed {
 			return fileReleaseError("file_release_protected", "input claim is within the upload idle window or publication grace")
 		}
 		if markPartial {
@@ -350,30 +376,48 @@ func (q *Queue) ReleaseFileInputClaim(ctx context.Context, req FileInputClaimRel
 	return result, err
 }
 
-// Read only metadata for this digest. The caller holds the lifecycle write
-// fence so upload writes, publication and claim issuance cannot race the check.
-func (s *FileStore) inputClaimActivity(claim FileInputClaim) (time.Time, error) {
-	if err := claim.File.validate(); err != nil {
-		return time.Time{}, err
+type claimPayloadObservation struct {
+	payload storedPayload
+	present bool
+	latest  time.Time
+}
+
+func (p claimPayloadObservation) lastActivity(claim FileInputClaim) time.Time {
+	if issued := claim.lastIssuance(); issued.After(p.latest) {
+		return issued
 	}
-	at := claim.lastIssuance()
-	upload := filepath.Join(s.root, "uploads", claim.File.SHA256)
-	for _, path := range []string{s.blob(claim.File), upload, upload + ".info"} {
+	return p.latest
+}
+
+// Neither the blob nor tus HEAD path is observational. Read metadata directly
+// and look for the blob last, since publication links it before removing the
+// upload paths. The caller holds at least the shared lifecycle fence.
+func (s *FileStore) observeClaimPayload(ref FileRef) (claimPayloadObservation, error) {
+	var out claimPayloadObservation
+	if err := ref.validate(); err != nil {
+		return out, err
+	}
+	upload := filepath.Join(s.root, "uploads", ref.SHA256)
+	for i, path := range []string{upload + ".info", upload, s.blob(ref)} {
 		st, err := os.Lstat(path)
 		if os.IsNotExist(err) {
 			continue
 		}
 		if err != nil {
-			return time.Time{}, err
+			return out, err
 		}
 		if !st.Mode().IsRegular() {
-			return time.Time{}, errors.New("invalid input claim payload")
+			return out, errors.New("invalid input claim payload")
 		}
-		if st.ModTime().After(at) {
-			at = st.ModTime()
+		if st.ModTime().After(out.latest) {
+			out.latest = st.ModTime()
+		}
+		if i != 0 {
+			out.payload = storedPayload{size: uint64(st.Size()), upload: i == 1}
+			out.present = true
 		}
 	}
-	return at, nil
+	return out, nil
 }
 
 func (s *FileStore) legacyPartialInput(ctx context.Context, ref FileRef) (bool, error) {
