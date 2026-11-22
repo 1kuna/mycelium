@@ -144,6 +144,7 @@ type Queue struct {
 	publishedReads       atomic.Pointer[publishedReadIndex]
 	readWarm             readWarmer // Decodes new published records off q.mu.
 	readRoot             *readNode  // q.mu; immutable committed input generations.
+	readStateBaseSize    int        // q.mu; encoded control state before attached evidence.
 	readModels           *ModelConfig
 	readEnvironments     *EnvironmentCatalog
 	readRuntime          *observationState

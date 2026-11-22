@@ -175,7 +175,22 @@ func (h *idleHistory) build() {
 
 func projectIdleCapture(c idleCapture, at time.Time, previous map[string]idleObservation) (map[string]idleObservation, error) {
 	source, err := c.index.capture.detachedQueue(context.Background(), at, nil, func(g *readGeneration) (state, *queueRecords, error) {
-		s, err := g.liveInputs(context.Background())
+		s, err := g.controlState()
+		if err != nil {
+			return state{}, nil, err
+		}
+		s.Jobs = map[string]*Job{}
+		readWalk(g.root, true, func(key string, record *readRecord) {
+			if err != nil || !strings.HasPrefix(key, "jobs/") {
+				return
+			}
+			var value any
+			value, err = record.decode(key)
+			if err == nil {
+				job := value.(*Job)
+				s.Jobs[job.ID] = job
+			}
+		})
 		return s, nil, err
 	})
 	if err != nil {

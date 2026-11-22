@@ -779,7 +779,8 @@ func readQueueRecordRows(rows queueRecordRows, visit func(string, []byte)) (map[
 // Dirty records are encoded exactly once. No whole-state comparison caches.
 func (q *Queue) marshalPersistenceValue(key string, value any) ([]byte, map[string]json.RawMessage, error) {
 	if s, ok := value.(state); key == "state" && ok {
-		return q.marshalQueueBase(s, true)
+		data, _, fields, err := q.marshalQueueBase(s, true)
+		return data, fields, err
 	}
 	if j, ok := value.(*Job); ok && j != nil && (q.startupPending(j) || q.startCapacityPaused(j)) {
 		copy := *j
@@ -796,7 +797,7 @@ func (q *Queue) marshalPersistenceValue(key string, value any) ([]byte, map[stri
 // Keep the existing logical JSON and physical field layout, including rollback
 // compatibility with the previous release. Reuse prepared encodings of large
 // unchanged generations when building the durable and published read roots.
-func (q *Queue) marshalQueueBase(s state, prepareFields bool) ([]byte, map[string]json.RawMessage, error) {
+func (q *Queue) marshalQueueBase(s state, prepareFields bool) (data []byte, baseSize int, fields map[string]json.RawMessage, err error) {
 	var efficiency json.RawMessage
 	if len(s.EfficiencyHealth) > 0 {
 		if q.efficiencyHealthJSON == nil {
@@ -804,7 +805,7 @@ func (q *Queue) marshalQueueBase(s state, prepareFields bool) ([]byte, map[strin
 			var err error
 			q.efficiencyHealthJSON, err = json.Marshal(s.EfficiencyHealth)
 			if err != nil {
-				return nil, nil, err
+				return nil, 0, nil, err
 			}
 		}
 		efficiency = q.efficiencyHealthJSON
@@ -815,20 +816,21 @@ func (q *Queue) marshalQueueBase(s state, prepareFields bool) ([]byte, map[strin
 			var err error
 			q.fileInputClaimsJSON, err = json.Marshal(s.FileInputClaims)
 			if err != nil {
-				return nil, nil, err
+				return nil, 0, nil, err
 			}
 		}
 		claims = q.fileInputClaimsJSON
 	}
 	s.EfficiencyHealth, s.FileInputClaims = nil, nil
-	data, err := json.Marshal(s)
+	data, err = json.Marshal(s)
 	if err != nil {
-		return nil, nil, err
+		return nil, 0, nil, err
 	}
+	baseSize = len(data)
 	var object map[string]json.RawMessage
 	if prepareFields {
 		if err := json.Unmarshal(data, &object); err != nil {
-			return nil, nil, err
+			return nil, 0, nil, err
 		}
 	}
 	if len(efficiency)+len(claims) > 0 {
@@ -856,8 +858,8 @@ func (q *Queue) marshalQueueBase(s state, prepareFields bool) ([]byte, map[strin
 		data = append(data, '}')
 	}
 	if !prepareFields {
-		return data, nil, nil
+		return data, baseSize, nil, nil
 	}
-	fields, err := splitPersistenceFields(object, q.persistencePageBytes)
-	return data, fields, err
+	fields, err = splitPersistenceFields(object, q.persistencePageBytes)
+	return data, baseSize, fields, err
 }

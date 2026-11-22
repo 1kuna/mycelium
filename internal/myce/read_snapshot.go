@@ -295,7 +295,7 @@ func (q *Queue) publishReadRecords(next map[string][]byte) {
 			continue
 		}
 		if key == "state" {
-			data, _, _ = q.marshalQueueBase(queueBase(q.s, true), false)
+			data, q.readStateBaseSize, _, _ = q.marshalQueueBase(queueBase(q.s, true), false)
 		}
 
 		// Read snapshots include recomputable diagnostics; SQLite keeps decisions.
@@ -354,7 +354,7 @@ func (q *Queue) publishReadRuntime() {
 	}
 	value := copyObservation(observationState{Calls: q.calls, Unreported: q.unreported})
 	q.readRuntime = &value
-	q.readGeneration = &readGeneration{root: q.readRoot}
+	q.readGeneration = &readGeneration{root: q.readRoot, stateBaseSize: q.readStateBaseSize}
 	q.readSamples = make(map[string]map[attemptKey]hostMemorySample, len(q.hostMemorySamples))
 	for id, samples := range q.hostMemorySamples {
 		q.readSamples[id] = maps.Clone(samples)
@@ -527,17 +527,34 @@ func (q *Queue) unpublishedRecords() bool {
 // Concurrent readers share that assembly and the unchanged records' decoders.
 // It never shares a mutable diagnostic planner or a projected response.
 type readGeneration struct {
-	root       *readNode
-	once       sync.Once
-	liveOnce   sync.Once
-	liveState  state
-	liveErr    error
-	memoryOnce sync.Once
-	memory     map[string]*externalMemoryRing
-	memoryErr  error
-	state      state
-	records    *queueRecords
-	err        error
+	root          *readNode
+	stateBaseSize int // Length of control state before encoded histories are attached.
+	once          sync.Once
+	liveOnce      sync.Once
+	liveState     state
+	liveErr       error
+	memoryOnce    sync.Once
+	memory        map[string]*externalMemoryRing
+	memoryErr     error
+	state         state
+	records       *queueRecords
+	err           error
+}
+
+// controlState reads the committed state without decoding the appended claim
+// and efficiency histories. These can be much larger than the active queue.
+func (g *readGeneration) controlState() (state, error) {
+	record := readGet(g.root, "state")
+	data := record.data
+	if size := g.stateBaseSize; size > 0 && size < len(data) {
+		// The history fields replaced the closing brace at size-1. Restore
+		// it in a detached copy and leave the shared encoded root intact.
+		data = bytes.Clone(data[:size])
+		data[size-1] = '}'
+	}
+	var result state
+	err := json.Unmarshal(data, &result)
+	return result, err
 }
 
 func (g *readGeneration) inputs(ctx context.Context) (state, *queueRecords, error) {

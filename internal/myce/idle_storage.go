@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net/url"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -25,10 +27,15 @@ CREATE TABLE IF NOT EXISTS host_idle_intervals (
 CREATE INDEX IF NOT EXISTS host_idle_end ON host_idle_intervals(end);
 `
 
-// The queue has a single SQLite control database. Interval batches and pruning
-// use a separate local evidence file so their writer can never stall a control
-// transaction that already holds q.mu.
+// The independent writer keeps interval batches and pruning out of the control
+// database. WAL NORMAL avoids an additional storage sync on every tick. A
+// machine crash can lose recent evidence, which the report exposes as unknown.
 func (q *Queue) openIdleHistory(path string) {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		log.Printf("host idle evidence storage unavailable: %v", err)
+		return
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		log.Printf("host idle evidence storage unavailable: %v", err)
@@ -39,10 +46,11 @@ func (q *Queue) openIdleHistory(path string) {
 		log.Printf("host idle evidence storage unavailable: %v", err)
 		return
 	}
-	db, err := sql.Open("sqlite", path)
+	location := url.URL{Scheme: "file", Path: path, RawQuery: "_pragma=synchronous(NORMAL)"}
+	db, err := sql.Open("sqlite", location.String())
 	if err == nil {
 		db.SetMaxOpenConns(2) // One retention writer and one concurrent WAL reader.
-		_, err = db.Exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;" + idleSchema)
+		_, err = db.Exec("PRAGMA journal_mode=WAL;" + idleSchema)
 	}
 	if err != nil {
 		if db != nil {
@@ -245,12 +253,12 @@ func (q *Queue) idleReport(ctx context.Context, since, through time.Time, interv
 	// Current physical hosts can have no stored rows after a restart, a
 	// capture gap, or budget pruning. All such uncovered time is unknown.
 	if index := q.readIndex(ctx); index != nil {
-		record, err := readGet(index.root, "state").decode("state")
+		state, err := index.capture.generation.controlState()
 		if err != nil {
 			return nil, err
 		}
 		hosts := map[string][]*Machine{}
-		for _, m := range record.(*state).Machines {
+		for _, m := range state.Machines {
 			if m.Replacement == nil {
 				hosts[hostID(m)] = append(hosts[hostID(m)], m)
 			}
