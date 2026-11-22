@@ -247,6 +247,58 @@ func TestHostBackfillExtensionCheckBeforeMaintenanceCPU(t *testing.T) {
 	}
 }
 
+func TestHostBackfillExtensionCheckRespectsRetainedCardCustody(t *testing.T) {
+	q, clock, m, probe := gpuHostFixture(t)
+	m.HostAvailableMemoryGB = 20
+	var holders []*Job
+	for _, ram := range []float64{2, 10} {
+		s := sharedSpec("experiment", 2)
+		s.Needs.HostMemoryGB, s.WallTime = ram, "1h"
+		s.Needs.Platform = Platform{Required: []string{"xpu"}}
+		s.Needs.GPU = &GPUSelection{Devices: []string{"0"}}
+		queued := submit(t, q, s)
+		run := assignedJob(machineCheck(t, q, m, holders...))
+		if run == nil || run.ID != queued.ID {
+			t.Fatal("missing sharing attempt", job(t, q, queued.ID).Reason)
+		}
+		if err := q.Started(result(run, false)); err != nil {
+			t.Fatal(err)
+		}
+		holders = append(holders, run)
+	}
+	pending := result(holders[0], true)
+	pending.ReleasePending = true
+	if err := q.Complete(pending); err != nil {
+		t.Fatal(err)
+	}
+	requireState(t, q, holders[0].ID, "succeeded")
+	clock.Advance(time.Second)
+	probe.Workload = nil
+	probe.ExtensionDigest = registeredExtension(t, q, probe.Extension).Digest
+	probe.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
+	probe.AllowedMachines = []string{m.ID}
+	probe.Needs.GPU = &GPUSelection{Devices: []string{"0"}}
+	probe.SizeHint = SizeHint{HostMemoryGB: 15}
+	demand := submit(t, q, probe)
+	backfill := submit(t, q, cpuSpec(1, 4))
+	cpu := assignedJob(machineCheck(t, q, m, holders[1]))
+	if cpu == nil || cpu.ID != backfill.ID {
+		t.Fatal("check fenced fitting CPU work behind retained card custody", job(t, q, backfill.ID).Reason)
+	}
+	finish(t, q, cpu, true)
+	finish(t, q, holders[1], true)
+	if got := assignedJob(machineCheck(t, q, m)); got != nil {
+		t.Fatal("check ran before exact card release", got.ID)
+	}
+	pending.ReleasePending, pending.ReleaseOnly = false, true
+	if err := q.Complete(pending); err != nil {
+		t.Fatal(err)
+	}
+	if got := assignedJob(machineCheck(t, q, m)); got == nil || got.ID != demand.ID {
+		t.Fatal("check did not start after exact card release", job(t, q, demand.ID).Reason)
+	}
+}
+
 // A fitting GPU job also consumes the shared host pool. Explain the same
 // accumulation fence as CPU backfill, then place it beside CPU holders once
 // the preceding demand clears (#1701).

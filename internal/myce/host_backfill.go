@@ -187,6 +187,20 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 // no basis to idle RAM indefinitely. This projection grants no release credit
 // to dispatch, which still checks the live ledger and exact custody.
 func (q *Queue) forecastCheckCapacity(m *Machine) *Machine {
+	releasing := q.forecastCheckReleases(m)
+	if len(releasing) == 0 {
+		return nil
+	}
+	projected := q.drainProjection(m, releasing)
+	return &projected
+}
+
+func (q *Queue) forecastCheckReleases(m *Machine) []*Job {
+	// The same exact-attempt custody check used for dispatch also covers a
+	// terminal attempt whose release never entered the live-job forecast.
+	if !q.cardSettled(m) {
+		return nil
+	}
 	now := q.clock.Now()
 	running := q.drainingAttempts(m)
 	releasing := running[:0]
@@ -201,11 +215,7 @@ func (q *Queue) forecastCheckCapacity(m *Machine) *Machine {
 			return nil // An unforecastable exclusive slot also blocks the check.
 		}
 	}
-	if len(releasing) == 0 {
-		return nil
-	}
-	projected := q.drainProjection(m, releasing)
-	return &projected
+	return releasing
 }
 
 // Host RAM is shared by CPU and device views. Apply accelerator-first backfill
