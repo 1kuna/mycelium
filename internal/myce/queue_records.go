@@ -39,6 +39,7 @@ type queueRecords struct {
 	keys                      recordDeadlines
 	jobCount, submissionCount int
 	updating                  bool
+	editingInputClaims        bool
 	checkpointExpiry          map[string]checkpointExpiryEntry // Settled job ID -> folder and earliest expiry (#894).
 	checkpointUndated         map[string]bool                  // Settled jobs with no timestamp to start a grace period.
 	after                     map[string]string                // Job ID -> its after: parent.
@@ -344,13 +345,12 @@ func (q *Queue) beginRecords() (recordUndo, error) {
 		q.rebuildRecords()
 	}
 	base := queueBase(q.s, false)
-	// Diagnostic generations are replaced, never mutated in place. Borrow the
-	// baseline for rollback just as observation capture does; copying thousands
-	// of histories on every unrelated writer only extends the central hold.
-	efficiencyHealth := base.EfficiencyHealth
-	base.EfficiencyHealth = nil
+	// Diagnostic generations and input claims are replaced on edit. Borrow
+	// them for rollback so unrelated writers avoid cloning the catalogs.
+	efficiencyHealth, inputClaims := base.EfficiencyHealth, base.FileInputClaims
+	base.EfficiencyHealth, base.FileInputClaims = nil, nil
 	old := copyObservationValue(reflect.ValueOf(base)).Interface().(state)
-	old.EfficiencyHealth = efficiencyHealth
+	old.EfficiencyHealth, old.FileInputClaims = efficiencyHealth, inputClaims
 	q.records.healthChanged = map[int]bool{}
 	q.records.updating = true
 	q.records.jobs = map[string]*Job{}
@@ -390,7 +390,8 @@ func (q *Queue) beginRecords() (recordUndo, error) {
 		q.touchSubmission(q.records.bindings[id])
 	}
 	catalogs := state{Extensions: q.s.Extensions, WorkObservations: q.s.WorkObservations, StorageObservations: q.s.StorageObservations, ExternalMemory: q.s.ExternalMemory}
-	return recordUndo{base: old, catalogs: catalogs, machines: q.s.Machines, health: q.s.Health.Events, efficiencyJSON: q.efficiencyHealthJSON}, nil
+	return recordUndo{base: old, catalogs: catalogs, machines: q.s.Machines, health: q.s.Health.Events,
+		efficiencyJSON: q.efficiencyHealthJSON, inputClaimsJSON: q.fileInputClaimsJSON}, nil
 }
 func (q *Queue) rollbackRecords(old recordUndo) {
 	q.evidenceGeneration++
@@ -404,6 +405,7 @@ func (q *Queue) rollbackRecords(old recordUndo) {
 	base.Jobs, base.Submissions = jobs, submissions
 	q.s = base
 	q.efficiencyHealthJSON = old.efficiencyJSON
+	q.fileInputClaimsJSON = old.inputClaimsJSON
 	q.s.Machines = old.machines
 	for id, m := range q.records.machines {
 		if m == nil {
@@ -490,6 +492,7 @@ func (q *Queue) commitRecords() {
 	q.records.catalogUndo = nil
 	q.records.machines, q.records.reasons, q.records.staleness = nil, nil, nil
 	q.records.updating = false
+	q.records.editingInputClaims = false
 	q.records.jobs = nil
 	q.records.submissions = nil
 }

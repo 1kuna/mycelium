@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -12,6 +14,101 @@ import (
 	"testing"
 	"time"
 )
+
+// The installed-cutover fixture uses 7,000 receipts to represent the retained
+// production claim catalog without using any real records.
+func seedRetainedInputClaims(q *Queue, count int) {
+	claims := make(map[string]FileInputClaim, count)
+	now := q.clock.Now()
+	for i := range count {
+		id := fmt.Sprintf("synthetic-claim-%05d", i)
+		claims[id] = FileInputClaim{
+			ID: id, Project: "synthetic-volume", Class: "experiment",
+			File: FileRef{SHA256: fmt.Sprintf("%064x", i), SizeBytes: 1},
+			At:   now, SettledAt: now,
+		}
+	}
+	q.s.FileInputClaims = claims
+}
+
+func TestQueuePersistenceCheckinWithRetainedInputClaims(t *testing.T) {
+	q, clock := fixture(t)
+	m := machine("worker", "fake")
+	report := Checkin{Machine: m, period: time.Second}
+	if _, err := q.Checkin(report); err != nil {
+		t.Fatal(err)
+	}
+	measure := func() float64 {
+		return testing.AllocsPerRun(5, func() {
+			clock.Advance(time.Second)
+			if _, err := q.Checkin(report); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	without := measure()
+	const retained = 7000
+	if err := q.update(func() error { seedRetainedInputClaims(q, retained); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	with := measure()
+	if with-without >= retained {
+		t.Fatalf("unchanged claims added %.0f allocations per check-in with %d receipts (%.0f -> %.0f)", with-without, retained, without, with)
+	}
+	t.Logf("allocations with %d retained receipts: %.0f -> %.0f per check-in", retained, without, with)
+}
+
+func TestQueuePersistenceInputClaimsRollbackRestart(t *testing.T) {
+	q, clock := fixture(t)
+	if err := q.update(func() error { seedRetainedInputClaims(q, 64); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	assertClaims := func(want map[string]FileInputClaim) {
+		t.Helper()
+		var disk state
+		if err := json.Unmarshal(durableQueueRecord(t, q.db, "state"), &disk); err != nil {
+			t.Fatal(err)
+		}
+		published, err := readGet(q.readRoot, "state").decode("state")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, actual := range []map[string]FileInputClaim{q.s.FileInputClaims, disk.FileInputClaims, published.(*state).FileInputClaims} {
+			if !maps.EqualFunc(actual, want, FileInputClaim.equal) {
+				t.Fatal("live, published and durable claims must agree")
+			}
+		}
+	}
+	first := maps.Clone(q.s.FileInputClaims)
+	assertClaims(first)
+	id := "synthetic-claim-00000"
+	claim := first[id]
+	clock.Advance(time.Second)
+	change := func() error {
+		q.forgetFileInputClaims(claim.File.SHA256, clock.Now())
+		return nil
+	}
+	if _, err := q.db.Exec(`CREATE TRIGGER reject_claims BEFORE INSERT ON queue_state BEGIN SELECT RAISE(ABORT,'test claim write failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.update(change); err == nil {
+		t.Fatal("failed SQLite write removed the claim")
+	}
+	if _, err := q.db.Exec("DROP TRIGGER reject_claims"); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.update(func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	assertClaims(first)
+	if err := q.update(change); err != nil {
+		t.Fatal(err)
+	}
+	delete(first, id)
+	assertClaims(first)
+	q = reopenQueue(t, q, clock)
+	assertClaims(first)
+}
 
 // The startup fast path must reconstruct exactly the state read by the
 // adjacent-release document decoder, including keyed answers and split fields.

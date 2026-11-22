@@ -13,7 +13,18 @@ import (
 // The earlier production fixture omitted the multi-megabyte diagnostic state
 // found in #1568. These are invented baselines, not captured consumer data.
 func BenchmarkCheckinProductionEfficiency(b *testing.B) {
+	benchmarkCheckinProductionRoot(b, false)
+}
+
+func BenchmarkCheckinProductionInputClaims(b *testing.B) {
+	benchmarkCheckinProductionRoot(b, true)
+}
+
+func benchmarkCheckinProductionRoot(b *testing.B, inputClaims bool) {
 	q, workers := productionCheckinFixture(b)
+	if inputClaims {
+		seedRetainedInputClaims(q, 7000)
+	}
 	q.s.EfficiencyHealth = map[string]efficiencyBaseline{}
 	for i := range 3129 {
 		history := make(alertSeries, alertHistorySize)

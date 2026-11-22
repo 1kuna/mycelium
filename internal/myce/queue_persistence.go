@@ -456,6 +456,9 @@ func (q *Queue) loadPersistedState() error {
 	if err != nil {
 		return err
 	}
+	// The large claim field was already detached during startup decoding.
+	claimField := base64.RawURLEncoding.EncodeToString([]byte("file_input_claims"))
+	q.fileInputClaimsJSON = q.persistedStateFields[claimField]
 	q.evidenceBytes = 0
 	for key, data := range q.persisted {
 		q.noteEvidenceRecord(key, nil, data)
@@ -791,9 +794,8 @@ func (q *Queue) marshalPersistenceValue(key string, value any) ([]byte, map[stri
 }
 
 // Keep the existing logical JSON and physical field layout, including rollback
-// compatibility with the previous release. The large, immutable diagnostic
-// generation has already been encoded outside q.mu. Do not run it through
-// json.Marshal/Unmarshal again merely to compare unchanged physical fragments.
+// compatibility with the previous release. Reuse prepared encodings of large
+// unchanged generations when building the durable and published read roots.
 func (q *Queue) marshalQueueBase(s state, prepareFields bool) ([]byte, map[string]json.RawMessage, error) {
 	var efficiency json.RawMessage
 	if len(s.EfficiencyHealth) > 0 {
@@ -807,7 +809,18 @@ func (q *Queue) marshalQueueBase(s state, prepareFields bool) ([]byte, map[strin
 		}
 		efficiency = q.efficiencyHealthJSON
 	}
-	s.EfficiencyHealth = nil
+	var claims json.RawMessage
+	if len(s.FileInputClaims) > 0 {
+		if q.fileInputClaimsJSON == nil {
+			var err error
+			q.fileInputClaimsJSON, err = json.Marshal(s.FileInputClaims)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		claims = q.fileInputClaimsJSON
+	}
+	s.EfficiencyHealth, s.FileInputClaims = nil, nil
 	data, err := json.Marshal(s)
 	if err != nil {
 		return nil, nil, err
@@ -818,14 +831,28 @@ func (q *Queue) marshalQueueBase(s state, prepareFields bool) ([]byte, map[strin
 			return nil, nil, err
 		}
 	}
-	if len(efficiency) > 0 {
+	if len(efficiency)+len(claims) > 0 {
+		data = slices.Grow(data, len(efficiency)+len(claims)+len(`,"efficiency_health":,"file_input_claims":`))
+	}
+	for _, field := range []struct {
+		name string
+		data json.RawMessage
+	}{
+		{"efficiency_health", efficiency},
+		{"file_input_claims", claims},
+	} {
+		if len(field.data) == 0 {
+			continue
+		}
 		if prepareFields {
-			object["efficiency_health"] = efficiency
+			object[field.name] = field.data
 		}
 		// Only copy already validated bytes. RawMessage in json.Marshal would
 		// scan/compact the entire history again while holding the queue lock.
-		data = append(data[:len(data)-1], `,"efficiency_health":`...)
-		data = append(data, efficiency...)
+		data = append(data[:len(data)-1], ',', '"')
+		data = append(data, field.name...)
+		data = append(data, '"', ':')
+		data = append(data, field.data...)
 		data = append(data, '}')
 	}
 	if !prepareFields {
