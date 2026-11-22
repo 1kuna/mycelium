@@ -820,11 +820,13 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   registered variant that still needs qualification, resolve tells you when to
   submit without `require_target` to create demand. Resolve itself is read-only.
   A native-qualification wait names the automatic check when it exists.
-  A next-check-in promise requires a dispatchable check offer. A released
-  launch-authorization refusal with exact proof that neither main nor sidecars
-  started is infrastructure evidence. Wait for the queue's automatic retry
-  under the same useful job and key. A retained failed check has no automatic
-  retry. The useful job's GET, `myce status JOB_ID` and terminal `myce wait`
+  A next-check-in promise requires a dispatchable check offer. The queue retries
+  a released check after a proven prelaunch authorization or memory refusal, or
+  a recorded priority interruption before main-command authorization. Keep the
+  same useful job and key while it waits. If an older queue already ended the
+  useful job with `dead_end_wait` for one of these interruptions, submit with a
+  new key once the queue supports the retry. For a terminal native check
+  verdict, the useful job's GET, `myce status JOB_ID` and terminal `myce wait`
   name the failed check job IDs and attempts, with each available `code`,
   `exception_type` and `missing_module`. Use the `myce logs CHECK_ID` action,
   fix and register a new version, then resubmit a failed useful job with a new

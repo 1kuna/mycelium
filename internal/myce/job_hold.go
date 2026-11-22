@@ -413,13 +413,13 @@ func (q *Queue) nativeCheckProgress(e Extension, work string, m *Machine, resolv
 		return progress(reason, "queued native check job", "wait; nothing to do"), false, true
 	}
 
-	releasedRefusal := false
+	releasedWithoutVerdict := false
 	for _, r := range m.ExtensionReports {
 		if r.Work != work || !matchingExtensionReport(e, m, r) || r.Qualified || r.CheckID == "" || !terminal(r.CheckState) {
 			continue
 		}
 		if q.automaticCheckRetryable(m.ID, r) {
-			releasedRefusal = releasedRefusal || r.CheckState == "failed"
+			releasedWithoutVerdict = releasedWithoutVerdict || r.CheckState == "failed"
 			continue
 		}
 		reason, action := nativeFailureReason, nativeFailureAction
@@ -433,20 +433,20 @@ func (q *Queue) nativeCheckProgress(e Extension, work string, m *Machine, resolv
 		return holdSource(h, nativeFailureSource), true, false
 	}
 	reason, source := "native qualification on "+host+" is waiting for preparation or dispatch eligibility; no check has been submitted", "worker preparation and check admission"
-	if releasedRefusal {
-		reason, source = "the native check was refused before launch and released; qualification remains pending", "accepted release and exact-attempt execution evidence"
+	if releasedWithoutVerdict {
+		reason, source = "the native check released its resources before its main command started; qualification remains pending", "accepted release and exact-attempt execution evidence"
 	}
 	for _, plan := range q.extensionQualificationPlan(m) {
 		if plan.Report.Digest == e.Digest && plan.Report.Work == work {
 			offer := "the queue submits its native check on " + host + " at that host's next check-in"
-			if releasedRefusal {
+			if releasedWithoutVerdict {
 				return progress(reason+"; "+offer, source, "wait for the automatic retry"), false, true
 			}
 			return progress(offer, "dispatchable native check offer", "wait; nothing to do"), false, true
 		}
 	}
 	if resolving && !q.extensionQualificationDemand(e, m) {
-		if !releasedRefusal {
+		if !releasedWithoutVerdict {
 			reason, source = "automatic native qualification requires submitted demand; resolve creates no check", "registered variant and queue qualification demand"
 		}
 		h := progress(reason, source, "submit the job without require_target to request native qualification")
@@ -454,7 +454,7 @@ func (q *Queue) nativeCheckProgress(e Extension, work string, m *Machine, resolv
 		return h, false, false
 	}
 	next := "wait; nothing to do"
-	if releasedRefusal {
+	if releasedWithoutVerdict {
 		next = "wait for the automatic retry"
 	}
 	return progress(reason, source, next), false, false
