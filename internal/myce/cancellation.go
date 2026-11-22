@@ -409,6 +409,12 @@ func (q *Queue) retainedJob(id string) *Job {
 				return r.Job
 			}
 		}
+	} else if q.records != nil && q.records.bindings != nil && q.records.submissionCount == len(q.s.Submissions) {
+		// The live record journal indexes retained keyed answers, including
+		// removed jobs. A missing folder cannot require a history scan.
+		if r := q.s.Submissions[q.records.bindings[id]]; r != nil && r.Kind == submissionBinding && r.JobID == id {
+			return r.Job
+		}
 	} else {
 		for _, record := range q.s.Submissions {
 			if record.Kind == submissionBinding && record.JobID == id {

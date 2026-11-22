@@ -7,11 +7,77 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestAttemptFilesBatchUsesOneWriterTurn(t *testing.T) {
+	q, _ := fixture(t)
+	client := retentionClient(t, q)
+	s := spec("experiment")
+	s.SubmissionKey = "retained-copy"
+	removed := submit(t, q, s)
+	current := submit(t, q, spec("experiment"))
+	if err := q.update(func() error {
+		j := q.touchJob(removed.ID)
+		j.State, j.Attempt, j.Machine, j.ReleaseConfirmed = "succeeded", 1, "worker", true
+		q.touchSubmission(q.records.bindings[j.ID]).Job = j
+		q.deleteJob(j.ID)
+
+		j = q.touchJob(current.ID)
+		j.State, j.Attempt, j.Machine = "running", 4, "worker"
+		j.Copies = []Copy{
+			{Attempt: 1, Machine: "worker", ReleaseConfirmed: true},
+			{Attempt: 2, Machine: "worker", ReleaseConfirmed: true, Recoverable: true},
+			{Attempt: 3, Machine: "other-worker", ReleaseConfirmed: true},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	admissionWaitBenchmarkSettle(q)
+
+	attempts := []Execution{
+		{ID: current.ID, Attempt: 1},
+		{ID: current.ID, Attempt: 2},
+		{ID: current.ID, Attempt: 3},
+		{ID: current.ID, Attempt: 4},
+		{ID: removed.ID, Attempt: 1},
+		{ID: ID(), Attempt: 1},
+	}
+	want := []AttemptFilesDisposition{
+		{Reclaim: true, Reason: "superseded_attempt"},
+		{Reason: "recoverable_attempt"},
+		{Reason: "unresolved_custody"},
+		{Reason: "unresolved_custody"},
+		{Reclaim: true, Reason: "accepted_result"},
+		{Reason: "unknown_job"},
+	}
+	ctx := context.Background()
+	for i, e := range attempts {
+		var single AttemptFilesDisposition
+		if err := client.Call(ctx, "POST", "/api/workers/attempt-files", AttemptFilesRequest{Execution: e, Machine: "worker"}, &single); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(single, want[i]) {
+			t.Fatalf("single disposition %d = %+v, want %+v", i, single, want[i])
+		}
+	}
+	before := q.mu.progress().Releases
+	var batch AttemptFilesBatchReply
+	if err := client.Call(ctx, "POST", "/api/workers/attempt-files/batch", AttemptFilesBatchRequest{Attempts: attempts, Machine: "worker"}, &batch); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(batch.Dispositions, want) {
+		t.Fatalf("batch dispositions = %+v, want %+v", batch.Dispositions, want)
+	}
+	if turns := q.mu.progress().Releases - before; turns != 1 {
+		t.Fatalf("batch used %d queue turns, want one", turns)
+	}
+}
 
 // #1227: old markers must neither pin accepted/released bytes forever nor
 // authorize losing the only copy. Exercise the real API from the worker sweep.
