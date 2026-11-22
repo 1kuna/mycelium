@@ -17,22 +17,34 @@ import (
 // A queue-issued claim binds a pre-submission transfer to its project and exact
 // bytes. The fleet still authenticates one operator, not separate project users.
 type FileInputClaim struct {
-	ID        string    `json:"id"`
-	Project   string    `json:"project"`
-	Class     string    `json:"class,omitempty"`
-	File      FileRef   `json:"file"`
-	At        time.Time `json:"at"`
-	Allocated bool      `json:"allocated,omitempty"`
-	SettledAt time.Time `json:"settled_at,omitempty"`
-	Released  bool      `json:"released,omitempty"`
+	ID           string    `json:"id"`
+	Project      string    `json:"project"`
+	Class        string    `json:"class,omitempty"`
+	File         FileRef   `json:"file"`
+	At           time.Time `json:"at"`
+	LastIssuedAt time.Time `json:"last_issued_at,omitzero"`
+	Allocated    bool      `json:"allocated,omitempty"`
+	SettledAt    time.Time `json:"settled_at,omitempty"`
+	Released     bool      `json:"released,omitempty"`
 }
 
 // Rollback and reopen round-trip timestamps through JSON. Compare instants,
 // not time.Time's location pointers or process-local monotonic readings.
 func (c FileInputClaim) equal(other FileInputClaim) bool {
+	return c.sameIdentity(other) && c.Allocated == other.Allocated && c.Released == other.Released &&
+		c.LastIssuedAt.Equal(other.LastIssuedAt) && c.SettledAt.Equal(other.SettledAt)
+}
+
+func (c FileInputClaim) sameIdentity(other FileInputClaim) bool {
 	return c.ID == other.ID && c.Project == other.Project && c.Class == other.Class &&
-		c.File == other.File && c.Allocated == other.Allocated && c.Released == other.Released &&
-		c.At.Equal(other.At) && c.SettledAt.Equal(other.SettledAt)
+		c.File == other.File && c.At.Equal(other.At)
+}
+
+func (c FileInputClaim) lastIssuance() time.Time {
+	if c.LastIssuedAt.After(c.At) {
+		return c.LastIssuedAt
+	}
+	return c.At
 }
 
 type fileInputClaimKey struct{}
@@ -74,7 +86,8 @@ func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileIn
 	// may still hold this receipt. An unrelated claim grants no revocation
 	// authority. Interrupted upload collection retires a claim with its transfer.
 	err := q.updateUploadRequest(ctx, func() error {
-		cutoff := q.clock.Now().Add(-fileStoreQuotaWindow)
+		now := q.clock.Now()
+		cutoff := now.Add(-fileStoreQuotaWindow)
 		for id, claim := range q.s.FileInputClaims {
 			if claim.Released {
 				if !claim.SettledAt.After(cutoff) {
@@ -83,6 +96,10 @@ func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileIn
 				continue
 			}
 			if claim.Project == s.Project && claim.Class == s.Class && claim.File == ref {
+				if claim.SettledAt.IsZero() && now.After(claim.lastIssuance()) {
+					claim.LastIssuedAt = now
+					q.editInputClaims()[id] = claim
+				}
 				out = claim
 				return nil
 			}
@@ -90,7 +107,7 @@ func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileIn
 		if err := q.fileStoreQuotaRefusal(s, FileManifest{"input": ref}, 0); err != nil {
 			return err
 		}
-		out = FileInputClaim{ID: ID(), Project: s.Project, Class: s.Class, File: ref, At: q.clock.Now()}
+		out = FileInputClaim{ID: ID(), Project: s.Project, Class: s.Class, File: ref, At: now}
 		q.editInputClaims()[out.ID] = out
 		return nil
 	}, nil)
@@ -117,7 +134,7 @@ func (q *Queue) editInputClaims() map[string]FileInputClaim {
 
 func (q *Queue) forgetFileInputClaims(hash string, before time.Time) {
 	for id, claim := range q.s.FileInputClaims {
-		if !claim.Released && claim.File.SHA256 == hash && !claim.At.After(before) {
+		if !claim.Released && claim.File.SHA256 == hash && !claim.lastIssuance().After(before) {
 			delete(q.editInputClaims(), id)
 		}
 	}
@@ -199,7 +216,7 @@ func (q *Queue) inputClaimContext(ctx context.Context, ref FileRef, allocate boo
 			if ok && !current.Released && (current.Allocated || !current.SettledAt.IsZero()) {
 				return nil
 			}
-			if !ok || !current.equal(claim) {
+			if !ok || current.Released || !current.sameIdentity(claim) {
 				return inputClaimError()
 			}
 			current.Allocated = true
@@ -288,21 +305,34 @@ func (q *Queue) ReleaseFileInputClaim(ctx context.Context, req FileInputClaimRel
 	if !claim.SettledAt.IsZero() {
 		return result, fileReleaseError("file_release_protected", "claim settled into a job; release the finished job")
 	}
+	if store == nil {
+		return result, &HTTPError{Status: http.StatusServiceUnavailable, Code: "file_store_unavailable", Message: "queue file store inventory unavailable"}
+	}
+	lastActivity, err := store.inputClaimActivity(claim)
+	if err != nil {
+		return result, fileReleaseError("file_release_busy", "cannot read input transfer activity; retry claim release")
+	}
 	// A legacy queue sometimes lost the upload marker. Preserve ordinary idle
 	// collection authority only for an exact legacy partial transfer. A claim
 	// reusing unmarked published content cannot authorize collecting it.
 	markPartial := false
-	if claim.Allocated && !marked && !bundle && store != nil {
+	if claim.Allocated && !marked && !bundle {
 		var err error
 		markPartial, err = store.legacyPartialInput(ctx, claim.File)
 		if err != nil {
 			return result, fileReleaseError("file_release_busy", "cannot read input transfer custody; retry claim release")
 		}
 	}
-	err := q.updateRequest(ctx, func() error {
+	err = q.updateRequest(ctx, func() error {
 		current, found := q.s.FileInputClaims[req.ClaimID]
 		if q.files != store || !found || !current.equal(claim) {
 			return fileReleaseError("file_release_stale", "claim custody changed; inspect holdings again")
+		}
+		// The configured interrupted-upload idle window and measured
+		// upload-to-submission grace both have to elapse. Lifecycle exclusion
+		// alone would cover each request but miss the gaps between them.
+		if !q.filePublicationAge(q.clock.Now()).interruptedUploadIdle(lastActivity, nil) {
+			return fileReleaseError("file_release_protected", "input claim is within the upload idle window or publication grace")
 		}
 		if markPartial {
 			if _, marked := q.jobUploadMarker(claim.File.SHA256); !marked {
@@ -318,6 +348,32 @@ func (q *Queue) ReleaseFileInputClaim(ctx context.Context, req FileInputClaimRel
 		return nil
 	}, nil)
 	return result, err
+}
+
+// Read only metadata for this digest. The caller holds the lifecycle write
+// fence so upload writes, publication and claim issuance cannot race the check.
+func (s *FileStore) inputClaimActivity(claim FileInputClaim) (time.Time, error) {
+	if err := claim.File.validate(); err != nil {
+		return time.Time{}, err
+	}
+	at := claim.lastIssuance()
+	upload := filepath.Join(s.root, "uploads", claim.File.SHA256)
+	for _, path := range []string{s.blob(claim.File), upload, upload + ".info"} {
+		st, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return time.Time{}, err
+		}
+		if !st.Mode().IsRegular() {
+			return time.Time{}, errors.New("invalid input claim payload")
+		}
+		if st.ModTime().After(at) {
+			at = st.ModTime()
+		}
+	}
+	return at, nil
 }
 
 func (s *FileStore) legacyPartialInput(ctx context.Context, ref FileRef) (bool, error) {

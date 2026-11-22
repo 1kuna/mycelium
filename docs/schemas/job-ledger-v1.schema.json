@@ -79,6 +79,9 @@
         "custody_end": {
           "type": "string",
           "format": "date-time"
+        },
+        "file_release_selection_sha256": {
+          "type": "string"
         }
       },
       "type": "object",

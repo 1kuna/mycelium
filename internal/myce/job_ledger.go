@@ -17,24 +17,25 @@ type JobLedgerInfo struct {
 }
 
 type JobLedgerEntry struct {
-	Placement       *PlacementDecision  `json:"placement,omitempty"`
-	WorkLearning    *WorkLearningChange `json:"work_learning,omitempty"`
-	Sequence        int                 `json:"sequence"`
-	At              time.Time           `json:"at"`
-	Attempt         int                 `json:"attempt"`
-	ExecutionID     string              `json:"execution_id"`
-	ProcessID       string              `json:"process_id,omitempty"`
-	SupervisorPID   int                 `json:"supervisor_pid,omitempty"`
-	SupervisorBirth string              `json:"supervisor_birth,omitempty"`
-	Machine         string              `json:"machine"`
-	Session         string              `json:"session"`
-	Kind            string              `json:"kind"`
-	Reason          string              `json:"reason"`
-	State           string              `json:"state,omitempty"`
-	Release         string              `json:"release"`
-	CustodyID       string              `json:"custody_id,omitempty"`
-	CustodyStart    *time.Time          `json:"custody_start,omitempty"`
-	CustodyEnd      *time.Time          `json:"custody_end,omitempty"`
+	Placement                  *PlacementDecision  `json:"placement,omitempty"`
+	WorkLearning               *WorkLearningChange `json:"work_learning,omitempty"`
+	Sequence                   int                 `json:"sequence"`
+	At                         time.Time           `json:"at"`
+	Attempt                    int                 `json:"attempt"`
+	ExecutionID                string              `json:"execution_id"`
+	ProcessID                  string              `json:"process_id,omitempty"`
+	SupervisorPID              int                 `json:"supervisor_pid,omitempty"`
+	SupervisorBirth            string              `json:"supervisor_birth,omitempty"`
+	Machine                    string              `json:"machine"`
+	Session                    string              `json:"session"`
+	Kind                       string              `json:"kind"`
+	Reason                     string              `json:"reason"`
+	State                      string              `json:"state,omitempty"`
+	Release                    string              `json:"release"`
+	CustodyID                  string              `json:"custody_id,omitempty"`
+	CustodyStart               *time.Time          `json:"custody_start,omitempty"`
+	CustodyEnd                 *time.Time          `json:"custody_end,omitempty"`
+	FileReleaseSelectionSHA256 string              `json:"file_release_selection_sha256,omitempty"`
 }
 
 type JobLedgerPage struct {

@@ -100,12 +100,12 @@ def prepare():
         print(f"upgrade-compat: baseline source {revision[:12]} prepared", flush=True)
 
 
-def binaries(source, identity, version, scratch):
+def binaries(source, identity, version, scratch, fixture=FIXTURE, build_cli=True):
     toolchain = command(["go", "version"])
-    digest = hashlib.sha256((identity + version + toolchain).encode() + FIXTURE.read_bytes()).hexdigest()
+    digest = hashlib.sha256((identity + version + toolchain).encode() + fixture.read_bytes()).hexdigest()
     cached = cache_root() / digest
     helper, cli = cached / "fixture.test", cached / "myce"
-    if helper.exists() and cli.exists():
+    if helper.exists() and (cli.exists() or not build_cli):
         return helper, cli
     print(f"upgrade-compat: building source {identity[:12]}", flush=True)
     # Build in scratch and publish only completed executables. Go's own cache
@@ -125,14 +125,16 @@ def binaries(source, identity, version, scratch):
                 shutil.copy2(src, tree / name)
     for path in (tree / "internal/myce").glob("*_test.go"):
         path.unlink()
-    shutil.copy2(FIXTURE, tree / "internal/myce/upgrade_compat_test.go")
+    shutil.copy2(fixture, tree / "internal/myce/upgrade_compat_test.go")
     flags = f"-X mycelium/internal/myce.BuildVersion={version} -X mycelium/internal/myce.BuildCommit={identity}"
     command(["go", "test", "-c", "-race", "-vet=off", "-ldflags", flags,
              "-o", str(tree / "fixture.test"), "./internal/myce"], cwd=tree)
-    command(["go", "build", "-ldflags", flags, "-o", str(tree / "myce"), "./cmd/myce"], cwd=tree)
+    if build_cli:
+        command(["go", "build", "-ldflags", flags, "-o", str(tree / "myce"), "./cmd/myce"], cwd=tree)
     cached.mkdir(exist_ok=True)
-    for name in ("fixture.test", "myce"):
-        os.replace(tree / name, cached / name)
+    os.replace(tree / "fixture.test", helper)
+    if build_cli:
+        os.replace(tree / "myce", cli)
     shutil.rmtree(tree)
     return helper, cli
 
@@ -500,6 +502,30 @@ def downgrade(previous, candidate, scratch, tools):
         print("upgrade-compat: PASS candidate install -> previous installer -> previous worker", flush=True)
 
 
+def file_holdings(previous_source):
+    fixture = REPO / "scripts/testdata/file_holdings_upgrade_test.go.txt"
+    source = archive(PREVIOUS) if previous_source is None else previous_source.resolve()
+    if previous_source is not None:
+        with source.open("rb") as archive_stream:
+            identity = subprocess.check_output(
+                ["git", "get-tar-commit-id"], stdin=archive_stream, text=True).strip()
+        if identity != PREVIOUS:
+            raise RuntimeError("previous archive commit does not match --previous")
+    with tempfile.TemporaryDirectory(prefix="file-holdings-upgrade-") as tmp:
+        scratch = Path(tmp)
+        previous, _ = binaries(source, PREVIOUS, OLD_VERSION, scratch, fixture, build_cli=False)
+        candidate, _ = binaries(REPO, candidate_identity(REPO), VERSION, scratch, fixture, build_cli=False)
+        state = scratch / "custody"
+        state.mkdir()
+        env = {k: v for k, v in os.environ.items() if not k.startswith("MYCE_")}
+        env["UPGRADE_ROOT"] = str(state)
+        for binary, mode in ((previous, "seed"), (candidate, "verify")):
+            env["UPGRADE_MODE"] = mode
+            print(command([str(binary), "-test.run=^TestFileHoldingsUpgradeProcess$", "-test.v"],
+                          cwd=state, env=env), flush=True)
+    print(f"upgrade-compat: PASS file holdings from {OLD_VERSION} ({PREVIOUS})", flush=True)
+
+
 class SuiteDeadline(BaseException):
     pass
 
@@ -526,20 +552,33 @@ def install_signal_handlers():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["prepare", "run"])
+    parser.add_argument("action", choices=["prepare", "run", "file-holdings"])
     parser.add_argument("--candidate", help="Git revision for incident reproduction; default actual checkout bytes")
     parser.add_argument("--case", help="run only cases whose names contain this text")
     parser.add_argument("--previous", help="exact additional live predecessor commit (requires --old-version)")
     parser.add_argument("--old-version", help="version compiled into --previous")
+    parser.add_argument("--previous-source", type=Path, help="predecessor git archive for offline file-holdings proof")
     args = parser.parse_args()
     if bool(args.previous) != bool(args.old_version):
         parser.error("--previous and --old-version must be supplied together")
+    if args.previous_source and args.action != "file-holdings":
+        parser.error("--previous-source requires file-holdings")
+    if args.action == "file-holdings":
+        if not args.previous:
+            parser.error("file-holdings requires --previous and --old-version")
+        if args.candidate or args.case:
+            parser.error("--candidate and --case apply to run only")
     if args.previous:
         PREVIOUS, OLD_VERSION = args.previous, args.old_version
     install_signal_handlers()
     signal.alarm(600)
     try:
-        prepare() if args.action == "prepare" else run(args)
+        if args.action == "prepare":
+            prepare()
+        elif args.action == "file-holdings":
+            file_holdings(args.previous_source)
+        else:
+            run(args)
     except (Exception, KeyboardInterrupt, SuiteDeadline, SuiteTerminated) as error:
         print(f"upgrade-compat: {error}", file=sys.stderr)
         sys.exit(1)

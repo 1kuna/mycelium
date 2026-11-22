@@ -646,6 +646,13 @@ r6.10; they prove main opens an older database.
 `prepare` fetches that exact public source before the offline gate; local gate
 snapshots carry only that predecessor archive.
 
+For the file-store first-collection check, run
+`scripts/upgrade-compat.py file-holdings --previous SHA --old-version VERSION`.
+A trusted `git archive` passed with `--previous-source` lets the fleet run it
+offline. The predecessor seeds real SQLite state and payloads. The candidate's
+first tick has to preserve a full keyed answer and an unsettled claim while
+collecting only the released digests that no holder still needs.
+
 Real loopback queue and worker processes cover both directions, retained history,
 command completion with confirmed custody release, unchanged keyed attempt identity,
 saved-config readability by the predecessor,
