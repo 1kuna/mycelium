@@ -21,6 +21,11 @@ type hostBackfillDemand struct {
 	// and lower-tier GPU work observe production's fence;
 	// the projection grants no accelerator admission.
 	devicePending bool
+	// A deferred startup probe has first use of non-production backfill.
+	// When production owns the main fence, its vector is protected first.
+	fleetProbe bool
+	probeReady bool
+	startProbe *hostBackfillDemand
 }
 
 // Piece executions and native extension checks finish too. Checks must protect
@@ -98,6 +103,7 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 		}
 	}
 	choices := []*hostBackfillDemand{}
+	probes := map[string]*hostBackfillDemand{}
 	orders := map[string]*candidateSet{}
 	drains := map[string]*Machine{}
 	resources := map[*Machine]map[batchResourceKey]batchResourceRoom{}
@@ -110,9 +116,10 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 	for _, j := range demands {
 		var best *hostBackfillDemand
 		drain := maintenanceResume(j) && j.Spec.FanOut == nil
+		start := q.fleetStartReservation(j)
 		for _, m := range scan.machines {
 			projected := projections[targetKey(m)]
-			if projected == nil || !q.placementAllowed(j, m) || !q.preemptionPlacementAllows(j, m) || q.preemptionReleasesPending(j) || !q.checkpointReady(j, m) || q.environmentFailureBlocked(j, m) {
+			if projected == nil || start != nil && !q.fleetStartReserves(start, m) || !q.placementAllowed(j, m) || !q.preemptionPlacementAllows(j, m) || q.preemptionReleasesPending(j) || !q.checkpointReady(j, m) || q.environmentFailureBlocked(j, m) {
 				continue
 			}
 			device := m.FreeMemoryGB
@@ -160,6 +167,12 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 			}
 		}
 		if best != nil {
+			if start != nil {
+				best.fleetProbe = true
+				best.probeReady = q.fleetProofFresh(best.machine.Fleet) && fits(best.job, best.machine, best.machine.FreeMemoryGB)
+				probes[hostID(best.machine)] = best
+				continue
+			}
 			if best.drain {
 				best.start = q.drainStart(best.job, best.machine, q.drainingAttempts(best.machine))
 			}
@@ -174,9 +187,20 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 		set := orders[targetKey(choice.machine)]
 		choice.order = set
 		host := hostID(choice.machine)
+		if probe := probes[host]; probe != nil {
+			if jobClass(choice.job.Spec) != "production" {
+				continue
+			}
+			choice.startProbe = probe
+		}
 		previous := scan.hostBackfill[host]
 		if previous == nil || q.hostBackfillBefore(choice.job, previous.job, choice.machine, set) {
 			scan.hostBackfill[host] = choice
+		}
+	}
+	for host, probe := range probes {
+		if scan.hostBackfill[host] == nil {
+			scan.hostBackfill[host] = probe
 		}
 	}
 	return scan.hostBackfill
@@ -230,30 +254,89 @@ func (q *Queue) hostBackfillBefore(a, b *Job, m *Machine, order *candidateSet) b
 }
 
 func (q *Queue) hostBackfillAllows(j *Job, m *Machine, fence *hostBackfillDemand) bool {
-	if fence == nil || j.ID == fence.job.ID {
+	return q.hostBackfillBlocker(j, m, fence) == nil
+}
+
+// Cold model loads and new preparation can claim host capacity before the
+// next batch offer. Apply the same reservation to those new claims only.
+func (q *Queue) fleetProbeBackfillAllows(j *Job, m *Machine, scans ...*placementScan) bool {
+	u := q.s.FleetUpgrade
+	if u == nil || u.State != "running" || jobClass(j.Spec) == "production" {
 		return true
 	}
+	for _, h := range u.Hosts {
+		if h.Host != hostID(m) || h.Outcome != FleetHostDeferred || !fleetProbePending(q.s.Jobs[h.StartProbe]) || !q.clock.Now().Before(h.startCapacityDeadline()) {
+			continue
+		}
+		fence := q.hostBackfillFences(q.placementScan(scans...))[h.Host]
+		return fence == nil || !fence.fleetProbe && fence.startProbe == nil || q.hostBackfillAllows(j, m, fence)
+	}
+	return true
+}
+
+func (q *Queue) hostBackfillBlocker(j *Job, m *Machine, fence *hostBackfillDemand) *Job {
+	if fence == nil || j.ID == fence.job.ID {
+		return nil
+	}
+	production := jobClass(j.Spec) == "production"
+	switch {
+	case fence.fleetProbe:
+		if !production && !fleetProbeBackfillFits(j, m, fence, nil) {
+			return fence.job
+		}
+		return nil
+	case fence.startProbe != nil && !production:
+		// The probe and lower work can use only surplus above production's
+		// projected demand, even under a custom policy that puts them first.
+		if !q.hostBackfillFits(j, m, fence) {
+			return fence.job
+		}
+		if j.ID != fence.startProbe.job.ID && !fleetProbeBackfillFits(j, m, fence.startProbe, fence) {
+			return fence.startProbe.job
+		}
+		return nil
+	}
 	if fence.devicePending && !j.Spec.Needs.cpuOnly() && !(fence.job.Spec.Priority == "production" && q.comparePriority(j.Spec, fence.job.Spec) > 0) {
-		return true // Other GPU demand keeps ordinary device admission order.
+		return nil // Other GPU demand keeps ordinary device admission order.
 	}
 	// Keep the existing tier and fair-turn order, including accelerator-first
 	// ordering across CPU/device views of the same worker. A demand protects
 	// capacity only against work behind it, never against its own admission.
-	if q.hostBackfillBefore(j, fence.job, m, fence.order) {
-		return true
+	if q.hostBackfillBefore(j, fence.job, m, fence.order) || q.hostBackfillFits(j, m, fence) {
+		return nil
 	}
-	d := fence.job.Spec.Needs
+	return fence.job
+}
+
+func fleetProbeBackfillFits(j *Job, m *Machine, probe, production *hostBackfillDemand) bool {
+	// A worker only receives one offer per pull. Take that turn when the
+	// probe is ready, even if the experiment would fit alongside it.
+	return !(probe.probeReady && m.ID == probe.machine.ID) && hostBackfillRoom(j, m, probe, production)
+}
+
+func hostBackfillRoom(j *Job, m *Machine, fence, extra *hostBackfillDemand) bool {
+	need := fence.job.Spec.Needs
+	memory, cores := hostNeed(fence.machine, need.MemoryGB, need.HostMemoryGB), need.cores()
+	if extra != nil {
+		need = extra.job.Spec.Needs
+		memory += hostNeed(extra.machine, need.MemoryGB, need.HostMemoryGB)
+		cores += need.cores()
+	}
 	// Backfill can use only capacity in excess of the demand. While a dimension
 	// is short, new work cannot deepen that deficit; other hosts remain free.
-	room := hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) <= max(0, m.FreeHostMemoryGB-m.hostReservationDebtGB-hostNeed(fence.machine, d.MemoryGB, d.HostMemoryGB)) &&
-		j.Spec.Needs.cores() <= max(0, m.FreeCPUCores-d.cores())
+	return hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) <= max(0, m.FreeHostMemoryGB-m.hostReservationDebtGB-memory) &&
+		j.Spec.Needs.cores() <= max(0, m.FreeCPUCores-cores)
+}
+
+func (q *Queue) hostBackfillFits(j *Job, m *Machine, fence *hostBackfillDemand) bool {
+	room := hostBackfillRoom(j, m, fence, nil)
 	if !fence.drain {
 		return room
 	}
 	// A maintenance resume also keeps its accelerator: later work does not
 	// take that card. Either way, work expected to finish before the resume
 	// could start anyway still backfills.
-	if !d.cpuOnly() && !j.Spec.Needs.cpuOnly() && targetKey(m) == targetKey(fence.machine) {
+	if !fence.job.Spec.Needs.cpuOnly() && !j.Spec.Needs.cpuOnly() && targetKey(m) == targetKey(fence.machine) {
 		room = false
 	}
 	return room || q.finishesBeforeDrain(j, m, fence.start)
@@ -271,12 +354,12 @@ func (q *Queue) hostBackfillWaitingReason(j *Job, scan *placementScan) string {
 			}
 			// No fitting target means capacity accumulation cannot be this job's
 			// blocker. Avoid sizing the entire backlog just to discover that.
-			fence := q.hostBackfillFences(scan)[hostID(m)]
-			if q.hostBackfillAllows(candidate, m, fence) {
+			blocker := q.hostBackfillBlocker(candidate, m, q.hostBackfillFences(scan)[hostID(m)])
+			if blocker == nil {
 				return "" // Another currently fitting host is not withheld.
 			}
-			if demand == nil || fence.job.ID < demand.ID {
-				demand = fence.job
+			if demand == nil || blocker.ID < demand.ID {
+				demand = blocker
 			}
 		}
 	}

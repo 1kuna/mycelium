@@ -58,16 +58,17 @@ type fleetUpgrade struct {
 	CreatedAt    time.Time           `json:"created_at,omitempty"`
 }
 type fleetUpgradeHost struct {
-	StartRevisited bool        `json:"start_revisited,omitempty"`
-	StartBefore    []Execution `json:"start_before,omitempty"`
-	StartAccepted  string      `json:"start_accepted,omitempty"`
-	StartProbe     string      `json:"start_probe,omitempty"`
-	StartIdentity  string      `json:"start_identity,omitempty"`
-	Takeover       bool        `json:"takeover,omitempty"`
-	CriticalStopAt *time.Time  `json:"critical_stop_at,omitempty"`
-	StepAt         time.Time   `json:"step_at,omitempty"`
-	HealthSince    time.Time   `json:"health_since,omitempty"`
-	HealthIdentity string      `json:"health_identity,omitempty"`
+	StartRevisited     bool        `json:"start_revisited,omitempty"`
+	StartBefore        []Execution `json:"start_before,omitempty"`
+	StartAccepted      string      `json:"start_accepted,omitempty"`
+	StartProbe         string      `json:"start_probe,omitempty"`
+	StartIdentity      string      `json:"start_identity,omitempty"`
+	StartCapacityUntil *time.Time  `json:"start_capacity_until,omitempty"`
+	Takeover           bool        `json:"takeover,omitempty"`
+	CriticalStopAt     *time.Time  `json:"critical_stop_at,omitempty"`
+	StepAt             time.Time   `json:"step_at,omitempty"`
+	HealthSince        time.Time   `json:"health_since,omitempty"`
+	HealthIdentity     string      `json:"health_identity,omitempty"`
 	FleetHostStatus
 	Queue       bool               `json:"queue"`
 	QueueDone   bool               `json:"queue_done"`
@@ -575,14 +576,21 @@ func (q *Queue) maintainFleetUpgrade() {
 		if h == nil {
 			pending := slicesContainsPhase(u.Hosts, "pending")
 			nonQueuePending := slices.ContainsFunc(u.Hosts, func(host *fleetUpgradeHost) bool { return host.Phase == "pending" && !host.Queue })
+			waitingForStart := false
 			for _, deferred := range u.Hosts {
-				if deferred.Phase != "deferred" || awaitingProof[deferred] {
+				if deferred.Phase != "deferred" {
 					continue
 				}
 				initial := deferred.StartIdentity == ""
-				probe := q.s.Jobs[deferred.StartProbe]
-				if pending && (!initial || nonQueuePending) || deferred.StartRevisited && (probe == nil || probe.Attempt == 0) {
+				if pending && (!initial || nonQueuePending) || initial && deferred.StartRevisited {
 					continue
+				}
+				if !initial {
+					ready, waiting := q.fleetReturnToStart(deferred, awaitingProof[deferred])
+					waitingForStart = waitingForStart || waiting
+					if !ready {
+						continue
+					}
 				}
 				deferred.StartRevisited = true
 				if initial {
@@ -606,7 +614,7 @@ func (q *Queue) maintainFleetUpgrade() {
 				break
 			}
 			if h == nil {
-				if !pending && len(awaitingProof) == 0 {
+				if !pending && !waitingForStart {
 					q.fleetFinishDeferred(u)
 				}
 				return

@@ -5,10 +5,13 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
+const fleetStartProbeName = "fleet-start-probe"
+
 func fleetStartProbeSpec(machine string) Spec {
-	return Spec{Name: "fleet-start-probe", Project: "mycelium", Class: "maintenance", AllowedMachines: []string{machine}, Needs: ResourceNeeds{Platform: Platform{Required: []string{"cpu"}}, CPUCores: 1, HostMemoryGB: 0.125}, Run: RunSpec{Command: []string{"sh", "-c", `test "${MYCE_TOKEN+x}" != x`}}}
+	return Spec{Name: fleetStartProbeName, Project: "mycelium", Class: "maintenance", AllowedMachines: []string{machine}, Needs: ResourceNeeds{Platform: Platform{Required: []string{"cpu"}}, CPUCores: 1, HostMemoryGB: 0.125}, Run: RunSpec{Command: []string{"sh", "-c", `test "${MYCE_TOKEN+x}" != x`}}}
 }
 
 // Even an owner policy that ranks maintenance highly cannot make an upgrade
@@ -34,6 +37,15 @@ func (q *Queue) fleetSnapshotStarts(h *fleetUpgradeHost) {
 	}
 }
 
+func (q *Queue) fleetUsefulStart(h *fleetUpgradeHost, m *Machine) *Job {
+	for _, j := range q.liveJobs() {
+		if j.ID != h.StartProbe && j.Machine == m.ID && j.Session == m.Session && j.StartedAt != nil && !slices.Contains(h.StartBefore, Execution{ID: j.ID, Attempt: j.Attempt}) {
+			return j
+		}
+	}
+	return nil
+}
+
 // Health and RunnerSmoke qualify the service process, not its detached
 // assignment launcher (#1709). Use an ordinary, queue-owned CPU assignment to
 // prove that path, including on an otherwise idle host. There is no scheduler,
@@ -49,6 +61,11 @@ func (q *Queue) fleetVerifyStart(h *fleetUpgradeHost) bool {
 		return false
 	}
 	if !q.fleetProofFresh(m.Fleet) {
+		if probe := q.s.Jobs[h.StartProbe]; h.StartCapacityUntil != nil && fleetProbePending(probe) && m.Fleet != nil {
+			h.Phase = "deferred"
+			h.Wait = "waiting for the deferred worker's next healthy runtime proof: " + q.fleetProofGap(m.Fleet)
+			return false
+		}
 		if q.clock.Now().Sub(h.StepAt) >= fleetStepTimeout {
 			q.fleetStop(h, "worker_start_not_verified")
 			return false
@@ -64,14 +81,12 @@ func (q *Queue) fleetVerifyStart(h *fleetUpgradeHost) bool {
 	// assigned execution reaching Started on this verified session proves the
 	// same start path without waiting for customer work to finish. Retained
 	// pre-upgrade attempts and their replays cannot supply this evidence.
-	for _, j := range q.liveJobs() {
-		if j.ID != h.StartProbe && j.Machine == m.ID && j.Session == m.Session && j.StartedAt != nil && !slices.Contains(h.StartBefore, Execution{ID: j.ID, Attempt: j.Attempt}) {
-			if probe := q.s.Jobs[h.StartProbe]; probe != nil && !terminal(probe.State) {
-				q.cancelJob(probe)
-			}
-			h.StartAccepted = j.ID
-			return true
+	if useful := q.fleetUsefulStart(h, m); useful != nil {
+		if j != nil && !terminal(j.State) {
+			q.cancelJob(j)
 		}
+		h.StartAccepted = useful.ID
+		return true
 	}
 	if h.StartProbe == "" {
 		if h.Owned && h.Policy.Mode == "drained" {
@@ -101,9 +116,18 @@ func (q *Queue) fleetVerifyStart(h *fleetUpgradeHost) bool {
 		return true
 	}
 	if reason := q.fleetStartAdmissionReason(m, j); reason != "" {
+		now := q.clock.Now()
+		if h.StartCapacityUntil == nil {
+			until := now.Add(fleetStepTimeout)
+			h.StartCapacityUntil = &until
+		}
 		h.Phase, h.Outcome, h.DeferredReason = "deferred", FleetHostDeferred, reason
 		h.Wait = fleetStartDeferredWait(h)
-		h.ProgressAt = q.clock.Now()
+		h.ProgressAt = now
+		return false
+	}
+	if h.StartCapacityUntil != nil && fleetProbePending(j) && !q.clock.Now().Before(*h.StartCapacityUntil) {
+		h.Phase = "deferred"
 		return false
 	}
 	// Once offered, a never-starting launcher still needs a finite failure
@@ -119,6 +143,68 @@ func (q *Queue) fleetVerifyStart(h *fleetUpgradeHost) bool {
 
 func fleetStartDeferredWait(h *fleetUpgradeHost) string {
 	return fmt.Sprintf("start probe %s deferred: %s; will revisit after the other hosts", h.StartProbe, h.DeferredReason)
+}
+
+func fleetProbePending(j *Job) bool {
+	return j != nil && j.State == "queued" && j.Attempt == 0 && j.Starts == 0 && j.StartedAt == nil && !cancelled(j)
+}
+
+func (h *fleetUpgradeHost) startCapacityDeadline() time.Time {
+	if h.StartCapacityUntil != nil {
+		return *h.StartCapacityUntil
+	}
+	return h.StepAt.Add(fleetStepTimeout) // An in-flight deferral written by an older queue.
+}
+
+// A projected fence and a new offer are distinct. One late heartbeat must
+// keep the former while waiting for fresh proof of the same runtime to offer
+// the same job. Invalid identities, owner maintenance and expiry fence both.
+func (q *Queue) fleetStartReservation(j *Job) *fleetUpgradeHost {
+	u := q.s.FleetUpgrade
+	if u == nil || u.State != "running" || !fleetProbePending(j) || j.Spec.Name != fleetStartProbeName {
+		return nil
+	}
+	for _, h := range u.Hosts {
+		if h.StartProbe == j.ID && h.Outcome == FleetHostDeferred && (h.Phase == "deferred" || h.Phase == "worker_start") {
+			return h
+		}
+	}
+	return nil
+}
+
+func (q *Queue) fleetStartReserves(h *fleetUpgradeHost, m *Machine) bool {
+	return h.Machine == m.ID && q.clock.Now().Before(h.startCapacityDeadline()) &&
+		q.fleetPolicyMatches(h) && q.fleetDeferredRuntimeFailure(h, m) == ""
+}
+
+// Revisit after the other hosts. A measured shortage keeps the deferred host
+// out of their way while the scheduler accumulates room on its own host.
+func (q *Queue) fleetReturnToStart(h *fleetUpgradeHost, proofPending bool) (ready, waiting bool) {
+	m, j := q.s.Machines[h.Machine], q.s.Jobs[h.StartProbe]
+	expired := !q.clock.Now().Before(h.startCapacityDeadline())
+	if proofPending {
+		if !expired || !fleetProbePending(j) || m.Fleet == nil {
+			return false, true
+		}
+		reason := q.fleetStartAdmissionReason(m, j)
+		if reason == "" {
+			reason = "worker_start_proof_stale: " + q.fleetProofGap(m.Fleet)
+		}
+		h.DeferredReason = reason
+		return false, false
+	}
+	if !fleetProbePending(j) || q.fleetUsefulStart(h, m) != nil {
+		return true, false
+	}
+	if reason := q.fleetStartAdmissionReason(m, j); reason != "" {
+		h.DeferredReason = reason
+		h.Wait = fmt.Sprintf("accumulating capacity for start probe %s until %s: %s", h.StartProbe, h.startCapacityDeadline().Format(time.RFC3339), reason)
+		return false, !expired
+	}
+	if expired {
+		h.DeferredReason = "capacity_window_elapsed: start probe was not offered before the admission deadline"
+	}
+	return !expired, false
 }
 
 // Machine.Fleet is transient. The durable session and start identity still
@@ -137,7 +223,7 @@ func (q *Queue) fleetDeferredStartProofReady(h *fleetUpgradeHost, m *Machine) bo
 		return true
 	}
 	gap := q.fleetProofGap(m.Fleet)
-	if q.clock.Now().Sub(h.StepAt) >= fleetStepTimeout {
+	if q.clock.Now().Sub(h.StepAt) >= fleetStepTimeout && (m.Fleet == nil || !fleetProbePending(q.s.Jobs[h.StartProbe])) {
 		q.fleetStop(h, "worker_start_proof_unavailable")
 		h.Wait = gap + "; " + h.Wait
 		return false
@@ -194,7 +280,7 @@ func (q *Queue) fleetStartProbeValid(h *fleetUpgradeHost, m *Machine, j *Job) bo
 // never-assigned probe. Unknown telemetry and structural/policy refusals retain
 // the ordinary failure path. All work here is in-memory under the queue lock.
 func (q *Queue) fleetStartAdmissionReason(m *Machine, j *Job) string {
-	if j.State != "queued" || j.Attempt != 0 || j.StartedAt != nil || j.Starts != 0 {
+	if !fleetProbePending(j) {
 		return ""
 	}
 	q.refreshHostMemory()
@@ -221,10 +307,11 @@ func (q *Queue) fleetStartAdmissionReason(m *Machine, j *Job) string {
 		return "shared_host_owner_pressure: " + m.SharedHostYieldReason
 	}
 	if why := hostFitFailure(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); why == "host memory" {
-		return fmt.Sprintf("no_capacity: start probe needs %.3f GiB host RAM; %.3f GiB admissible", hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), m.FreeHostMemoryGB)
+		need := hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+		return fmt.Sprintf("no_capacity: start probe needs %.3f GiB host RAM; %.3f GiB admissible; %.3f GiB short", need, m.FreeHostMemoryGB, need-m.FreeHostMemoryGB+m.hostReservationDebtGB)
 	}
 	if len(fit.failed) > 0 {
-		return fmt.Sprintf("no_capacity: start probe needs %d CPU core; %d admissible", j.Spec.Needs.cores(), m.FreeCPUCores)
+		return fmt.Sprintf("no_capacity: start probe needs %d CPU core; %d admissible; %d short", j.Spec.Needs.cores(), m.FreeCPUCores, j.Spec.Needs.cores()-m.FreeCPUCores)
 	}
 	return ""
 }
