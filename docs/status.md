@@ -9,18 +9,20 @@ For one job use `myce status JOB_ID`, `myce wait JOB_ID` and `myce logs JOB_ID`.
 ## Queue restart grace
 
 Compact and full fleet JSON include `restart_grace`. `active` is true while
-the restart-recovery budget remains. `accrued_seconds` is the counted control
-opportunity, capped at the configured grace, and `remaining_seconds` is the
-unspent budget. Both are zero if no restart window was configured for this
-queue startup. The clock counts time outside queue control transactions, so
-continuous occupancy can leave grace active for much longer than its configured
-duration. A cached response retains the value at the response's `now`.
+the restart-recovery budget remains. `remaining_seconds` gives the smaller
+remaining budget from idle control opportunity and the window established by
+successful worker check-ins. Before the first successful check-in, only idle
+control opportunity counts. `accrued_seconds` gives the configured grace minus
+that remaining budget, capped at the configured grace. Both are zero if no
+restart window was configured. A cached response retains the value at the
+response's `now`. See [how the queue measures the window](reference/scheduling-mechanisms.md#queue-restart-recovery).
 
 The restart warning concerns only unreported workers outside planned host
-maintenance. Grace can be active after the warning disappears. A worker that
-has yet to report can be marked gone by the next maintenance pass after expiry,
-including on a drained or disabled host. Exact pending worker handovers retain
-their separate protection. Older queues and idle-only responses omit the field.
+maintenance. Grace can be active after the warning disappears. Maintenance
+can mark a silent worker gone at expiry, including on a drained or disabled
+host. In-flight reports, their bounded reconnect delay after cancellation,
+and exact pending worker handovers can still protect the affected session.
+Older queues and idle-only responses omit the field.
 
 ## Idle machine-hours while runnable work waited
 

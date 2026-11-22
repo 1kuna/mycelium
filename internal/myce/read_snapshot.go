@@ -978,7 +978,7 @@ func (capture *committedReadCapture) readQueue(ctx context.Context, id string, r
 func (capture *committedReadCapture) statusContactInputs(q *Queue, at time.Time) *Queue {
 	base := capture.contactInputs
 	v := &Queue{clock: observationClock{at}, simulation: base.simulation, lossTimeouts: base.lossTimeouts,
-		restartUntil: base.restartUntil, restartControlUntil: base.restartControlUntil, restartGraceDuration: base.restartGraceDuration,
+		restartUntil: base.restartUntil, restartControlUntil: base.restartControlUntil, restartGraceDuration: base.restartGraceDuration, restartService: base.restartService,
 		s: base.s, calls: base.calls, contacts: make(map[string]*workerContact, len(base.s.Machines))}
 	if base.mu.control != nil {
 		v.mu.control = &controlClock{clock: v.clock.Now, at: at, opportunity: q.controlNow()}
@@ -1046,7 +1046,7 @@ func (capture *committedReadCapture) detachedQueue(ctx context.Context, readAt t
 	inputs.freezeContactView(contact)
 	source := &Queue{clock: committedClock{at: readAt, committed: base.clock.Now()}, nasAvailable: base.nasAvailable, evidenceRetention: base.evidenceRetention, checkpointExpiryStatus: base.checkpointExpiryStatus, efficiencyView: base.efficiencyView,
 		simulation: base.simulation, productionGrace: base.productionGrace, lossTimeouts: base.lossTimeouts, productionInfrastructureRetries: base.productionInfrastructureRetries,
-		restartUntil: contact.restartUntil, restartGraceDuration: contact.restartGraceDuration, networkQuiet: base.networkQuiet, root: base.root, files: base.files, fileRetention: base.fileRetention, hostMemorySamples: base.hostMemorySamples,
+		restartUntil: contact.restartUntil, restartGraceDuration: contact.restartGraceDuration, restartService: contact.restartService, networkQuiet: base.networkQuiet, root: base.root, files: base.files, fileRetention: base.fileRetention, hostMemorySamples: base.hostMemorySamples,
 		contacts: contact.contacts, detachedRead: true}
 	if contact.mu.control != nil {
 		source.mu.control = &controlClock{clock: source.clock.Now, at: source.clock.Now(), opportunity: contact.controlNow()}

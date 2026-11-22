@@ -48,9 +48,10 @@ type checkinContact struct {
 type contactTransaction struct{ before map[string]*workerContact }
 
 type contactEvidence struct {
-	Session   string        `json:"session"`
-	Allowance time.Duration `json:"allowance"`
-	Seen      time.Time     `json:"seen,omitempty"` // Accepted LastSeen; machine records omit it.
+	Session          string        `json:"session"`
+	Allowance        time.Duration `json:"allowance"`
+	ArrivalAllowance time.Duration `json:"arrival_allowance,omitempty"`
+	Seen             time.Time     `json:"seen,omitempty"` // Accepted LastSeen; machine records omit it.
 }
 
 // Caller holds q.mu and contactMu.
@@ -124,10 +125,12 @@ func (q *Queue) acceptContactPeriod(m *Machine, period time.Duration, pending *c
 		if q.s.ContactEvidence == nil {
 			q.s.ContactEvidence = map[string]contactEvidence{}
 		}
-		q.s.ContactEvidence[m.ID] = contactEvidence{Session: m.Session, Seen: m.LastSeen}
+		evidence := contactEvidence{Session: m.Session, Seen: m.LastSeen}
 		if q.workerLossAllowance(m) > 0 {
-			q.s.ContactEvidence[m.ID] = contactEvidence{Session: m.Session, Allowance: q.machineLossTimeout(m.ID), Seen: m.LastSeen}
+			evidence.Allowance = q.machineLossTimeout(m.ID)
+			evidence.ArrivalAllowance = q.workerArrivalAllowanceFrom(m, evidence.Allowance)
 		}
+		q.s.ContactEvidence[m.ID] = evidence
 	}()
 	if q.contacts == nil {
 		q.contacts = map[string]*workerContact{}

@@ -43,7 +43,10 @@ func (q *Queue) workerLossAllowance(m *Machine) time.Duration {
 // Keeping the two clocks separate avoids both starvation under healthy slow
 // control and teaching blocked service as confirmed worker silence.
 func (q *Queue) workerArrivalAllowance(m *Machine) time.Duration {
-	allowance := q.machineLossTimeout(m.ID)
+	return q.workerArrivalAllowanceFrom(m, q.machineLossTimeout(m.ID))
+}
+
+func (q *Queue) workerArrivalAllowanceFrom(m *Machine, allowance time.Duration) time.Duration {
 	q.contactMu.Lock()
 	defer q.contactMu.Unlock()
 	if c := q.contacts[m.ID]; c != nil && c.session == m.Session {
@@ -110,17 +113,82 @@ func (q *Queue) contactFresh(m *Machine, now time.Time, includePending bool) boo
 		now.Sub(q.contactTime(m, now, includePending)) < q.machineLossTimeout(m.ID)
 }
 
-// Restart recovery also needs available queue service; a startup stall cannot
-// consume the explicit operator recovery window before workers can reconcile.
+// Restart grace can elapse through idle control opportunities or demonstrated
+// check-in service. A stalled queue with neither cannot spend the window.
+type restartServiceWindow struct {
+	until, servedThrough time.Time
+}
+
+// Called in the check-in transaction after accepting a reconciliation report.
+// A failed transaction restores the window along with the report. The first
+// report fixes the deadline: later reports prove service without moving it.
+func (q *Queue) observeRestartService(report *checkinContact) {
+	if report == nil || q.restartGraceDuration <= 0 {
+		return
+	}
+	now := q.clock.Now()
+	if !q.inRestartGrace(now) {
+		return
+	}
+	window := &q.restartService
+	if window.until.IsZero() {
+		budget := max(q.restartGraceDuration, 2*report.period)
+		for id := range q.unreported {
+			if m, e := q.s.Machines[id], q.s.ContactEvidence[id]; m != nil && e.Session == m.Session {
+				budget = max(budget, e.Allowance, e.ArrivalAllowance)
+			}
+		}
+		// Let each returning sender take its observed arrival window and incur
+		// the newly measured queue delay. Missing historical samples keep the
+		// configured startup window and the reporting peer's send cadence.
+		window.until = now.Add(budget).Add(max(0, now.Sub(report.arrived)))
+		window.servedThrough = now
+	}
+	// Count only arrivals that complete reconciliation. An old request
+	// finally getting out of a stall cannot spend the whole stalled interval.
+	window.servedThrough = maxTime(window.servedThrough, report.arrived)
+}
+
 func (q *Queue) inRestartGrace(now time.Time) bool {
 	return q.restartGraceRemaining(now) > 0
 }
 
 func (q *Queue) restartGraceRemaining(now time.Time) time.Duration {
+	remaining := q.restartUntil.Sub(now)
 	if q.mu.control != nil && q.restartControlUntil > 0 {
-		return q.restartControlUntil - q.controlNow()
+		remaining = q.restartControlUntil - q.controlNow()
 	}
-	return q.restartUntil.Sub(now)
+	if w := q.restartService; !w.until.IsZero() {
+		remaining = min(remaining, w.until.Sub(w.servedThrough))
+	}
+	return remaining
+}
+
+// A report waiting behind other requests protects only its current session.
+// A cancelled report gets the existing reconnect delay in wall time. Giving
+// it control-opportunity credit here could reintroduce indefinite protection.
+func (q *Queue) restartProtectsWorker(m *Machine, now time.Time) bool {
+	if !q.unreported[m.ID] {
+		return false
+	}
+	if q.inRestartGrace(now) {
+		return true
+	}
+	q.contactMu.Lock()
+	defer q.contactMu.Unlock()
+	c := q.contacts[m.ID]
+	if c == nil || c.session != m.Session {
+		return false
+	}
+	if !c.retry.ready(now) {
+		return true
+	}
+	for report := range c.pending {
+		if report.inFlight {
+			return true
+		}
+	}
+	return false
 }
 
 func (q *Queue) restartGraceStatus(now time.Time) *RestartGraceStatus {
@@ -136,6 +204,7 @@ func (q *Queue) restartGraceStatus(now time.Time) *RestartGraceStatus {
 // grace in a detached observation. The caller owns q.mu or an immutable source.
 func (q *Queue) freezeContactView(v *Queue) {
 	v.restartUntil, v.restartGraceDuration = q.restartUntil, q.restartGraceDuration
+	v.restartService = q.restartService
 	if q.mu.control != nil {
 		opportunity := q.controlNow()
 		v.mu.control = &controlClock{clock: v.clock.Now, at: v.clock.Now(), opportunity: opportunity}
@@ -158,7 +227,7 @@ func (q *Queue) freezeContactView(v *Queue) {
 // the live queue merely to copy a worker's contact evidence.
 func (q *Queue) captureContactInputs(clock Clock) *Queue {
 	v := &Queue{clock: clock, simulation: q.simulation, lossTimeouts: q.lossTimeouts,
-		restartUntil: q.restartUntil, restartControlUntil: q.restartControlUntil, restartGraceDuration: q.restartGraceDuration,
+		restartUntil: q.restartUntil, restartControlUntil: q.restartControlUntil, restartGraceDuration: q.restartGraceDuration, restartService: q.restartService,
 		s:     state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}, ModelSlots: map[string]*ModelSlot{}},
 		calls: map[string]*ModelCall{}, contacts: map[string]*workerContact{}}
 	if q.mu.control != nil {

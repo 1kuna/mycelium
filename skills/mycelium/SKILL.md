@@ -115,8 +115,10 @@ in can take work when otherwise eligible. Drained and disabled hosts still
 show their maintenance holds.
 In compact and full fleet JSON, `restart_grace` reports `active`,
 `accrued_seconds` and `remaining_seconds` at the response's `now`. The budget
-counts control opportunity, which can advance much slower than wall time. The
-restart warning may clear while grace is active. Older queues omit this field.
+advances with idle queue opportunity and with the measured window established
+by successful check-ins. The warning may clear while grace is active. A
+pending report or exact handover can protect its session after expiry.
+Older queues used only idle opportunity or omit this field.
 During queue restart recovery, an exact attempt proven to have started no main,
 sidecars or environment preparation can retry a control-unreachable start gate
 without spending a loss or infrastructure retry. Keep its job and key. The

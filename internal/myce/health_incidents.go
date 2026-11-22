@@ -88,7 +88,7 @@ func (q *Queue) detectIncidentHealth() {
 		key := "stale-flaps/" + m.ID
 		seen[key] = true
 		stale := !q.workerFresh(m, now)
-		cold := q.unreported[m.ID] && q.inRestartGrace(now)
+		cold := q.restartProtectsWorker(m, now)
 		c := q.s.Health.Conditions[key]
 		id := ""
 		if intentional || cold {
