@@ -45,7 +45,7 @@ func benchmarkCheckinPersistence(b *testing.B, manifests bool) {
 	}
 	admissionWaitBenchmarkSettle(q)
 	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(q.persisted["state"], &fields); err != nil {
+	if err := json.Unmarshal(durableQueueRecord(b, q.db, "state"), &fields); err != nil {
 		b.Fatal(err)
 	}
 	for k, v := range fields {

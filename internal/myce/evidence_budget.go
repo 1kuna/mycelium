@@ -156,11 +156,15 @@ func (q *Queue) noteEvidenceRecord(key string, old, current []byte) {
 	if bytes.Equal(old, current) {
 		return
 	}
-	q.evidenceBytes -= min(q.evidenceBytes, uint64(len(old)))
-	q.evidenceBytes = addDiskBytes(q.evidenceBytes, uint64(len(current)))
+	q.replaceEvidenceBytes(len(old), len(current))
 	if strings.HasPrefix(key, "jobs/") || strings.HasPrefix(key, "work_observations/") || strings.HasPrefix(key, "external_memory/") {
 		q.enqueueEvidence(key)
 	}
+}
+
+func (q *Queue) replaceEvidenceBytes(old, current int) {
+	q.evidenceBytes -= min(q.evidenceBytes, uint64(old))
+	q.evidenceBytes = addDiskBytes(q.evidenceBytes, uint64(current))
 }
 func (q *Queue) evidencePressure() (bool, time.Duration) {
 	p := q.mu.pressure.Load()

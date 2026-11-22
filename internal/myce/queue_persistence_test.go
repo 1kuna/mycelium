@@ -317,7 +317,7 @@ func TestQueuePersistenceStorageRollbackAndRemoval(t *testing.T) {
 }
 
 // Inspect durable logical records independently of their physical row layout.
-func durableQueueRecord(t *testing.T, db *sql.DB, key string) []byte {
+func durableQueueRecord(t testing.TB, db *sql.DB, key string) []byte {
 	t.Helper()
 	records, err := readQueueRecords(db, key)
 	if err != nil {
@@ -436,7 +436,7 @@ func TestQueuePersistenceEfficiencyGenerationRollbackRestart(t *testing.T) {
 		if err := json.Unmarshal(canonical, &a); err != nil {
 			t.Fatal(err)
 		}
-		if err := json.Unmarshal(q.persisted["state"], &b); err != nil || !reflect.DeepEqual(a, b) {
+		if err := json.Unmarshal(durableQueueRecord(t, q.db, "state"), &b); err != nil || !reflect.DeepEqual(a, b) {
 			t.Fatal("state encoding changed", err)
 		}
 	}

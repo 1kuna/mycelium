@@ -36,9 +36,7 @@ func crashCopy(t *testing.T, q *Queue, clock *fakeClock) *Queue {
 
 func storedHistories(t *testing.T, q *Queue) EfficiencyHost {
 	t.Helper()
-	q.mu.RLock()
-	data := q.persisted["state"]
-	q.mu.RUnlock()
+	data := durableQueueRecord(t, q.db, "state")
 	var s state
 	if err := json.Unmarshal(data, &s); err != nil {
 		t.Fatal(err)

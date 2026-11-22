@@ -78,7 +78,7 @@ func benchmarkCheckinProductionRoot(b *testing.B, inputClaims bool) {
 	b.ReportMetric(holdMS(maximum), "max-hold-ms")
 	b.ReportMetric(float64(len(want)), "baseline-bytes")
 	var stored state
-	if err := json.Unmarshal(q.persisted["state"], &stored); err != nil {
+	if err := json.Unmarshal(durableQueueRecord(b, q.db, "state"), &stored); err != nil {
 		b.Fatal(err)
 	}
 	got, _ := json.Marshal(stored.EfficiencyHealth)

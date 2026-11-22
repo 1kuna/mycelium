@@ -255,6 +255,12 @@ func readQueueState(db queueRecordReader, data []byte) ([]byte, error) {
 type queuePersistenceUpdate struct {
 	records     map[string][]byte
 	stateFields map[string]json.RawMessage
+	stateSize   int
+}
+
+func (q *Queue) commitPersistenceRoot(next *queuePersistenceUpdate) {
+	q.replaceEvidenceBytes(q.persistedStateSize, next.stateSize)
+	q.persistedStateSize, q.persistedStateFields = next.stateSize, next.stateFields
 }
 
 // Immutable history stays in SQLite but is not rewritten by each heartbeat.
@@ -271,10 +277,13 @@ func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (*que
 		measured.SQL += holdNow(q.holdClock).Sub(started)
 		return result, err
 	}
-	putData := func(key string, data []byte, fields ...map[string]json.RawMessage) error {
-		if key == "state" && len(fields) > 0 {
-			update.stateFields = fields[0]
-		}
+	putCompact := func(key string, data []byte) error {
+		measured.Bytes += int64(len(data))
+		measured.Records++
+		_, err := exec("INSERT INTO queue_state(key,data) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET data=excluded.data", key, data)
+		return err
+	}
+	putData := func(key string, data []byte) error {
 		next[key] = data
 		if bytes.Equal(data, q.persisted[key]) {
 			next[key] = q.persisted[key]
@@ -284,25 +293,18 @@ func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (*que
 		// No fragment preparation or extra B-tree keys are needed for them.
 		compact := len(data) <= q.persistencePageBytes && len(q.persisted[key]) <= q.persistencePageBytes
 		if splitPersistenceKey(key) && !compact {
-			var prepared map[string]json.RawMessage
-			if len(fields) > 0 {
-				prepared = fields[0]
-			}
-			return q.writeFields(key, q.persisted[key], data, measured, exec, prepared)
+			return q.writeFields(key, q.persisted[key], data, measured, exec, nil)
 		}
-		measured.Bytes += int64(len(data))
-		measured.Records++
-		_, err := exec("INSERT INTO queue_state(key,data) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET data=excluded.data", key, data)
-		return err
+		return putCompact(key, data)
 	}
 	put := func(key string, value any) error {
 		started := holdNow(q.holdClock)
-		data, fields, err := q.marshalPersistenceValue(key, value)
+		data, err := q.marshalPersistenceValue(key, value)
 		measured.Marshal += holdNow(q.holdClock).Sub(started)
 		if err != nil {
 			return err
 		}
-		return putData(key, data, fields)
+		return putData(key, data)
 	}
 
 	if q.persisted == nil {
@@ -313,8 +315,34 @@ func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (*que
 			return nil, err
 		}
 	}
-	base := q.persistentBase()
-	if err := put("state", base); err != nil {
+	started := holdNow(q.holdClock)
+	base, err := q.encodeStateRoot(q.persistentBase())
+	if err != nil {
+		return nil, err
+	}
+	update.stateSize = base.size()
+	if update.stateSize > q.persistencePageBytes {
+		update.stateFields, err = base.split(q.persistencePageBytes)
+		if err != nil {
+			return nil, err
+		}
+	}
+	stateData := update.stateFields[""]
+	if len(update.stateFields) <= 1 {
+		stateData = base.assemble()
+	}
+	measured.Marshal += holdNow(q.holdClock).Sub(started)
+	// Only the small SQLite root belongs in the record journal. Keep its
+	// detached fields and logical size in the same pending commit instead.
+	next["state"] = stateData
+	if len(update.stateFields) > 1 || len(q.persistedStateFields) > 1 {
+		err = q.writeFields("state", q.persisted["state"], stateData, measured, exec, update.stateFields)
+	} else if bytes.Equal(stateData, q.persisted["state"]) {
+		next["state"] = q.persisted["state"]
+	} else {
+		err = putCompact("state", stateData)
+	}
+	if err != nil {
 		return nil, err
 	}
 	machines := q.s.Machines
@@ -459,9 +487,13 @@ func (q *Queue) loadPersistedState() error {
 	// The large claim field was already detached during startup decoding.
 	claimField := base64.RawURLEncoding.EncodeToString([]byte("file_input_claims"))
 	q.fileInputClaimsJSON = q.persistedStateFields[claimField]
+	q.persistedStateSize = len(q.persisted["state"])
 	q.evidenceBytes = 0
 	for key, data := range q.persisted {
 		q.noteEvidenceRecord(key, nil, data)
+	}
+	if len(q.persistedStateFields) > 1 {
+		q.persisted["state"] = q.persistedStateFields[""]
 	}
 	q.restoreLastSeen()
 	if err := q.loadExpiredLearning(); err != nil {
@@ -780,11 +812,7 @@ func readQueueRecordRows(rows queueRecordRows, visit func(string, []byte)) (map[
 }
 
 // Dirty records are encoded exactly once. No whole-state comparison caches.
-func (q *Queue) marshalPersistenceValue(key string, value any) ([]byte, map[string]json.RawMessage, error) {
-	if s, ok := value.(state); key == "state" && ok {
-		data, _, fields, err := q.marshalQueueBase(s, true)
-		return data, fields, err
-	}
+func (q *Queue) marshalPersistenceValue(key string, value any) ([]byte, error) {
 	if j, ok := value.(*Job); ok && j != nil && (q.startupPending(j) || q.startCapacityPaused(j)) {
 		copy := *j
 		copy.Reason = "recomputing admission diagnostics"
@@ -794,75 +822,90 @@ func (q *Queue) marshalPersistenceValue(key string, value any) ([]byte, map[stri
 	if j, ok := value.(*Job); ok && err == nil && q.slimJobRecords && strings.HasPrefix(key, "jobs/") && !mutableJob(j) {
 		data = slimJobRecord(data)
 	}
-	return data, nil, err
+	return data, err
 }
 
-// Keep the existing logical JSON and physical field layout, including rollback
-// compatibility with the previous release. Reuse prepared encodings of large
-// unchanged generations when building the durable and published read roots.
-func (q *Queue) marshalQueueBase(s state, prepareFields bool) (data []byte, baseSize int, fields map[string]json.RawMessage, err error) {
-	var efficiency json.RawMessage
+// Large attachments already have their own SQLite rows in normalized-state-v3.
+type queueStateEncoding struct {
+	base             []byte
+	efficiencyHealth json.RawMessage
+	fileInputClaims  json.RawMessage
+}
+
+func (s queueStateEncoding) equal(other queueStateEncoding) bool {
+	return bytes.Equal(s.base, other.base) &&
+		bytes.Equal(s.efficiencyHealth, other.efficiencyHealth) && bytes.Equal(s.fileInputClaims, other.fileInputClaims)
+}
+
+func (q *Queue) encodeStateRoot(s state) (queueStateEncoding, error) {
+	var encoded queueStateEncoding
 	if len(s.EfficiencyHealth) > 0 {
 		if q.efficiencyHealthJSON == nil {
 			// Initial/imported state without a prepared diagnostic generation.
 			var err error
 			q.efficiencyHealthJSON, err = json.Marshal(s.EfficiencyHealth)
 			if err != nil {
-				return nil, 0, nil, err
+				return queueStateEncoding{}, err
 			}
 		}
-		efficiency = q.efficiencyHealthJSON
+		encoded.efficiencyHealth = q.efficiencyHealthJSON
 	}
-	var claims json.RawMessage
 	if len(s.FileInputClaims) > 0 {
 		if q.fileInputClaimsJSON == nil {
 			var err error
 			q.fileInputClaimsJSON, err = json.Marshal(s.FileInputClaims)
 			if err != nil {
-				return nil, 0, nil, err
+				return queueStateEncoding{}, err
 			}
 		}
-		claims = q.fileInputClaimsJSON
+		encoded.fileInputClaims = q.fileInputClaimsJSON
 	}
 	s.EfficiencyHealth, s.FileInputClaims = nil, nil
-	data, err = json.Marshal(s)
-	if err != nil {
-		return nil, 0, nil, err
+	var err error
+	encoded.base, err = json.Marshal(s)
+	return encoded, err
+}
+
+const efficiencyHealthPrefix = `,"efficiency_health":`
+const fileInputClaimsPrefix = `,"file_input_claims":`
+
+func (s queueStateEncoding) size() int {
+	size := len(s.base)
+	if len(s.efficiencyHealth) > 0 {
+		size += len(efficiencyHealthPrefix) + len(s.efficiencyHealth)
 	}
-	baseSize = len(data)
+	if len(s.fileInputClaims) > 0 {
+		size += len(fileInputClaimsPrefix) + len(s.fileInputClaims)
+	}
+	return size
+}
+
+func (s queueStateEncoding) assemble() []byte {
+	if len(s.efficiencyHealth)+len(s.fileInputClaims) == 0 {
+		return s.base
+	}
+	data := append(make([]byte, 0, s.size()), s.base[:len(s.base)-1]...)
+	if len(s.efficiencyHealth) > 0 {
+		data = append(data, efficiencyHealthPrefix...)
+		data = append(data, s.efficiencyHealth...)
+	}
+	if len(s.fileInputClaims) > 0 {
+		data = append(data, fileInputClaimsPrefix...)
+		data = append(data, s.fileInputClaims...)
+	}
+	return append(data, '}')
+}
+
+func (s queueStateEncoding) split(pageBytes int) (map[string]json.RawMessage, error) {
 	var object map[string]json.RawMessage
-	if prepareFields {
-		if err := json.Unmarshal(data, &object); err != nil {
-			return nil, 0, nil, err
-		}
+	if err := json.Unmarshal(s.base, &object); err != nil {
+		return nil, err
 	}
-	if len(efficiency)+len(claims) > 0 {
-		data = slices.Grow(data, len(efficiency)+len(claims)+len(`,"efficiency_health":,"file_input_claims":`))
+	if len(s.efficiencyHealth) > 0 {
+		object["efficiency_health"] = s.efficiencyHealth
 	}
-	for _, field := range []struct {
-		name string
-		data json.RawMessage
-	}{
-		{"efficiency_health", efficiency},
-		{"file_input_claims", claims},
-	} {
-		if len(field.data) == 0 {
-			continue
-		}
-		if prepareFields {
-			object[field.name] = field.data
-		}
-		// Only copy already validated bytes. RawMessage in json.Marshal would
-		// scan/compact the entire history again while holding the queue lock.
-		data = append(data[:len(data)-1], ',', '"')
-		data = append(data, field.name...)
-		data = append(data, '"', ':')
-		data = append(data, field.data...)
-		data = append(data, '}')
+	if len(s.fileInputClaims) > 0 {
+		object["file_input_claims"] = s.fileInputClaims
 	}
-	if !prepareFields {
-		return data, baseSize, nil, nil
-	}
-	fields, err = splitPersistenceFields(object, q.persistencePageBytes)
-	return data, baseSize, fields, err
+	return splitPersistenceFields(object, pageBytes)
 }

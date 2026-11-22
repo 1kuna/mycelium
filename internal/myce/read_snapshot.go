@@ -24,13 +24,22 @@ type readNode struct {
 	height, live int
 }
 type readRecord struct {
-	data    []byte // The persistence journal already owns immutable encodings.
-	mutable bool
-	once    sync.Once
-	decoded atomic.Bool
-	value   any
-	err     error
-	history statusHistoryEntry
+	data      []byte              // The persistence journal already owns immutable encodings.
+	stateRoot *publishedStateRoot // Only the state record has reusable attachments.
+	mutable   bool
+	once      sync.Once
+	decoded   atomic.Bool
+	value     any
+	err       error
+	history   statusHistoryEntry
+}
+
+type publishedStateRoot struct {
+	queueStateEncoding
+	// These generations are replaced by diagnostics and copied on the first
+	// input-claim edit, so readers may borrow them across commits.
+	baselines map[string]efficiencyBaseline
+	claims    map[string]FileInputClaim
 }
 
 func readHeight(n *readNode) int {
@@ -245,6 +254,9 @@ func (r *readRecord) decode(key string) (any, error) {
 		case "state":
 			out := &state{}
 			r.err = json.Unmarshal(r.data, out)
+			if r.stateRoot != nil {
+				out.EfficiencyHealth, out.FileInputClaims = r.stateRoot.baselines, r.stateRoot.claims
+			}
 			r.value = out
 		case "submissions":
 			r.value, r.err = decodeReadSubmission(r.data)
@@ -295,7 +307,23 @@ func (q *Queue) publishReadRecords(next map[string][]byte) {
 			continue
 		}
 		if key == "state" {
-			data, q.readStateBaseSize, _, _ = q.marshalQueueBase(queueBase(q.s, true), false)
+			encoded, err := q.encodeStateRoot(queueBase(q.s, true))
+			if err != nil {
+				q.readRoot = readPut(q.readRoot, key, nil)
+				continue
+			}
+			old := readGet(q.readRoot, key)
+			if old == nil || old.stateRoot == nil || !encoded.equal(old.stateRoot.queueStateEncoding) {
+				root := &publishedStateRoot{queueStateEncoding: encoded}
+				if len(q.s.EfficiencyHealth) > 0 {
+					root.baselines = q.s.EfficiencyHealth
+				}
+				if len(q.s.FileInputClaims) > 0 {
+					root.claims = q.s.FileInputClaims
+				}
+				q.readRoot = readPut(q.readRoot, key, &readRecord{data: encoded.base, stateRoot: root})
+			}
+			continue
 		}
 
 		// Read snapshots include recomputable diagnostics; SQLite keeps decisions.
@@ -354,7 +382,7 @@ func (q *Queue) publishReadRuntime() {
 	}
 	value := copyObservation(observationState{Calls: q.calls, Unreported: q.unreported})
 	q.readRuntime = &value
-	q.readGeneration = &readGeneration{root: q.readRoot, stateBaseSize: q.readStateBaseSize}
+	q.readGeneration = &readGeneration{root: q.readRoot}
 	q.readSamples = make(map[string]map[attemptKey]hostMemorySample, len(q.hostMemorySamples))
 	for id, samples := range q.hostMemorySamples {
 		q.readSamples[id] = maps.Clone(samples)
@@ -527,33 +555,25 @@ func (q *Queue) unpublishedRecords() bool {
 // Concurrent readers share that assembly and the unchanged records' decoders.
 // It never shares a mutable diagnostic planner or a projected response.
 type readGeneration struct {
-	root          *readNode
-	stateBaseSize int // Length of control state before encoded histories are attached.
-	once          sync.Once
-	liveOnce      sync.Once
-	liveState     state
-	liveErr       error
-	memoryOnce    sync.Once
-	memory        map[string]*externalMemoryRing
-	memoryErr     error
-	state         state
-	records       *queueRecords
-	err           error
+	root       *readNode
+	once       sync.Once
+	liveOnce   sync.Once
+	liveState  state
+	liveErr    error
+	memoryOnce sync.Once
+	memory     map[string]*externalMemoryRing
+	memoryErr  error
+	state      state
+	records    *queueRecords
+	err        error
 }
 
 // controlState reads the committed state without decoding the appended claim
 // and efficiency histories. These can be much larger than the active queue.
 func (g *readGeneration) controlState() (state, error) {
 	record := readGet(g.root, "state")
-	data := record.data
-	if size := g.stateBaseSize; size > 0 && size < len(data) {
-		// The history fields replaced the closing brace at size-1. Restore
-		// it in a detached copy and leave the shared encoded root intact.
-		data = bytes.Clone(data[:size])
-		data[size-1] = '}'
-	}
 	var result state
-	err := json.Unmarshal(data, &result)
+	err := json.Unmarshal(record.data, &result)
 	return result, err
 }
 

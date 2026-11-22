@@ -272,10 +272,12 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 		q.persisted = map[string][]byte{}
 	}
 	q.commitHistories()
-	q.persistedStateFields = next.stateFields
+	q.commitPersistenceRoot(next)
 	changedJobs := false
 	for key, value := range next.records {
-		q.noteEvidenceRecord(key, q.persisted[key], value)
+		if key != "state" {
+			q.noteEvidenceRecord(key, q.persisted[key], value)
+		}
 		// persistState reuses the immutable byte slice for unchanged records.
 		// Invalidate only after SQLite commit, including removal, and never on
 		// ordinary check-ins that merely journal an unchanged live job.
