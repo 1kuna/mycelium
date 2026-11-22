@@ -147,7 +147,9 @@ func NewCompactStatus(s Snapshot) CompactStatus {
 			h.Release = m.Release.Version
 		}
 		for _, r := range m.EnvironmentReports {
-			h.Preparing = append(h.Preparing, r.Key+": "+r.State)
+			if r.State == "building" || r.State == "uploading" {
+				h.Preparing = append(h.Preparing, r.Key+": "+r.State)
+			}
 		}
 		for _, r := range m.CopyReports {
 			h.Copying = append(h.Copying, fmt.Sprintf("%s: %d/%d bytes", r.Model, r.Bytes, r.Total))

@@ -2416,7 +2416,7 @@ normally. Their actions are:
 | Finding | Next action |
 |---|---|
 | `queue_overload`, `client_request_flood` | Diagnose route latency and excess client demand against local healthy history. |
-| `environment_recipe_failed` | Repair the deterministic recipe failure; transient preparation is excluded. |
+| `environment_recipe_failed` | Inspect the deterministic failure that excludes a target for current queued work. When that demand ends, the alert closes. Detailed machine status keeps the retained failure evidence. |
 | `pin_reason_missing`, `job_target_unsatisfied` | Correct authored restrictions or permanent target capacity. |
 | `infrastructure_loss_streak`, `staging_cache_refused` | Inspect exact-attempt cause and repair worker/staging infrastructure. |
 | `update_failed` | Repair the sanitized update failure and retry the rollout. |

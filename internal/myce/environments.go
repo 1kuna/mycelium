@@ -49,6 +49,9 @@ type EnvironmentRecipe struct {
 	Files          map[string][]byte   `json:"files,omitempty" yaml:"-"`
 	Key            string              `json:"key" yaml:"-"`
 	Platform       string              `json:"platform" yaml:"-"`
+
+	// Known target coverage from the bundled npm Node layer's default Pixi lock.
+	NodeLayerTargets []ExecutionTarget `json:"node_layer_targets,omitempty" yaml:"-"`
 }
 type EnvironmentCatalog struct {
 	Environments map[string]map[string]EnvironmentRecipe `json:"environments" yaml:"environments"`
@@ -261,12 +264,21 @@ func snapshotEnvironmentFiles(r EnvironmentRecipe, platform, base, label string,
 	identity.BinaryRelative = ""
 	identity.Key = ""
 	identity.Launch = nil
+	identity.NodeLayerTargets = nil // Derived metadata does not change the cache identity.
 	b, e := json.Marshal(identity)
 	if e != nil {
 		return r, e
 	}
 	h := sha256.Sum256(b)
 	r.Key = hex.EncodeToString(h[:])
+	r.NodeLayerTargets = nil
+	if r.Backend == "npm" && len(r.Files["pixi.lock"]) > 0 {
+		node := EnvironmentRecipe{Backend: "pixi", LockFile: r.LockFile, Files: r.Files}
+		coverage := environmentLockCoverage(node, nil, platform)
+		if !coverage.UnmappedPlatforms {
+			r.NodeLayerTargets = coverage.Targets
+		}
+	}
 	return r, nil
 }
 
@@ -406,6 +418,9 @@ func extensionEnvironmentRecipes(j *Job, m *Machine) []EnvironmentRecipe {
 	return out
 }
 func environmentReady(j *Job, m *Machine) bool {
+	if !npmNodeLayersAllow(j, m) {
+		return false
+	}
 	if j.CommandDiscovery != nil {
 		if !commandDiscoveryAllows(j, m) {
 			return false
@@ -440,6 +455,9 @@ func environmentReady(j *Job, m *Machine) bool {
 	return k == "" && j.Spec.Environment.Key() == "" || k != "" && slices.Contains(m.Environments, k)
 }
 func environmentCanRun(j *Job, m *Machine) bool {
+	if !npmNodeLayersAllow(j, m) {
+		return false
+	}
 	if j.CommandDiscovery != nil {
 		return commandDiscoveryAllows(j, m) && (environmentReady(j, m) || m.EnvironmentBuilder)
 	}

@@ -819,7 +819,10 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   failed, the job ends with `dead_end_wait` and one finding/action. Repair and
   resubmit with a new key; terminal jobs do not reopen. Unknown/offline inventory
   remains a wait. Read `myce status --sections machines` for its hash, target, failure and log
-  reference. Repair the worker, then `myce env retry WORKER HASH OS ARCH PLATFORM`,
+  reference. Compact status counts recipe failures that exclude a target for
+  current queued work. For an npm recipe with a bundled Pixi Node layer, add
+  any required OS/architecture to the default Pixi environment and relock it.
+  Repair the worker, then `myce env retry WORKER HASH OS ARCH PLATFORM`,
   or submit changed recipe inputs. Process restarts and idle polling do not
   clear failures; transient network/disk failures and planned stops remain holds.
 - **Host maintenance:** `myce status JOB_ID` shows a `host_maintenance`

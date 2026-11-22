@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 )
@@ -24,6 +25,22 @@ import (
 // npmNodeLayer is the optional Pixi workspace beside package-lock.json that
 // provides Node. Both files or neither.
 var npmNodeLayer = []string{"pixi.lock", "pixi.toml"}
+
+func npmNodeLayersAllow(j *Job, m *Machine) bool {
+	allows := func(recipes map[string]EnvironmentRecipe) bool {
+		targets := recipes[m.GPU].NodeLayerTargets
+		return len(targets) == 0 || slices.Contains(targets, machineTarget(m))
+	}
+	if !allows(j.EnvironmentRecipes) {
+		return false
+	}
+	for _, recipes := range j.SidecarEnvironmentRecipes {
+		if !allows(recipes) {
+			return false
+		}
+	}
+	return true
+}
 
 // npmToolCaches are tools' standard download-cache variables. Post-install
 // downloads (headless browsers) land in the prepared prefix and jobs find them.

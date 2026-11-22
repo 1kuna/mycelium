@@ -180,6 +180,9 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 	case "allow-list":
 		return "machine excluded by job or project allow-list"
 	case "environment":
+		if !npmNodeLayersAllow(j, m) {
+			return "npm Node layer: the default Pixi lock excludes " + targetLabel(machineTarget(m))
+		}
 		if !commandDiscoveryAllows(j, m) {
 			return fmt.Sprintf("target %s is outside the supported targets covered by every member's selected immutable lock", formatTarget(target))
 		}

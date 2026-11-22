@@ -8,6 +8,48 @@ import (
 	"time"
 )
 
+func TestRecipeAlertClosesWhenQueuedDemandEnds(t *testing.T) {
+	q, clock := fixture(t)
+	const kind, condition = "environment_recipe_failed", "recipe/worker/recipe"
+	worker := cpuMachine("worker", "worker", "cpu", 4, 16)
+	worker.EnvironmentBuilder = true
+	alternate := cpuMachine("alternate", "alternate", "cpu", 4, 16)
+	alternate.EnvironmentBuilder = true
+	check(t, q, worker, nil)
+	check(t, q, alternate, nil)
+	if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{
+		"tools": {"cpu": {Key: "recipe", Platform: "cpu"}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	s := cpuSpec(1, 1)
+	s.Environment.Name = "tools"
+	job := submit(t, q, s)
+	worker.EnvironmentReports = []EnvironmentReport{{Key: "recipe", State: "failed", FailureKind: "deterministic", Error: "private diagnostic"}}
+	check(t, q, worker, nil)
+	requireIncident(t, q, kind, condition, 1, true)
+	if err := q.Cancel(job.ID); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	check(t, q, worker, nil)
+	requireIncident(t, q, kind, condition, 1, false)
+	state, err := q.cachedCompactStatusJSON(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(state, "recipe: failed") || strings.Contains(state, `"kind":"recipe"`) || strings.Contains(state, "private diagnostic") {
+		t.Fatalf("retained failure showed as active preparation: %s", state)
+	}
+	worker.EnvironmentReports = nil
+	check(t, q, worker, nil)
+	if got := q.s.Machines[worker.ID].EnvironmentReports; len(got) != 1 || got[0].State != "failed" {
+		t.Fatalf("lost retained scheduler exclusion: %+v", got)
+	}
+	submit(t, q, s)
+	requireIncident(t, q, kind, condition, 2, true)
+}
+
 func TestRemainingHealthReportsRecipesCachesUpdates(t *testing.T) {
 	for _, hosts := range []int{2, 200} {
 		t.Run(fmt.Sprint(hosts), func(t *testing.T) {
@@ -34,8 +76,8 @@ func TestRemainingHealthReportsRecipesCachesUpdates(t *testing.T) {
 			if len(q.s.Health.Events) != 0 {
 				t.Fatal("healthy inventory alerted", q.s.Health.Events)
 			}
-			// Current accepted failures, with arbitrary private text that must never
-			// enter notification payloads. No live database or filesystem evidence.
+			// Current cache and update failures plus a historical recipe receipt.
+			// Private diagnostics must never enter notification payloads.
 			if err := q.update(func() error {
 				q.touchMachine(m.ID)
 				m.CapabilityProfile = nil
@@ -46,7 +88,8 @@ func TestRemainingHealthReportsRecipesCachesUpdates(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			cases := []struct{ kind, key string }{{"worker_reports_missing", "reports/worker/cpu_capacity_report_missing"}, {"environment_recipe_failed", "recipe/worker/recipe"}, {"staging_cache_refused", "cache/worker"}, {"update_failed", "update/worker"}}
+			cases := []struct{ kind, key string }{{"worker_reports_missing", "reports/worker/cpu_capacity_report_missing"}, {"staging_cache_refused", "cache/worker"}, {"update_failed", "update/worker"}}
+			requireIncident(t, q, "environment_recipe_failed", "recipe/worker/recipe", 0, false)
 			for _, tc := range cases {
 				requireIncident(t, q, tc.kind, tc.key, 1, true)
 			}

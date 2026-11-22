@@ -2032,6 +2032,15 @@
         "manifest": {
           "type": "string"
         },
+        "node_layer_targets": {
+          "items": {
+            "$ref": "#/$defs/ExecutionTarget"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "platform": {
           "type": "string"
         },

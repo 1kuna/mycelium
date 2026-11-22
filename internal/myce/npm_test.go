@@ -100,6 +100,49 @@ func TestEnvironmentInlineNPMUploadedNodeLayer(t *testing.T) {
 	}
 }
 
+func TestNPMNodeLayerOnlyPreparesOnLockedTargets(t *testing.T) {
+	q, _ := fixture(t)
+	s := cpuResolveSpec()
+	s.Environment = Environment{Backend: "npm", LockFile: "package-lock.json", Platforms: []string{"cpu"}, Files: map[string][]byte{
+		"package-lock.json": []byte(`{"lockfileVersion":3,"packages":{"":{}}}`),
+		"package.json":      []byte(`{}`),
+		"pixi.toml":         []byte("[workspace]\nname = \"node\"\nchannels = []\nplatforms = [\"osx-arm64\"]\n"),
+		"pixi.lock":         []byte("version: 6\nenvironments:\n  default:\n    channels: []\n    packages:\n      osx-arm64: []\npackages: []\n"),
+	}}
+	linux := cpuMachine("linux", "linux", "cpu", 4, 16)
+	linux.EnvironmentBuilder = true
+	linuxARM := cpuMachine("linux-arm", "linux-arm", "cpu", 4, 16)
+	linuxARM.CapabilityProfile.Arch = "arm64"
+	linuxARM.EnvironmentBuilder = true
+	mac := cpuMachine("mac", "mac", "cpu", 4, 16)
+	mac.CapabilityProfile.OS, mac.CapabilityProfile.Arch = "darwin", "arm64"
+	mac.EnvironmentBuilder = true
+	check(t, q, linux, nil)
+	check(t, q, linuxARM, nil)
+	check(t, q, mac, nil)
+	report, err := q.Resolve(ResolveRequest{Spec: s})
+	if err != nil || len(report.Targets) != 3 {
+		t.Fatalf("resolve targets: %+v, %v", report, err)
+	}
+	for _, target := range report.Targets {
+		if target.Eligible != (target.Machine == mac.ID) {
+			t.Fatalf("unexpected npm preparation eligibility: %+v", target)
+		}
+		if !target.Eligible && !strings.Contains(target.Reason, "default Pixi lock excludes") {
+			t.Fatalf("missing Node layer diagnostic: %+v", target)
+		}
+	}
+	j := submit(t, q, s)
+	for _, worker := range []Machine{linux, linuxARM} {
+		if reply := check(t, q, worker, nil); len(reply.EnvironmentPlan) != 0 || reply.Job != nil {
+			t.Fatalf("Linux was offered a Darwin-only Node layer: %+v", reply)
+		}
+	}
+	if reply := check(t, q, mac, nil); len(reply.EnvironmentPlan) != 1 || reply.EnvironmentPlan[0].Key != j.EnvironmentRecipes["cpu"].Key {
+		t.Fatalf("missing Darwin preparation: %+v", reply)
+	}
+}
+
 // One lock digest prepares once per worker: the second job runs no install and
 // downloads nothing, reads the post-install "browser" from the read-only tree,
 // and imports the prepared package from ESM. A changed lock prepares again.

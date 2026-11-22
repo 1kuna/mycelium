@@ -363,6 +363,10 @@ npm from it, so the worker needs no Node of its own. Pin `nodejs` there for
 portable jobs. One Pixi file without its partner is refused. Without the layer,
 the worker's own `node` and `npm` are used.
 
+When the default Pixi lock gives known platform coverage, the queue offers
+preparation only to covered OS/architecture targets. Add the required platforms
+to the Node workspace and relock it to widen coverage.
+
 ```yaml
 environment: {backend: npm, lock_file: app/package-lock.json, platforms: [cpu]}
 ```
@@ -509,6 +513,9 @@ builder or the recipe, then resubmit with a new key; terminal jobs do not reopen
 
 `myce status --sections machines` shows each failed hash, worker, exact
 OS/architecture/platform target, failure and `log_reference` (`myce logs ID`).
+Compact status lists ongoing builds and build-log uploads. Its recipe alert
+counts deterministic failures that exclude a compatible target for current
+queued work and clears when that demand ends.
 Exclusions survive queue and worker process restarts and omitted reports.
 Changed immutable recipe bytes or a changed relevant host/toolchain fingerprint
 permit another build. After repairing a worker, explicitly request a fresh build:
