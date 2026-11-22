@@ -728,6 +728,9 @@ After a measured `live_host_growth` refusal, `launch_capacity` (or
 and enough observed headroom to cover the shortfall on that worker session.
 Small changes that leave the job short keep it queued at the same attempt.
 Keep the job and key. After exact cleanup, another fitting worker can offer it.
+Supporting detached workers retain the final gate's comparison in
+`execution_cause.admission`, including competing growth and helper charges when
+measured. A missing comparison leaves the worker's exact shortfall unknown.
 
 Detached workers retain their owner's device sample and sensor age in the parent
 heartbeat. An attribution-uncertain warning remains a separate sharing refusal

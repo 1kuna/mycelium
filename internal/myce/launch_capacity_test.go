@@ -81,7 +81,8 @@ func TestLaunchCapacityNativeHelperRepeated(t *testing.T) {
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
 	checkpoint := filepath.Join(t.TempDir(), "job")
-	for attempt := 1; attempt <= 5; attempt++ {
+	gate := &attemptCustodian{dir: t.TempDir(), id: ID()}
+	for attempt := 1; attempt <= 4; attempt++ {
 		offer := check(t, q, m, nil).Job
 		if offer == nil || offer.ID != j.ID || offer.Attempt != attempt {
 			t.Fatalf("missing attempt %d: %+v", attempt, offer)
@@ -91,13 +92,30 @@ func TestLaunchCapacityNativeHelperRepeated(t *testing.T) {
 		w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
 		w.nativeListenerProbe = func(string, int) error { return nil }
 		var store *workerStore
-		w.batchAdmission = func(context.Context, HostLaunch) error {
+		worker := w
+		worker.batchAdmission = func(context.Context, HostLaunch) error {
 			// Alternate refusal before and after durable Started authorization.
 			// Both cases require an executed helper, independent of earlier gates.
-			if attempt <= 4 && store.startExecutionEvidence(*offer).Sidecars == executionMayHaveRun && (attempt%2 == 0 || job(t, q, j.ID).StartedAt != nil) {
-				return refuseAdmission("live_host_growth", "GiB", 4, 3, false)
+			if attempt <= 3 && store.startExecutionEvidence(*offer).Sidecars == executionMayHaveRun && (attempt%2 == 0 || job(t, q, j.ID).StartedAt != nil) {
+				return refuseAdmission("live_host_growth", "GiB", 4, 3, false,
+					HostGrowthContributor{ID: offer.ID, Attempt: attempt, Kind: "attempt", Launching: true, ChargeGB: 4, PendingGB: 4})
 			}
 			return nil
+		}
+		w.batchAdmission = func(ctx context.Context, launch HostLaunch) error {
+			request := custodianGate{Nonce: ID(), Launch: launch}
+			if err := saveWorkerJSON(gate.dir, custodianName(gate.id, "gate"), request); err != nil {
+				return err
+			}
+			worker.serveCustodianGate(ctx, gate, *offer)
+			var receipt custodianGateReceipt
+			if err := readCustodianJSON(gate.dir, custodianName(gate.id, "gate-receipt"), &receipt); err != nil {
+				return err
+			}
+			if receipt.Nonce != request.Nonce {
+				return fmt.Errorf("custodian did not answer request %s", request.Nonce)
+			}
+			return receipt.refusal()
 		}
 		store, err := w.openStore()
 		if err != nil {
@@ -123,7 +141,7 @@ func TestLaunchCapacityNativeHelperRepeated(t *testing.T) {
 			t.Fatal("native attempt did not finish")
 		}
 		store.close()
-		if attempt == 5 {
+		if attempt == 4 {
 			if !r.Success {
 				t.Fatalf("main did not start after capacity changed: %+v", r)
 			}
@@ -139,6 +157,9 @@ func TestLaunchCapacityNativeHelperRepeated(t *testing.T) {
 		if !launchCapacityRefusal(r) || c.Admission == nil || c.Admission.Subcheck != "live_host_growth" || c.PrelaunchRefused || e == nil || e.Main != executionNotStarted || e.Sidecars != executionMayHaveRun {
 			t.Fatalf("lost member refusal/custody: %+v cause=%+v evidence=%+v", r, c, e)
 		}
+		if d := c.Admission; d.Available == nil || *d.Available != 3 || d.Required != 4 || len(d.Contributors) != 1 || d.Contributors[0].ID != offer.ID || d.Contributors[0].Attempt != attempt {
+			t.Fatalf("lost custodian memory comparison: %+v", d)
+		}
 		if err := q.Complete(r); err != nil {
 			t.Fatal(err)
 		}
@@ -146,14 +167,19 @@ func TestLaunchCapacityNativeHelperRepeated(t *testing.T) {
 		if next := check(t, q, m, nil).Job; next != nil {
 			t.Fatal("unchanged capacity re-offered", next)
 		}
+		m.HostAvailableMemoryGB += 0.25
+		clock.Advance(time.Second)
+		if next := check(t, q, m, nil).Job; next != nil {
+			t.Fatal("capacity below the observed deficit re-offered", next)
+		}
 		got := job(t, q, j.ID)
-		if got.State != "queued" || got.Losses != 0 || got.InfrastructureRetries != 0 || submit(t, q, s).ID != j.ID {
+		if got.State != "queued" || got.Attempt != attempt || got.Losses != 0 || got.InfrastructureRetries != 0 || submit(t, q, s).ID != j.ID {
 			t.Fatalf("capacity consumed budget or identity: %+v", got)
 		}
 		if err := q.Complete(r); !errors.Is(err, ErrStale) {
 			t.Fatal("old result not fenced", err)
 		}
-		m.HostAvailableMemoryGB++
+		m.HostAvailableMemoryGB += 0.75
 	}
 	got := job(t, q, j.ID)
 	if got.State != "succeeded" || got.Losses != 0 || got.InfrastructureRetries != 0 {
