@@ -1047,6 +1047,12 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		if err := validationErr; err != nil {
 			return specRejection(err)
 		}
+		inputExpiries := q.checkpointInputExpiries(s)
+		for _, expiry := range inputExpiries {
+			if !expiry.ExpiredAt.IsZero() {
+				return &HTTPError{Status: 410, Code: checkpointInputExpired, Message: expiry.removedMessage() + ". To run, " + checkpointInputReplacement + "."}
+			}
+		}
 		if s.ephemeral() {
 			if err := validateEphemeralExtensions(s, extensions); err != nil {
 				return rejectFieldRule("job_worker_data_unsupported", err)
@@ -1141,6 +1147,7 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 			id = ID()
 		}
 		j := &Job{EntryCoverage: entryCoverage, CommandDiscovery: discovery, PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints || s.localFirst(), Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: q.checkpointPath(id)}
+		j.CheckpointInputExpiries = inputExpiries
 		// Uploaded lock bytes are frozen in EnvironmentRecipes (with their digest);
 		// do not keep a second copy in every stored job spec.
 		j.Spec.Environment.Files = nil
@@ -1351,6 +1358,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 		j.YieldPause = nil
 		q.pauseJob(j, pending.Pause)
 	}
+	j.CheckpointInputExpiries = q.checkpointInputExpiries(j.Spec)
 }
 func (q *Queue) stop(j *Job, why string) {
 	q.touchJob(j.ID)

@@ -82,6 +82,13 @@ func terminalJobFinding(stored *Job) *JobFinding {
 }
 
 func failedJobFinding(j *Job, raw string) *JobFinding {
+	if j.DiagnosticCode == checkpointInputExpired {
+		for _, expiry := range j.CheckpointInputExpiries {
+			if !expiry.ExpiredAt.IsZero() {
+				return &JobFinding{checkpointInputExpired, findingOwnerJob, expiry.removedMessage() + ".", checkpointInputReplacement + "."}
+			}
+		}
+	}
 	if j.DiagnosticCode == deadEndWait {
 		if len(j.NativeCheckFailures) != 0 {
 			evidence, action := nativeCheckFailureText(j.NativeCheckFailures)

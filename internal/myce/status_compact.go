@@ -210,6 +210,7 @@ func compactStatusJob(j *Job) Job {
 		PriorityPolicy: j.PriorityPolicy, QueueOrder: j.QueueOrder, ApplicationProgress: j.ApplicationProgress,
 		ExecutionCause: j.ExecutionCause, CleanupCause: j.CleanupCause,
 		Timing: j.Timing, Liveness: j.Liveness, WallTime: j.WallTime, Progress: j.Progress,
+		CheckpointInputExpiries: j.CheckpointInputExpiries,
 		// The whitelist drops the frozen reason maps (raw text). Carry their
 		// sanitized markers so the summary matches the per-job read (#748).
 		RequirementReasons: compactRequirementReasons(j)}

@@ -873,6 +873,20 @@ A missing NAS source still fails before launch with `input_staging: not_found`;
 stay private. Present file-store inputs remain readable immediately after a
 queue restart; a deferred retention pass does not hide them.
 
+If `nas` or `manifest_file` points into a known settled job's NAS checkpoint,
+the submission response and job status (`myce status --json JOB_ID`) show
+`checkpoint_input_expiries` with the input field and earliest removal deadline.
+`myce submit` and `myce run` print the advisory on stderr. At the deadline,
+queued work waits with `checkpoint_input_expiry_due` before staging can start.
+Once a worker confirms removal, a queued job fails with
+`checkpoint_input_expired`, and a new submission with the same source is
+refused with that code. The diagnostic names the input field to replace. Publish
+durable bytes as declared outputs or copy them to a retained NAS path. Then
+submit with the updated input and a new key if you are replacing an accepted
+job. A shared-input declaration does not extend checkpoint retention.
+These diagnostics use retained queue records. Other missing NAS paths are
+still reported by staging.
+
 Workers report verified cache identities for placement. Their shared input
 evidence counts successful cache hits and cold stages, plus the declared NAS
 source sizes for completed cold stages; it is not a network traffic measurement.

@@ -354,6 +354,15 @@ processing never runs at network speed (MY-36):
 The command reads the local copy at `$MYCE_INPUT_FOOTAGE`. NAS paths are
 relative to the NAS root ([inputs](references/submit.md#inputs-checkpoints-and-pieces)).
 
+When a shared input points into a known settled job's NAS checkpoint, the
+queue reports the earliest removal deadline in `checkpoint_input_expiries`
+on submission and in `myce status --json JOB_ID`. A queued job can show
+`checkpoint_input_expiry_due` once the deadline passes. Confirmed removal
+produces `checkpoint_input_expired` at submission or in job status before
+staging. Publish the bytes as declared outputs or copy them to a retained
+NAS path, then submit the corrected input. Use a new key when replacing an
+accepted job. Referencing the checkpoint does not extend its lifetime.
+
 Supporting workers also set `MYCE_BINDINGS_FILE` to an attempt-local JSON file:
 `{"inputs":{"footage":"/local/staged/path"},"models":{}}`. Keys preserve the
 declared input/model names; values are the verified local paths. Read this file

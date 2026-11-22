@@ -67,6 +67,9 @@ func (q *Queue) jobHold(j *Job, resolving bool) (blocker *Hold) {
 	if wait == nil {
 		wait = q.waitHold(j)
 	}
+	if wait.Kind == checkpointInputExpiryDue {
+		return wait
+	}
 	if !dependencyReady(j) {
 		copy := *j
 		copy.Reason = wait.Detail

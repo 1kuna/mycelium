@@ -639,6 +639,8 @@ type Job struct {
 	Reason                string                       `json:"reason,omitempty"`
 	Checkpoint            string                       `json:"checkpoint"`                   // Always emitted, empty when unset: consumers pin it as required (#1439 regression).
 	CheckpointExpired     *time.Time                   `json:"checkpoint_expired,omitempty"` // Worker-confirmed removal of this settled job's NAS checkpoint folder (#894).
+
+	CheckpointInputExpiries []CheckpointInputExpiry `json:"checkpoint_input_expiries,omitempty"`
 }
 type Machine struct {
 	qualificationMemo map[extensionQualificationKey]string // One scheduling/observation pass; never persisted.

@@ -1373,6 +1373,25 @@
       ],
       "type": "object"
     },
+    "CheckpointInputExpiry": {
+      "properties": {
+        "deadline": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "expired_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "field": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "field"
+      ],
+      "type": "object"
+    },
     "CheckpointMirror": {
       "properties": {
         "checkpoint": {
@@ -3480,6 +3499,16 @@
         "checkpoint_expired": {
           "format": "date-time",
           "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "checkpoint_input_expiries": {
+          "items": {
+            "$ref": "#/$defs/CheckpointInputExpiry"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
           "x-contract": "diagnostic"
         },
         "checkpoint_mirrors": {

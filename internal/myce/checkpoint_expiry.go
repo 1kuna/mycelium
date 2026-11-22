@@ -92,6 +92,10 @@ func checkpointExpirable(root string, j *Job) (string, bool) {
 	if j == nil || j.FileTransport && !j.Spec.localFirst() || j.CheckpointExpired != nil || j.Attempt == 0 || j.Checkpoint == "" || mutableJob(j) {
 		return "", false
 	}
+	return checkpointRecordFolder(root, j)
+}
+
+func checkpointRecordFolder(root string, j *Job) (string, bool) {
 	rel, err := filepath.Rel(root, j.Checkpoint)
 	if err != nil {
 		return "", false
