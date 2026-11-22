@@ -14,6 +14,9 @@ type LaunchCapacityWait struct {
 	Attempt   int              `json:"attempt"`
 	Evidence  string           `json:"evidence"`
 	Admission *AdmissionDetail `json:"admission,omitempty"`
+	// Required surplus above the candidate's charge in the queue's physical
+	// RAM ledger. It can be signed because queue room can already be short.
+	LiveGrowthSurplusGB *float64 `json:"live_growth_surplus_gb,omitempty"`
 }
 
 const launchCapacityWaitReason = "waiting for launch capacity"
@@ -68,17 +71,92 @@ func (q *Queue) recordLaunchCapacityWait(j *Job, r Result) {
 		j.LaunchCapacityWait = map[string]LaunchCapacityWait{}
 	}
 	if m != nil {
+		key := targetKey(m)
+		wait := LaunchCapacityWait{Machine: j.Machine, Session: j.Session, Attempt: j.Attempt,
+			Admission: safeAdmissionDetail(r.ExecutionCause.Admission)}
+		if prior := j.LaunchCapacityWait[key]; prior.Session == wait.Session && prior.Attempt == wait.Attempt && prior.LiveGrowthSurplusGB != nil {
+			// Completion can retain the same result on both sides of diagnostic
+			// verification. Do not move the required room with later reports.
+			return
+		}
 		// A restored machine holds no capacity telemetry until its first
 		// check-in (#1399). Leave the evidence empty; that report becomes the
 		// baseline, so an unchanged reading is still not new capacity.
-		evidence := ""
 		if !q.unreported[m.ID] {
-			evidence = q.launchCapacityEvidence(j, m)
+			wait.Evidence = q.launchCapacityEvidence(j, m)
+			if deficit := liveGrowthDeficit(wait.Admission); deficit > 0 {
+				// Build from current accounting here. A result can arrive between
+				// scheduling passes, including after an exact sibling release.
+				capacity, _, known, _ := q.hostLiveCapacity(m)
+				if known {
+					ledger := q.hostMemoryLedger(m)
+					ledger.CapacityGB = capacity
+					charge := hostNeed(m, j.Spec.Needs.MemoryGB, chargedHostGB(j))
+					wait.LiveGrowthSurplusGB = growthWaitSurplus(j, ledger, charge, deficit)
+				}
+			}
 		}
-		j.LaunchCapacityWait[targetKey(m)] = LaunchCapacityWait{Machine: j.Machine, Session: j.Session,
-			Attempt: j.Attempt, Admission: safeAdmissionDetail(r.ExecutionCause.Admission),
-			Evidence: evidence}
+		j.LaunchCapacityWait[key] = wait
 	}
+}
+
+func liveGrowthDeficit(d *AdmissionDetail) float64 {
+	if d == nil || d.Subcheck != "live_host_growth" || d.Unavailable || d.Available == nil {
+		return 0
+	}
+	return max(0, d.Required-*d.Available)
+}
+
+func growthWaitSurplus(j *Job, ledger *HostMemoryLedger, charge, deficit float64) *float64 {
+	surplus := launchGrowthRoom(j, ledger) - charge + deficit
+	return &surplus
+}
+
+// Account for every competing pending byte on this host. The refunded helper
+// cannot justify relaunching itself. Its exact release is checked separately.
+func launchGrowthRoom(j *Job, ledger *HostMemoryLedger) float64 {
+	room := ledger.CapacityGB - ledger.GrowthGB
+	for _, owner := range ledger.Owners {
+		if owner.Execution != nil && owner.Execution.ID == j.ID {
+			room += owner.GrowthGB
+		}
+	}
+	return room
+}
+
+// The worker compares host-wide growth on every card. Keep the latest refusal
+// in its exact session applicable to any target on that worker.
+func launchGrowthWait(j *Job, m *Machine) (string, LaunchCapacityWait) {
+	var key string
+	var latest LaunchCapacityWait
+	for target, h := range j.LaunchCapacityWait {
+		if h.LiveGrowthSurplusGB == nil && target != targetKey(m) {
+			continue // Anchor older records using the refused target's sizing.
+		}
+		if h.Machine == m.ID && h.Session == m.Session && h.Attempt > latest.Attempt && liveGrowthDeficit(h.Admission) > 0 {
+			key, latest = target, h
+		}
+	}
+	return key, latest
+}
+
+func (q *Queue) liveGrowthShortfall(j *Job, m *Machine, key string, h LaunchCapacityWait) (float64, bool) {
+	ledger := q.hostMemoryLedgers[m.ID]
+	if q.unreported[m.ID] || ledger == nil || !ledger.AvailableKnown {
+		return 0, false
+	}
+	if h.LiveGrowthSurplusGB == nil {
+		// Older records and refusals received before inventory was restored
+		// take their baseline from the first measured ledger in a writer pass.
+		if q.records == nil || !q.records.updating || q.s.Jobs[j.ID] == nil {
+			return 0, false
+		}
+		charge := hostNeed(m, h.Admission.EnvelopeDeviceGB, h.Admission.EnvelopeHostGB)
+		h.LiveGrowthSurplusGB = growthWaitSurplus(j, ledger, charge, liveGrowthDeficit(h.Admission))
+		q.touchJob(j.ID).LaunchCapacityWait[key] = h
+	}
+	surplus := launchGrowthRoom(j, ledger) - hostNeed(m, j.Spec.Needs.MemoryGB, chargedHostGB(j))
+	return *h.LiveGrowthSurplusGB - surplus, true
 }
 
 func (q *Queue) waitLaunchCapacity(j *Job, r Result) {
@@ -108,8 +186,13 @@ func (q *Queue) launchCapacityBlocked(j *Job, m *Machine) bool {
 			return true
 		}
 	}
+	if key, h := launchGrowthWait(j, m); key != "" {
+		if shortfall, known := q.liveGrowthShortfall(j, m, key, h); !known || shortfall > 0 {
+			return true
+		}
+	}
 	h, ok := j.LaunchCapacityWait[targetKey(m)]
-	if !ok {
+	if !ok || liveGrowthDeficit(h.Admission) > 0 {
 		return false
 	}
 	if h.Evidence == "" {
@@ -133,6 +216,9 @@ func launchCapacityHold(j *Job) *Hold {
 	for _, w := range j.LaunchCapacityWait {
 		if w.Attempt != j.Attempt || w.Admission == nil {
 			continue
+		}
+		if liveGrowthDeficit(w.Admission) > 0 {
+			detail = "waiting for enough live host RAM to cover the launch shortfall and for exact release"
 		}
 		for _, c := range w.Admission.Contributors {
 			if c.Launching {
@@ -209,6 +295,16 @@ func (q *Queue) queuedCapacityStatus(j *Job) (waiting, ready bool) {
 // planner chooses lower tiers; same-tier work remains protected. Exact releases
 // and a changed capacity snapshot are still required by dispatch.
 func (q *Queue) launchCapacityProjection(j *Job, m *Machine) *Machine {
+	if key, h := launchGrowthWait(j, m); key != "" {
+		if deficit, known := q.liveGrowthShortfall(j, m, key, h); known {
+			if deficit <= 0 {
+				return m
+			}
+			copy := *m
+			copy.FreeHostMemoryGB = min(copy.FreeHostMemoryGB, hostNeed(m, j.Spec.Needs.MemoryGB, chargedHostGB(j))-deficit)
+			return &copy
+		}
+	}
 	h, ok := j.LaunchCapacityWait[targetKey(m)]
 	if !ok || h.Evidence != q.launchCapacityEvidence(j, m) || h.Admission == nil {
 		return m

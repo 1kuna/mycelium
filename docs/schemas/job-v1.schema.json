@@ -4478,6 +4478,9 @@
         "evidence": {
           "type": "string"
         },
+        "live_growth_surplus_gb": {
+          "type": "number"
+        },
         "machine": {
           "type": "string"
         },

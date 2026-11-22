@@ -3195,10 +3195,17 @@ retains the failed subcheck and compared safe values. Component
 exact attempt's release before the logical job can run elsewhere.
 
 `launch_capacity_wait` retains per-target admission evidence and an opaque capacity
-fingerprint. A changed capacity measurement, allowance, competing reservation or
-exact release permits reevaluation; heartbeat timestamps alone do not. Ordinary
-lower-tier preemption can satisfy the measured deficit; equal-tier production
-waits. `start_capacity_waiting` records any relative startup
+fingerprint. A measured `live_host_growth` refusal also sets
+`live_growth_surplus_gb` from the queue's physical room minus the refused offer's
+charge, plus the worker's measured deficit. The same worker session can offer the
+job when physical room after competing pending growth covers the resolved charge
+and that surplus. Falling room, unrelated inventory changes and gains smaller than
+the deficit leave the job waiting. An older refusal without a numeric baseline
+starts from the first measured queue ledger. Exact release and ordinary admission
+also apply, and another eligible worker session can offer the job after release.
+Other capacity subchecks still use changed capacity evidence to reevaluate.
+Ordinary lower-tier preemption can satisfy the measured deficit. Equal-tier
+production waits. `start_capacity_waiting` records any relative startup
 window suspended by qualified resource contention, including explicit
 `start_window` declarations. Typed uncharged launch refusals also suspend the
 relative window. Status reasons show the original window's seconds left with
