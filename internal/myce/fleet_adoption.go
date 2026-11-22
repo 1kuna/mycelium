@@ -17,10 +17,10 @@ func workerAdoptionProof(actors map[attemptKey]*attemptSupervisor, now time.Time
 	proof := &WorkerAdoptionProof{Protocol: custodianProtocol, Attempts: []Execution{}}
 	for _, a := range actors {
 		a.mu.Lock()
-		g, released := a.custodian, a.released || a.finished
+		g, released, finished := a.custodian, a.released, a.finished
 		shared := a.worker.Machine.SharedHost != nil
 		a.mu.Unlock()
-		if released {
+		if finished || released && g == nil {
 			continue
 		}
 		if g == nil {
@@ -36,7 +36,15 @@ func workerAdoptionProof(actors map[attemptKey]*attemptSupervisor, now time.Time
 		// The independent owner exists before input staging or environment
 		// acquisition begins. Started describes the payload, not adoptability:
 		// g.read already verified the exact custodian birth and manager scope.
-		if !observed || now.Sub(v.At) > max(3*interval, attemptLivenessMaxAge) || v.State.Result != nil && v.State.Result.ReleasePending {
+		// A locally released attempt can still owe the queue logs or results.
+		// Its durable snapshot survives the swap and needs no live heartbeat.
+		r := v.State.Result
+		resultReady := v.Finished && r != nil && !r.ReleasePending && r.ID == a.job.ID && r.Attempt == a.job.Attempt && r.Machine == a.job.Machine && r.Session == a.job.Session
+		live := !v.Finished && r == nil && !released && !now.Before(v.At) && now.Sub(v.At) <= max(3*interval, attemptLivenessMaxAge)
+		if !observed || !resultReady && !live {
+			if released {
+				continue // An unrelated, already released actor cannot veto takeover.
+			}
 			proof.Reason = "detached attempt readiness or release is unconfirmed"
 			return proof
 		}
@@ -64,6 +72,9 @@ func (q *Queue) fleetAdoptionReason(h *fleetUpgradeHost) string {
 				return reason
 			}
 			continue
+		}
+		if p.Launch != nil && !p.Launch.Started {
+			continue // AuthorizeLaunch fences the still-unstarted offer at cutover.
 		}
 		if p.Launch != nil || p.Preparation {
 			// Standalone background preparation belongs to the worker's
@@ -93,5 +104,5 @@ func (q *Queue) fleetTakeoverFence(host string) bool {
 		}
 	}
 	h := q.fleetActiveHost()
-	return h != nil && h.Host == host && h.Takeover && h.Phase != "worker_start"
+	return h != nil && h.Host == host && h.Machine != "" && !h.WorkerDone && h.Takeover && h.Phase != "worker_start"
 }

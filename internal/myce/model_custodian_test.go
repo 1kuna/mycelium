@@ -444,9 +444,13 @@ func TestDetachedModelProofRefusesUnconfirmedIdentity(t *testing.T) {
 }
 
 func TestFleetUpgradeDetachedModelsAndLateCall(t *testing.T) {
-	for _, kind := range []string{"idle", "inflight", "late-call", "legacy", "unready", "wrong-session"} {
+	for _, kind := range []string{"idle", "inflight", "late-call", "queue-colocated", "legacy", "unready", "wrong-session"} {
 		t.Run(kind, func(t *testing.T) {
-			q, clock, workers := fleetFixture(t, "q", "a")
+			queueHost := "q"
+			if kind == "queue-colocated" {
+				queueHost = "a"
+			}
+			q, clock, workers := fleetFixture(t, queueHost, "a")
 			m := workers[0]
 			config := ModelConfig{Models: []Model{{Name: "test", Engine: "fake", Path: "fake", MemoryGB: 1, Platforms: []string{"fake"}}}, Idle: time.Hour}
 			if err := q.ConfigureModels(config); err != nil {
@@ -473,7 +477,7 @@ func TestFleetUpgradeDetachedModelsAndLateCall(t *testing.T) {
 			if kind == "wrong-session" {
 				s.Session = "old-session"
 			}
-			if kind == "inflight" {
+			if kind == "inflight" || kind == "queue-colocated" {
 				if err := q.addCall(&ModelCall{Model: "test", Project: "test", Priority: "experiment"}); err != nil {
 					t.Fatal(err)
 				}
@@ -494,6 +498,9 @@ func TestFleetUpgradeDetachedModelsAndLateCall(t *testing.T) {
 			}
 			if !h.Takeover || h.Phase != "worker_update" {
 				t.Fatal("resident model blocked upgrade", h)
+			}
+			if kind == "queue-colocated" && q.fleetPausesCalls() {
+				t.Fatal("colocated worker update fenced queue streams")
 			}
 			i := fleetInstructionFor(t, q)
 			if kind == "late-call" {
@@ -530,6 +537,14 @@ func TestFleetUpgradeDetachedModelsAndLateCall(t *testing.T) {
 			if s.Attempt != before.Attempt || s.Session != before.Session || s.Custody.ID != before.Custody.ID || s.State != "ready" || len(q.s.Pins) != 1 {
 				t.Fatalf("upgrade replaced engine or pin: %+v", s)
 			}
+			if kind == "queue-colocated" {
+				for range int(fleetStableFor/time.Second) + 2 {
+					fleetHeartbeatAdvance(t, q, clock)
+				}
+				if h.Phase != "draining" || !h.WorkerDone || !q.fleetPausesCalls() || q.fleetTakeoverFence(h.Host) || q.maintenanceBlocked(h.Host) || h.TakeoverWait != "queue process owns active model calls or streams" {
+					t.Fatalf("queue cutover did not isolate its wait to model calls: %+v", h)
+				}
+			}
 			for id := range q.calls {
 				if !q.callAttemptLive(q.calls[id]) {
 					t.Fatal("in-flight call lost exact engine")
@@ -540,6 +555,9 @@ func TestFleetUpgradeDetachedModelsAndLateCall(t *testing.T) {
 			}
 			if s.InFlight != 0 {
 				t.Fatal("call accounting did not settle exactly once", s.InFlight)
+			}
+			if kind == "queue-colocated" && fleetInstructionFor(t, q).Machine != "@queue" {
+				t.Fatal("finished stream did not unblock queue cutover")
 			}
 		})
 	}

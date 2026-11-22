@@ -1145,6 +1145,9 @@ func printStatusDetail(s myce.Snapshot, full, detail bool) {
 		fmt.Printf("fleet upgrade %s: release=%s urgency=%s state=%s\n", u.Operation, u.Release, u.Urgency, u.State)
 		for _, h := range u.Hosts {
 			fmt.Printf("  host %s: phase=%s wait=%s failure=%s outcome=%s deferred_reason=%s verified_progress=%s\n", h.Host, h.Phase, h.Wait, h.Failure, h.Outcome, h.DeferredReason, h.ProgressAt.UTC().Format(time.RFC3339))
+			if h.TakeoverWait != "" {
+				fmt.Printf("    takeover_wait=%s\n", h.TakeoverWait)
+			}
 		}
 	}
 

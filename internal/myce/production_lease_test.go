@@ -144,7 +144,7 @@ func TestFleetUpgradeWaitsForProductionLeaseBetweenPipelineStages(t *testing.T) 
 			waiting = h
 		}
 	}
-	if waiting == nil || waiting.Phase != "pending" || !strings.Contains(waiting.Wait, "production lease pipeline") || q.maintenanceBlocked("gpu-host") {
+	if waiting == nil || waiting.Phase != "pending" || !strings.Contains(waiting.Wait, "production lease pipeline") || !strings.Contains(waiting.Wait, "takeover unavailable:") || waiting.TakeoverWait != "" || q.maintenanceBlocked("gpu-host") {
 		t.Fatal("idle lease host was drained", waiting, q.fleetUpgradeStatus())
 	}
 

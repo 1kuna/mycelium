@@ -10,7 +10,7 @@ import (
 func TestWorkerAdoptionProof(t *testing.T) {
 	c := &fakeClock{now: time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)}
 	j := Job{ID: ID(), Attempt: 2, Machine: "worker", Session: "session"}
-	for _, kind := range []string{"preparing", "started", "finished", "unobserved", "stale", "release-pending", "inline", "shared-inline", "released"} {
+	for _, kind := range []string{"preparing", "started", "finished", "finished-unobserved", "finished-stale-attempt", "unobserved", "stale", "release-pending", "inline", "shared-inline", "released"} {
 		t.Run(kind, func(t *testing.T) {
 			g := &attemptCustodian{observed: true, last: custodianSnapshot{At: c.Now(), State: workerState{Job: &j, Session: j.Session}}}
 			a := &attemptSupervisor{job: j, custodian: g}
@@ -18,8 +18,21 @@ func TestWorkerAdoptionProof(t *testing.T) {
 			switch kind {
 			case "started":
 				g.last.Started = true
-			case "finished":
+			case "finished", "finished-unobserved", "finished-stale-attempt":
 				g.last.Finished = true
+				g.last.At = c.Now().Add(-time.Hour)
+				g.last.State.Result = &Result{Execution: runExecution(&j), Machine: j.Machine, Session: j.Session}
+				a.released = true
+				if kind == "finished-unobserved" {
+					a.released = false
+					g.observed = false
+					want = "readiness or release"
+				}
+				if kind == "finished-stale-attempt" {
+					a.released = false
+					g.last.State.Result.Attempt--
+					want = "readiness or release"
+				}
 			case "unobserved":
 				g.observed = false
 				want = "readiness or release"

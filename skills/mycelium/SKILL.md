@@ -491,6 +491,11 @@ and reports why. Normal updates never checkpoint-stop or kill work. Only an
 explicit critical update retains the existing interruption fallback when takeover
 is unavailable; `stop_requests` records it. Keep the same job and submission key
 through a worker update; resubmitting can duplicate work.
+Pending results from a durably finished detached attempt can resume publication
+after worker replacement. The queue service's own upgrade waits for model
+streams already in progress. On supporting queues, `myce status --history
+--json` retains each host's most recent natural wait as `takeover_wait` on the
+reported operation, even once the host advances.
 A rollout may also defer an initially stale/unhealthy worker with a managed
 proof, revisit it in the same operation, and leave it visibly deferred if it
 never recovers. A never-managed worker or an incompatible target still refuses
