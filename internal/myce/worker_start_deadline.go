@@ -108,6 +108,8 @@ func (w Worker) launchContext() context.Context {
 
 // A positive reply means this exact attempt is durably started, before execution.
 func (w Worker) authorizeStart(j Job, session string, receiptDirs ...string) error {
+	timing := w.launchTiming
+	defer timing.within(launchStartChecks)()
 	if err := w.checkAvailability(); err != nil {
 		return err
 	}
@@ -124,7 +126,9 @@ func (w Worker) authorizeStart(j Job, session string, receiptDirs ...string) err
 		OK                       bool     `json:"ok"`
 		StartGate                string   `json:"start_gate"`
 	}
-	requested, err := w.controlHandshake("/api/workers/started", Result{InputsStagedAt: j.InputsStagedAt, StagingTimings: j.StagingTimings, Machine: w.Machine.ID, Session: session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, &reply)
+	done := timing.within(launchStartedRPC)
+	requested, err := w.controlHandshake("/api/workers/started", Result{LaunchTimings: timing.snapshot(), InputsStagedAt: j.InputsStagedAt, StagingTimings: j.StagingTimings, Machine: w.Machine.ID, Session: session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, &reply)
+	done()
 	if err != nil {
 		return fmt.Errorf("%w: %w", errWorkerStartHandoff, err)
 	}
@@ -140,7 +144,10 @@ func (w Worker) authorizeStart(j Job, session string, receiptDirs ...string) err
 		}
 	}
 	if w.batchAdmission != nil {
-		if err := w.batchAdmission(w.launchContext(), HostLaunch{Machine: w.Machine.ID, Session: session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)}); err != nil {
+		done := timing.within(launchAdmission)
+		err := w.batchAdmission(w.launchContext(), HostLaunch{Machine: w.Machine.ID, Session: session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})
+		done()
+		if err != nil {
 			return err
 		}
 	}

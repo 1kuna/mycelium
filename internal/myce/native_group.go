@@ -305,6 +305,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 	}
 	assigned := j
 	assigned.ExecutionEvidence = nil
+	assigned.LaunchTimings = w.launchTiming.snapshot()
 	s.state.Job = &assigned
 	s.state.Identity = identity
 	s.state.Log = logName
@@ -332,6 +333,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		output.Close()
 		return nil, err
 	}
+	w.launchTiming.enter(launchSupervisor)
 	writer, err := g.startSupervisor(s, env)
 	if err != nil {
 		cancel()
@@ -365,6 +367,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 			if !errors.Is(runErr, errNativePortCollision) || groupAttempt+1 == nativeBindAttempts {
 				break
 			}
+			w.launchTiming.enter(launchRetry)
 			// No advertised endpoint may change while an old consumer survives.
 			// Keep custody until the entire old group is verified empty.
 			if err := g.cleanupProcesses(writer, true); err != nil {
@@ -375,11 +378,13 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 				runErr = err
 				break
 			}
+			w.launchTiming.enter(launchSupervisor)
 			writer, runErr = g.startSupervisor(nil, env)
 			if runErr != nil {
 				break
 			}
 		}
+		w.launchTiming.finish("")
 		defer func() {
 			for _, release := range g.releases {
 				release()
@@ -414,7 +419,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		}
 		persist := errors.Join(syncCommandOutput(output), output.Close())
 		// Cleanup uncertainty holds custody, not the successful payload result.
-		r := Result{ExecutionEvidence: safeExecutionEvidence(j.ExecutionEvidence, j.Attempt), Resources: resources, MemoryPeak: peak, Machine: w.Machine.ID, Session: g.session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: runErr == nil && oom == nil && persist == nil, Forced: forced, PoliteStop: polite, ReleasePending: cleanup != nil}
+		r := Result{LaunchTimings: w.launchTiming.snapshot(), ExecutionEvidence: safeExecutionEvidence(j.ExecutionEvidence, j.Attempt), Resources: resources, MemoryPeak: peak, Machine: w.Machine.ID, Session: g.session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: runErr == nil && oom == nil && persist == nil, Forced: forced, PoliteStop: polite, ReleasePending: cleanup != nil}
 		if runErr != nil {
 			r.Error = nativeAttemptError(j, runErr.Error())
 			r.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("command", runErr))
@@ -509,7 +514,9 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 	if !nativeUnsandboxed(&g.p.job) {
 		g.worker.nativeCI = nativeCIRequired(&g.p.job)
 		g.worker.nativeEphemeral = g.p.job.Spec.ephemeral()
+		done := g.worker.launchTiming.within(launchSandbox)
 		g.namespace, err = g.worker.prepareNativeGroupIsolation(cmd, g.dir, work, env, g.p.job.Spec.Needs.Network)
+		done()
 	}
 	if err != nil {
 		writer.Close()
@@ -591,7 +598,10 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 	if err = g.control.attach(cmd.Process.Pid); err != nil {
 		return abort(err)
 	}
-	if err = g.namespace.activate(g.ctx, writer); err != nil {
+	done := g.worker.launchTiming.within(launchSandbox)
+	err = g.namespace.activate(g.ctx, writer)
+	done()
+	if err != nil {
 		return abort(err)
 	}
 	if s != nil {
@@ -724,6 +734,10 @@ func environmentList(env map[string]string) []string {
 }
 
 func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]string, dir string, output *os.File) error {
+	timing := g.worker.launchTiming
+	if m.Name == "main" {
+		timing.enter(launchSupervisor)
+	}
 	if err := g.worker.verifyDevice(); err != nil {
 		return g.recordInfrastructure(launchRefused, m.Name, "", err)
 	}
@@ -796,7 +810,10 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	}
 	cmd.Env = inheritedProcessSessionEnvironment(environmentList(env))
 	cmd.Args = append(slices.Clone(cmd.Args[:4]), sharedHostCommand(environmentCommand(cmd.Args[4:], cmd.Env), g.worker.Machine.SharedHost)...)
-	if err := g.metricWorker().isolateNativeAttempt(&g.p.job, g.namespace, cmd, g.dir, work, env, g.isolationPorts, m.Name == "main"); err != nil {
+	done := timing.within(launchSandbox)
+	err = g.metricWorker().isolateNativeAttempt(&g.p.job, g.namespace, cmd, g.dir, work, env, g.isolationPorts, m.Name == "main")
+	done()
+	if err != nil {
 		return err
 	}
 	cmd.Stdout = output
@@ -885,12 +902,16 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 			e.Sidecars = executionMayHaveRun
 		}
 	}
+	if m.Name == "main" {
+		timing.enter(launchPayload)
+	}
 	if err = g.releaseMember(m, writer); err != nil {
 		return err
 	}
 	m.execReleased = true
 	if m.Name == "main" {
 		g.main = m
+		timing.finish(launchGateReleased)
 	}
 	m.Phase = "running"
 	return g.saveLocked()
@@ -945,6 +966,7 @@ func (g *nativeGroup) independentMemberFailureLocked() bool {
 }
 
 func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string, output *os.File) (error, bool) {
+	g.worker.launchTiming.enter(launchSidecarEnv)
 	// Acquire all helper environments before starting any payload; hold cache use
 	// protections until every member has exited (the outer goroutine defers release).
 	roots := map[string]string{}
@@ -961,6 +983,7 @@ func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string,
 			g.releases = append(g.releases, release)
 		}
 	}
+	g.worker.launchTiming.enter(launchSidecars)
 	reservations := map[string]net.Listener{}
 	defer func() {
 		for _, l := range reservations {

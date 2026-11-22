@@ -299,6 +299,7 @@ func (w Worker) authorizeLaunch(l HostLaunch) error {
 }
 
 func (w Worker) authorizeLaunchContext(ctx context.Context, l HostLaunch) error {
+	defer w.launchTiming.within(launchAuthorization)()
 	w.launchCtx = ctx
 	if err := w.checkAvailability(); err != nil {
 		return err
@@ -321,7 +322,10 @@ func (w Worker) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 		return errWorkerStartAuthorization
 	}
 	if l.Kind == "batch" && w.batchAdmission != nil {
-		if err := w.batchAdmission(ctx, l); err != nil {
+		done := w.launchTiming.within(launchAdmission)
+		err := w.batchAdmission(ctx, l)
+		done()
+		if err != nil {
 			return err
 		}
 	}

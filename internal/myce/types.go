@@ -611,6 +611,7 @@ type Job struct {
 	WaitingSince          time.Time                    `json:"waiting_since,omitempty"`
 	AssignedAt            *time.Time                   `json:"assigned_at,omitempty"`
 	StagingTimings        *StagingTimings              `json:"staging_timings,omitempty"`
+	LaunchTimings         *LaunchTimings               `json:"launch_timings,omitempty"`
 	InputsStagedAt        *time.Time                   `json:"inputs_staged_at,omitempty"` // Worker clock; diagnostic only, scoped to this attempt.
 	FinishedAt            *time.Time                   `json:"finished_at,omitempty"`
 	QueueOrder            int                          `json:"queue_order,omitempty"`
@@ -873,6 +874,7 @@ type AttemptReport struct {
 	DockerCause       retiredField       `json:"docker_cause,omitzero"` // Previous release only (MY-49).
 	Execution
 	StagingTimings *StagingTimings `json:"staging_timings,omitempty"`
+	LaunchTimings  *LaunchTimings  `json:"launch_timings,omitempty"`
 	InputsStagedAt *time.Time      `json:"inputs_staged_at,omitempty"`
 	Session        string          `json:"session"`
 	Started        bool            `json:"started,omitempty"`
@@ -899,6 +901,7 @@ type Result struct {
 	FinalCheckpointGeneration *int64              `json:"final_checkpoint_generation,omitempty"`
 	StoragePeak               *AttemptStoragePeak `json:"storage_peak,omitempty"`
 	StagingTimings            *StagingTimings     `json:"staging_timings,omitempty"`
+	LaunchTimings             *LaunchTimings      `json:"launch_timings,omitempty"`
 	InputsStagedAt            *time.Time          `json:"inputs_staged_at,omitempty"`
 	Diagnostics               *AttemptDiagnostics `json:"diagnostics,omitempty"`
 	PriorityStop              *PriorityPreemption `json:"priority_stop,omitempty"`

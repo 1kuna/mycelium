@@ -911,6 +911,9 @@
         "interrupted": {
           "type": "boolean"
         },
+        "launch_timings": {
+          "$ref": "#/$defs/LaunchTimings"
+        },
         "machine": {
           "type": "string"
         },
@@ -3729,6 +3732,10 @@
           ],
           "x-contract": "diagnostic"
         },
+        "launch_timings": {
+          "$ref": "#/$defs/LaunchTimings",
+          "x-contract": "diagnostic"
+        },
         "ledger": {
           "$ref": "#/$defs/JobLedgerInfo",
           "description": "Retained ledger summary: complete is historical coverage, high_water is the last durable sequence. GET /api/jobs/ID/ledger enumerates immutable entries to a fixed high_water. Older incomplete history is explicit; no diagnostic cap applies.",
@@ -4483,6 +4490,66 @@
         "session",
         "attempt",
         "evidence"
+      ],
+      "type": "object"
+    },
+    "LaunchPhaseTiming": {
+      "properties": {
+        "phase": {
+          "type": "string"
+        },
+        "seconds": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "phase",
+        "seconds"
+      ],
+      "type": "object"
+    },
+    "LaunchTimings": {
+      "properties": {
+        "assignment_received_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "command_start_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "command_start_boundary": {
+          "type": "string"
+        },
+        "current_phase": {
+          "type": "string"
+        },
+        "inputs_ready_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "phases": {
+          "items": {
+            "$ref": "#/$defs/LaunchPhaseTiming"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "preparation_ready_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "assignment_received_at",
+        "observed_at",
+        "phases"
       ],
       "type": "object"
     },

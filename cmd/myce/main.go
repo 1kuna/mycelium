@@ -921,6 +921,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			if j.StagingTimings != nil {
 				fmt.Println("  " + j.StagingTimings.String())
 			}
+			if *statusHistory && j.LaunchTimings != nil {
+				fmt.Println("  " + j.LaunchTimings.String())
+			}
 			for _, a := range j.AttemptHistory {
 				fmt.Printf("  attempt %d hypha=%s session=%s ended=%s state=%s interrupted=%t oom=%t availability=%t operator=%t: %s", a.Attempt, a.Machine, a.Session, a.EndedAt.UTC().Format(time.RFC3339), a.State, a.Interrupted, a.OutOfMemory, a.PoliteStop, a.OperatorStop, a.Reason)
 				if a.PriorityStop != nil {
@@ -958,6 +961,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				fmt.Println()
 				if a.StagingTimings != nil {
 					fmt.Println("    " + a.StagingTimings.String())
+				}
+				if a.LaunchTimings != nil {
+					fmt.Println("    " + a.LaunchTimings.String())
 				}
 			}
 			return nil
