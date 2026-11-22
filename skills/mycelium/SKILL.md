@@ -772,6 +772,10 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   can overlap; do not sum them or label assignment-to-staged as transfer time. Fix what you authored, or record the owner and
   action on your work record and move on. Keep the same job and key; resubmitting,
   pinning or running locally only hides a hold ([waiting](references/waiting.md)).
+  `yield_plan` in the job JSON describes possible relocation or why it is
+  unavailable. Read `hold` for the current admission blocker, including RAM
+  headroom or capacity accumulating for another job. A worker check-in can
+  admit the same job once its current requirements fit and it has the turn.
   Resolve (`myce spec check --resolve FILE`) and status give a compatibility
   action under `hold.next` with its evidence source in `hold.reason`. A terminal
   compatibility finding has its action and source under `finding`. For a newly

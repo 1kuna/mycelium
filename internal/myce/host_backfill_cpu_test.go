@@ -58,6 +58,7 @@ func TestHostBackfillCPUAccumulates(t *testing.T) {
 			}
 			demand := submit(t, q, large)
 			small.Needs.MemoryGB, small.Needs.CPUCores = tc.ram/16, 1
+			small.RequirementReasons = map[string]string{"host": "input is local to this host"}
 			for _, remaining := range [][]*Job{{a, b}, {b}} {
 				for i := 0; i < 3; i++ {
 					clock.Advance(time.Second)
@@ -68,6 +69,9 @@ func TestHostBackfillCPUAccumulates(t *testing.T) {
 					status, err := q.jobSnapshot(later.ID, context.Background())
 					if err != nil || status.DiagnosticCode != "host_capacity_accumulation" || !strings.Contains(status.Reason, demand.ID) {
 						t.Fatalf("missing CPU accumulation diagnostic: %v, %v", status, err)
+					}
+					if status.YieldPlan == nil || status.Hold == nil || status.Hold.Kind != "host_backfill" {
+						t.Fatalf("yield advice masked CPU accumulation: plan=%+v hold=%+v", status.YieldPlan, status.Hold)
 					}
 					for _, r := range remaining {
 						if q.s.Jobs[r.ID].StopAt != nil {

@@ -133,6 +133,64 @@ func TestScarceHostYieldLifecycle(t *testing.T) {
 		t.Fatal("demand did not get released host", hard, job(t, q, demand.ID).Reason)
 	}
 }
+
+func TestScarceHostYieldAdvisoryDoesNotMaskMemoryRelease(t *testing.T) {
+	q, clock := fixture(t)
+	m := m3Machine()
+	m.HostMemoryBudgetGB = 16
+	m.MemoryEnforcement = cgroupMemoryEnforcement
+	m.Capabilities = append(m.Capabilities, scarceHostYieldCapability)
+	machineCheck(t, q, m)
+	holderSpec := spec("experiment")
+	holderSpec.Resumable = false
+	holderSpec.Needs.HostMemoryGB = 12
+	holder := submit(t, q, holderSpec)
+	running := assignedJob(machineCheck(t, q, m))
+	if running == nil || running.ID != holder.ID {
+		t.Fatal("missing memory holder", running)
+	}
+	if err := q.Started(result(running, false)); err != nil {
+		t.Fatal(err)
+	}
+	m.HostAvailableMemoryGB = 1
+	clock.Advance(time.Second)
+	machineCheck(t, q, m, running)
+
+	demandSpec := cpuSpec(1, 0)
+	demandSpec.Needs.Memory = "auto"
+	demandSpec.AllowedMachines = []string{m.ID}
+	demandSpec.RequirementReasons = map[string]string{"host": "input is local to this host"}
+	demand := submit(t, q, demandSpec)
+	blocked, err := q.jobSnapshot(demand.ID, context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blocked.LastMemoryAdmission == nil || blocked.LastMemoryAdmission.Ledger.FreeGB != 0 {
+		t.Fatal("missing live RAM refusal", blocked.LastMemoryAdmission)
+	}
+	if blocked.YieldPlan == nil || len(blocked.YieldPlan.Victims) != 0 {
+		t.Fatal("expected yield advice without a relocation", blocked.YieldPlan)
+	}
+	if blocked.Hold == nil || blocked.Hold.Kind != "host_memory_headroom" {
+		t.Errorf("current RAM blocker hidden: %+v", blocked.Hold)
+	}
+	if next := assignedJob(machineCheck(t, q, m, running)); next != nil {
+		t.Fatal("offered work before RAM release", next.ID)
+	}
+
+	clock.Advance(time.Second)
+	if err := q.Complete(result(running, true)); err != nil {
+		t.Fatal(err)
+	}
+	m.HostAvailableMemoryGB = 16
+	next := assignedJob(machineCheck(t, q, m))
+	if next == nil || next.ID != demand.ID || next.Attempt != 1 {
+		t.Fatal("first fresh check-in after release did not admit demand", job(t, q, demand.ID).Hold)
+	}
+	if err := q.Started(result(next, false)); err != nil {
+		t.Fatal(err)
+	}
+}
 func TestScarceHostYieldFailedFinalSaveHolds(t *testing.T) {
 	for _, forced := range []bool{false, true} {
 		t.Run(fmt.Sprint(forced), func(t *testing.T) {
