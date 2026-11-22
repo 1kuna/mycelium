@@ -177,6 +177,8 @@ type Queue struct {
 	// Ephemeral exact-attempt samples: restart cannot renew a cached credit.
 	admissionWaitDecisions map[string]map[string]admissionWaitDecision // transient actual planner decisions
 	admissionTrace         *admissionTrace
+	idleHistory            idleHistory
+	idleRevision           uint64                               // Protected by q.mu, advances on scheduling commits only.
 	admissionWaitPending   bool                                 // committed maintenance requests an off-lock observation
 	admissionWaitLast      atomic.Pointer[admissionWaitCapture] // completed observation inputs; one retained generation
 	admissionWaitBuild     admissionWaitBuilder                 // post-commit background observation, independent of q.mu
@@ -480,6 +482,9 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		return nil, err
 	}
 	q.traceStartup("load_usage_reader")
+	if !q.simulation {
+		q.openIdleHistory(path + ".idle")
+	}
 	success = true
 	if q.checkpointExpiryStatus == nil {
 		q.checkpointExpiryStatus = &atomic.Pointer[CheckpointExpiryStatus]{}
@@ -599,7 +604,7 @@ func (q *Queue) BeginShutdown() {
 }
 
 func (q *Queue) Close() error {
-	err := q.closeCheckpointShards()
+	err := errors.Join(q.closeCheckpointShards(), q.closeIdleHistory())
 	if q.stopping.Load() {
 		log.Printf("event=queue_shutdown phase=storage_wait")
 	}
@@ -654,6 +659,7 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 		return queueStopping()
 	}
 	var waitCapture *admissionWaitCapture
+	var idle idleCapture
 	available := true
 	if !q.simulation {
 		if q.checkpointProbe != nil {
@@ -692,6 +698,9 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 		q.activeHold = nil
 		unlockTimedRequest(ctx, &q.mu, timing)
 		logQueueHold(duration, "update", fn, &hold)
+		if idle.index != nil {
+			q.offerIdleCapture(idle)
+		}
 		if waitCapture != nil {
 			q.enqueueAdmissionWait(waitCapture)
 		}
@@ -816,6 +825,10 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 		// retained history for callers that may mutate records directly.
 		q.publishReadRuntime()
 		q.commitRecords()
+		if captureWait && q.idleHistory.db != nil {
+			q.idleRevision++
+			idle = idleCapture{index: q.publishedReads.Load(), trace: q.admissionTrace, revision: q.idleRevision}
+		}
 		if captureWait && q.admissionWaitPending {
 			waitCapture = q.freezeAdmissionWait()
 		}
@@ -1574,7 +1587,9 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 		return err
 	}
 	q.publishEfficiencyDiagnostics(diagnostics)
-	return errors.Join(q.maintainEvidence(requestCtx), q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx))
+	evidenceErr := q.maintainEvidence(requestCtx)
+	q.flushIdleEvidence(requestCtx)
+	return errors.Join(evidenceErr, q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx))
 }
 func (q *Queue) CheckinKeyed(c Checkin) (Reply, error) {
 	return q.CheckinKeyedContext(context.Background(), c)
@@ -2075,6 +2090,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			scan := q.placementScan()
 			j := q.plannedPick(&m, scan)
 			if j != nil {
+				q.recordAdmissionSelection(j, &m)
 				out := q.assign(j, &m, scan)
 				reply.Job = &out
 			}

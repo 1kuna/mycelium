@@ -288,6 +288,7 @@ func (q *Queue) assignmentPlan(scan *placementScan) map[string]*Job {
 			continue
 		}
 		scan.assignments[targetKey(selected.m)] = j
+		q.recordAdmissionPlacementElsewhere(j, selected.m)
 		remaining := sets[:0]
 		for _, s := range sets {
 			// A check-in offers one next attempt, even on a multi-device worker.

@@ -852,6 +852,11 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 	}
 	defer finishBudget()
 	contexts = []context.Context{ctx}
+	if options != nil && !options.full && len(options.sections) == 1 && options.sections[0] == "idle" {
+		now := q.clock.Now()
+		idle, err := q.readIdleStatus(ctx, options, now)
+		return Snapshot{Now: now, Idle: idle}, err
+	}
 	if options.compact() {
 		v, summary, delivery, err := q.compactStatusObservation(options, ctx)
 		if err != nil {
@@ -893,6 +898,9 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 	out.RequestLatencies = q.requestLatencies.snapshot()
 	if options.includes("usage") {
 		out.Usage, err = v.readUsage(q.usageReader, out.Now.Add(-7*24*time.Hour), ctx)
+	}
+	if err == nil && options != nil && contains(options.sections, "idle") {
+		out.Idle, err = q.readIdleStatus(ctx, options, out.Now)
 	}
 	trimStatusSections(&out, options)
 	if options != nil && !options.full {

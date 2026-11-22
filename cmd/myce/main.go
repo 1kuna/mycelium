@@ -370,7 +370,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	full := f.Bool("full", false, "show full job IDs in status")
 	statusJSON := f.Bool("json", false, "show status as JSON")
 	statusHistory := f.Bool("history", false, "include all retained status detail (jobs, diagnostics and evidence)")
-	statusSections := f.String("sections", "", "status detail sections: jobs,machines,storage,work,alerts,health,efficiency,usage,diagnostics")
+	statusSections := f.String("sections", "", "status detail sections: jobs,machines,storage,work,alerts,health,efficiency,usage,diagnostics,idle")
+	idleSince := f.String("idle-since", "", "start of idle history window (RFC3339, defaults to seven days ago)")
+	idleIntervals := f.Bool("idle-intervals", false, "include per-host idle interval evidence")
 	statusJobs := f.String("jobs", "", "status jobs: active,recent,all")
 	statusLimit := new(int)
 	if args[0] == "status" {
@@ -405,7 +407,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				names = append(names, "after")
 			}
 			if args[0] == "status" {
-				names = append(names, "history", "json")
+				names = append(names, "history", "json", "sections", "idle-since", "idle-intervals")
 			}
 			for _, name := range names {
 				v := f.Lookup(name)
@@ -976,6 +978,12 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if *statusSections != "" {
 			query.Set("sections", *statusSections)
 		}
+		if *idleSince != "" {
+			query.Set("idle_since", *idleSince)
+		}
+		if *idleIntervals {
+			query.Set("idle_intervals", "true")
+		}
 		if *statusJobs != "" {
 			query.Set("jobs", *statusJobs)
 		}
@@ -1026,6 +1034,12 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return json.NewEncoder(os.Stdout).Encode(myce.NewCompactStatus(s))
 			}
 			return json.NewEncoder(os.Stdout).Encode(s)
+		}
+		if s.Idle != nil && *statusSections == "idle" {
+			for _, line := range s.Idle.Lines() {
+				fmt.Println(line)
+			}
+			return nil
 		}
 		printStatus(s, *full)
 		return nil

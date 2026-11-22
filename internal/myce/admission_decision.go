@@ -19,6 +19,7 @@ const (
 	AdmissionNotConsidered AdmissionOutcome = "not_considered"
 	AdmissionRejected      AdmissionOutcome = "rejected"
 	AdmissionNotSelected   AdmissionOutcome = "not_selected"
+	AdmissionSelected      AdmissionOutcome = "selected"
 	AdmissionCheckin       AdmissionStage   = "checkin"
 	AdmissionEligibility   AdmissionStage   = "candidate_eligibility"
 	AdmissionPlacement     AdmissionStage   = "placement"
@@ -41,6 +42,7 @@ type admissionTrace struct {
 	at               time.Time
 	period           time.Duration
 	jobs             map[string]map[string]AdmissionDecision
+	skipped          AdmissionPredicate
 	selecting        bool
 	active           *AdmissionDecision
 	activeJob        string
@@ -60,28 +62,54 @@ func (q *Queue) beginAdmissionCheckin(m *Machine) {
 		}
 	}
 	q.contactMu.Unlock()
-	if period <= 0 {
-		return
-	}
 	now := q.clock.Now()
-	var trace *admissionTrace
+	trace := &admissionTrace{machine: m.ID, session: m.Session, at: now, period: period, skipped: predicateSelectionSkipped}
 	for _, j := range q.liveJobs() {
 		since := j.Queued
 		if !j.WaitingSince.IsZero() {
 			since = j.WaitingSince
 		}
-		if j.State != "queued" || since.IsZero() || now.Sub(since) < period {
+		if period <= 0 || j.State != "queued" || since.IsZero() || now.Sub(since) < period {
 			continue
 		}
-		if trace == nil {
-			trace = &admissionTrace{machine: m.ID, session: m.Session, at: now, period: period, jobs: map[string]map[string]AdmissionDecision{}}
+		if trace.jobs == nil {
+			trace.jobs = map[string]map[string]AdmissionDecision{}
 		}
 		trace.jobs[j.ID] = map[string]AdmissionDecision{}
 	}
 	q.admissionTrace = trace
-	if trace != nil {
+	if len(trace.jobs) > 0 {
 		q.admissionWaitPending = true
 		q.skipAdmissionSelection(m, predicateSelectionSkipped)
+	}
+}
+
+func (t *admissionTrace) skippedDecision(m *Machine) AdmissionDecision {
+	return AdmissionDecision{At: t.at, CheckinMachine: t.machine, CheckinSession: t.session, Device: m.Device,
+		Outcome: AdmissionNotConsidered, Stage: AdmissionCheckin, Predicate: t.skipped, OpportunitySeconds: t.period.Seconds()}
+}
+
+func (q *Queue) recordAdmissionSelection(j *Job, m *Machine) {
+	t := q.admissionTrace
+	if t == nil || t.machine != m.ID {
+		return
+	}
+	if d, ok := t.jobs[j.ID][targetKey(m)]; ok {
+		d.Outcome, d.Stage, d.Predicate, d.Hold = AdmissionSelected, AdmissionPlacement, predicateSelected, nil
+		t.jobs[j.ID][targetKey(m)] = d
+	}
+}
+
+func (q *Queue) recordAdmissionPlacementElsewhere(j *Job, m *Machine) {
+	t := q.admissionTrace
+	if t == nil || !t.selecting || t.machine == m.ID {
+		return
+	}
+	for key, d := range t.jobs[j.ID] {
+		if d.Outcome == AdmissionNotSelected {
+			d.Stage, d.Predicate = AdmissionPlacement, predicatePlacementElsewhere
+			t.jobs[j.ID][key] = d
+		}
 	}
 }
 
@@ -90,12 +118,15 @@ func (q *Queue) skipAdmissionSelection(m *Machine, reason AdmissionPredicate) {
 	if t == nil {
 		return
 	}
+	t.skipped = reason
+	if len(t.jobs) == 0 {
+		return
+	}
 	// Inventory bounds the per-job endpoints; optional transitions use the
 	// existing measured evidence-byte budget, rather than a sample-count cap.
 	for _, target := range q.placementTargets(m) {
 		for _, targets := range t.jobs {
-			targets[targetKey(target)] = AdmissionDecision{At: t.at, CheckinMachine: t.machine, CheckinSession: t.session,
-				Device: target.Device, Outcome: AdmissionNotConsidered, Stage: AdmissionCheckin, Predicate: reason, OpportunitySeconds: t.period.Seconds()}
+			targets[targetKey(target)] = t.skippedDecision(target)
 		}
 	}
 }
@@ -107,11 +138,16 @@ func (q *Queue) beginAdmissionCandidate(j *Job, m *Machine) (*AdmissionDecision,
 	}
 	previous, previousJob := t.active, t.activeJob
 	t.active, t.activeJob = nil, ""
-	if t.machine == m.ID {
-		if d, ok := t.jobs[j.ID][targetKey(m)]; ok {
-			d.Outcome, d.Stage, d.Predicate, d.Hold = AdmissionNotSelected, AdmissionEligibility, predicateCandidateUnavailable, nil
-			t.active, t.activeJob = &d, j.ID
+	if t.machine == m.ID && (j.State == "queued" || t.jobs[j.ID] != nil) {
+		d := t.skippedDecision(m)
+		if t.jobs == nil {
+			t.jobs = map[string]map[string]AdmissionDecision{}
 		}
+		if t.jobs[j.ID] == nil {
+			t.jobs[j.ID] = map[string]AdmissionDecision{}
+		}
+		d.Outcome, d.Stage, d.Predicate = AdmissionNotSelected, AdmissionEligibility, predicateCandidateUnavailable
+		t.active, t.activeJob = &d, j.ID
 	}
 	return previous, previousJob
 }
@@ -286,6 +322,7 @@ const (
 	predicateModelLogPolicy       AdmissionPredicate = "model_log_policy"
 	predicateModelProject         AdmissionPredicate = "model_project"
 	predicateNativeNetwork        AdmissionPredicate = "native_network"
+	predicatePlacementElsewhere   AdmissionPredicate = "placement_elsewhere"
 	predicatePreemptionPlacement  AdmissionPredicate = "preemption_placement"
 	predicatePreparationActive    AdmissionPredicate = "preparation_active"
 	predicatePreparationStopping  AdmissionPredicate = "preparation_stopping"
@@ -305,6 +342,7 @@ const (
 	predicateSelectionNotReached  AdmissionPredicate = "selection_not_reached"
 	predicateSelectionOrder       AdmissionPredicate = "selection_order"
 	predicateSelectionSkipped     AdmissionPredicate = "selection_skipped"
+	predicateSelected             AdmissionPredicate = "selected"
 	predicateSharedHostBackoff    AdmissionPredicate = "shared_host_backoff"
 	predicateSharedHostProfile    AdmissionPredicate = "shared_host_profile"
 	predicateStagingHostRetry     AdmissionPredicate = "staging_host_retry"

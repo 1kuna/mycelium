@@ -97,6 +97,9 @@ when an upload-creation response has no accepted offset.
   Existing CPU work keeps its stop/checkpoint contract and may need to finish.
 - `myce COMMAND --help` is the flag reference. A field your installed queue or
   worker doesn't return is unknown, not false.
+- `myce status --sections idle --json` gives seven days of idle machine-hours
+  while runnable work waited, by machine class and refusal. Check the unknown
+  hours before interpreting the total. [Status reference](https://github.com/1kuna/mycelium/blob/main/docs/status.md#idle-machine-hours-while-runnable-work-waited)
 
 Status reads, waits and keyed submissions ride through a queue restart within
 the caller's timeout or cancellation budget. Keep the same submission key when

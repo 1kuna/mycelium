@@ -397,6 +397,7 @@ func (q *Queue) maintainEvidence(ctx context.Context) error {
 	report.OverBudget = !report.Unavailable && report.RetainedBytes > report.BudgetBytes
 	q.evidenceRetention = &report
 	unlock()
+	q.idleHistory.setBudget(report)
 	return nil
 }
 

@@ -931,6 +931,7 @@ type LogChunk struct {
 }
 
 type Snapshot struct {
+	Idle                *IdleReport          `json:"idle,omitempty"`
 	Summary             *StatusSummary       `json:"summary,omitempty"`
 	Efficiency          *EfficiencyReport    `json:"efficiency,omitempty"`
 	EvidenceRetention   *EvidenceRetention   `json:"evidence_retention,omitempty"`
