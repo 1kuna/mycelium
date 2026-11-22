@@ -274,8 +274,9 @@ type Queue struct {
 	usageWrites     []usageSample
 	s               state
 
-	restartControlUntil time.Duration       // Available startup service, not blocked wall time.
-	contactTransaction  *contactTransaction // Lazy, per-worker undo while q.mu owns a transaction.
+	restartControlUntil  time.Duration // Available startup service, not blocked wall time.
+	restartGraceDuration time.Duration
+	contactTransaction   *contactTransaction // Lazy, per-worker undo while q.mu owns a transaction.
 
 	persistencePageBytes    int
 	histories               *historySnapshot // Measurement histories as SQLite holds them (history_persistence.go).
@@ -449,8 +450,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		q.contacts[id] = &workerContact{session: m.Session}
 	}
 	if len(data) > 0 {
-		q.restartUntil = clock.Now().Add(RestartGrace)
-		q.restartControlUntil = q.controlNow() + RestartGrace
+		q.beginRestartGrace(RestartGrace)
 		for id, m := range q.s.Machines {
 			if !m.Gone {
 				q.unreported[id] = true
@@ -499,10 +499,15 @@ func (q *Queue) SetRestartGrace(d time.Duration) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if len(q.unreported) > 0 {
-		q.restartUntil = q.clock.Now().Add(d)
-		q.restartControlUntil = q.controlNow() + d
+		q.beginRestartGrace(d)
 		q.republishReads()
 	}
+}
+
+func (q *Queue) beginRestartGrace(d time.Duration) {
+	q.restartUntil = q.clock.Now().Add(d)
+	q.restartControlUntil = q.controlNow() + d
+	q.restartGraceDuration = d
 }
 
 const DefaultProductionInfrastructureRetries = 2
@@ -2677,7 +2682,9 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 	if q.networkQuiet {
 		warnings = append(warnings, "most workers quiet: waiting for the network to return")
 	}
-	if q.inRestartGrace(q.clock.Now()) {
+	out.Now = q.clock.Now()
+	out.RestartGrace = q.restartGraceStatus(out.Now)
+	if out.RestartGrace.Active {
 		for id := range q.unreported {
 			if m := q.s.Machines[id]; m != nil && !q.maintenanceBlocked(hostID(m)) {
 				warnings = append(warnings, "queue restarted: waiting for workers to report")
@@ -2748,7 +2755,6 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 	out.Holds = append(out.Holds, operatorHolds(out.Reservations, out.ComponentExclusions, out.DeviceMaintenance)...)
 	sortHolds(out.Holds)
 	out.PriorityPolicy = q.priorityPolicyRecord()
-	out.Now = q.clock.Now()
 	order, reasons, holds := map[string]int{}, map[string]string{}, map[string]*Hold{}
 	if !compact {
 		order, reasons, holds = q.queueProjection()

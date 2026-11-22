@@ -932,12 +932,19 @@ type LogChunk struct {
 	Text   string `json:"text"`
 }
 
+type RestartGraceStatus struct {
+	Active           bool    `json:"active"`
+	AccruedSeconds   float64 `json:"accrued_seconds"`
+	RemainingSeconds float64 `json:"remaining_seconds"`
+}
+
 type Snapshot struct {
 	Idle                *IdleReport          `json:"idle,omitempty"`
 	Summary             *StatusSummary       `json:"summary,omitempty"`
 	Efficiency          *EfficiencyReport    `json:"efficiency,omitempty"`
 	EvidenceRetention   *EvidenceRetention   `json:"evidence_retention,omitempty"`
 	Freshness           *SnapshotFreshness   `json:"freshness,omitempty"`
+	RestartGrace        *RestartGraceStatus  `json:"restart_grace,omitempty"`
 	StorageObservations []StorageObservation `json:"storage_observations,omitempty"`
 	JobsPage            *StatusJobsPage      `json:"jobs_page,omitempty"`
 	RequestLatencies    []RequestLatency     `json:"request_latencies,omitempty"`

@@ -901,7 +901,7 @@ func (q *Queue) freezeReadCapture() *committedReadCapture {
 	generation, models, environments, runtime := q.readGeneration, q.readModels, q.readEnvironments, q.readRuntime
 	source := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable, evidenceRetention: q.evidenceRetention, checkpointExpiryStatus: q.checkpointExpiryStatus, efficiencyView: q.efficiencyView,
 		simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts, productionInfrastructureRetries: q.productionInfrastructureRetries,
-		restartUntil: q.restartUntil, networkQuiet: q.networkQuiet, root: q.root, files: q.files, diskHost: q.diskHost, fileRetention: q.fileRetention, hostMemorySamples: q.readSamples, detachedRead: true}
+		networkQuiet: q.networkQuiet, root: q.root, files: q.files, diskHost: q.diskHost, fileRetention: q.fileRetention, hostMemorySamples: q.readSamples, detachedRead: true}
 	ledgers := make(map[string]observationMachineLedger, len(q.s.Machines))
 	fresh := make(map[string]readFreshness, len(q.s.Machines))
 	for key, m := range q.s.Machines {
@@ -978,7 +978,7 @@ func (capture *committedReadCapture) readQueue(ctx context.Context, id string, r
 func (capture *committedReadCapture) statusContactInputs(q *Queue, at time.Time) *Queue {
 	base := capture.contactInputs
 	v := &Queue{clock: observationClock{at}, simulation: base.simulation, lossTimeouts: base.lossTimeouts,
-		restartUntil: base.restartUntil, restartControlUntil: base.restartControlUntil,
+		restartUntil: base.restartUntil, restartControlUntil: base.restartControlUntil, restartGraceDuration: base.restartGraceDuration,
 		s: base.s, calls: base.calls, contacts: make(map[string]*workerContact, len(base.s.Machines))}
 	if base.mu.control != nil {
 		v.mu.control = &controlClock{clock: v.clock.Now, at: at, opportunity: q.controlNow()}
@@ -1037,7 +1037,7 @@ func (capture *committedReadCapture) detachedQueue(ctx context.Context, readAt t
 	base := capture.source
 	// Preserve the original capture clock and service opportunity while deriving
 	// contact. A later read clock may age suspicion, but cannot renew its grace.
-	contact := &Queue{clock: base.clock, restartUntil: base.restartUntil}
+	contact := &Queue{clock: base.clock}
 	inputs := capture.contactInputs
 	if live != nil {
 		inputs = capture.statusContactInputs(live, readAt)
@@ -1046,7 +1046,7 @@ func (capture *committedReadCapture) detachedQueue(ctx context.Context, readAt t
 	inputs.freezeContactView(contact)
 	source := &Queue{clock: committedClock{at: readAt, committed: base.clock.Now()}, nasAvailable: base.nasAvailable, evidenceRetention: base.evidenceRetention, checkpointExpiryStatus: base.checkpointExpiryStatus, efficiencyView: base.efficiencyView,
 		simulation: base.simulation, productionGrace: base.productionGrace, lossTimeouts: base.lossTimeouts, productionInfrastructureRetries: base.productionInfrastructureRetries,
-		restartUntil: contact.restartUntil, networkQuiet: base.networkQuiet, root: base.root, files: base.files, fileRetention: base.fileRetention, hostMemorySamples: base.hostMemorySamples,
+		restartUntil: contact.restartUntil, restartGraceDuration: contact.restartGraceDuration, networkQuiet: base.networkQuiet, root: base.root, files: base.files, fileRetention: base.fileRetention, hostMemorySamples: base.hostMemorySamples,
 		contacts: contact.contacts, detachedRead: true}
 	if contact.mu.control != nil {
 		source.mu.control = &controlClock{clock: source.clock.Now, at: source.clock.Now(), opportunity: contact.controlNow()}

@@ -637,6 +637,98 @@ func TestRestartWarningClearsAfterEnabledWorkersReport(t *testing.T) {
 	}
 }
 
+func TestRestartGraceStatusDuringSustainedControlOccupancy(t *testing.T) {
+	q, clock := fixture(t)
+	peer, silent := machine("peer", "fake"), machine("silent", "fake")
+	drained := machine("drained-worker", "fake", "drained-host")
+	disabled := machine("disabled-worker", "fake", "disabled-host")
+	workers := []Machine{silent, drained, disabled}
+	for _, m := range workers {
+		check(t, q, m, nil)
+	}
+	check(t, q, peer, nil)
+	if _, err := q.ChangeHostMaintenance(drained.HostID, HostMaintenanceRequest{Action: "drain"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.ChangeHostMaintenance(disabled.HostID, HostMaintenanceRequest{Action: "disable"}); err != nil {
+		t.Fatal(err)
+	}
+
+	assertStatus := func(want RestartGraceStatus, warning string) {
+		t.Helper()
+		api := (API{Queue: q, Token: "test"}).Handler()
+		for _, suffix := range []string{"", "?view=snapshot", "?detail=full"} {
+			r := httptest.NewRequest(http.MethodGet, "/api/status"+suffix, nil)
+			r.Header.Set("Authorization", "Bearer test")
+			w := httptest.NewRecorder()
+			api.ServeHTTP(w, r)
+			var got struct {
+				Grace   *RestartGraceStatus `json:"restart_grace"`
+				Warning string              `json:"warning"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &got); w.Code != http.StatusOK || err != nil {
+				t.Fatalf("status%s returned HTTP %d: %v\n%s", suffix, w.Code, err, w.Body)
+			}
+			if got.Grace == nil || *got.Grace != want || got.Warning != warning {
+				t.Fatalf("status%s grace = %+v, warning = %q, want %+v and %q", suffix, got.Grace, got.Warning, want, warning)
+			}
+		}
+	}
+	assertStatus(RestartGraceStatus{}, "")
+
+	q = reopenQueue(t, q, clock)
+	const warning = "queue restarted: waiting for workers to report"
+	assertStatus(RestartGraceStatus{Active: true, RemainingSeconds: RestartGrace.Seconds()}, warning)
+	const idle = 45 * time.Second
+	clock.Advance(idle)
+	// Back-to-back control service can keep the clock continuously occupied
+	// even while the peer keeps completing valid check-ins.
+	func() {
+		q.mu.control.begin()
+		defer q.mu.control.end(func() {})
+		for range 3 {
+			clock.Advance(time.Hour)
+			check(t, q, peer, nil)
+		}
+		assertStatus(RestartGraceStatus{Active: true, AccruedSeconds: idle.Seconds(), RemainingSeconds: (RestartGrace - idle).Seconds()}, warning)
+	}()
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	for _, worker := range workers {
+		if got := q.s.Machines[worker.ID]; got.Gone {
+			t.Fatalf("%s was marked gone during grace", worker.ID)
+		}
+	}
+	if c := q.s.Health.Conditions["host/"+silent.ID]; !c.Since.IsZero() {
+		t.Fatalf("silent-worker health alert started during grace: %+v", c)
+	}
+
+	clock.Advance(RestartGrace - idle)
+	// A status read can observe the expired timer before maintenance marks
+	// the workers gone. Reading either status shape does not run maintenance.
+	assertStatus(RestartGraceStatus{AccruedSeconds: RestartGrace.Seconds()}, "")
+	for _, worker := range workers {
+		if q.s.Machines[worker.ID].Gone {
+			t.Fatalf("status mutated worker %s", worker.ID)
+		}
+	}
+	check(t, q, peer, nil)
+	for _, worker := range workers {
+		if !q.s.Machines[worker.ID].Gone {
+			t.Fatalf("%s was not marked gone after grace", worker.ID)
+		}
+	}
+	if c := q.s.Health.Conditions["host/"+silent.ID]; c.Since.IsZero() {
+		t.Fatal("silent enabled worker did not start its health alert timer after grace")
+	}
+	for _, worker := range []Machine{drained, disabled} {
+		if c := q.s.Health.Conditions["host/"+worker.ID]; !c.Since.IsZero() {
+			t.Fatalf("maintenance worker %s started a stale health alert: %+v", worker.ID, c)
+		}
+	}
+}
+
 func TestControlClockOverlappingReadersCountOnce(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(100, 0)}
 	c := &controlClock{clock: clock.Now, at: clock.Now()}
