@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"strings"
 	"time"
@@ -78,10 +79,7 @@ func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileIn
 			return err
 		}
 		out = FileInputClaim{ID: ID(), Project: s.Project, Class: s.Class, File: ref, At: q.clock.Now()}
-		if q.s.FileInputClaims == nil {
-			q.s.FileInputClaims = map[string]FileInputClaim{}
-		}
-		q.s.FileInputClaims[out.ID] = out
+		q.editInputClaims()[out.ID] = out
 		return nil
 	}, nil)
 	return out, err
@@ -91,10 +89,24 @@ func inputClaimError() error {
 	return &HTTPError{Status: http.StatusConflict, Code: "file_input_claim_required", Message: "input upload requires a queue-issued claim for this project and file; use a current submit/profile client or POST /api/files/input-claims before uploading"}
 }
 
+// Clone once on the first edit so unrelated transactions can borrow the
+// original map for rollback. Every write invalidates the prepared encoding.
+func (q *Queue) editInputClaims() map[string]FileInputClaim {
+	if q.records != nil && q.records.updating && !q.records.editingInputClaims {
+		q.s.FileInputClaims = maps.Clone(q.s.FileInputClaims)
+		q.records.editingInputClaims = true
+	}
+	if q.s.FileInputClaims == nil {
+		q.s.FileInputClaims = map[string]FileInputClaim{}
+	}
+	q.fileInputClaimsJSON = nil
+	return q.s.FileInputClaims
+}
+
 func (q *Queue) forgetFileInputClaims(hash string, before time.Time) {
 	for id, claim := range q.s.FileInputClaims {
 		if claim.File.SHA256 == hash && !claim.At.After(before) {
-			delete(q.s.FileInputClaims, id)
+			delete(q.editInputClaims(), id)
 		}
 	}
 }
@@ -179,7 +191,7 @@ func (q *Queue) inputClaimContext(ctx context.Context, ref FileRef, allocate boo
 				return inputClaimError()
 			}
 			current.Allocated = true
-			q.s.FileInputClaims[id] = current
+			q.editInputClaims()[id] = current
 			return nil
 		}, nil); err != nil {
 			return ctx, err
@@ -217,7 +229,7 @@ func (q *Queue) settleFileInputClaims(s Spec) {
 					delay = max(delay, now.Sub(claim.At))
 				}
 				claim.SettledAt = now
-				q.s.FileInputClaims[id] = claim
+				q.editInputClaims()[id] = claim
 			}
 		}
 	}

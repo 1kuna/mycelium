@@ -17,7 +17,7 @@ import (
 
 // A busy queue can spend the old whole-finalization budget servicing an upload.
 // Advance the client/queue clock while the real queue mutex blocks a small
-// output's creation upload, without spending the equivalent wall time.
+// output's creation upload and a competing check-in over retained input claims.
 func TestFinalizationUploadBusyQueue(t *testing.T) {
 	q, clock := fixture(t)
 	// Go contexts use wall-clock deadlines. Align the injected clock once, then
@@ -35,6 +35,9 @@ func TestFinalizationUploadBusyQueue(t *testing.T) {
 	j := check(t, q, m, nil).Job
 	if j == nil || j.ID != submitted.ID {
 		t.Fatal("no assignment")
+	}
+	if err := q.update(func() error { seedRetainedInputClaims(q, 7000); return nil }); err != nil {
+		t.Fatal(err)
 	}
 	j.Spec.Run.Workdir = t.TempDir()
 	path := filepath.Join(j.Spec.Run.Workdir, "short.mp4")
@@ -61,16 +64,25 @@ func TestFinalizationUploadBusyQueue(t *testing.T) {
 	defer cancel()
 	parent := t.TempDir()
 	done := make(chan outcome, 1)
+	checkinDone := make(chan error, 1)
 	func() {
 		q.mu.Lock()
 		defer q.mu.Unlock()
 		go func() {
+			_, err := q.Checkin(Checkin{Machine: m, period: time.Second, Running: &Execution{ID: j.ID, Attempt: j.Attempt}})
+			checkinDone <- err
+		}()
+		await(t, func() bool { return q.mu.waiting.Load() > 0 })
+		go func() {
 			finished, err := w.finishFileResultContext(ctx, *j, result(j, true), parent)
 			done <- outcome{finished, err}
 		}()
-		await(t, func() bool { return q.mu.waiting.Load() > 0 })
+		await(t, func() bool { return q.mu.waiting.Load() > 1 })
 		clock.Advance(time.Minute)
 	}()
+	if err := <-checkinDone; err != nil {
+		t.Fatal(err)
+	}
 	gotResult := <-done
 	finished, err := gotResult.result, gotResult.err
 	if err != nil || !finished.Success || finished.ExecutionCause != nil {

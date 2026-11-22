@@ -279,6 +279,7 @@ type Queue struct {
 	histories               *historySnapshot // Measurement histories as SQLite holds them (history_persistence.go).
 	historiesPending        *historySnapshot
 	efficiencyHealthJSON    json.RawMessage            // Same immutable generation as s.EfficiencyHealth; q.mu.
+	fileInputClaimsJSON     json.RawMessage            // Same immutable generation as s.FileInputClaims; q.mu.
 	persistedStateFields    map[string]json.RawMessage // Committed fragments only; q.mu.
 	flushHistoriesNow       bool
 	observePersistence      func(queuePersistenceTiming)

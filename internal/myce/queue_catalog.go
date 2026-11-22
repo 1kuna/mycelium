@@ -148,9 +148,10 @@ func queueBase(s state, machines bool) state {
 }
 
 type recordUndo struct {
-	base           state
-	catalogs       state // Borrow map containers; touched entries have detached undo.
-	machines       map[string]*Machine
-	health         []HealthAlert
-	efficiencyJSON json.RawMessage
+	base            state
+	catalogs        state // Borrow map containers; touched entries have detached undo.
+	machines        map[string]*Machine
+	health          []HealthAlert
+	efficiencyJSON  json.RawMessage
+	inputClaimsJSON json.RawMessage
 }
