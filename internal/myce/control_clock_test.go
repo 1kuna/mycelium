@@ -603,6 +603,40 @@ func TestControlClockRestartGraceExcludesQueueStall(t *testing.T) {
 	}
 }
 
+func TestRestartWarningClearsAfterEnabledWorkersReport(t *testing.T) {
+	q, clock := fixture(t)
+	first, second := machine("first", "fake"), machine("second", "fake")
+	offline := machine("offline-worker", "fake", "maintenance-host")
+	for _, m := range []Machine{first, second, offline} {
+		check(t, q, m, nil)
+	}
+	if _, err := q.ChangeHostMaintenance(offline.HostID, HostMaintenanceRequest{Action: "drain"}); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	q = reopenQueue(t, q, clock)
+
+	q.mu.Lock()
+	clock.Advance(10 * RestartGrace)
+	q.mu.Unlock()
+	check(t, q, first, nil)
+	const warning = "queue restarted: waiting for workers to report"
+	snapshot, err := q.statusSnapshot()
+	if err != nil || snapshot.Warning != warning {
+		t.Fatalf("warning while an enabled worker still owes a report = %q, err = %v", snapshot.Warning, err)
+	}
+
+	check(t, q, second, nil)
+	snapshot, err = q.statusSnapshot()
+	if err != nil || snapshot.Warning != "" {
+		t.Fatalf("warning with only the drained worker silent = %q, err = %v", snapshot.Warning, err)
+	}
+	status, err := q.HostMaintenanceStatus(offline.HostID)
+	if err != nil || status.Policy.Mode != "drained" || len(status.Workers) != 1 || status.Workers[0].Fresh || status.Workers[0].Machine.Gone || !q.inRestartGrace(clock.Now()) {
+		t.Fatalf("expected a drained and still-protected worker during restart grace: %+v, err = %v", status, err)
+	}
+}
+
 func TestControlClockOverlappingReadersCountOnce(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(100, 0)}
 	c := &controlClock{clock: clock.Now, at: clock.Now()}

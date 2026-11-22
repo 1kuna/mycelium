@@ -109,6 +109,10 @@ Status reads, waits and keyed submissions ride through a queue restart within
 the caller's timeout or cancellation budget. Keep the same submission key when
 retrying an uncertain write; an unkeyed write cannot be safely replayed. TLS
 identity refusals still stop immediately.
+After a restart, `myce status` warns while the queue waits for workers outside
+planned host maintenance to report during recovery. Workers that have checked
+in can take work when otherwise eligible. Drained and disabled hosts still
+show their maintenance holds.
 During queue restart recovery, an exact attempt proven to have started no main,
 sidecars or environment preparation can retry a control-unreachable start gate
 without spending a loss or infrastructure retry. Keep its job and key. The
