@@ -113,20 +113,35 @@ func (q *Queue) contactFresh(m *Machine, now time.Time, includePending bool) boo
 // Restart recovery also needs available queue service; a startup stall cannot
 // consume the explicit operator recovery window before workers can reconcile.
 func (q *Queue) inRestartGrace(now time.Time) bool {
+	return q.restartGraceRemaining(now) > 0
+}
+
+func (q *Queue) restartGraceRemaining(now time.Time) time.Duration {
 	if q.mu.control != nil && q.restartControlUntil > 0 {
-		return q.controlNow() < q.restartControlUntil
+		return q.restartControlUntil - q.controlNow()
 	}
-	return now.Before(q.restartUntil)
+	return q.restartUntil.Sub(now)
+}
+
+func (q *Queue) restartGraceStatus(now time.Time) *RestartGraceStatus {
+	remaining := max(0, q.restartGraceRemaining(now))
+	return &RestartGraceStatus{
+		Active:           remaining > 0,
+		AccruedSeconds:   max(0, q.restartGraceDuration-remaining).Seconds(),
+		RemainingSeconds: remaining.Seconds(),
+	}
 }
 
 // freezeContactView preserves accepted cadence, suspicion and remaining service
 // grace in a detached observation. The caller owns q.mu or an immutable source.
 func (q *Queue) freezeContactView(v *Queue) {
+	v.restartUntil, v.restartGraceDuration = q.restartUntil, q.restartGraceDuration
 	if q.mu.control != nil {
-		v.mu.control = &controlClock{clock: v.clock.Now, at: v.clock.Now(), opportunity: q.controlNow()}
-	}
-	if q.mu.control != nil && q.restartControlUntil > 0 {
-		v.restartUntil = v.clock.Now().Add(q.restartControlUntil - q.controlNow())
+		opportunity := q.controlNow()
+		v.mu.control = &controlClock{clock: v.clock.Now, at: v.clock.Now(), opportunity: opportunity}
+		if q.restartControlUntil > 0 {
+			v.restartUntil = v.clock.Now().Add(q.restartControlUntil - opportunity)
+		}
 	}
 	// Freeze session contact at capture time just like the queue clock. Without
 	// it, a detached fleet view turns an in-flight check-in into worker silence.
@@ -143,7 +158,7 @@ func (q *Queue) freezeContactView(v *Queue) {
 // the live queue merely to copy a worker's contact evidence.
 func (q *Queue) captureContactInputs(clock Clock) *Queue {
 	v := &Queue{clock: clock, simulation: q.simulation, lossTimeouts: q.lossTimeouts,
-		restartUntil: q.restartUntil, restartControlUntil: q.restartControlUntil,
+		restartUntil: q.restartUntil, restartControlUntil: q.restartControlUntil, restartGraceDuration: q.restartGraceDuration,
 		s:     state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}, ModelSlots: map[string]*ModelSlot{}},
 		calls: map[string]*ModelCall{}, contacts: map[string]*workerContact{}}
 	if q.mu.control != nil {

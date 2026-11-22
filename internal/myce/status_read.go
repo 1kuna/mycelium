@@ -364,7 +364,7 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	v := &Queue{clock: q.detachedClock(q.clock.Now()), nasAvailable: q.nasAvailable,
 		evidenceRetention: q.evidenceRetention, checkpointExpiryStatus: q.checkpointExpiryStatus, simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts,
 		productionInfrastructureRetries: q.productionInfrastructureRetries,
-		restartUntil:                    q.restartUntil, networkQuiet: q.networkQuiet, root: q.root}
+		networkQuiet:                    q.networkQuiet, root: q.root}
 	q.freezeContactView(v)
 
 	s := q.s

@@ -349,7 +349,7 @@ func (q *Queue) compactStatusObservation(o *statusOptions, ctx context.Context) 
 // under q.mu or a private detached source built from a publication.
 func (q *Queue) compactStatusView(o *statusOptions, ctx context.Context, retained int, delivery *HealthAlertDelivery) (*Queue, *StatusSummary, *HealthAlertDelivery, error) {
 	v := &Queue{clock: q.detachedClock(q.clock.Now()), nasAvailable: q.nasAvailable, simulation: q.simulation,
-		restartUntil: q.restartUntil, networkQuiet: q.networkQuiet, root: q.root, detachedRead: true}
+		networkQuiet: q.networkQuiet, root: q.root, detachedRead: true}
 	q.captureContactInputs(v.clock).freezeContactView(v)
 	s := state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}, Hosts: q.s.Hosts,
 		HostReleases: q.s.HostReleases, HostMaintenance: q.s.HostMaintenance, DeviceMaintenance: q.s.DeviceMaintenance,

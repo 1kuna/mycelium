@@ -15,6 +15,7 @@ import (
 type CompactStatus struct {
 	Now           time.Time            `json:"now"`
 	QueueRelease  RunningRelease       `json:"queue_release"`
+	RestartGrace  *RestartGraceStatus  `json:"restart_grace,omitempty"`
 	RetainedJobs  int                  `json:"retained_jobs"`
 	Counts        map[string]int       `json:"counts"`
 	Alerts        []StatusAlertGroup   `json:"alert_groups,omitempty"`
@@ -94,7 +95,7 @@ func compactJobGroup(j *Job) string {
 // NewCompactStatus projects a default (summary) snapshot. Reasons are whole;
 // the text view bounds them to one line.
 func NewCompactStatus(s Snapshot) CompactStatus {
-	c := CompactStatus{Now: s.Now, QueueRelease: s.QueueRelease, Counts: map[string]int{}, Hyphas: []CompactHypha{}, Detail: compactStatusDetail, Freshness: s.Freshness}
+	c := CompactStatus{Now: s.Now, QueueRelease: s.QueueRelease, RestartGrace: s.RestartGrace, Counts: map[string]int{}, Hyphas: []CompactHypha{}, Detail: compactStatusDetail, Freshness: s.Freshness}
 	if s.Summary != nil {
 		c.RetainedJobs, c.Alerts, c.Leases, c.NotQuiescent = s.Summary.RetainedJobs, s.Summary.Alerts, s.Summary.Leases, s.Summary.NotQuiescent
 	}

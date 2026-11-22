@@ -66,7 +66,7 @@ func (q *Queue) captureSubmissionAdvice() *submissionAdviceSnapshot {
 	v := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable,
 		simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts,
 		productionInfrastructureRetries: q.productionInfrastructureRetries,
-		restartUntil:                    q.restartUntil, networkQuiet: q.networkQuiet, root: q.root,
+		networkQuiet:                    q.networkQuiet, root: q.root,
 		hostMemorySamples: q.readSamples, detachedRead: true}
 	// Policy records are replaced, never mutated. Keep this small fallback even
 	// when cold decoding cannot fit the post-commit request allowance.
