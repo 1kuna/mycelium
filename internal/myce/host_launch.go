@@ -232,6 +232,17 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 				reject("production_admission")
 				return nil
 			}
+			if q.s.FleetUpgrade != nil && q.s.FleetUpgrade.State == "running" && (p.CPUCores > 0 || !q.workerHasCPUReservation(m)) {
+				claim := &Job{ID: p.Attempt}
+				if p.Spec != nil {
+					claim.Spec = *p.Spec
+				}
+				claim.Spec.Needs = ResourceNeeds{CPUCores: max(1, p.CPUCores)}
+				if !q.fleetProbeBackfillAllows(claim, m) {
+					reject("host_capacity_accumulation")
+					return nil
+				}
+			}
 		}
 		if !p.Started && !q.reservationAllows(q.s.Jobs[p.Demand], allocationMachine(m, []string{p.Device})) {
 			reject("reservation")

@@ -538,6 +538,13 @@ func (q *Queue) maintainModels() {
 		for _, m := range machines {
 			var p *placementPlan
 			s := q.s.ModelSlots[targetSlotKey(m, c.Model)]
+			if q.s.FleetUpgrade != nil && q.s.FleetUpgrade.State == "running" && (s == nil || !slotReservesMemory(s)) {
+				demand := callJob(c)
+				demand.Spec.Needs.MemoryGB, demand.Spec.Needs.HostMemoryGB = model.MemoryGB, model.HostMemoryGB
+				if !q.fleetProbeBackfillAllows(demand, m, scan) {
+					continue
+				}
+			}
 			switch {
 			case s != nil && s.State == "ready":
 				if limit := declaredCallLimit(c, model); limit >= 0 {

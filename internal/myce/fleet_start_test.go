@@ -241,6 +241,18 @@ func TestFleetUpgradeStartProbeDefersAndReturns(t *testing.T) {
 				fleetTick(t, q)
 				active := q.fleetActiveHost()
 				if active == nil {
+					if !recovers && q.s.FleetUpgrade.State == "running" {
+						// A single return pass is no longer the admission bound.
+						// Keep the runtime healthy through the last instant so the
+						// capacity deficit alone decides the outcome.
+						c.Advance(h.startCapacityDeadline().Sub(c.Now()) - time.Nanosecond)
+						check(t, q, *q.s.Machines[h.Machine], nil)
+						if q.s.FleetUpgrade.State != "running" || cancelled(job(t, q, probe)) {
+							t.Fatal("admission closed before the capacity deadline", h)
+						}
+						c.Advance(time.Nanosecond)
+						fleetTick(t, q)
+					}
 					continue
 				}
 				if active.Host == "b" && recovers {
@@ -260,7 +272,7 @@ func TestFleetUpgradeStartProbeDefersAndReturns(t *testing.T) {
 					t.Fatalf("recovered probe did not prove same worker: %+v", h)
 				}
 			} else {
-				if h.WorkerDone || h.Phase != "deferred" || h.Outcome != FleetHostDeferred || h.Failure != "" || !cancelled(job(t, q, probe)) {
+				if h.WorkerDone || h.Phase != "deferred" || h.Outcome != FleetHostDeferred || h.Failure != "" || !cancelled(job(t, q, probe)) || !strings.Contains(h.DeferredReason, "0.125 GiB short") {
 					t.Fatalf("persistent pressure became rollout failure or false acceptance: %+v", h)
 				}
 				status := q.fleetUpgradeStatus()
@@ -273,6 +285,7 @@ func TestFleetUpgradeStartProbeDefersAndReturns(t *testing.T) {
 					t.Fatal("completed rollout hid deferred host", compact.FleetUpgrade)
 				}
 				// Same-release reruns must not skip the remaining start debt.
+				fleetRefreshWithoutStart(t, q, c)
 				q.s.Machines[h.Machine].HostAvailableMemoryGB = 32
 				if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
 					t.Fatal(err)
@@ -285,6 +298,144 @@ func TestFleetUpgradeStartProbeDefersAndReturns(t *testing.T) {
 			}
 			if !reflect.DeepEqual(order, want) {
 				t.Fatalf("host/queue order %v, want %v", order, want)
+			}
+		})
+	}
+}
+
+func TestFleetUpgradeDeferredProbeAccumulatesCapacity(t *testing.T) {
+	for _, mode := range []string{"experiment", "stale proof", "production"} {
+		t.Run(mode, func(t *testing.T) {
+			q, c, _ := fleetFixture(t, "upgrade-host")
+			if mode == "production" {
+				// A custom tier must not let the smoke take the only room in
+				// which production could start.
+				policy := defaultPriorityPolicy()
+				policy.Tiers = append([]PriorityTier{{"maintenance", []string{"mycelium/maintenance"}}}, policy.Tiers...)
+				if _, err := q.SetPriorityPolicy(q.PriorityPolicy().Revision, policy); err != nil {
+					t.Fatal(err)
+				}
+			}
+			m := backfillMachine("upgrade-host", 1)
+			m.Fleet = fleetTestProof(c, m.Session, 200, false)
+			machineCheck(t, q, m)
+			var running []*Job
+			for _, gigabytes := range []float64{0.78, 0.06, 0.14} {
+				s := cpuSpec(1, gigabytes)
+				s.AllowedMachines = []string{m.ID}
+				j := submit(t, q, s)
+				run := assignedJob(machineCheck(t, q, m, running...))
+				if run == nil || run.ID != j.ID {
+					t.Fatal("saturating holder was not assigned", run)
+				}
+				if err := q.Started(result(run, true)); err != nil {
+					t.Fatal(err)
+				}
+				running = append(running, run)
+			}
+			m.Fleet.Adoption = &WorkerAdoptionProof{Protocol: custodianProtocol}
+			for _, run := range running {
+				m.Fleet.Adoption.Attempts = append(m.Fleet.Adoption.Attempts, runExecution(run))
+			}
+			machineCheck(t, q, m, running...)
+			if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+				t.Fatal(err)
+			}
+			fleetTick(t, q)
+			h := q.fleetActiveHost()
+			if h == nil || !h.Takeover || h.Phase != "worker_update" {
+				t.Fatal("saturated host did not start live takeover", h)
+			}
+			i := fleetInstructionFor(t, q)
+			if err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "restarting"}); err != nil {
+				t.Fatal(err)
+			}
+			proof := fleetTestProof(c, m.Session, m.Fleet.PID+1, true)
+			proof.Adoption = m.Fleet.Adoption
+			m.Fleet = proof
+			machineCheck(t, q, m, running...)
+			for h.Phase != "deferred" && c.Now().Sub(proof.ObservedAt) <= fleetStableFor+time.Second {
+				c.Advance(time.Second)
+				machineCheck(t, q, m, running...)
+			}
+			if h.Phase != "deferred" || h.StartProbe == "" {
+				t.Fatal("saturation did not defer the probe", h)
+			}
+			probe, deadline := h.StartProbe, h.startCapacityDeadline()
+			s := cpuSpec(1, 0.06)
+			s.AllowedMachines = []string{m.ID}
+			experiment := submit(t, q, s)
+			finish(t, q, running[1], true)
+			if got := assignedJob(machineCheck(t, q, m, running[0], running[2])); got != nil {
+				t.Fatal("partial release was backfilled", got.ID)
+			}
+			// The reservation is local even while the rollout waits on its
+			// last host. This worker joins after the operation was accepted.
+			peer := backfillMachine("peer", 1)
+			machineCheck(t, q, peer)
+			s.AllowedMachines = []string{peer.ID}
+			portable := submit(t, q, s)
+			if got := assignedJob(machineCheck(t, q, peer)); got == nil || got.ID != portable.ID {
+				t.Fatal("the probe withheld another host's admission", got)
+			}
+
+			want := probe
+			if mode == "production" {
+				// Production's full 0.2 GiB would fit on the final release,
+				// but a probe taking its 0.125 GiB first would block it.
+				s = cpuSpec(1, 0.2)
+				s.Priority, s.AllowedMachines = "production", []string{m.ID}
+				want = submit(t, q, s).ID
+			} else if mode == "stale proof" {
+				// Replace the small contender so this pull isolates whether
+				// work that needs the reserved room can take it.
+				if err := q.Cancel(experiment.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			finish(t, q, running[2], true)
+			running = running[:1]
+			c.Advance(time.Second)
+			if mode == "stale proof" {
+				late := *proof
+				late.ObservationAgeSeconds = 6.3
+				m.Fleet = &late
+				// Use a larger experiment than the partial-release contender:
+				// it fits only by borrowing the room now held for the probe.
+				s = cpuSpec(1, 0.2)
+				s.AllowedMachines = []string{m.ID}
+				submit(t, q, s)
+				if got := assignedJob(machineCheck(t, q, m, running[0])); got != nil {
+					t.Fatal("late proof allowed the probe or waiting experiment to start", got.ID)
+				}
+				if !fleetProbePending(job(t, q, probe)) || !strings.Contains(h.Wait, "runtime proof") || h.startCapacityDeadline() != deadline {
+					t.Fatal("the stale proof changed the reservation or assigned the probe", h)
+				}
+				m.Fleet = proof
+			}
+			run := assignedJob(machineCheck(t, q, m, running...))
+			if run == nil || run.ID != want || run.Attempt != 1 {
+				t.Fatalf("wrong assignment on first eligible pull: want %s, got %+v, fleet %+v", want, run, h)
+			}
+			if err := q.Started(result(run, true)); err != nil {
+				t.Fatal(err)
+			}
+			if want == probe {
+				finish(t, q, run, true)
+			}
+			fleetTick(t, q)
+			if !h.WorkerDone || h.StartAccepted != want || h.Phase != "queue_update" {
+				t.Fatalf("the proven worker did not advance to queue update: %+v", h)
+			}
+			holder := job(t, q, running[0].ID)
+			if holder.State != "running" || holder.StopAt != nil || holder.Attempt != running[0].Attempt || len(h.StopRequests) != 0 {
+				t.Fatal("probe interrupted a retained attempt", holder)
+			}
+			q.fleetQueue.Proof.ObservedAt = c.Now()
+			fleetTick(t, q)
+			fleetActivate(t, q, c)
+			if q.s.FleetUpgrade.State != "complete" || !h.QueueDone {
+				t.Fatal("rollout did not finish after start proof", q.fleetUpgradeStatus())
 			}
 		})
 	}

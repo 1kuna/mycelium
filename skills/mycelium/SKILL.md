@@ -510,9 +510,15 @@ never recovers. A never-managed worker or an incompatible target still refuses
 the operation. Initially deferred hosts keep their existing binary until healthy.
 A rollout may defer a host whose startup probe has never been assigned because
 of measured owner pressure or CPU/RAM capacity, upgrade the others, then revisit
-it in the same operation. A completed rollout can retain `outcome: deferred`
-and `deferred_reason` per host: that host's new binary is installed but startup
-is still unproved. Status keeps these hosts visible; the release owner reruns
+it in the same operation. For up to 15 minutes from deferral, the queue lets
+freed capacity accumulate for that host's probe behind production-class demand.
+Other queued work may show `host_capacity_accumulation` and can still use
+eligible capacity on other hosts. Running work finishes normally. A late
+runtime proof keeps the same reservation until a fresh proof arrives or the
+window expires. A completed rollout can retain `outcome: deferred` and
+`deferred_reason` per host, with the measured shortage if capacity is still
+short. That host's new binary is installed and startup is still unproved.
+Status keeps these hosts visible. The release owner reruns
 `myce fleet upgrade` when capacity recovers. Failed probes and runtime health
 failures still stop advancement.
 When a worker has no managed runtime proof, check `myce status` for its
