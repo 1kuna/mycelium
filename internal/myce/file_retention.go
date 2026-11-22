@@ -515,8 +515,16 @@ func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[str
 		} else {
 			visitJobFileManifests(j, keepFiles)
 		}
-		checkpointsExpired := j.Spec.localFirst() && j.FilesExpired ||
-			j.FileReclamation != nil && j.FileReclamation.LegacyCheckpointsExpired
+		legacyCheckpointsExpired := j.FileReclamation != nil && j.FileReclamation.LegacyCheckpointsExpired
+		if legacyCheckpointsExpired {
+			visitLegacyCheckpointFiles(j, func(_ string, files FileManifest) {
+				add(referenced, files)
+				if !pendingOnly && terminal(j.State) && !protected {
+					add(expired, files)
+				}
+			})
+		}
+		checkpointsExpired := j.Spec.localFirst() && j.FilesExpired || legacyCheckpointsExpired
 		if !checkpointsExpired {
 			for _, save := range j.FileCheckpoints {
 				keepFiles("checkpoint", save.Files)

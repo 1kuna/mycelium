@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -160,6 +161,9 @@ func TestFileReleaseLegacyCheckpointRequiresExplicitPlan(t *testing.T) {
 	}
 	if _, err := os.Stat(q.files.blob(ref)); !os.IsNotExist(err) {
 		t.Fatal("checkpoint was not collected", err)
+	}
+	if err := c.DownloadFile(ctx, ref, filepath.Join(t.TempDir(), "checkpoint")); !isResultExpired(err) {
+		t.Fatal("released checkpoint lost its typed expiry", err)
 	}
 }
 

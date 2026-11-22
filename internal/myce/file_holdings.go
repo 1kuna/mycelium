@@ -61,38 +61,43 @@ func (q *Queue) captureProjectFileHoldings(ctx context.Context) (time.Time, []fi
 		return time.Time{}, nil, nil, err
 	}
 	defer q.fileLifecycle.RUnlock()
-	for range 2 {
-		unlock, err := requestObservationLock(ctx, &q.mu)
-		if err != nil {
-			return time.Time{}, nil, nil, err
-		}
-		store, at, revision := q.files, q.clock.Now(), q.fileReferenceRevision
-		if store == nil {
-			unlock()
-			break
-		}
-		var facts []fileHoldingFact
-		q.collectFileReferences(true, nil, func(file FileRef, owner FileKeepingReference) {
-			if file.SHA256 != "" {
-				facts = append(facts, fileHoldingFact{file, owner})
-			}
-		})
-		unlock()
-		payloads, err := store.inventoryUnlocked(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				return time.Time{}, nil, nil, ctx.Err()
-			}
-			return time.Time{}, nil, nil, &HTTPError{Status: http.StatusServiceUnavailable, Code: "file_store_unavailable", Message: "queue file store inventory unavailable"}
-		}
-		unlock = requestReadLock(ctx, &q.mu)
-		current := q.files == store && q.fileReferenceRevision == revision
-		unlock()
-		if current {
-			return at, facts, payloads, nil
-		}
+	unlock, err := requestObservationLock(ctx, &q.mu)
+	if err != nil {
+		return time.Time{}, nil, nil, err
 	}
-	return time.Time{}, nil, nil, &HTTPError{Status: http.StatusServiceUnavailable, Code: "file_holdings_unavailable", Message: "file store custody observation unavailable; retry the read"}
+	store, at := q.files, q.clock.Now()
+	if store == nil {
+		unlock()
+		return time.Time{}, nil, nil, fileHoldingsUnavailable()
+	}
+	var facts []fileHoldingFact
+	q.collectFileReferences(true, nil, func(file FileRef, owner FileKeepingReference) {
+		if file.SHA256 != "" {
+			facts = append(facts, fileHoldingFact{file, owner})
+		}
+	})
+	unlock()
+	payloads, err := store.inventoryUnlocked(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return time.Time{}, nil, nil, ctx.Err()
+		}
+		return time.Time{}, nil, nil, &HTTPError{Status: http.StatusServiceUnavailable, Code: "file_store_unavailable", Message: "queue file store inventory unavailable"}
+	}
+	// No mutation uses the snapshot. A worker heartbeat or a later job/claim
+	// update cannot invalidate the committed custody observation at captured_at.
+	// Do recheck that the payloads came from the still-configured store.
+	unlock = requestReadLock(ctx, &q.mu)
+	current := q.files == store
+	unlock()
+	if !current {
+		return time.Time{}, nil, nil, fileHoldingsUnavailable()
+	}
+	return at, facts, payloads, nil
+}
+
+func fileHoldingsUnavailable() error {
+	return &HTTPError{Status: http.StatusServiceUnavailable, Code: "file_holdings_unavailable", Message: "file store custody observation unavailable; retry the read"}
 }
 
 func validFileProject(project string) bool {

@@ -105,8 +105,9 @@ myce file holdings --project PROJECT
 
 The JSON report lists each digest once, with its own holders, the bytes charged
 to `file_store.projects[].retained_bytes`, and the payload bytes present in the
-queue store. A declaration or input claim can count at full size while its
-payload is absent or an upload is in progress. `by_kind` deduplicates within
+queue store. The queue captures committed custody at `captured_at` and samples
+payload immediately afterward. A declaration or input claim can count at full
+size while its payload is absent or an upload is in progress. `by_kind` deduplicates within
 each kind. A digest can appear in multiple kinds, so use the top-level totals
 for the union. `shared_bytes` is the stored portion also held by another
 project or queue-wide custody. Those holders appear by kind only. The project
