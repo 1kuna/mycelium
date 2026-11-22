@@ -144,7 +144,6 @@ type Queue struct {
 	publishedReads       atomic.Pointer[publishedReadIndex]
 	readWarm             readWarmer // Decodes new published records off q.mu.
 	readRoot             *readNode  // q.mu; immutable committed input generations.
-	readStateBaseSize    int        // q.mu; encoded control state before attached evidence.
 	readModels           *ModelConfig
 	readEnvironments     *EnvironmentCatalog
 	readRuntime          *observationState
@@ -284,6 +283,7 @@ type Queue struct {
 	efficiencyHealthJSON    json.RawMessage            // Same immutable generation as s.EfficiencyHealth; q.mu.
 	fileInputClaimsJSON     json.RawMessage            // Same immutable generation as s.FileInputClaims; q.mu.
 	persistedStateFields    map[string]json.RawMessage // Committed fragments only; q.mu.
+	persistedStateSize      int                        // Logical JSON size for evidence accounting; q.mu.
 	flushHistoriesNow       bool
 	observePersistence      func(queuePersistenceTiming)
 	observePersistenceHold  func(queueHoldPhases)
