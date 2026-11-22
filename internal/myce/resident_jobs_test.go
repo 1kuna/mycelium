@@ -390,7 +390,10 @@ func TestResidentAutoCheckFitsAlongsideColdEngine(t *testing.T) {
 	m.ModelConfigHash = modelConfigHash(q.models)
 	m.CapabilityProfile.LogicalCPUs, m.CapabilityProfile.SystemMemoryBytes = 16, 31<<30
 	m.TotalMemoryGB, m.FreeMemoryGB = 30, 30
-	m.HostMemoryBudgetGB, m.HostAvailableMemoryGB = 24, 17.44
+	// Leave 2 GiB after the cold engine's host charge so the probe's own
+	// minimum cannot mask the accelerator-memory rejection below.
+	const hostRoomWithProbeGB = 18.0
+	m.HostMemoryBudgetGB, m.HostAvailableMemoryGB = 24, hostRoomWithProbeGB
 	check(t, q, m, nil)
 
 	e := fakeExtension(t)
@@ -475,7 +478,7 @@ func TestResidentAutoCheckFitsAlongsideColdEngine(t *testing.T) {
 	if run := check(t, q, m, nil).Job; run != nil {
 		t.Fatal("ending maintenance did not free host RAM")
 	}
-	m.HostAvailableMemoryGB = 17.44
+	m.HostAvailableMemoryGB = hostRoomWithProbeGB
 	clock.Advance(time.Second)
 	run := check(t, q, m, nil).Job
 	if run == nil || run.ID != queued.ID || run.Attempt != 1 {
