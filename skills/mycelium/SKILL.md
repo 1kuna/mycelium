@@ -706,6 +706,12 @@ counters are never summed for this credit. Missing/stale/ambiguous evidence and
 older workers retain conservative pending growth; this does not reduce charges
 or qualify native coexistence.
 
+After a measured `live_host_growth` refusal, `launch_capacity` (or
+`helper_charge` when helpers exceeded the reservation) waits for exact cleanup
+and enough observed headroom to cover the shortfall on that worker session.
+Small changes that leave the job short keep it queued at the same attempt.
+Keep the job and key. After exact cleanup, another fitting worker can offer it.
+
 Detached workers retain their owner's device sample and sensor age in the parent
 heartbeat. An attribution-uncertain warning remains a separate sharing refusal
 even when charges fit. CUDA physical bounds can include unknown external use;

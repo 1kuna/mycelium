@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"net/http/httptest"
 	"path/filepath"
@@ -165,6 +166,86 @@ func TestAssignChurnPrelaunchGrowthBoundary(t *testing.T) {
 		if !errors.As(err, &refusal) || refusal.detail.Subcheck != "live_host_growth" || refusal.detail.Required != pair[0] || *refusal.detail.Available != pair[1] {
 			t.Fatalf("did not replay retained comparison: %v", err)
 		}
+	}
+}
+
+func TestAssignChurnLiveGrowthWaitsForMeasuredRoom(t *testing.T) {
+	for _, pair := range [][2]float64{{8.827884674, 8.754188538}, {17.0485, 17.0116}} {
+		t.Run(fmt.Sprint(pair[0]), func(t *testing.T) {
+			q, clock := fixture(t)
+			m := cpuMachine("worker", "host", "cpu", 16, 32)
+			m.Devices = []MachineDevice{}
+			s := cpuSpec(4, pair[0]-4)
+			s.Priority = "production"
+			holder := submit(t, q, s)
+			running := assignedJob(machineCheck(t, q, m))
+			if running == nil || running.ID != holder.ID {
+				t.Fatal("missing co-tenant", running)
+			}
+			s = cpuSpec(2, 4)
+			s.SubmissionKey = "live-growth-wait"
+			j := submit(t, q, s)
+			m.HostAvailableMemoryGB = pair[0] + 0.125
+			first := assignedJob(machineCheck(t, q, m, running))
+			if first == nil || first.ID != j.ID || first.Attempt != 1 {
+				t.Fatal("missing initial offer", first)
+			}
+			clock.Advance(time.Second)
+			w := Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return pair[1], nil }}
+			d := admissionDetail(localAttemptAdmission(w, []Job{*running}, *first, nil), *first)
+			if d == nil || d.Subcheck != "live_host_growth" || d.Required != pair[0] || d.Available == nil || *d.Available != pair[1] {
+				t.Fatalf("prelaunch did not reproduce the recorded comparison: %+v", d)
+			}
+			r := capacityResult(first, true)
+			r.ExecutionCause.Admission = d
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			baseline := m.HostAvailableMemoryGB
+			deficit := pair[0] - pair[1]
+			m.HostAvailableMemoryGB = baseline + 2*deficit
+			if next := assignedJob(machineCheck(t, q, m, running)); next != nil {
+				t.Fatal("new room bypassed exact release", next)
+			}
+			if got := job(t, q, j.ID); got.Copies[0].ReleaseConfirmed {
+				t.Fatal("check-in acknowledged the refused copy without release proof")
+			}
+			m.HostAvailableMemoryGB = baseline
+			machineCheck(t, q, m, running)
+			release := result(first, false)
+			release.ReleaseOnly = true
+			if err := q.Complete(release); err != nil {
+				t.Fatal(err)
+			}
+			for i, change := range []float64{-deficit / 2, 0, deficit / 4, deficit / 2} {
+				clock.Advance(time.Second)
+				m.HostAvailableMemoryGB = baseline + change
+				m.MemoryUsedGB = float64(i)
+				if next := assignedJob(machineCheck(t, q, m, running)); next != nil {
+					t.Fatalf("check-in %d reissued with %.5f GiB change and %.5f GiB shortfall: attempt %d", i, change, deficit, next.Attempt)
+				}
+				got, err := q.jobSnapshotGeneration(j.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.State != "queued" || got.Attempt != 1 || got.Losses != 0 || got.InfrastructureRetries != 0 || got.Hold == nil || got.Hold.Kind != "launch_capacity" {
+					t.Fatalf("lost capacity wait or charged a retry: state=%s attempt=%d losses=%d retries=%d hold=%+v", got.State, got.Attempt, got.Losses, got.InfrastructureRetries, got.Hold)
+				}
+			}
+			m.HostAvailableMemoryGB = baseline + 2*deficit
+			second := assignedJob(machineCheck(t, q, m, running))
+			if second == nil || second.ID != j.ID || second.Attempt != 2 || submit(t, q, s).ID != j.ID {
+				t.Fatal("sufficient room did not resume the same submission", second)
+			}
+			w.HostMemorySource = func(context.Context) (float64, error) { return pair[1] + 2*deficit, nil }
+			if err := localAttemptAdmission(w, []Job{*running}, *second, nil); err != nil {
+				t.Fatal("fresh offer refused after room recovered", err)
+			}
+			if err := q.Complete(r); !errors.Is(err, ErrStale) {
+				t.Fatal("earlier refusal changed the new attempt", err)
+			}
+			finish(t, q, second, true)
+		})
 	}
 }
 
