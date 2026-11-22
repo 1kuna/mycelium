@@ -791,6 +791,9 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 			return profileFailure(out, &r, 69, "queue_unavailable: submission unconfirmed; retry the saved key (cause: "+e.Error()+")")
 		}
 		r.JobID, r.Status = j.ID, j.State
+		for _, warning := range myce.CheckpointInputAdvisories(j) {
+			fmt.Fprintln(errOut, "checkpoint input advisory: "+warning)
+		}
 		r.SubmissionReused = j.SubmissionReused
 		r.RefusalCode, r.RefusalReason = "", ""
 		r.PathDiagnostic = nil

@@ -647,6 +647,9 @@ func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
 	if c := q.calls[j.ID]; c != nil {
 		return q.callWait(c)
 	}
+	if h := q.checkpointInputHold(j); h != nil {
+		return h
+	}
 	// Every target's checkpoint admission fails while the queue's own root is
 	// unreachable, so that is the wait for runnable work, whatever else holds it.
 	if j.State == "queued" && needsCheckpoint(j) && !q.checkpointsAvailable() && dependencyReady(j) {

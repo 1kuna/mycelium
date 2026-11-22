@@ -83,6 +83,7 @@ func (q *Queue) settleMaintenance() {
 			continue
 		}
 		q.maintainJobPause(j)
+		q.maintainCheckpointInputs(j)
 		q.maintainFanOutJob(j)
 		q.maintainPieceDependency(j)
 		after := relationVersion(j)

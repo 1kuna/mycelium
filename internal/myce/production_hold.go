@@ -247,6 +247,9 @@ func (q *Queue) placementAllowed(j *Job, m *Machine) bool {
 }
 
 func (q *Queue) placementAllowedForUse(j *Job, m *Machine, resident bool) bool {
+	if !q.admissionHold(j, m, q.checkpointInputHold(j), predicateCheckpointInputExpiry) {
+		return false
+	}
 	if !q.admissionPass(j, m, !(j.StartedAt == nil && q.deviceFaultRetryBlocked(j, m)), predicateDeviceFaultRetry) {
 		return false
 	}

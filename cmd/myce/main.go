@@ -852,6 +852,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return err
 		}
 		fmt.Fprintln(os.Stderr, myce.DeadlineGuidanceText(j))
+		for _, warning := range myce.CheckpointInputAdvisories(j) {
+			fmt.Fprintln(os.Stderr, "checkpoint input advisory: "+warning)
+		}
 		fmt.Println(j.ID)
 		return nil
 	case "usage":
