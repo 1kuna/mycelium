@@ -25,8 +25,10 @@ import (
 // #1011: a final local capacity check can refuse after queue Started commits,
 // while the native supervisor still holds main behind its exec gate.
 func TestWorkerStartHandoffCapacity(t *testing.T) {
+	const requiredGB, refusedAvailableGB = 85.2073, 67.6324
 	q, clock := fixture(t)
 	m := machine("worker", "fake")
+	m.CapabilityProfile.SystemMemoryBytes = 128 << 30
 	m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 96
 	s := spec("production")
 	s.Run.Command = []string{"sh", "-c", `printf x > "$MARKER"`}
@@ -39,7 +41,7 @@ func TestWorkerStartHandoffCapacity(t *testing.T) {
 	w.Clock, w.Machine, w.Client = clock, m, Client{URL: server.URL, Token: "test"}
 	w.batchAdmission = func(context.Context, HostLaunch) error {
 		if job(t, q, a.ID).StartedAt != nil {
-			return refuseAdmission("live_host_growth", "GiB", 85.2073, 67.6324, false)
+			return refuseAdmission("live_host_growth", "GiB", requiredGB, refusedAvailableGB, false)
 		}
 		return nil
 	}
@@ -85,8 +87,12 @@ func TestWorkerStartHandoffCapacity(t *testing.T) {
 		t.Fatal("unchanged capacity reoffered", next)
 	}
 	m.HostAvailableMemoryGB++
+	if next := check(t, q, m, nil).Job; next != nil {
+		t.Fatal("insufficient recovery reoffered", next)
+	}
+	m.HostAvailableMemoryGB += requiredGB - refusedAvailableGB
 	if next := check(t, q, m, nil).Job; next == nil || next.ID != a.ID || next.Attempt != 2 {
-		t.Fatal("changed capacity did not retry same logical job", next)
+		t.Fatal("sufficient recovery did not retry same logical job", next)
 	}
 }
 
