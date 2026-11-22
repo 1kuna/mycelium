@@ -46,6 +46,11 @@ The queue's appended environment-preparation failure is labelled
 `[attempt 0: environment failure]`. Labels do not change `--after`/`--follow`
 sequence cursors or the API's `attempt` field.
 
+`queue restarted: waiting for workers to report` means at least one worker
+outside planned host maintenance has yet to check in during restart recovery.
+Workers that have checked in can take work when otherwise eligible.
+Drained and disabled hosts still show their maintenance holds.
+
 Attempt history reports memory-limit stops with their retained bound in GiB,
 measured cgroup/non-reclaimable peaks and kernel event counts. A failed attempt
 with `execution_cause.class: resource_limit`, an RSS guard stop, or kernel OOM

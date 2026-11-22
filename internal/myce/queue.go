@@ -2669,8 +2669,13 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 	if q.networkQuiet {
 		warnings = append(warnings, "most workers quiet: waiting for the network to return")
 	}
-	if q.inRestartGrace(q.clock.Now()) && len(q.unreported) > 0 {
-		warnings = append(warnings, "queue restarted: waiting for workers to report")
+	if q.inRestartGrace(q.clock.Now()) {
+		for id := range q.unreported {
+			if m := q.s.Machines[id]; m != nil && !q.maintenanceBlocked(hostID(m)) {
+				warnings = append(warnings, "queue restarted: waiting for workers to report")
+				break
+			}
+		}
 	}
 	if !q.checkpointsAvailable() {
 		warnings = append(warnings, "NAS checkpoint root is unreachable; checkpoint-dependent jobs will not start")
