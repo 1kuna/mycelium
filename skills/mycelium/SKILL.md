@@ -73,6 +73,10 @@ when an upload-creation response has no accepted offset.
 
 ## Ground rules
 
+- A queue-owned `capacity` hold with `wait; keep other work moving` can
+  mean an allowed accelerator fits the job once device memory is free.
+  Status detail names the jobs holding the device when known. Check job needs
+  and allowed machines when the hold says `no_eligible_host`.
 - Use the installed `myce` CLI or Python `Client.from_installed()`; both find
   their own credentials. Never open, print, copy, pass or set fleet credentials.
   A missing CLI or refused authority is a hold for the installation owner: keep

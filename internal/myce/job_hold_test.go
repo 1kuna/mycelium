@@ -587,3 +587,90 @@ func assertCompatibilityAction(t *testing.T, q *Queue, id string, report Resolve
 	}
 	t.Fatal("aggregate status omitted job", id)
 }
+
+func TestDeviceCapacityHoldUsesAdvertisedCapacity(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		needGB float64
+		holder bool
+		auto   bool
+		kind   string
+		owner  string
+		next   string
+	}{
+		{"unmeasured with known holder", 0, true, true, "capacity", "queue", "wait; keep other work moving"},
+		{"unattributed occupancy", 12, false, false, "capacity", "queue", "wait; keep other work moving"},
+		{"over capacity", 17, true, false, "no_eligible_host", "consumer", "check the job's needs and allowed machines"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, clock := fixture(t)
+			m := m3Machine()
+			m.Devices = m.Devices[:1]
+			m.Devices[0].TotalMemoryGB, m.Devices[0].BudgetGB, m.Devices[0].FreeMemoryGB = 16, 16, 16
+			machineCheck(t, q, m)
+			if tc.kind == "no_eligible_host" {
+				other := m3Machine()
+				other.ID, other.HostID, other.Session = "excluded-worker", "excluded-worker", "excluded-session"
+				other.Devices[0].TotalMemoryGB, other.Devices[0].BudgetGB, other.Devices[0].FreeMemoryGB = 32, 32, 32
+				machineCheck(t, q, other)
+			}
+
+			s := spec("experiment")
+			s.Resumable = false
+			s.AllowedMachines = []string{m.ID}
+			var running *Job
+			if tc.holder {
+				holder := submit(t, q, s)
+				running = assignedJob(machineCheck(t, q, m))
+				if running == nil || running.ID != holder.ID {
+					t.Fatal("device holder did not receive an assignment", running)
+				}
+			} else {
+				m.Devices[0].FreeMemoryGB = 8
+			}
+
+			s.Needs.MemoryGB = tc.needGB
+			if tc.auto {
+				s.Needs.Memory = "auto"
+			}
+			demand := submit(t, q, s)
+			clock.Advance(time.Second)
+			if running == nil {
+				machineCheck(t, q, m)
+			} else {
+				machineCheck(t, q, m, running)
+			}
+			got, err := q.jobSnapshot(demand.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.State != "queued" || got.Hold == nil || got.Hold.Kind != tc.kind || got.Hold.Owner != tc.owner || got.Hold.Next != tc.next {
+				t.Fatalf("state=%s hold=%+v", got.State, got.Hold)
+			}
+			if tc.kind == "capacity" {
+				if running != nil && !strings.Contains(got.Hold.Detail, running.ID) {
+					t.Errorf("capacity hold omitted the holder: %+v", got.Hold)
+				}
+				if strings.Contains(got.Reason, "can run this job right now") {
+					t.Errorf("status reason contradicted capacity hold: %s", got.Reason)
+				}
+				if running == nil && !strings.Contains(got.Hold.Detail, "12.0 GiB accelerator memory needed, 8.0 GiB free of 16.0 GiB capacity") {
+					t.Errorf("capacity hold omitted the live and advertised figures: %+v", got.Hold)
+				}
+			}
+
+			clock.Advance(time.Second)
+			if running != nil {
+				finish(t, q, running, true)
+			}
+			m.Devices[0].FreeMemoryGB = 16
+			assignment := assignedJob(machineCheck(t, q, m))
+			if tc.kind == "capacity" && (assignment == nil || assignment.ID != demand.ID || assignment.Attempt != 1) {
+				t.Fatalf("release did not admit the feasible job: %+v", assignment)
+			}
+			if tc.kind == "no_eligible_host" && assignment != nil {
+				t.Fatalf("released capacity admitted an oversized job: %+v", assignment)
+			}
+		})
+	}
+}

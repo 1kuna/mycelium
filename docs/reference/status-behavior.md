@@ -2725,6 +2725,13 @@ recover) and the preparation and coverage kinds below. A queued model call's
 hold comes from the same scheduler wait as a job's. An unknown kind is
 unresolved; read its `owner` and `next`.
 
+When an allowed accelerator target fits the job at its advertised capacity
+and current device occupancy is blocking it, status reports queue-owned
+`capacity` with `wait; keep other work moving`. The detail names the jobs
+retaining the device when known. A request that exceeds every allowed
+target's advertised capacity keeps the consumer-owned `no_eligible_host`
+action to check its needs and allowed machines.
+
 A check-in's admission decision (`admission_wait` targets) carries the refusing
 check's `hold` row (kind, owner, reason, clears, next) when that check names
 one; its detail stays on the job's own hold.

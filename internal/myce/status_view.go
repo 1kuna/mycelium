@@ -304,6 +304,13 @@ func (q *Queue) statusWaitingReason(j *Job) string {
 	if j.Hold != nil && (j.Hold.Kind == "native_qualification" || j.Hold.Kind == ephemeralIsolationHold) {
 		return j.Hold.Reason
 	}
+	if j.Hold != nil && j.Hold.Kind == "capacity" && j.wait != nil && j.wait.Kind == "no_eligible_host" {
+		// Keep any queue-order explanation and startup countdown already
+		// present in the legacy reason field.
+		copy := *j
+		copy.Reason = strings.Replace(j.Reason, j.wait.Detail, j.Hold.Reason, 1)
+		return q.statusWaitingReasonDetail(&copy)
+	}
 	return q.statusWaitingReasonDetail(j)
 }
 
