@@ -56,6 +56,16 @@ func (s Spec) ephemeralRequiredCapability() string {
 	return ephemeralCapability
 }
 
+func ephemeralWorkerRefusal(s Spec, m *Machine) string {
+	if !contains(m.Capabilities, ephemeralCapability) {
+		return ephemeralHostReason(m)
+	}
+	if len(s.ModelSnapshots) != 0 && !contains(m.Capabilities, ephemeralSnapshotsCapability) {
+		return "the worker release must support declared model snapshots with ephemeral worker data"
+	}
+	return ""
+}
+
 // The policy opts into the ci boundary, including extension-owned executions.
 func validateWorkerData(s Spec) error {
 	if s.WorkerData == "" {
