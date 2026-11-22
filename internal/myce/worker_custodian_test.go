@@ -134,7 +134,7 @@ func TestCustodianNativeWorkerReplacement(t *testing.T) {
 			t.Fatalf("build replacement: %v\n%s", err, out)
 		}
 	}
-	for _, mode := range []string{"plain", "native", "cancel", "memory", "preparation", "model"} {
+	for _, mode := range []string{"plain", "native", "cancel", "memory", "preparation", "publication", "model"} {
 		t.Run(mode, func(t *testing.T) { custodianNativeReplacement(t, next, mode) })
 	}
 }
@@ -149,10 +149,11 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 	}
 	entered, unblock := make(chan struct{}, 1), make(chan struct{})
 	var releaseOnce sync.Once
-	releasePreparation := func() { releaseOnce.Do(func() { close(unblock) }) }
+	releaseRequest := func() { releaseOnce.Do(func() { close(unblock) }) }
 	handler := API{Queue: q, Token: "custodian-test"}.Handler()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if mode == "preparation" && r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/files/blobs/") {
+		if mode == "preparation" && r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/files/blobs/") ||
+			mode == "publication" && r.Method == "POST" && r.URL.Path == "/api/workers/complete" {
 			select {
 			case entered <- struct{}{}:
 			default:
@@ -166,7 +167,7 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 		handler.ServeHTTP(w, r)
 	}))
 	defer server.Close()
-	defer releasePreparation()
+	defer releaseRequest()
 	dir := t.TempDir()
 
 	c := nativeCustodianServiceConfig(dir, server.URL)
@@ -473,7 +474,7 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 		if err := readCustodianJSON(custodianDir(c.State), custodianName(before.ID, "snapshot"), &after); err != nil || after.PID != before.PID || after.Birth != before.Birth || after.Started || after.Finished {
 			t.Fatalf("preparation did not survive replacement: %+v %v", after, err)
 		}
-		releasePreparation()
+		releaseRequest()
 	}
 	await(t, func() bool {
 		files, _ := filepath.Glob(filepath.Join(custodianDir(c.State), "*.snapshot.json"))
@@ -523,6 +524,29 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if mode == "publication" {
+		if err := os.WriteFile(filepath.Join(checkpoint, "finish"), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-entered:
+		case <-time.After(testWaitTimeout):
+			t.Fatal("result publication did not reach the blocked queue endpoint")
+		}
+		var saved custodianSnapshot
+		if err := readCustodianJSON(custodianDir(c.State), custodianName(before.ID, "snapshot"), &saved); err != nil || !saved.Finished || saved.State.Result == nil || saved.State.Result.ReleasePending {
+			t.Fatalf("attempt has no replayable result: %+v %v", saved, err)
+		}
+		got := job(t, q, j.ID)
+		if got.State != "running" || got.ReleaseConfirmed || got.Attempt != original || got.Session != session {
+			t.Fatalf("test did not hold the exact completion: %+v", got)
+		}
+		stale := *saved.State.Result
+		stale.Attempt++
+		if err := q.Complete(stale); !errors.Is(err, ErrStale) {
+			t.Fatalf("different attempt was accepted: %v", err)
+		}
+	}
 	if mode != "preparation" {
 		stop()
 	}
@@ -535,8 +559,10 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 			return readCustodianJSON(custodianDir(c.State), custodianName(before.ID, "snapshot"), &v) == nil && v.Finished && v.State.Result != nil && v.State.Result.OutOfMemory && v.State.Result.ExecutionCause != nil
 		})
 	}
-	if current, e := processBirth(payload); (e != nil || current != birth) && mode != "memory" {
-		t.Fatalf("service teardown interrupted payload: %v", e)
+	if mode != "memory" && mode != "publication" {
+		if current, e := processBirth(payload); e != nil || current != birth {
+			t.Fatalf("service teardown interrupted payload: %v", e)
+		}
 	}
 	if mode != "preparation" {
 		writeImage(next)
@@ -550,11 +576,21 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 		await(t, func() bool {
 			b, e := readSingleAttemptState(filepath.Join(c.State, "state.json"))
 			var st workerState
-			return e == nil && json.Unmarshal(b, &st) == nil && st.Custodian == before.ID && st.PID == before.State.PID
+			if e != nil || json.Unmarshal(b, &st) != nil || st.Custodian != before.ID {
+				return false
+			}
+			if mode == "publication" {
+				return st.Result != nil && st.Result.ID == j.ID && st.Result.Attempt == original && st.Result.Session == session
+			}
+			return st.PID == before.State.PID
 		})
 	}
-	if current, e := processBirth(payload); (e != nil || current != birth) && mode != "memory" {
-		t.Fatalf("new binary failed to retain payload: %v", e)
+	if mode == "publication" {
+		releaseRequest()
+	} else if mode != "memory" {
+		if current, e := processBirth(payload); e != nil || current != birth {
+			t.Fatalf("new binary failed to retain payload: %v", e)
+		}
 	}
 	if mode == "cancel" {
 		if err := q.Cancel(j.ID); err != nil {
@@ -571,7 +607,7 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 		await(t, func() bool { v := job(t, q, j.ID); return v.State == "succeeded" && v.ReleaseConfirmed })
 	}
 	after := job(t, q, j.ID)
-	if after.Attempt != original || after.Session != session || after.Losses != 0 {
+	if after.Attempt != original || after.Session != session || after.Losses != 0 || mode == "publication" && len(after.AttemptHistory) != 1 {
 		t.Fatalf("execution identity changed: %+v", after)
 	}
 	if mode != "memory" && mode != "cancel" {
@@ -598,11 +634,15 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 		for _, line := range logs {
 			combined.WriteString(line.Text)
 		}
-		if !strings.Contains(combined.String(), "before") || !strings.Contains(combined.String(), "after") {
-			t.Fatal("queue logs missing restart output", combined.String())
+		if strings.Count(combined.String(), "before\n") != 1 || strings.Count(combined.String(), "after\n") != 1 {
+			t.Fatal("queue logs lost or duplicated restart output", combined.String())
 		}
 	}
 
+	if mode == "publication" {
+		t.Logf("different worker image published the same finished attempt %d/session exactly once", original)
+		return
+	}
 	t.Logf("different worker image adopted same attempt %d/session; payload birth unchanged; logs, result and release preserved", original)
 }
 

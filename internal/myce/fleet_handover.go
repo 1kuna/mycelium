@@ -21,8 +21,10 @@ func (q *Queue) beginWorkerHandover(h *fleetUpgradeHost) {
 			v.Models = append(v.Models, *o.Engine)
 			continue
 		}
-		if o.Call != nil {
-			continue // Calls share the exact detached engine/bridge owner.
+		if o.Call != nil || o.Launch != nil {
+			// Calls share the engine owner. Only unstarted offers can pass
+			// preparation proof, and they have no custody to transfer.
+			continue
 		}
 		v.Attempts = append(v.Attempts, Execution{ID: o.Result.ID, Attempt: o.Result.Attempt})
 	}

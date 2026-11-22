@@ -940,12 +940,18 @@ For each host in turn the queue:
    control alive. The new worker adopts publication and release custody under
    the same queue session and attempt. No completion wait or stop is needed,
    including production and non-resumable work. A brief cutover fence blocks
-   new placement/launches without taking a host drain.
+   new placement/launches without taking a host drain. Preparation offers that
+   have yet to pass launch authorization cannot acquire custody during this
+   fence. A verified, durably finished detached attempt can also hand over
+   pending result publication.
 3. **Falls back to natural drain when proof is missing.** The `wait` reason
    explains missing custodian support, identity/attempt mismatch, preparation,
    resident bridge, Linux shared-host aggregate CPU quota, model or unresolved
    cleanup custody. Older workers need
    this first natural drain before their first custodian-capable release.
+   `myce status --history --json` retains the most recent natural wait for
+   each host as `takeover_wait` on the reported operation, including after the
+   host advances. An omitted field means no wait was recorded by that release.
    Normal urgency never sends checkpoint stops or SIGKILL for an update; the
    previous release's undelivered `planned_stops` deadlines are discarded.
    An operator's drain/disable remains theirs and is never resumed.
@@ -957,8 +963,11 @@ For each host in turn the queue:
    before the critical upgrade, then resume only the policy you own afterward.
    `--urgency critical` by itself still prefers takeover. `stop_requests` records
    explicit critical interruptions. Exact release is required after such a
-   stop; grace expiry never proves it. Queue-host model calls/streams finish
-   before the queue restarts.
+   stop; grace expiry never proves it. The queue host's worker can update
+   while model calls and streams remain active. During the queue service's
+   own step, new model calls pause and existing calls and streams finish
+   before the queue restarts. Worker job admission remains enabled during
+   that wait whenever the host is eligible for takeover.
 4. **Updates each Mycelium service on the host**, the worker first and then, on
    the queue's host, the queue. The service fetches the release through the
    queue's authenticated endpoint and checks it against its locally pinned
