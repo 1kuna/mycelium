@@ -194,6 +194,23 @@ func (q *Queue) jobHold(j *Job, resolving bool) (blocker *Hold) {
 	if specificWaitKind(wait.Kind) {
 		return b
 	}
+	if wait.Kind == "no_eligible_host" && q.calls[j.ID] == nil && j.Spec.Needs.Model == "" && j.Spec.Resident == nil {
+		scan := q.placementScan()
+		for _, t := range targets {
+			if t.fit.failures != 0 || t.m.GPU == "cpu" || t.job.Spec.Needs.cpuOnly() || !q.inventoryFresh(q.s.Machines[t.m.ID]) {
+				continue
+			}
+			i, found := slices.BinarySearchFunc(scan.machines, t.fit.key, func(m *Machine, key string) int {
+				return strings.Compare(targetKey(m), key)
+			})
+			if !found {
+				continue
+			}
+			if hold := q.deviceCapacityHold(t.job, scan.machines[i]); hold != nil {
+				return hold
+			}
+		}
+	}
 	if wait.Kind == "waiting_for_worker" && len(compatibleHosts) != 0 {
 		return b
 	}
@@ -319,6 +336,24 @@ func (q *Queue) jobHold(j *Job, resolving bool) (blocker *Hold) {
 		}
 	}
 	return b
+}
+
+// The candidate fits the target at advertised capacity. Compare it with the
+// live card or group without changing its sizing or the dispatch decision.
+func (q *Queue) deviceCapacityHold(j *Job, m *Machine) *Hold {
+	if m.Disabled != "" || m.Leaving || m.Recovering || availabilityBlocked(m) ||
+		q.maintenanceBlocked(hostID(m)) || q.deviceAdmissionBlocked(m) ||
+		m.MemoryError != "" || inventoryWaitingReason(m) != "" || !environmentReady(j, m) {
+		return nil
+	}
+	n := j.Spec.Needs
+	if detail := q.cardWaitingReason(j, m); detail != "" {
+		return newHold("capacity", detail)
+	}
+	if n.MemoryGB <= m.FreeMemoryGB {
+		return nil
+	}
+	return newHold("capacity", fmt.Sprintf("%s: %.1f GiB accelerator memory needed, %.1f GiB free of %.1f GiB capacity", m.ID, n.MemoryGB, m.FreeMemoryGB, m.TotalMemoryGB))
 }
 
 func (q *Queue) maintenanceJobHold(hosts map[string]bool) *Hold {
