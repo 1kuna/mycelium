@@ -15,12 +15,23 @@ type custodianGate struct {
 	Launch HostLaunch `json:"launch"`
 }
 type custodianGateReceipt struct {
-	Nonce string `json:"nonce"`
-	Error string `json:"error,omitempty"`
+	Nonce     string           `json:"nonce"`
+	Error     string           `json:"error,omitempty"`
+	Admission *AdmissionDetail `json:"admission,omitempty"`
 }
 type custodianLedger struct {
 	Charge  float64 `json:"charge"`
 	Pending float64 `json:"pending"`
+}
+
+func (r custodianGateReceipt) refusal() error {
+	if r.Error == "" {
+		return nil
+	}
+	if detail := safeAdmissionDetail(r.Admission); detail != nil {
+		return &admissionError{detail: *detail}
+	}
+	return errors.Join(errWorkerMemory, errors.New(r.Error))
 }
 
 func custodianLaunchGate(ctx context.Context, dir, id string, launch HostLaunch) error {
@@ -33,8 +44,8 @@ func custodianLaunchGate(ctx context.Context, dir, id string, launch HostLaunch)
 	for {
 		var receipt custodianGateReceipt
 		if readCustodianJSON(dir, custodianName(id, "gate-receipt"), &receipt) == nil && receipt.Nonce == r.Nonce {
-			if receipt.Error != "" {
-				return errors.Join(errWorkerMemory, errors.New(receipt.Error))
+			if err := receipt.refusal(); err != nil {
+				return err
 			}
 			return ctx.Err()
 		}
@@ -74,10 +85,12 @@ func (w Worker) serveCustodianGate(ctx context.Context, g *attemptCustodian, j J
 	if w.batchAdmission != nil {
 		if err := w.batchAdmission(ctx, l); err != nil {
 			receipt.Error = err.Error()
+			receipt.Admission = admissionDetail(err, j)
 		}
 	}
 	if w.checkAvailability() != nil {
 		receipt.Error = "worker is unavailable"
+		receipt.Admission = nil
 	}
 	if ctx.Err() == nil && (w.serviceStop == nil || w.serviceStop.Err() == nil) {
 		_ = saveWorkerJSON(g.dir, custodianName(g.id, "gate-receipt"), receipt)
