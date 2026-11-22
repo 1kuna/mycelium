@@ -46,7 +46,7 @@ the new boundary for that result.
 
 ### Attempt launch timings
 
-Use `myce status JOB_ID --history` for launch phases in seconds and add
+Use `myce status --history JOB_ID` for launch phases in seconds and add
 `--json` for timestamps and full precision. `launch_timings` on a job belongs
 to its current attempt. In `attempt_history[]`, it belongs to that row's
 attempt, machine and session. Older worker receipts can omit the field.
