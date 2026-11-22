@@ -354,22 +354,26 @@ Run the release performance check once per release batch, on the candidate SHA,
 alongside the release full:
 
 ```sh
-myce run --profile release-perf
+myce run --profile release-perf -- --baseline "$deployed_release_sha"
 ```
 
-It runs on a fleet Linux CPU worker without race instrumentation, with four cores
-reserved, and executes once each the benchmarks that hold the wall-clock bounds
-the race suite no longer asserts, because shared-host load alone decided them
-(#1224): `BenchmarkStatusReadCheckinContention` (check-in p99 < 500 ms),
-`BenchmarkCheckinRetainedHistoryContention` (all-hold p99 < 100 ms),
-`BenchmarkDevFanOutBurst62` (ack p99 < 500 ms, heartbeat age and no losses) and
-`BenchmarkDevProductionStart` (submit-to-start < 15 s). `release-perf.txt` lists
-PASS/FAIL per benchmark against those unchanged bounds and ends with the overall
-verdict; `release-perf.log` keeps the measurements. Fleet hosts are shared, so a
-FAIL needs a rerun on a quieter host or the same-host comparison against the
-previous release before it counts as a regression. The functional tests keep the
-load-independent checks: reads never take a queue-mutex turn during check-in
-contention, and no attempt is lost.
+Set `deployed_release_sha` to the full commit SHA of the deployed release. The
+profile builds both revisions with the same Go toolchain and runs
+`BenchmarkStatusReadCheckinContention` in one four-core Linux CPU assignment,
+without race instrumentation. It runs the informational standalone candidate
+measurement first, followed by the paired deployed and candidate legs.
+The paired candidate p99 must be below 500 ms. The report shows both paired
+p99 values side by side. If either leg is missing or errors, the paired check-in
+verdict fails. A deployed baseline p99 at or above 500 ms is still a measurement.
+
+The candidate's standalone `BenchmarkCheckinRetainedHistoryContention`
+(all-hold p99 < 100 ms), `BenchmarkDevFanOutBurst62` (ack p99 < 500 ms,
+heartbeat age and no losses), and `BenchmarkDevProductionStart`
+(submit-to-start < 15 s) still bind. `release-perf.txt` records the benchmark
+results and ends with the overall verdict. `release-perf.log` keeps the raw
+output. Both files are retained on failure. The functional tests retain the
+load-independent assertions (#1224), including the queue-mutex and attempt-loss
+checks.
 
 On the local Darwin gate, declare a release full with
 `./scripts/gate.sh full --priority release`. It keeps its FIFO position, drains
