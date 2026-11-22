@@ -6,17 +6,23 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"mycelium/internal/myce"
+	"io"
+	"net/url"
 	"os"
 	"path/filepath"
+
+	"mycelium/internal/myce"
 )
 
 func fileCommand(args []string) error {
+	if len(args) > 0 && args[0] == "holdings" {
+		return fileHoldingsCommand(context.Background(), args[1:], os.Stdout)
+	}
 	if len(args) > 0 && args[0] == "release" {
 		return fileReleaseCommand(context.Background(), args[1:], os.Stdout)
 	}
 	if len(args) == 0 {
-		return errors.New("usage: myce file put [flags] FILE | get [flags] SHA256 DEST | release plan|apply")
+		return errors.New("usage: myce file put [flags] FILE | get [flags] SHA256 DEST | holdings --project PROJECT | release plan|apply")
 	}
 	f := flag.NewFlagSet("file "+args[0], flag.ContinueOnError)
 	authority := installedClientFlags(f)
@@ -77,6 +83,32 @@ func fileCommand(args []string) error {
 	default:
 		return fmt.Errorf("unknown file command %q", args[0])
 	}
+}
+
+func fileHoldingsCommand(ctx context.Context, args []string, out io.Writer) error {
+	f := flag.NewFlagSet("file holdings", flag.ContinueOnError)
+	authority := installedClientFlags(f)
+	project := f.String("project", "", "project attribution")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *project == "" || f.NArg() != 0 {
+		return errors.New("holdings requires --project")
+	}
+	c, err := authority.client()
+	if err != nil {
+		return err
+	}
+	if c.HTTP != nil {
+		defer c.HTTP.CloseIdleConnections()
+	}
+	var report myce.ProjectFileHoldings
+	if err := c.Call(ctx, "GET", "/api/files/holdings?"+url.Values{"project": {*project}}.Encode(), nil, &report); err != nil {
+		return err
+	}
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	return enc.Encode(report)
 }
 
 // Upload only the explicitly declared input mappings. The transmitted description

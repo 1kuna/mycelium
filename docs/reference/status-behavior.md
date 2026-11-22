@@ -780,8 +780,10 @@ The [disk-volume schema](../schemas/disk-volume-v1.schema.json) describes each e
 Old workers without samples retain startup storage figures.
 
 Queue `file_store.projects` reports per-project retained and 24-hour added
-bytes, limits and any quota refusal; see
-[per-project quotas](../reference/file-store.md#per-project-file-store-quotas-464).
+bytes, limits and any quota refusal. Use `myce file holdings --project PROJECT`
+to see the digests and holders behind the total. See the
+[accounting and release commands](../files.md#see-and-release-project-file-holdings)
+and [per-project quotas](../reference/file-store.md#per-project-file-store-quotas-464).
 
 Queue `file_store.collection` counts published-blob collection since the queue
 process opened its store: `passes`, `yielded_passes` (stopped after a batch
@@ -789,8 +791,9 @@ because a control request was waiting on the queue), `deferred_passes` (an
 upload or publication held the file fence), `reclaimed_blobs`,
 `reclaimed_bytes`, `pending_candidates` left by the last pass, and
 `last_reclaim_at` (queue clock). A pass can leave candidates that still need to
-age out of publication grace. Use `reclaimable_bytes` to see how many bytes can
-be collected now. Control-pressure yields occur after the first batch, and a
+age out of publication grace. `pending_collection_bytes` measures present
+published candidates, including those waiting for grace. Use
+`reclaimable_bytes` to see how many bytes can be collected now. Control-pressure yields occur after the first batch, and a
 busy publication fence can defer the first batch.
 
 Queue `file_store.physical` is shadow accounting for #506. `disk_free_bytes`

@@ -27,7 +27,8 @@ const fileReclaimBatch = 1
 // Stored on the existing job record, not a separate blob index. A non-nil value
 // with no pending hashes means this job's input/result reclamation is complete.
 type FileReclamation struct {
-	Pending []string `json:"pending,omitempty"`
+	Pending                  []string `json:"pending,omitempty"`
+	LegacyCheckpointsExpired bool     `json:"legacy_checkpoints_expired,omitempty"`
 }
 
 const attemptOutputUploadPurpose = "attempt-output"
@@ -312,6 +313,40 @@ func enrollFileReclamation(j *Job) {
 	}
 }
 
+func visitLegacyCheckpointFiles(j *Job, visit func(string, FileManifest)) {
+	if j.Spec.localFirst() {
+		return
+	}
+	for _, save := range j.FileCheckpoints {
+		visit("checkpoint", save.Files)
+	}
+	if j.ResumeFiles != nil {
+		visit("resume_checkpoint", j.ResumeFiles.Files)
+	}
+}
+
+// Explicit terminal-job release may enroll legacy HTTP checkpoint files.
+// Clone because the release planner projects expiry from a shallow job copy.
+func enrollLegacyCheckpointReclamation(j *Job) {
+	if j.Spec.localFirst() || j.FileReclamation.LegacyCheckpointsExpired {
+		return
+	}
+	pending := slices.Clone(j.FileReclamation.Pending)
+	seen := make(map[string]bool, len(pending))
+	for _, hash := range pending {
+		seen[hash] = true
+	}
+	visitLegacyCheckpointFiles(j, func(_ string, files FileManifest) {
+		for _, ref := range files {
+			if !seen[ref.SHA256] {
+				seen[ref.SHA256] = true
+				pending = append(pending, ref.SHA256)
+			}
+		}
+	})
+	j.FileReclamation = &FileReclamation{Pending: pending, LegacyCheckpointsExpired: true}
+}
+
 // q.mu must be held. Only expired terminal inputs/results are candidates.
 // Everything else with explicit custody is a keeping reference. In particular,
 // checkpoint generations and catalog snapshots survive terminal file expiry.
@@ -321,7 +356,7 @@ func (q *Queue) fileReferences(pendingOnly bool, subset ...map[string]*Job) (exp
 
 // The release planner uses the collector itself, treating only eligible selected
 // jobs as expired. Explanations therefore follow the same protection decisions.
-func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]bool, report func(FileRef, FileKeepingReference), subset ...map[string]*Job) (expired, keep, referenced map[string]bool) {
+func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]fileReleaseScope, report func(FileRef, FileKeepingReference), subset ...map[string]*Job) (expired, keep, referenced map[string]bool) {
 	expired, keep, referenced = q.collectDurableFileReferences(pendingOnly, releasing, report, subset...)
 	for _, claim := range q.s.FileInputClaims {
 		if claim.SettledAt.IsZero() {
@@ -338,7 +373,7 @@ func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]boo
 // An unsettled input claim keeps a published blob. It does not retire the
 // cleanup marker or give an interrupted transfer the custody of a job, catalog
 // asset or other committed reference.
-func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[string]bool, report func(FileRef, FileKeepingReference), subset ...map[string]*Job) (expired, keep, referenced map[string]bool) {
+func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[string]fileReleaseScope, report func(FileRef, FileKeepingReference), subset ...map[string]*Job) (expired, keep, referenced map[string]bool) {
 	expired, keep, referenced = map[string]bool{}, map[string]bool{}, map[string]bool{}
 	if len(subset) == 0 {
 		for hash := range q.s.RetiredJobFiles {
@@ -356,19 +391,38 @@ func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[str
 			}
 		}
 	}
-	for hash := range q.bundleReferences(subset...) {
-		keepFiles("extension_environment_bundle", FileManifest{"bundle": {SHA256: hash}})
-	}
 	add := func(to map[string]bool, files FileManifest) {
 		for _, ref := range files {
 			to[ref.SHA256] = true
 		}
 	}
+	bundle := func(ref *FileRef) {
+		if ref == nil {
+			return
+		}
+		keep[ref.SHA256] = true
+		if report != nil {
+			r := owner
+			r.Kind, r.Name = "extension_environment_bundle", "bundle"
+			report(*ref, r)
+		}
+	}
+	recipe := func(kind string, r EnvironmentRecipe) {
+		keepFiles(kind, r.Assets)
+		bundle(r.FilesRef)
+	}
+	model := func(kind string, m Model) {
+		keepFiles(kind, FileManifest{m.Name: {SHA256: m.SHA256, SizeBytes: m.SizeBytes}})
+		for _, f := range m.Files {
+			keepFiles(kind, FileManifest{f.Path: {SHA256: f.SHA256, SizeBytes: f.SizeBytes}})
+		}
+	}
 	extension := func(e Extension) {
 		keepFiles("extension_asset", e.Assets)
+		bundle(e.FilesRef)
 		for _, v := range e.Variants {
 			for _, r := range v.Environments {
-				keepFiles("environment_asset", r.Assets)
+				recipe("environment_asset", r)
 			}
 		}
 	}
@@ -377,12 +431,15 @@ func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[str
 		if j == nil {
 			return
 		}
-		if releasing[j.ID] {
+		if scope, ok := releasing[j.ID]; ok {
 			// Project exactly the enrollment that apply would perform without
 			// re-enrolling historical manifests after completed reclamation.
 			planned := *j
 			planned.FilesExpired = true
 			enrollFileReclamation(&planned)
+			if scope.checkpoints {
+				enrollLegacyCheckpointReclamation(&planned)
+			}
 			j = &planned
 		}
 		owner = FileKeepingReference{JobID: j.ID, Project: j.Spec.Project}
@@ -449,44 +506,48 @@ func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[str
 				for _, files := range jobFileManifests(j) {
 					add(expired, files)
 				}
-			} else if j.FileReclamation != nil {
+			}
+			if j.FileReclamation != nil {
 				for _, hash := range j.FileReclamation.Pending {
 					expired[hash] = true
 				}
 			}
 		} else {
-			for _, files := range jobFileManifests(j) {
-				keepFiles("retained_job_files", files)
-			}
+			visitJobFileManifests(j, keepFiles)
 		}
-		for _, save := range j.FileCheckpoints {
-			if j.Spec.localFirst() && j.FilesExpired {
-				continue
-			}
-			keepFiles("checkpoint", save.Files)
+		legacyCheckpointsExpired := j.FileReclamation != nil && j.FileReclamation.LegacyCheckpointsExpired
+		if legacyCheckpointsExpired {
+			visitLegacyCheckpointFiles(j, func(_ string, files FileManifest) {
+				add(referenced, files)
+				if !pendingOnly && terminal(j.State) && !protected {
+					add(expired, files)
+				}
+			})
 		}
-		if j.ResumeFiles != nil && !(j.Spec.localFirst() && j.FilesExpired) {
-			keepFiles("resume_checkpoint", j.ResumeFiles.Files)
+		checkpointsExpired := j.Spec.localFirst() && j.FilesExpired || legacyCheckpointsExpired
+		if !checkpointsExpired {
+			for _, save := range j.FileCheckpoints {
+				keepFiles("checkpoint", save.Files)
+			}
+			if j.ResumeFiles != nil {
+				keepFiles("resume_checkpoint", j.ResumeFiles.Files)
+			}
 		}
 		for _, e := range j.Extensions {
 			extension(e)
 		}
 		if r := j.Spec.Resident; r != nil && r.Engine != nil {
-			for _, recipe := range r.Engine.Environments {
-				keepFiles("resident_environment", recipe.Assets)
+			for _, env := range r.Engine.Environments {
+				keepFiles("resident_environment", env.Assets)
 			}
-			model := r.Engine.Model
-			keepFiles("resident_model", FileManifest{model.Name: {SHA256: model.SHA256}})
-			for _, f := range model.Files {
-				keepFiles("resident_model", FileManifest{"file": {SHA256: f.SHA256}})
-			}
+			model("resident_model", r.Engine.Model)
 		}
 		for _, r := range j.EnvironmentRecipes {
-			keepFiles("environment_asset", r.Assets)
+			recipe("environment_asset", r)
 		}
 		for _, recipes := range j.SidecarEnvironmentRecipes {
 			for _, r := range recipes {
-				keepFiles("environment_asset", r.Assets)
+				recipe("environment_asset", r)
 			}
 		}
 	}
@@ -499,7 +560,12 @@ func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[str
 	}
 	if len(subset) == 0 {
 		for _, record := range q.s.Submissions {
-			job(record.Job)
+			// Pruned answers retain the submitted spec for replay, never file
+			// custody. The history transaction transfers pending collection to
+			// RetiredJobFiles before storing the skeletal answer.
+			if record.Job != nil && !record.FileCustodyPruned && jobs[record.Job.ID] == nil {
+				job(record.Job)
+			}
 		}
 	}
 	owner = FileKeepingReference{}
@@ -508,28 +574,21 @@ func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[str
 	}
 	for _, recipes := range q.environments.Environments {
 		for _, r := range recipes {
-			keepFiles("environment_asset", r.Assets)
+			recipe("environment_asset", r)
 		}
 	}
 	for _, m := range q.models.Models {
-		keepFiles("model_catalog", FileManifest{m.Name: {SHA256: m.SHA256}})
-		for _, f := range m.Files {
-			keepFiles("model_catalog", FileManifest{"file": {SHA256: f.SHA256}})
-		}
+		model("model_catalog", m)
 	}
 	for _, slot := range q.s.ModelSlots {
 		if slot.Resident != nil {
 			for _, recipe := range slot.Resident.Environments {
 				keepFiles("resident_environment", recipe.Assets)
 			}
-			model := slot.Resident.Model
-			keepFiles("resident_model", FileManifest{model.Name: {SHA256: model.SHA256}})
-			for _, f := range model.Files {
-				keepFiles("resident_model", FileManifest{"file": {SHA256: f.SHA256}})
-			}
+			model("resident_model", slot.Resident.Model)
 		}
 		if slot.EnvironmentRecipe != nil {
-			keepFiles("model_environment_asset", slot.EnvironmentRecipe.Assets)
+			recipe("model_environment_asset", *slot.EnvironmentRecipe)
 		}
 	}
 	for hash := range keep {

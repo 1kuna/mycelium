@@ -9,6 +9,7 @@ Docker requests receive `job_docker_retired`; retained Docker job records and
 their existing file references still load under MY-42.
 
 - [Submit and transfer files](#start-and-submit)
+- [Project file holdings](#see-and-release-project-file-holdings)
 - [Failed-attempt recovery](#recover-outputs-from-a-failed-terminal-attempt)
 - [Atomic checkpoints and resume](#resumable-jobs)
 - [Asynchronous NAS delivery](#complete-from-queue-storage-deliver-to-nas-later-349)
@@ -95,6 +96,47 @@ job's `output_refs` maps output names to identities; retrieve an output with:
 ```sh
 myce file get --size-bytes BYTE_COUNT SHA256 ./answer.json
 ```
+
+## See and release project file holdings
+
+```sh
+myce file holdings --project PROJECT
+```
+
+The JSON report lists each digest once, with its own holders, the bytes charged
+to `file_store.projects[].retained_bytes`, and the payload bytes present in the
+queue store. The queue captures committed custody at `captured_at` and samples
+payload immediately afterward. A declaration or input claim can count at full
+size while its payload is absent or an upload is in progress. `by_kind` deduplicates within
+each kind. A digest can appear in multiple kinds, so use the top-level totals
+for the union. `shared_bytes` is the stored portion also held by another
+project or queue-wide custody. Those holders appear by kind only. The project
+selector scopes accounting under the existing shared fleet credential.
+
+Review the job and claim IDs in `files[].holders` before releasing anything:
+
+| Holder | What to do |
+| --- | --- |
+| Finished job inputs, shared inputs, dependency inputs, outputs, fan-out outputs and ordinary diagnostics | Run `myce file release plan --project PROJECT JOB_ID...`, save and review the JSON, then run `myce file release apply --accept-expiry PLAN.json`. Include every finished holder you can give up. |
+| Legacy queue-backed checkpoints and resume files of finished jobs | Add `--include-checkpoints` to the same plan command and review the checkpoint files before applying. |
+| Local-first checkpoint generations and pending mirrors | Use normal job retention after checkpoint grace, verified delivery and attempt release. The release plan reports any checkpoint or custody block. |
+| Abandoned pre-submission input claim, including a partial upload or unused declaration | Run `myce file release claim --project PROJECT --accept-expiry CLAIM_ID`. The ID is the holder's `name` for `input_claim`. Retiring the claim removes its retained charge, preserves the rolling additions charge, and leaves eligible bytes to ordinary collection. A settled claim belongs to the job's file release. |
+| Live jobs, pending output/delivery, separately retained attempt diagnostics and recovered results | Their own execution, delivery or recovery contract determines when the hold ends. |
+| Registered model files, resident model sources, extension bundles and environment recipe assets | Registry and job-history custody follow their own lifetimes. There is no consumer early release for these holders. |
+| Worker model snapshots and built environment caches, or NAS-backed files | These are outside the queue file store and use their respective worker or NAS lifetimes. |
+
+Use `myce status --json` to verify collection. `file_store.used_bytes` is the
+sum of `held_published_bytes`, `pending_collection_bytes`,
+`unreferenced_published_bytes`, and `open_upload_bytes`.
+`pending_collection_bytes` counts present published candidates even during
+publication grace. `reclaimable_bytes` counts currently eligible candidates
+and reclaimable written portions of idle uploads. `collection.pending_candidates`
+is the last collector pass's count, which can still include absent digests.
+`unreferenced_published_bytes` includes uploads still in their tracking window
+and imports with no recorded collection authority. Untracked imports and
+unidentified uploads have no project release command. Pending collection is
+queue-wide, and release receipts acknowledge custody expiry before physical
+collection. See [retention and early release](reference/file-store.md).
 
 ### Folder and glob outputs (#1341)
 

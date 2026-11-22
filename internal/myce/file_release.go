@@ -17,8 +17,13 @@ import (
 // Explicit job IDs define the owner's completion boundary (including any parents,
 // children and downstream consumers). There is deliberately no project-wide glob.
 type FileReleaseSelection struct {
-	Project string   `json:"project"`
-	Jobs    []string `json:"jobs"`
+	Project            string   `json:"project"`
+	Jobs               []string `json:"jobs"`
+	IncludeCheckpoints bool     `json:"include_checkpoints,omitempty"`
+}
+
+type fileReleaseScope struct {
+	checkpoints bool
 }
 
 type FileKeepingReference struct {
@@ -172,7 +177,7 @@ func fileReleasePlanID(base string, candidates []string) string {
 // q.mu held. Only metadata work here; no blob reads, stats or NAS access.
 func (q *Queue) fileReleaseMetadata(selection FileReleaseSelection, includeReferences bool) (FileReleasePlan, error) {
 	plan := FileReleasePlan{Selection: selection, Jobs: []FileReleaseJob{}, Blobs: []FileReleaseBlob{}}
-	releasing := map[string]bool{}
+	releasing := map[string]fileReleaseScope{}
 	hashes := map[string]bool{}
 	for _, id := range selection.Jobs {
 		j := q.retainedJob(id)
@@ -245,9 +250,14 @@ func (q *Queue) fileReleaseMetadata(selection FileReleaseSelection, includeRefer
 				add("fan_out_result:"+key, r.OutputRefs)
 			}
 		}
+		if selection.IncludeCheckpoints {
+			visitLegacyCheckpointFiles(j, add)
+		}
 		slices.SortFunc(item.Files, func(a, b FileReleaseFile) int { return compareReleaseJSON(a, b) })
 		plan.Jobs = append(plan.Jobs, item)
-		releasing[id] = len(item.Blockers) == 0
+		if len(item.Blockers) == 0 {
+			releasing[id] = fileReleaseScope{checkpoints: selection.IncludeCheckpoints}
+		}
 	}
 	refs := map[string][]FileKeepingReference{}
 	var report func(FileRef, FileKeepingReference)
@@ -423,6 +433,9 @@ func (q *Queue) ApplyFileRelease(ctx context.Context, req FileReleaseApply) (Fil
 		for _, id := range selection.Jobs {
 			j := q.retainedJob(id)
 			q.acceptFileExpiry(j, req.PlanID)
+			if selection.IncludeCheckpoints {
+				enrollLegacyCheckpointReclamation(j)
+			}
 		}
 		result, _ = q.fileReleaseReplay(selection, req.PlanID)
 		return nil
@@ -431,6 +444,10 @@ func (q *Queue) ApplyFileRelease(ctx context.Context, req FileReleaseApply) (Fil
 }
 
 func (a API) registerFileRelease(mux *requestMux) {
+	mux.HandleFunc("GET /api/files/holdings", func(w http.ResponseWriter, r *http.Request) {
+		report, err := a.Queue.ProjectFileHoldings(r.Context(), r.URL.Query().Get("project"))
+		respond(w, report, err)
+	})
 	mux.HandleFunc("POST /api/files/release/plan", func(w http.ResponseWriter, r *http.Request) {
 		var s FileReleaseSelection
 		if !decode(w, r, &s) {
@@ -438,6 +455,14 @@ func (a API) registerFileRelease(mux *requestMux) {
 		}
 		plan, err := a.Queue.PlanFileRelease(r.Context(), s)
 		respond(w, plan, err)
+	})
+	mux.HandleFunc("POST /api/files/release/claim", func(w http.ResponseWriter, r *http.Request) {
+		var req FileInputClaimRelease
+		if !decode(w, r, &req) {
+			return
+		}
+		result, err := a.Queue.ReleaseFileInputClaim(r.Context(), req)
+		respondOperation(w, result, err, "file_release_invalid")
 	})
 	mux.HandleFunc("POST /api/files/release/apply", func(w http.ResponseWriter, r *http.Request) {
 		var req FileReleaseApply

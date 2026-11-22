@@ -95,6 +95,18 @@
         "reclaimable_bytes": {
           "type": "integer"
         },
+        "pending_collection_bytes": {
+          "type": "integer"
+        },
+        "unreferenced_published_bytes": {
+          "type": "integer"
+        },
+        "open_upload_bytes": {
+          "type": "integer"
+        },
+        "held_published_bytes": {
+          "type": "integer"
+        },
         "collection": {
           "$ref": "#/$defs/FileCollectionStatus"
         },
@@ -120,6 +132,10 @@
         "used_bytes",
         "free_bytes",
         "reclaimable_bytes",
+        "pending_collection_bytes",
+        "unreferenced_published_bytes",
+        "open_upload_bytes",
+        "held_published_bytes",
         "limit_bytes",
         "disk_free_bytes",
         "floor_bytes"

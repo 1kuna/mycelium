@@ -38,6 +38,9 @@ type submissionRecord struct {
 	CancelledAt *time.Time `json:"cancelled_at,omitempty"`
 	// Last durable answer, retained for 30 days after transactional job removal.
 	Job *Job `json:"job,omitempty"`
+	// The history transaction left only a replay receipt and transferred any
+	// remaining collection to RetiredJobFiles.
+	FileCustodyPruned bool `json:"file_custody_pruned,omitempty"`
 }
 
 func submissionDigest(project, key string) string {

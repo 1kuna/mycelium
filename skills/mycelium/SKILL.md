@@ -1006,6 +1006,13 @@ In an existing project, Mycelium now does these; delete your own:
 
 ## Check your project's efficiency
 
+Run `myce file holdings --project NAME` to find which jobs, checkpoint
+generations, claims and other holders account for your queue file-store usage.
+Each digest is counted once in the total. `by_kind` counts a shared digest in
+each applicable kind. Compare `retained_bytes` with `stored_bytes` to see the
+difference between attributed size and payload actually present, and use
+`shared_bytes` to see what other custody also holds.
+
 When finished work fills the file store, use `myce file release plan --project
 NAME JOB_ID...`, inspect the plan, then `myce file release apply --accept-expiry
 PLAN_FILE`. Include every finished owner whose queue recovery you can give up.
@@ -1021,11 +1028,17 @@ bundles after publication grace when no keeping reference remains. Live, queued,
 unexpired or other projects' retained jobs still protect shared bytes, as do
 checkpoint, model, extension and environment custody. New keeping references
 can reduce what apply collects without invalidating the plan. If apply reports
-`file_release_stale`, generate and review a new plan. Apply schedules collection;
-check status to confirm space was freed. A positive `pending_candidates` count
-can include files still in measured publication grace. Use `reclaimable_bytes`
-to see which bytes can be collected now. See the
-[file-store release contract](https://github.com/1kuna/mycelium/blob/main/docs/reference/file-store.md#project-owner-early-file-release-465).
+`file_release_stale`, generate and review a new plan. Add `--include-checkpoints`
+to the plan for legacy queue checkpoint generations of finished jobs you no
+longer need. Local-first checkpoints follow their existing grace and custody
+rules. For an abandoned `input_claim`, use
+`myce file release claim --project NAME --accept-expiry CLAIM_ID` with the
+holder's `name`. For a settled claim, release the finished job.
+
+Use `myce status --json` to verify collection. `pending_collection_bytes` counts
+published candidates, including those in publication grace, and
+`reclaimable_bytes` counts what can be collected now. See the
+[holder classes and release commands](https://github.com/1kuna/mycelium/blob/main/docs/files.md#see-and-release-project-file-holdings).
 
 After a batch, run `myce efficiency --project NAME` once. It shows named-host
 list usage (real pins), those jobs' plain queue wait and current stranded jobs

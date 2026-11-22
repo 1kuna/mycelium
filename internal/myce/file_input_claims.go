@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
-	"strings"
+	"os"
+	"path/filepath"
 	"time"
+
+	"github.com/tus/tusd/v2/pkg/filestore"
+	tus "github.com/tus/tusd/v2/pkg/handler"
 )
 
 // A queue-issued claim binds a pre-submission transfer to its project and exact
@@ -20,13 +24,14 @@ type FileInputClaim struct {
 	At        time.Time `json:"at"`
 	Allocated bool      `json:"allocated,omitempty"`
 	SettledAt time.Time `json:"settled_at,omitempty"`
+	Released  bool      `json:"released,omitempty"`
 }
 
 // Rollback and reopen round-trip timestamps through JSON. Compare instants,
 // not time.Time's location pointers or process-local monotonic readings.
 func (c FileInputClaim) equal(other FileInputClaim) bool {
 	return c.ID == other.ID && c.Project == other.Project && c.Class == other.Class &&
-		c.File == other.File && c.Allocated == other.Allocated &&
+		c.File == other.File && c.Allocated == other.Allocated && c.Released == other.Released &&
 		c.At.Equal(other.At) && c.SettledAt.Equal(other.SettledAt)
 }
 
@@ -44,7 +49,7 @@ func (q *Queue) inputClaimsRequired() bool {
 
 func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileInputClaim, error) {
 	var out FileInputClaim
-	if strings.TrimSpace(s.Project) == "" || strings.ContainsAny(s.Project, "\r\n\x00") {
+	if !validFileProject(s.Project) {
 		return out, errors.New("input claim requires project")
 	}
 	if err := ref.validate(); err != nil {
@@ -69,7 +74,14 @@ func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileIn
 	// may still hold this receipt. An unrelated claim grants no revocation
 	// authority. Interrupted upload collection retires a claim with its transfer.
 	err := q.updateUploadRequest(ctx, func() error {
-		for _, claim := range q.s.FileInputClaims {
+		cutoff := q.clock.Now().Add(-fileStoreQuotaWindow)
+		for id, claim := range q.s.FileInputClaims {
+			if claim.Released {
+				if !claim.SettledAt.After(cutoff) {
+					delete(q.editInputClaims(), id)
+				}
+				continue
+			}
 			if claim.Project == s.Project && claim.Class == s.Class && claim.File == ref {
 				out = claim
 				return nil
@@ -105,7 +117,7 @@ func (q *Queue) editInputClaims() map[string]FileInputClaim {
 
 func (q *Queue) forgetFileInputClaims(hash string, before time.Time) {
 	for id, claim := range q.s.FileInputClaims {
-		if claim.File.SHA256 == hash && !claim.At.After(before) {
+		if !claim.Released && claim.File.SHA256 == hash && !claim.At.After(before) {
 			delete(q.editInputClaims(), id)
 		}
 	}
@@ -145,7 +157,7 @@ func (q *Queue) inputClaimContext(ctx context.Context, ref FileRef, allocate boo
 	if _, ok := ctx.Value(fileStoreAttemptKey{}).(fileStoreAttempt); ok {
 		required = false
 	}
-	valid := found && (ref.SHA256 == "" || claim.File == ref || ref.SizeBytes == -1 && claim.File.SHA256 == ref.SHA256)
+	valid := found && !claim.Released && (ref.SHA256 == "" || claim.File == ref || ref.SizeBytes == -1 && claim.File.SHA256 == ref.SHA256)
 	declaredOutput := false
 	if ctx.Value(fileStoreOrdinaryKey{}) != nil {
 		required = false
@@ -184,7 +196,7 @@ func (q *Queue) inputClaimContext(ctx context.Context, ref FileRef, allocate boo
 	if allocate && !claim.Allocated {
 		if err := q.updateUploadRequest(ctx, func() error {
 			current, ok := q.s.FileInputClaims[id]
-			if ok && (current.Allocated || !current.SettledAt.IsZero()) {
+			if ok && !current.Released && (current.Allocated || !current.SettledAt.IsZero()) {
 				return nil
 			}
 			if !ok || !current.equal(claim) {
@@ -205,12 +217,13 @@ func (q *Queue) noteInputClaimFacts(f *projectFileFacts, project string) {
 		if project != "" && claim.Project != project {
 			continue
 		}
-		if !claim.SettledAt.IsZero() {
-			continue
+		if claim.SettledAt.IsZero() || claim.Released {
+			fact := projectFileFact{project: claim.Project, hash: claim.File.SHA256, size: uint64(claim.File.SizeBytes), at: claim.At}
+			f.added = append(f.added, fact)
+			if !claim.Released {
+				f.retained = append(f.retained, fact)
+			}
 		}
-		fact := projectFileFact{project: claim.Project, hash: claim.File.SHA256, size: uint64(claim.File.SizeBytes), at: claim.At}
-		f.retained = append(f.retained, fact)
-		f.added = append(f.added, fact)
 	}
 }
 
@@ -221,7 +234,7 @@ func (q *Queue) settleFileInputClaims(s Spec) {
 	var delay time.Duration
 	for _, ref := range submissionFiles(s) {
 		for id, claim := range q.s.FileInputClaims {
-			if claim.Project == s.Project && claim.File == ref {
+			if !claim.Released && claim.Project == s.Project && claim.File == ref {
 				// A settled claim is reused by later submissions of the same bytes.
 				// Its age then measures reuse, not a publication delay: live, one
 				// reused claim lifted the horizon past file retention (#1375).
@@ -236,6 +249,93 @@ func (q *Queue) settleFileInputClaims(s Spec) {
 	if delay > 0 {
 		q.recordPublicationTiming(now, delay)
 	}
+}
+
+type FileInputClaimRelease struct {
+	Project      string `json:"project"`
+	ClaimID      string `json:"claim_id"`
+	AcceptExpiry bool   `json:"accept_expiry"`
+}
+
+type FileInputClaimReleaseResult struct {
+	ClaimID    string    `json:"claim_id"`
+	ReleasedAt time.Time `json:"released_at"`
+}
+
+func (q *Queue) ReleaseFileInputClaim(ctx context.Context, req FileInputClaimRelease) (FileInputClaimReleaseResult, error) {
+	var result FileInputClaimReleaseResult
+	if !validFileProject(req.Project) || req.ClaimID == "" || !req.AcceptExpiry {
+		return result, fileReleaseInvalid("claim release requires a project, one claim ID and explicit acceptance")
+	}
+	// Revoke only outside active transfer/verification intervals. TryLock keeps
+	// an owner release from queuing a writer ahead of unrelated publications.
+	if !q.fileLifecycle.TryLock() {
+		return result, fileReleaseError("file_release_busy", "file publication is active; retry claim release")
+	}
+	defer q.fileLifecycle.Unlock()
+	unlock := requestReadLock(ctx, &q.mu)
+	claim, found := q.s.FileInputClaims[req.ClaimID]
+	store := q.files
+	_, marked := q.jobUploadMarker(claim.File.SHA256)
+	_, bundle := q.s.BundleUploads[claim.File.SHA256]
+	unlock()
+	if !found || claim.Project != req.Project {
+		return result, fileReleaseInvalid("claim is unavailable or belongs to another project")
+	}
+	if claim.Released {
+		return FileInputClaimReleaseResult{claim.ID, claim.SettledAt}, nil
+	}
+	if !claim.SettledAt.IsZero() {
+		return result, fileReleaseError("file_release_protected", "claim settled into a job; release the finished job")
+	}
+	// A legacy queue sometimes lost the upload marker. Preserve ordinary idle
+	// collection authority only for an exact legacy partial transfer. A claim
+	// reusing unmarked published content cannot authorize collecting it.
+	markPartial := false
+	if claim.Allocated && !marked && !bundle && store != nil {
+		var err error
+		markPartial, err = store.legacyPartialInput(ctx, claim.File)
+		if err != nil {
+			return result, fileReleaseError("file_release_busy", "cannot read input transfer custody; retry claim release")
+		}
+	}
+	err := q.updateRequest(ctx, func() error {
+		current, found := q.s.FileInputClaims[req.ClaimID]
+		if q.files != store || !found || !current.equal(claim) {
+			return fileReleaseError("file_release_stale", "claim custody changed; inspect holdings again")
+		}
+		if markPartial {
+			if _, marked := q.jobUploadMarker(claim.File.SHA256); !marked {
+				if q.s.JobInputUploads == nil {
+					q.s.JobInputUploads = map[string]time.Time{}
+				}
+				q.s.JobInputUploads[claim.File.SHA256] = time.Time{}
+			}
+		}
+		claim.SettledAt, claim.Released = q.clock.Now(), true
+		q.editInputClaims()[claim.ID] = claim
+		result = FileInputClaimReleaseResult{claim.ID, claim.SettledAt}
+		return nil
+	}, nil)
+	return result, err
+}
+
+func (s *FileStore) legacyPartialInput(ctx context.Context, ref FileRef) (bool, error) {
+	if err := ref.validate(); err != nil {
+		return false, err
+	}
+	if _, err := os.Lstat(s.blob(ref)); !os.IsNotExist(err) {
+		return false, err
+	}
+	upload, err := filestore.New(filepath.Join(s.root, "uploads")).GetUpload(ctx, ref.SHA256)
+	if errors.Is(err, tus.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	info, err := upload.GetInfo(ctx)
+	return err == nil && jobInputUpload(info, ref.SHA256) && info.Size == ref.SizeBytes, err
 }
 
 type filePublicationSample struct {
