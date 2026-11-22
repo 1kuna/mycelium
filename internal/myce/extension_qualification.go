@@ -37,7 +37,7 @@ func automaticExtensionCheckID(machine string, r ExtensionReport) string {
 	return "auto-" + identityHash([2]string{machine, extensionReportIdentity(r)})
 }
 
-// A cancelled or proven never-executed automatic check has no native verdict.
+// A cancelled automatic check or one stopped before its main command has no native verdict.
 // Its successor gets a new immutable key derived from the previous one; the
 // queue reruns the check itself instead of waiting for an explicit retry.
 func automaticExtensionRetryCheckID(machine string, r ExtensionReport, previous string) string {
@@ -48,9 +48,8 @@ func automaticCheckCancelled(r ExtensionReport) bool {
 	return strings.HasPrefix(r.CheckID, "auto-") && r.CheckState == "cancelled" && !r.Qualified
 }
 
-// An accepted infrastructure refusal before execution is not a native verdict.
-// Require released custody and positive evidence for this exact attempt; a
-// missing Started timestamp alone cannot prove that a command never ran.
+// Require released custody and positive evidence for this exact attempt before
+// treating a failed check as having ended without a native verdict.
 func automaticCheckNoVerdict(j *Job) bool {
 	if j == nil || !terminal(j.State) {
 		return false
@@ -58,11 +57,36 @@ func automaticCheckNoVerdict(j *Job) bool {
 	if cancelled(j) {
 		return true
 	}
+	if j.State != "failed" || !j.ReleaseConfirmed || j.StartedAt != nil {
+		return false
+	}
 	c := j.ExecutionCause
 	e := safeExecutionEvidence(j.ExecutionEvidence, j.Attempt)
-	return j.State == "failed" && j.ReleaseConfirmed && j.StartedAt == nil &&
-		c != nil && c.Operation == "launch" && c.Class == launchRefused && c.Predicate == "launch_authorization" && c.PrelaunchRefused &&
-		e != nil && e.Main == executionNotStarted && e.Sidecars == executionNotStarted
+	if c == nil {
+		return (e == nil || e.Main == executionNotStarted) && qualificationStartupPreemption(j) != nil
+	}
+	if c.Operation != "launch" || e == nil || e.Main != executionNotStarted || e.Sidecars != executionNotStarted {
+		return false
+	}
+	return c.Class == launchRefused && c.Predicate == "launch_authorization" && c.PrelaunchRefused ||
+		c.Class == "resource_limit" && e.EnvironmentPreparation == executionNotStarted
+}
+
+// A release-only report after a queue-issued priority stop can lack a worker
+// execution cause. Match the queue's accepted interruption to this assignment.
+func qualificationStartupPreemption(j *Job) *AttemptOutcome {
+	if j.Attempt == 0 || j.Machine == "" || j.Session == "" {
+		return nil
+	}
+	for i := len(j.AttemptHistory) - 1; i >= 0; i-- {
+		h := &j.AttemptHistory[i]
+		if h.Attempt == j.Attempt && h.Machine == j.Machine && h.Session == j.Session &&
+			h.State == "failed" && h.Interrupted && !h.OutOfMemory && h.ExecutionCause == nil &&
+			h.PriorityStop != nil && h.PriorityStop.Cause == priorityPreemptionCause && h.PriorityStop.Victim == j.ID {
+			return h
+		}
+	}
+	return nil
 }
 
 func (q *Queue) automaticCheckRetryable(machine string, r ExtensionReport) bool {
@@ -96,9 +120,14 @@ func (q *Queue) qualificationReportInputs() map[string]*submissionRecord {
 					NativeCheckFailures: j.NativeCheckFailures}
 				proof.Spec.ExtensionCheck = &ExtensionCheckRequest{Automatic: automaticExtensionCheck(j)}
 				if q.automaticCheckRetryable(m.ID, r) {
-					c := j.ExecutionCause
 					proof.ExecutionEvidence = safeExecutionEvidence(j.ExecutionEvidence, j.Attempt)
-					proof.ExecutionCause = &RuntimeCause{Operation: c.Operation, Class: c.Class, Predicate: c.Predicate, PrelaunchRefused: c.PrelaunchRefused}
+					if c := j.ExecutionCause; c != nil {
+						proof.ExecutionCause = &RuntimeCause{Operation: c.Operation, Class: c.Class, Predicate: c.Predicate, PrelaunchRefused: c.PrelaunchRefused}
+					} else if h := qualificationStartupPreemption(j); h != nil {
+						proof.Session = j.Session
+						proof.AttemptHistory = []AttemptOutcome{{Attempt: h.Attempt, Machine: h.Machine, Session: h.Session,
+							State: h.State, Interrupted: true, PriorityStop: h.PriorityStop}}
+					}
 				}
 				inputs[key] = &submissionRecord{JobID: j.ID, Job: proof}
 			}
@@ -495,7 +524,7 @@ func (w Worker) reconcileExtensionQualification(ctx context.Context, plan Extens
 		report.Qualified = j.State == "succeeded" && !cancelled(&j) && j.Machine == plan.Machine && automaticExtensionCheck(&j) != nil && extensionReportIdentity(*automaticExtensionCheck(&j)) == extensionReportIdentity(r)
 		report.Reason = "native check " + j.State + "; explicit check required to retry"
 		if automaticCheckNoVerdict(&j) {
-			report.Reason = "native check did not execute; queue retries after dispatch eligibility is restored"
+			report.Reason = "native check ended before its main command started; queue retries after dispatch eligibility is restored"
 		}
 		if report.Qualified {
 			report.Reason = extensionQualificationReason(e, *report, &w.Machine)

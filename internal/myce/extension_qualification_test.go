@@ -176,7 +176,7 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 		}
 	})
 
-	for _, outcome := range []string{"failed", "prelaunch refusal", "unproven refusal", "stale refusal", "cancelled", "stale", "maintenance", "demand cancelled", "identity changed"} {
+	for _, outcome := range []string{"failed", "prelaunch refusal", "prelaunch resource limit", "preempted during startup", "unproven refusal", "stale refusal", "cancelled", "stale", "maintenance", "demand cancelled", "identity changed"} {
 		t.Run(outcome, func(t *testing.T) {
 			q, w, e, demand, _, plans := qualificationFixture(t)
 			plan := plans[0]
@@ -193,6 +193,7 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 			}
 			clock := q.clock.(*fakeClock)
 			clock.Advance(time.Second)
+			retryable := outcome == "prelaunch refusal" || outcome == "prelaunch resource limit" || outcome == "preempted during startup"
 			switch outcome {
 			case "failed":
 				if err := q.Started(result(assigned, false)); err != nil {
@@ -219,6 +220,54 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 				}
 				if err := q.Complete(r); err != nil {
 					t.Fatal(err)
+				}
+			case "prelaunch resource limit":
+				r := result(assigned, false)
+				r.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "resource_limit"}
+				r.ExecutionEvidence = unstartedExecution(assigned.Attempt)
+				if err := q.Complete(r); err != nil {
+					t.Fatal(err)
+				}
+			case "preempted during startup":
+				for attempt := 1; attempt <= 16; attempt++ {
+					if assigned.ID != qualificationJob(t, q, plan.Report.CheckID).ID || assigned.Attempt != attempt {
+						t.Fatalf("capacity retry changed the check: %s attempt %d", assigned.ID, assigned.Attempt)
+					}
+					r := result(assigned, false)
+					r.Interrupted = true
+					r.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "resource_limit", Predicate: "memory_capacity"}
+					r.ExecutionEvidence = unstartedExecution(attempt)
+					if err := q.Complete(r); err != nil {
+						t.Fatal(err)
+					}
+					got := job(t, q, assigned.ID)
+					last := got.AttemptHistory[len(got.AttemptHistory)-1]
+					if got.State != "queued" || last.Reason != launchCapacityWaitReason || got.Losses != 0 || !got.ReleaseConfirmed {
+						t.Fatalf("capacity refusal outcome: %s, %s, losses %d, released %t", got.State, last.Reason, got.Losses, got.ReleaseConfirmed)
+					}
+					clock.Advance(time.Second)
+					w.Machine.HostAvailableMemoryGB += 0.125
+					assigned = check(t, q, w.Machine, nil).Job
+					if assigned == nil {
+						t.Fatal("check not reassigned after new capacity evidence")
+					}
+				}
+				if err := q.update(func() error {
+					production := &Job{ID: "production-demand", Spec: Spec{Priority: "production"}}
+					q.stopBatchFor(q.s.Jobs[assigned.ID], production)
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+				r := result(assigned, false)
+				r.ReleaseOnly = true
+				if err := q.Complete(r); err != nil {
+					t.Fatal(err)
+				}
+				got := job(t, q, assigned.ID)
+				last := got.AttemptHistory[len(got.AttemptHistory)-1]
+				if got.Attempt != 17 || !got.ReleaseConfirmed || got.StartedAt != nil || last.PriorityStop == nil || !last.Interrupted || last.ExecutionCause != nil {
+					t.Fatalf("expected exact release after a priority stop before Started: %+v", last)
 				}
 			case "cancelled":
 				if err := q.Cancel(assigned.ID); err != nil {
@@ -262,7 +311,7 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 			if qualifiedExtension(demand, q.s.Machines[incoming.ID]) != nil {
 				t.Fatal("unsuccessful or obsolete check granted qualification")
 			}
-			if outcome == "failed" || outcome == "cancelled" || outcome == "prelaunch refusal" || outcome == "unproven refusal" || outcome == "stale refusal" {
+			if outcome == "failed" || outcome == "cancelled" || retryable || outcome == "unproven refusal" || outcome == "stale refusal" {
 				reconcileQualification(t, w, plan)
 				before := qualificationJob(t, q, plan.Report.CheckID)
 				reconcileQualification(t, w, plan)
@@ -276,7 +325,7 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 					}
 				}
 				w.Machine.ExtensionReports = local
-				if outcome == "prelaunch refusal" || outcome == "failed" {
+				if retryable || outcome == "failed" {
 					// Receipt, aggregate status and read-only resolve use the
 					// same identity-matched evidence as the real planner.
 					check(t, q, w.Machine, nil)
@@ -286,9 +335,9 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 					}
 					action := "read `myce logs " + assigned.ID + "`, then fix the implementation or check, register a new version, and resubmit with a new key"
 					source := nativeFailureSource
-					if outcome == "prelaunch refusal" {
+					if retryable {
 						action, source = "wait for the automatic retry", "accepted release and exact-attempt execution evidence"
-						if report.Hold == nil || report.Hold.Kind != "native_qualification" || !strings.Contains(report.Hold.Reason, "refused before launch") {
+						if report.Hold == nil || report.Hold.Kind != "native_qualification" || !strings.Contains(report.Hold.Reason, "qualification remains pending") {
 							t.Fatalf("resolve lost the retryable infrastructure evidence: %+v", report.Hold)
 						}
 					}
@@ -339,9 +388,7 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 						}
 					}
 				} else {
-					// Cancellation or proven prelaunch refusal has no verdict.
-					// The queue reruns it under
-					// a successor key instead of waiting for an explicit retry.
+					// A released check without a verdict gets a successor key.
 					if successor == nil || successor.Report.CheckID != automaticExtensionRetryCheckID(w.Machine.ID, successor.Report, plan.Report.CheckID) {
 						t.Fatal("check without a native verdict was not rerun", successor)
 					}
