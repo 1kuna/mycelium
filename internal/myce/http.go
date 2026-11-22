@@ -902,7 +902,7 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 			e.CurrentRevision = body.CurrentRevision
 			// These endpoints return their own sanitized validation reasons.
 			specificValidation := method == http.MethodPost && (path == "/api/jobs" || path == "/api/resolve" ||
-				body.Code == "file_release_invalid" && (path == "/api/files/release/plan" || path == "/api/files/release/apply"))
+				body.Code == "file_release_invalid" && (path == "/api/files/release/plan" || path == "/api/files/release/apply" || path == "/api/files/release/claim"))
 			if message := rejectionMessages[body.Code]; message != "" && body.Code != "extension_version_conflict" && body.Code != "policy_revision_conflict" && body.Code != "shared_input_cache_capacity" && !specificValidation {
 				e.Message = message
 			}

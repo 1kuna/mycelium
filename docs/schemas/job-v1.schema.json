@@ -2994,6 +2994,9 @@
     },
     "FileReclamation": {
       "properties": {
+        "legacy_checkpoints_expired": {
+          "type": "boolean"
+        },
         "pending": {
           "items": {
             "type": "string"

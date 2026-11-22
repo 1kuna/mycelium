@@ -30,11 +30,18 @@ type FileStoreStatus struct {
 	UsedBytes                        uint64                  `json:"used_bytes"`
 	FreeBytes                        uint64                  `json:"free_bytes"`
 	ReclaimableBytes                 uint64                  `json:"reclaimable_bytes"`
-	Collection                       *FileCollectionStatus   `json:"collection,omitempty"`
-	LimitBytes                       uint64                  `json:"limit_bytes"`
-	DiskFreeBytes                    uint64                  `json:"disk_free_bytes"`
-	FloorBytes                       uint64                  `json:"floor_bytes"`
-	Error                            string                  `json:"error,omitempty"`
+	// Present published candidates without a keeper, including publication grace.
+	PendingCollectionBytes uint64 `json:"pending_collection_bytes"`
+	// Present published payloads with neither a keeper nor current collection
+	// authority. Includes recent tracked orphans and untracked imports.
+	UnreferencedPublishedBytes uint64                `json:"unreferenced_published_bytes"`
+	OpenUploadBytes            uint64                `json:"open_upload_bytes"`
+	HeldPublishedBytes         uint64                `json:"held_published_bytes"`
+	Collection                 *FileCollectionStatus `json:"collection,omitempty"`
+	LimitBytes                 uint64                `json:"limit_bytes"`
+	DiskFreeBytes              uint64                `json:"disk_free_bytes"`
+	FloorBytes                 uint64                `json:"floor_bytes"`
+	Error                      string                `json:"error,omitempty"`
 	// Which bound set FreeBytes, for refusal explanations; not public status.
 	allowanceFree, volumeFree, diskTotal uint64
 	diskVolume                           string
@@ -322,6 +329,7 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 		at, marked := markers[hash]
 		claims := v.claims[hash]
 		if p.upload {
+			status.OpenUploadBytes = addDiskBytes(status.OpenUploadBytes, p.size)
 			_, output := v.outputMarkers[hash]
 			owned := marked && at.IsZero() || !marked && p.jobInput && allocatedInputClaim(claims, int64(p.length))
 			if owned && !referenced[hash] && (!output || len(claims) == 0) && v.age.interruptedUploadIdle(p.modified, claims) {
@@ -329,22 +337,27 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 			}
 			continue
 		}
-		// Mirror the collector: only marked orphans and bundles keep the full
-		// horizon; an expired job's files use the grace capped at retention.
-		_, bundle := v.bundles[hash]
-		ordinaryExpired := !bundle && (!marked || referenced[hash])
-		if keep[hash] || len(claims) != 0 || v.age.protects(p.modified, ordinaryExpired) {
+		if keep[hash] || len(claims) != 0 {
+			status.HeldPublishedBytes = addDiskBytes(status.HeldPublishedBytes, p.size)
 			continue
 		}
-		if at, tracked := v.bundles[hash]; tracked && !expired[hash] && (at.After(now.Add(-retention)) || p.modified.After(now.Add(-retention))) {
-			continue
-		}
+		// Mirror the collector's candidate enrollment separately from its age
+		// check. A candidate may still be in publication grace or deferred.
+		bundleAt, bundle := v.bundles[hash]
 		if !marked && bundle {
-			at, marked = v.bundles[hash], true
+			at, marked = bundleAt, true
 		}
-		reclaimable := expired[hash] || retention > 0 && marked && !referenced[hash] && !at.IsZero() &&
-			!at.After(now.Add(-retention)) && !p.modified.After(now.Add(-retention))
-		if reclaimable {
+		cutoff := now.Add(-retention)
+		orphan := retention > 0 && !referenced[hash] &&
+			(marked && !at.IsZero() && !at.After(cutoff) || bundle && !bundleAt.After(cutoff))
+		if !expired[hash] && !orphan {
+			status.UnreferencedPublishedBytes = addDiskBytes(status.UnreferencedPublishedBytes, p.size)
+			continue
+		}
+		status.PendingCollectionBytes = addDiskBytes(status.PendingCollectionBytes, p.size)
+		markedCandidate := bundle || orphan
+		if !v.age.protects(p.modified, !markedCandidate) &&
+			(!markedCandidate || expired[hash] || !p.modified.After(cutoff)) {
 			status.ReclaimableBytes = addDiskBytes(status.ReclaimableBytes, p.size)
 		}
 	}
@@ -645,5 +658,5 @@ func fileCapacityCode(code string) bool {
 
 // File-store refusals whose code and reason reach HTTP callers intact.
 func fileStoreRefusalCode(code string) bool {
-	return fileCapacityCode(code) || code == "project_file_store_quota" || code == "file_input_claim_required" || code == "input_blob_missing" || code == "input_blob_corrupt" || code == "input_blob_unavailable" || code == "file_blob_unavailable"
+	return fileCapacityCode(code) || code == "project_file_store_quota" || code == "file_input_claim_required" || code == "input_blob_missing" || code == "input_blob_corrupt" || code == "input_blob_unavailable" || code == "file_blob_unavailable" || code == "file_holdings_unavailable"
 }

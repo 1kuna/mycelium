@@ -253,27 +253,36 @@ func jobInputPaths(j *Job) map[string]string {
 
 // All accepted references use the existing live/terminal retention window.
 func jobFileManifests(j *Job) []FileManifest {
-	files := []FileManifest{j.Spec.Files, sharedStoredFiles(j.Spec), j.OutputRefs}
+	var files []FileManifest
+	visitJobFileManifests(j, func(_ string, manifest FileManifest) {
+		files = append(files, manifest)
+	})
+	return files
+}
+
+func visitJobFileManifests(j *Job, visit func(string, FileManifest)) {
+	visit("input", j.Spec.Files)
+	visit("shared_input", sharedStoredFiles(j.Spec))
+	visit("result", j.OutputRefs)
 	if j.Spec.localFirst() {
 		for _, save := range j.FileCheckpoints {
-			files = append(files, save.Files)
+			visit("checkpoint", save.Files)
 		}
 		for _, m := range j.CheckpointMirrors {
-			files = append(files, m.Checkpoint.Files)
+			visit("checkpoint_mirror", m.Checkpoint.Files)
 		}
 	}
 	for _, a := range j.AttemptHistory {
 		if a.Diagnostics != nil {
-			files = append(files, a.Diagnostics.Files)
+			visit("diagnostic", a.Diagnostics.Files)
 		}
 	}
 	if j.Dependency != nil {
-		files = append(files, j.Dependency.Files)
+		visit("dependency_input", j.Dependency.Files)
 	}
 	if j.FanOut != nil {
 		for _, r := range j.FanOut.Results {
-			files = append(files, r.OutputRefs)
+			visit("fan_out_result", r.OutputRefs)
 		}
 	}
-	return files
 }

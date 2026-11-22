@@ -55,9 +55,16 @@ type projectFileFacts struct {
 // Report callback for collectFileReferences. Worker-local custody lives on the
 // worker, not in the queue store.
 func (f *projectFileFacts) retain(ref FileRef, owner FileKeepingReference) {
-	if owner.Project != "" && owner.Kind != "worker_local_custody" {
+	if projectFileCharge(owner) {
 		f.retained = append(f.retained, projectFileFact{project: owner.Project, hash: ref.SHA256, size: uint64(ref.SizeBytes)})
 	}
+}
+
+// Bundles and resident model sources also keep content, but have historically
+// been accounted under registry/model custody, outside consumer admission.
+func projectFileCharge(owner FileKeepingReference) bool {
+	return owner.Project != "" && owner.Kind != "worker_local_custody" &&
+		owner.Kind != "resident_model" && owner.Kind != "extension_environment_bundle"
 }
 
 // q.mu held. Inputs count at submission, results at completion.
@@ -109,7 +116,7 @@ func (q *Queue) noteProjectFileAdditions(f *projectFileFacts, jobs map[string]*J
 // q.mu held. Keyed answers whose job has left the job table.
 func (q *Queue) retiredSubmissionJobs(project string, into map[string]*Job) map[string]*Job {
 	for _, r := range q.s.Submissions {
-		if r.Job != nil && q.s.Jobs[r.Job.ID] == nil && (project == "" || r.Job.Spec.Project == project) {
+		if r.Job != nil && r.RemovedAt == nil && q.s.Jobs[r.Job.ID] == nil && (project == "" || r.Job.Spec.Project == project) {
 			if into == nil {
 				into = map[string]*Job{}
 			}
@@ -140,7 +147,8 @@ func (f projectFileFacts) ledgers() map[string]*projectFileLedger {
 		return ledgers[name]
 	}
 	for _, r := range f.retained {
-		ledger(r.project).retained[r.hash] = r.size
+		l := ledger(r.project)
+		l.retained[r.hash] = max(l.retained[r.hash], r.size)
 	}
 	for _, a := range f.added {
 		l := ledger(a.project)
