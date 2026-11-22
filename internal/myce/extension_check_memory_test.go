@@ -166,6 +166,14 @@ func TestExtensionCheckMemoryCrossFamilyRecovery(t *testing.T) {
 // its own envelope; a check's small peak never shrinks it.
 func TestExtensionCheckMemoryLearnsFromChecksNotWorkload(t *testing.T) {
 	q, clock, m, s := floorFreeFitFixture(t, 24)
+	holder := submit(t, q, cpuSpec(1, 4))
+	running := assignedJob(machineCheck(t, q, m))
+	if running == nil || running.ID != holder.ID {
+		t.Fatal("missing CPU memory holder", running)
+	}
+	if err := q.Started(result(running, false)); err != nil {
+		t.Fatal(err)
+	}
 	workloadHost, workloadDevice := 12.8, 4.5
 	for id, p := range q.s.WorkObservations { // the workload's accepted peak
 		p.MemoryPeak = &AttemptMemoryPeak{HostGB: &workloadHost, DeviceGB: &workloadDevice}
@@ -181,7 +189,7 @@ func TestExtensionCheckMemoryLearnsFromChecksNotWorkload(t *testing.T) {
 	runCheck := func(host, device float64) *Job {
 		t.Helper()
 		queued := submit(t, q, checkSpec)
-		j := assignedJob(machineCheck(t, q, m))
+		j := assignedJob(machineCheck(t, q, m, running))
 		if j == nil || j.ID != queued.ID {
 			t.Fatalf("check not assigned: %s", job(t, q, queued.ID).Reason)
 		}
@@ -198,8 +206,8 @@ func TestExtensionCheckMemoryLearnsFromChecksNotWorkload(t *testing.T) {
 	}
 
 	first := runCheck(.4, .18)
-	if e := first.MemoryEnvelope; e == nil || e.Source != physicalMemoryProbe || first.Spec.Needs.HostMemoryGB != 24-minimumHostMemoryGB {
-		t.Fatalf("first check did not reserve physical headroom: host=%.2f GiB %+v", first.Spec.Needs.HostMemoryGB, e)
+	if e := first.MemoryEnvelope; e == nil || e.Source != physicalMemoryProbe || first.Spec.Needs.HostMemoryGB != 20-minimumHostMemoryGB {
+		t.Fatalf("first check did not use the 20 GiB admission remainder: host=%.2f GiB %+v", first.Spec.Needs.HostMemoryGB, e)
 	}
 	second := runCheck(.4, .18)
 	if e := second.MemoryEnvelope; e == nil || e.Basis != "learned" || math.Abs(second.Spec.Needs.HostMemoryGB-(.4+minimumHostMemoryGB)) > 1e-9 || math.Abs(second.Spec.Needs.MemoryGB-(.18+minimumHostMemoryGB)) > 1e-9 {
@@ -207,7 +215,7 @@ func TestExtensionCheckMemoryLearnsFromChecksNotWorkload(t *testing.T) {
 	}
 
 	queued := submit(t, q, s)
-	work := assignedJob(machineCheck(t, q, m))
+	work := assignedJob(machineCheck(t, q, m, running))
 	if work == nil || work.ID != queued.ID {
 		t.Fatalf("workload not assigned: %s", job(t, q, queued.ID).Reason)
 	}

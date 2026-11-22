@@ -85,8 +85,10 @@ when an upload-creation response has no accepted offset.
   workstation. Light work still uses its measured allowances. Queued GPU work
   protects its resolved CPU/RAM needs from CPU backfill, including internal
   extension checks, CPU maintenance resumes, and waits for a finite GPU execution
-  to finish. Freed capacity accumulates toward that demand; portable queued CPU
-  work can use another eligible host. No fixed core reserve or GPU-host exclusion is needed.
+  to finish. A cold native check sizes its probe from measured admission RAM.
+  When a check needs more room, it protects accumulating capacity only if current
+  capacity and forecast releases can satisfy it. Portable queued CPU work can use
+  another eligible host. No fixed core reserve or GPU-host exclusion is needed.
   Production's relative start budget renews when it expires behind a
   `host_capacity_accumulation` fence; status may show a countdown that re-arms.
   First assignment grants a full relative budget for preparation. An explicit

@@ -575,17 +575,10 @@ func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
 				source = estimate.source
 			}
 			host, why := 0.0, ""
-			probeMachine := m
-			if !n.cpuOnly() && j.Spec.ExtensionCheck != nil {
-				physical := *m
-				physical.FreeHostMemoryGB = min(m.HostAvailableMemoryGB, q.qualificationCapacity(m).FreeHostMemoryGB)
-				physical.hostReservationDebtGB = 0
-				probeMachine = &physical
-			}
-			// Choose the physical opportunity before splitting a unified pool.
-			// Admission against m still waits for its existing reservations.
+			// Size probes from the admission ledger before splitting a unified pool.
+			// Raw physical availability omits the growth still owed to other jobs.
 			inputs := &MemorySizingInputs{}
-			device, unified, bounded, similar, gpuBounded := q.unifiedGPUFirstRun(j, probeMachine, estimate, deviceFloor, 0, hostFloor, inputs)
+			device, unified, bounded, similar, gpuBounded := q.unifiedGPUFirstRun(j, m, estimate, deviceFloor, 0, hostFloor, inputs)
 			if gpuBounded {
 				n.MemoryGB, host, source, evidence = device, unified, source+" "+bounded, similar
 				sizing = inputs
@@ -595,9 +588,9 @@ func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
 				if !floorRun {
 					if !n.cpuOnly() || !q.learnedMemory() {
 						sizing = inputs
-						host, why, _ = q.physicalProbeMemoryStatus(j, probeMachine, sizing)
+						host, why, _ = q.physicalProbeMemoryStatus(j, m, sizing)
 					} else {
-						host, why = q.exploratoryMemory(j, probeMachine)
+						host, why = q.exploratoryMemory(j, m)
 					}
 				}
 				if q.learnedMemory() && n.cpuOnly() {

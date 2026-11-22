@@ -161,7 +161,7 @@ func TestExploratoryOOMColdGuardFinalLaunch(t *testing.T) {
 	}
 }
 
-func TestExploratoryOOMExtensionCheckWaitsForPhysicalOpportunity(t *testing.T) {
+func TestExploratoryOOMExtensionCheckRecoversFromSmallProbe(t *testing.T) {
 	q, clock, m, s := coldProbeAdmissionFixture(t, false)
 	// Another envelope can own most allowance even while its payload is small.
 	queued := submit(t, q, s)
@@ -169,8 +169,8 @@ func TestExploratoryOOMExtensionCheckWaitsForPhysicalOpportunity(t *testing.T) {
 	target.FreeHostMemoryGB = 1.0571327209472656
 	target.HostAvailableMemoryGB = 19.742050170898438
 	candidate := q.memoryCandidate(queued, &target)
-	if candidate.MemoryEnvelope.HostGB < 4 || hostFits(&target, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) {
-		t.Fatalf("unknown check used tiny residual: %+v", candidate.MemoryEnvelope)
+	if candidate.MemoryEnvelope.Refusal != "" || candidate.MemoryEnvelope.HostGB <= 0 || !hostFits(&target, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) {
+		t.Fatalf("check did not fit measured admission room: %+v", candidate.MemoryEnvelope)
 	}
 	run := assignedJob(machineCheck(t, q, m))
 	if run == nil {
@@ -268,14 +268,14 @@ func TestExploratoryOOMUnifiedCheckRecoveryKeepsSharedSplit(t *testing.T) {
 	}
 }
 
-func TestExploratoryOOMUnifiedCheckWaitsForPhysicalOpportunity(t *testing.T) {
+func TestExploratoryOOMUnifiedCheckUsesLedgerRemainder(t *testing.T) {
 	q, _, m, s := unifiedCheckOOMFixture(t)
 	queued := submit(t, q, s)
 	target := m.Devices[0].machine(*q.s.Machines[m.ID])
 	target.FreeHostMemoryGB = 1.0571327209472656
 	target.HostAvailableMemoryGB = 19.742050170898438
 	candidate := q.memoryCandidate(queued, &target)
-	if candidate.MemoryEnvelope.HostGB < 4 || hostFits(&target, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) {
-		t.Fatalf("unified check launched in tiny ledger remainder: %+v", candidate.MemoryEnvelope)
+	if candidate.MemoryEnvelope.Refusal != "" || candidate.MemoryEnvelope.HostGB <= 0 || !hostFits(&target, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) {
+		t.Fatalf("unified check did not fit its shared ledger remainder: %+v", candidate.MemoryEnvelope)
 	}
 }
