@@ -486,11 +486,12 @@ func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, prog
 	scan := q.placementScan()
 	for _, candidate := range q.placementTargets(m) {
 		j := q.plannedPick(candidate, scan)
-		if j != nil && q.batchSlotFree(candidate, j) && (best == nil || q.candidates(candidate, scan).before(j, best)) {
+		if j != nil && q.admissionGate(j, candidate, q.batchSlotFree(candidate, j), predicateBatchSlot) && (best == nil || q.candidates(candidate, scan).before(j, best)) {
 			best, target = j, candidate
 		}
 	}
 	if best != nil {
+		q.recordAdmissionSelection(best, target)
 		out := q.assign(best, target, scan)
 		reply.Attempts = append(reply.Attempts, AttemptDirective{Execution: Execution{ID: out.ID, Attempt: out.Attempt}, Session: out.Session, Job: &out})
 	}

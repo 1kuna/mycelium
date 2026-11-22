@@ -109,6 +109,13 @@ func (q *Queue) serveStatusHistory(w http.ResponseWriter, r *http.Request, optio
 		respond(w, nil, err)
 		return
 	}
+	if contains(options.sections, "idle") {
+		out.Idle, err = q.readIdleStatus(ctx, &options, out.Now)
+		if err != nil {
+			respond(w, nil, err)
+			return
+		}
+	}
 	out.FileStore = files.status(ctx)
 	out.Freshness = q.snapshotFreshness(readCommitted(v.clock), false)
 	out = publicStatusValue(out)

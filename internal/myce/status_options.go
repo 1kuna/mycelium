@@ -25,6 +25,8 @@ type statusOptions struct {
 	full                  bool
 	stream                bool // Borrow immutable history; copy only the row being encoded.
 	sections              []string
+	idleSince             time.Time
+	idleIntervals         bool
 }
 
 type statusSelection struct {
@@ -50,11 +52,27 @@ func parseStatusOptions(v url.Values) (statusOptions, error) {
 		switch section {
 		case "alerts":
 			o.sections = append(o.sections, "health")
-		case "jobs", "machines", "storage", "work", "health", "efficiency", "usage", "diagnostics":
+		case "jobs", "machines", "storage", "work", "health", "efficiency", "usage", "diagnostics", "idle":
 			o.sections = append(o.sections, section)
 		default:
 			return o, reject("status_query_invalid", nil)
 		}
+	}
+	if s := v.Get("idle_since"); s != "" {
+		var err error
+		o.idleSince, err = time.Parse(time.RFC3339Nano, s)
+		if err != nil || !o.idleSince.Equal(time.Unix(0, o.idleSince.UnixNano())) {
+			return o, reject("status_query_invalid", err)
+		}
+	}
+	if s := v.Get("idle_intervals"); s != "" {
+		if s != "true" {
+			return o, reject("status_query_invalid", nil)
+		}
+		o.idleIntervals = true
+	}
+	if (!o.idleSince.IsZero() || o.idleIntervals) && !contains(o.sections, "idle") {
+		return o, reject("status_query_invalid", nil)
 	}
 	o.project, o.before = v.Get("project"), v.Get("before")
 	if s := v.Get("limit"); s != "" {

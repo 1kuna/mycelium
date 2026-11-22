@@ -135,7 +135,8 @@ func TestStatusOptionsPaging(t *testing.T) {
 }
 
 func TestStatusOptionsRejectInvalidQuery(t *testing.T) {
-	for _, query := range []string{"jobs=unknown", "limit=0", "limit=-1", "since=invalid", "detail=unknown", "before=missing", "sections=unknown"} {
+	for _, query := range []string{"jobs=unknown", "limit=0", "limit=-1", "since=invalid", "detail=unknown", "before=missing", "sections=unknown",
+		"sections=idle&idle_since=invalid", "sections=idle&idle_intervals=invalid", "idle_intervals=true"} {
 		q, _ := fixture(t)
 		r := httptest.NewRequest("GET", "/api/status?"+query, nil)
 		r.Header.Set("Authorization", "Bearer test")
