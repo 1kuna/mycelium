@@ -203,7 +203,7 @@ func (q *Queue) pruneJobHistory(requestContexts ...context.Context) error {
 			// not the full record it would otherwise retain.
 			if digest := q.records.bindings[id]; digest != "" {
 				if r := q.touchSubmission(digest); r != nil && r.Kind == submissionBinding {
-					r.Job = replayJob(c.job)
+					r.Job, r.FileCustodyPruned = replayJob(c.job), true
 				}
 			}
 			q.deleteJob(id)
@@ -268,7 +268,23 @@ func (q *Queue) learnExpired(l expiredJobLearning) {
 // whose record still exists (an interrupted expiry) are skipped: the record
 // itself is the input.
 func (q *Queue) loadExpiredLearning() error {
-	rows, err := q.db.Query("SELECT id, learned FROM job_summaries WHERE learned IS NOT NULL")
+	// Previous releases pruned to the same skeletal replay without marking it.
+	// The separate durable history summary proves that transition. Old full
+	// keyed answers can have RemovedAt without a summary and still own files.
+	var unmarked map[string]*submissionRecord
+	for _, record := range q.s.Submissions {
+		if record.Job != nil && record.RemovedAt != nil && !record.FileCustodyPruned && q.s.Jobs[record.JobID] == nil {
+			if unmarked == nil {
+				unmarked = map[string]*submissionRecord{}
+			}
+			unmarked[record.JobID] = record
+		}
+	}
+	query := "SELECT id, learned FROM job_summaries WHERE learned IS NOT NULL"
+	if len(unmarked) != 0 {
+		query = "SELECT id, learned FROM job_summaries"
+	}
+	rows, err := q.db.Query(query)
 	if err != nil {
 		return err
 	}
@@ -281,6 +297,12 @@ func (q *Queue) loadExpiredLearning() error {
 			return err
 		}
 		if q.s.Jobs[id] != nil {
+			continue
+		}
+		if record := unmarked[id]; record != nil {
+			record.FileCustodyPruned = true
+		}
+		if len(data) == 0 {
 			continue
 		}
 		var l expiredJobLearning

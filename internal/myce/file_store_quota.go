@@ -116,7 +116,7 @@ func (q *Queue) noteProjectFileAdditions(f *projectFileFacts, jobs map[string]*J
 // q.mu held. Keyed answers whose job has left the job table.
 func (q *Queue) retiredSubmissionJobs(project string, into map[string]*Job) map[string]*Job {
 	for _, r := range q.s.Submissions {
-		if r.Job != nil && r.RemovedAt == nil && q.s.Jobs[r.Job.ID] == nil && (project == "" || r.Job.Spec.Project == project) {
+		if r.Job != nil && !r.FileCustodyPruned && q.s.Jobs[r.Job.ID] == nil && (project == "" || r.Job.Spec.Project == project) {
 			if into == nil {
 				into = map[string]*Job{}
 			}

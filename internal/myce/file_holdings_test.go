@@ -90,8 +90,21 @@ func TestProjectFileHoldingsPrunedReplayDoesNotKeepReleasedInputs(t *testing.T) 
 		t.Fatal(err)
 	}
 	r := q.s.Submissions[submissionDigest(s.Project, s.SubmissionKey)]
-	if q.s.Jobs[j.ID] != nil || r.RemovedAt == nil || !q.s.RetiredJobFiles[ref.SHA256] {
-		t.Fatalf("fixture did not retire the job and transfer its uncollected input: live=%t removed=%t pending=%t", q.s.Jobs[j.ID] != nil, r.RemovedAt != nil, q.s.RetiredJobFiles[ref.SHA256])
+	if q.s.Jobs[j.ID] != nil || r.RemovedAt == nil || !r.FileCustodyPruned || !q.s.RetiredJobFiles[ref.SHA256] {
+		t.Fatalf("fixture did not retire the job and transfer its uncollected input: live=%t removed=%t pruned=%t pending=%t",
+			q.s.Jobs[j.ID] != nil, r.RemovedAt != nil, r.FileCustodyPruned, q.s.RetiredJobFiles[ref.SHA256])
+	}
+	report, err := q.ProjectFileHoldings(ctx, "owner")
+	if err != nil || report.RetainedBytes != 0 || len(report.Files) != 0 {
+		t.Fatal("new replay kept old file custody", report, err)
+	}
+	// Open a previous-release record that has the summary and replay, but no
+	// explicit custody marker. The upgrade must recognize the existing state.
+	if err := q.update(func() error {
+		q.touchSubmission(submissionDigest(s.Project, s.SubmissionKey)).FileCustodyPruned = false
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 	root := q.files.root
 	q = reopenTierQueue(t, q, clock)
@@ -101,7 +114,7 @@ func TestProjectFileHoldingsPrunedReplayDoesNotKeepReleasedInputs(t *testing.T) 
 	if got := submit(t, q, s); got.ID != j.ID || got.State != "succeeded" {
 		t.Fatal("keyed replay changed", got)
 	}
-	report, err := q.ProjectFileHoldings(ctx, "owner")
+	report, err = q.ProjectFileHoldings(ctx, "owner")
 	if err != nil || report.RetainedBytes != 0 || len(report.Files) != 0 {
 		t.Fatal("pruned replay resurrected file attribution", report, err)
 	}

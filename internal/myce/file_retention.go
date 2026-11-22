@@ -563,7 +563,7 @@ func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[str
 			// Pruned answers retain the submitted spec for replay, never file
 			// custody. The history transaction transfers pending collection to
 			// RetiredJobFiles before storing the skeletal answer.
-			if record.Job != nil && record.RemovedAt == nil && jobs[record.Job.ID] == nil {
+			if record.Job != nil && !record.FileCustodyPruned && jobs[record.Job.ID] == nil {
 				job(record.Job)
 			}
 		}
