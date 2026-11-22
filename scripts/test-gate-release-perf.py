@@ -21,9 +21,9 @@ def checkin(duration, bound_failed=False, extra_error=""):
     if bound_failed:
         diagnostic = ("    status_read_contention_test.go:31: "
                       f"check-in p99 {duration} exceeds half the 1s heartbeat interval\n")
-        output = f"=== RUN   {name}\n--- FAIL: {name}\n{measurement}{extra_error}{diagnostic}FAIL\n"
+        output = f"--- FAIL: {name}\n{measurement}{extra_error}{diagnostic}FAIL\n"
         return CompletedProcess([], 1, stdout=output)
-    output = f"=== RUN   {name}\n{name}-4\t1\t1000 ns/op\n--- BENCH: {name}-4\n{measurement}PASS\n"
+    output = f"{name}-4\t1\t1000 ns/op\n--- BENCH: {name}-4\n{measurement}PASS\n"
     return CompletedProcess([], 0, stdout=output)
 
 

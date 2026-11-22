@@ -50,13 +50,14 @@ def build(log, label, source, binary):
 
 def bench(log, label, source, binary, names):
     pattern = "^(" + "|".join(names) + ")$"
+    # Go's default benchmark output groups diagnostics under the FAIL header.
     return logged_run(log, label, [str(binary), "-test.run=^$", f"-test.bench={pattern}",
                                   "-test.benchtime=1x", "-test.count=1",
-                                  "-test.timeout=30m", "-test.v"], source / "internal/myce")
+                                  "-test.timeout=30m"], source / "internal/myce")
 
 
 def benchmark_row(name, output):
-    return re.search(rf"^{name}(?:-\d+)?\s+1\s+\S", output, re.MULTILINE)
+    return re.search(rf"^{name}(?:-\d+)?[ \t]+1[ \t]+\S", output, re.MULTILINE)
 
 
 def duration_ms(value):
