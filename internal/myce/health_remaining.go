@@ -30,6 +30,8 @@ func (q *Queue) detectRemainingHealth() {
 	defer func() { q.memoryPlanning = previous }()
 	seen := map[string]bool{}
 	toolNeeded := map[string]bool{}
+	failedRecipes := map[string][]EnvironmentReport{}
+	requestedRecipes := map[string]bool{}
 	observe := func(key string, bad bool, e HealthAlert) { seen[key] = true; q.observeCurrentHealth(key, bad, e) }
 	for _, m := range q.s.Machines {
 		if m.Replacement != nil {
@@ -56,9 +58,12 @@ func (q *Queue) detectRemainingHealth() {
 		for reason, bad := range reasons {
 			observe("reports/"+m.ID+"/"+reason, !intentional && bad, HealthAlert{Kind: "worker_reports_missing", Host: hostID(m), Reason: reason})
 		}
-		for _, r := range m.EnvironmentReports {
-			key := "recipe/" + m.ID + "/" + r.Key
-			observe(key, !intentional && r.State == "failed" && environmentFailureKind(r) == "deterministic", HealthAlert{Kind: "environment_recipe_failed", Host: hostID(m), Reason: "deterministic_recipe_failure"})
+		if !intentional {
+			for _, r := range m.EnvironmentReports {
+				if r.State == "failed" && environmentFailureKind(r) == "deterministic" {
+					failedRecipes[m.ID] = append(failedRecipes[m.ID], r)
+				}
+			}
 		}
 		// Actual copy/staging refusals, never cache occupancy or mere coldness.
 		transferRefused := m.FileTransferError != "" && m.FileTransferError != inputTransferRecoveringReason
@@ -75,6 +80,8 @@ func (q *Queue) detectRemainingHealth() {
 		if j.State != "queued" {
 			continue
 		}
+		checkRecipe := len(failedRecipes) > 0 && j.Pause == nil &&
+			(j.Spec.Environment.Key() != "" || len(j.EnvironmentRecipes) > 0 || len(j.Extensions) > 0)
 		known, fit, unknown := false, false, false
 		q.evaluateTargets(j, func(f targetFit, candidate *Job, m *Machine) bool {
 			if q.s.HostMaintenance[hostID(m)].Mode == "disabled" || m.Replacement != nil {
@@ -95,9 +102,24 @@ func (q *Queue) detectRemainingHealth() {
 			}
 			known = true
 			fit = fit || f.failures == 0
-			return !fit
+			if reports := failedRecipes[m.ID]; checkRecipe && f.failures == 0 && len(reports) > 0 && !environmentReady(candidate, m) {
+				keys := environmentFailureKeys(candidate, m)
+				for _, report := range reports {
+					if slices.Contains(keys, report.Key) && environmentReportMatches(report, m) {
+						requestedRecipes["recipe/"+m.ID+"/"+report.Key] = true
+					}
+				}
+			}
+			return !fit || checkRecipe
 		})
 		observe("target/"+j.ID, known && !fit && !unknown, HealthAlert{Kind: "job_target_unsatisfied", Project: j.Spec.Project, JobID: j.ID, Reason: "no_enabled_target"})
+	}
+	for id, reports := range failedRecipes {
+		host := hostID(q.s.Machines[id])
+		for _, report := range reports {
+			key := "recipe/" + id + "/" + report.Key
+			observe(key, requestedRecipes[key], HealthAlert{Kind: "environment_recipe_failed", Host: host, Reason: "deterministic_recipe_failure"})
+		}
 	}
 	for _, m := range q.s.Machines {
 		if m.Replacement != nil {
