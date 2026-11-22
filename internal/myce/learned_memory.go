@@ -203,6 +203,9 @@ func (q *Queue) unifiedGPUFirstRun(j *Job, m *Machine, estimate memoryEstimate, 
 		return 0, 0, "", 0, false
 	}
 	floor = max(floor, q.constrainedMemoryLower(j, estimate), minimumHostMemoryGB)
+	if host <= 0 {
+		floor = max(floor, nativeCheckProbeHostFloor(j))
+	}
 	if f := j.MemoryOOMFloor; f != nil {
 		floor = max(floor, f.HostMemoryGB)
 	}

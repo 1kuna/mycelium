@@ -560,6 +560,9 @@ func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
 				if m.UnifiedMemory {
 					host -= n.MemoryGB
 				}
+				if floor := nativeCheckProbeHostFloor(j); why == "" && floor > 0 && host < floor {
+					why = nativeCheckProbeMemoryWait(floor, host)
+				}
 				n.HostMemoryGB, refusal = max(minimumHostMemoryGB, host, q.constrainedMemoryLowerFor(j, estimate, !m.UnifiedMemory)), why
 				source = "submitter hint; exploratory host"
 			}
@@ -575,17 +578,10 @@ func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
 				source = estimate.source
 			}
 			host, why := 0.0, ""
-			probeMachine := m
-			if !n.cpuOnly() && j.Spec.ExtensionCheck != nil {
-				physical := *m
-				physical.FreeHostMemoryGB = min(m.HostAvailableMemoryGB, q.qualificationCapacity(m).FreeHostMemoryGB)
-				physical.hostReservationDebtGB = 0
-				probeMachine = &physical
-			}
-			// Choose the physical opportunity before splitting a unified pool.
-			// Admission against m still waits for its existing reservations.
+			// Size probes from the admission ledger before splitting a unified pool.
+			// Raw physical availability omits the growth still owed to other jobs.
 			inputs := &MemorySizingInputs{}
-			device, unified, bounded, similar, gpuBounded := q.unifiedGPUFirstRun(j, probeMachine, estimate, deviceFloor, 0, hostFloor, inputs)
+			device, unified, bounded, similar, gpuBounded := q.unifiedGPUFirstRun(j, m, estimate, deviceFloor, 0, hostFloor, inputs)
 			if gpuBounded {
 				n.MemoryGB, host, source, evidence = device, unified, source+" "+bounded, similar
 				sizing = inputs
@@ -595,9 +591,10 @@ func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
 				if !floorRun {
 					if !n.cpuOnly() || !q.learnedMemory() {
 						sizing = inputs
-						host, why, _ = q.physicalProbeMemoryStatus(j, probeMachine, sizing)
+						host, why, _ = q.physicalProbeMemoryStatus(j, m, sizing)
+						hostFloor = max(hostFloor, nativeCheckProbeHostFloor(j))
 					} else {
-						host, why = q.exploratoryMemory(j, probeMachine)
+						host, why = q.exploratoryMemory(j, m)
 					}
 				}
 				if q.learnedMemory() && n.cpuOnly() {
@@ -1063,6 +1060,20 @@ func (q *Queue) hostSizingInputs(m *Machine) MemorySizingInputs {
 	return e
 }
 
+func nativeCheckProbeHostFloor(j *Job) float64 {
+	if j.Spec.ExtensionCheck == nil || j.Spec.Needs.cpuOnly() || j.MemoryOOMFloor != nil || j.OOMRetries != 0 {
+		return 0
+	}
+	// The XPU incident replay (dd36352ba, #1017) killed a check offered 1.057 GiB.
+	// Its measured 1.406 GiB peak plus 0.125 GiB sampled growth gives a floor
+	// for an unmeasured probe. Learned demand and exact OOM recovery size their own runs.
+	return 1.4061470031738281 + .12493726001956092
+}
+
+func nativeCheckProbeMemoryWait(minimum, offer float64) string {
+	return fmt.Sprintf("exploratory native check needs %.3f GiB for its minimum probe; %.3f GiB available", minimum, max(0, offer))
+}
+
 // GPU attribution and explicitly disabled learning retain physical probing.
 // Transfer-prior exceptions also use this capacity comparison, never the CPU
 // bootstrap charge.
@@ -1102,6 +1113,14 @@ func (q *Queue) physicalProbeMemoryStatus(j *Job, m *Machine, inputs *MemorySizi
 		}
 	}
 	projected := q.hostRoomAfter(m, jobs, slots)
+	minimum := nativeCheckProbeHostFloor(j)
+	if minimum > 0 && m.HostMemoryInUseGB > 0 {
+		if releases := q.forecastCheckReleases(m); len(releases) > 0 {
+			// A credible larger probe can retain a wait. The ordinary fit check
+			// still uses the live ledger until those attempts actually release.
+			projected = max(projected, q.hostRoomAfter(m, append(jobs, releases...), slots))
+		}
+	}
 	liveRoom := min(projected, allowance)
 	// A cold probe offers capacity, not measured demand. Do not fill a high
 	// inventory sample when this host has already demonstrated less idle room.
@@ -1156,6 +1175,14 @@ func (q *Queue) physicalProbeMemoryStatus(j *Job, m *Machine, inputs *MemorySizi
 	}
 	if room <= slack {
 		return 0, fmt.Sprintf("exploratory first run needs physical headroom (%.1f GiB available; %.1f GiB allowance)", room, allowance), true
+	}
+	if minimum > 0 {
+		if m.UnifiedMemory {
+			minimum += minimumHostMemoryGB // Exclusive-device marker is in the same pool.
+		}
+		if offer := room - slack; offer < minimum {
+			return 0, nativeCheckProbeMemoryWait(minimum, offer), true
+		}
 	}
 	return room - slack, "", false
 }

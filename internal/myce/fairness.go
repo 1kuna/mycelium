@@ -658,9 +658,8 @@ func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
 	if why := q.yieldWaitReason(j); why != "" {
 		return newHold("scarce_host_yield", why)
 	}
-	if plan := q.yieldProjection(j); plan != nil && plan.Reason != "" {
-		return newHold("scarce_host_yield", plan.Reason)
-	}
+	// Yield projections are advice. A queued demand's wait follows the ordinary
+	// admission checks, using current capacity even when no relocation is possible.
 	if h := q.hostRetryStorageWait(j); h != nil {
 		return h
 	}

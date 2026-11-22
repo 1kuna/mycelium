@@ -63,6 +63,7 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 	live := q.placementLiveness(scan)
 	projections := map[string]*Machine{}
 	deviceProjections := map[string]*Machine{}
+	checkProjections := map[string]*Machine{}
 	for _, m := range scan.machines {
 		if !live[m.ID] || q.preparationActive(m) || q.preparationStopping(m) || m.HostMemoryError != "" || hostHasUnifiedCUDA(m) && !validHostMemoryObservation(m.MemoryObservation) {
 			continue
@@ -129,15 +130,29 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 				projected, device = drains[targetKey(m)], drains[targetKey(m)].FreeMemoryGB
 			}
 			for _, candidate := range q.backfillCandidates(j, m, projected, resourceRoom(projected)) {
-				if !environmentReady(candidate, m) || q.capReasonFor(candidate, m) != "" || !drain && !devicePending && !q.batchSlotFree(m, candidate) || !fits(candidate, projected, device) {
+				if !environmentReady(candidate, m) || q.capReasonFor(candidate, m) != "" || !fits(candidate, projected, device) {
+					continue
+				}
+				slotFree := q.batchSlotFree(m, candidate)
+				if !drain && !devicePending && !slotFree {
 					continue
 				}
 				key := targetKey(m)
+				ready := fits(candidate, m, m.FreeMemoryGB)
+				if candidate.Spec.ExtensionCheck != nil && (!ready || !slotFree) {
+					forecast, known := checkProjections[key]
+					if !known {
+						forecast = q.forecastCheckCapacity(m)
+						checkProjections[key] = forecast
+					}
+					if forecast == nil || !fits(candidate, forecast, forecast.FreeMemoryGB) {
+						continue
+					}
+				}
 				if orders[key] == nil {
 					orders[key] = &candidateSet{q: q, scores: map[string]float64{}, actives: map[string]float64{}}
 				}
 				orders[key].jobs = append(orders[key].jobs, candidate)
-				ready := fits(candidate, m, m.FreeMemoryGB)
 				bestReady := best != nil && fits(best.job, best.machine, best.machine.FreeMemoryGB)
 				if best == nil || ready && !bestReady || ready == bestReady && q.targetPlacementBetter(candidate, m, best.machine, scan) {
 					best = &hostBackfillDemand{job: candidate, machine: m, drain: drain, devicePending: devicePending}
@@ -165,6 +180,42 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 		}
 	}
 	return scan.hostBackfill
+}
+
+// A native check can protect its resolved demand while capacity accumulates
+// toward a future release. An unstarted holder or an expired prediction gives
+// no basis to idle RAM indefinitely. This projection grants no release credit
+// to dispatch, which still checks the live ledger and exact custody.
+func (q *Queue) forecastCheckCapacity(m *Machine) *Machine {
+	releasing := q.forecastCheckReleases(m)
+	if len(releasing) == 0 {
+		return nil
+	}
+	projected := q.drainProjection(m, releasing)
+	return &projected
+}
+
+func (q *Queue) forecastCheckReleases(m *Machine) []*Job {
+	// The same exact-attempt custody check used for dispatch also covers a
+	// terminal attempt whose release never entered the live-job forecast.
+	if !q.cardSettled(m) {
+		return nil
+	}
+	now := q.clock.Now()
+	running := q.drainingAttempts(m)
+	releasing := running[:0]
+	for _, holder := range running {
+		if holder.StartedAt != nil {
+			if end := q.expectedEnd(holder, q.s.Machines[holder.Machine]); end != nil && end.After(now) {
+				releasing = append(releasing, holder)
+				continue
+			}
+		}
+		if batchOnTarget(holder, m) {
+			return nil // An unforecastable exclusive slot also blocks the check.
+		}
+	}
+	return releasing
 }
 
 // Host RAM is shared by CPU and device views. Apply accelerator-first backfill

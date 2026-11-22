@@ -161,17 +161,9 @@ func TestExploratoryOOMColdGuardFinalLaunch(t *testing.T) {
 	}
 }
 
-func TestExploratoryOOMExtensionCheckWaitsForPhysicalOpportunity(t *testing.T) {
+func TestExploratoryOOMExtensionCheckRecoversFromSmallProbe(t *testing.T) {
 	q, clock, m, s := coldProbeAdmissionFixture(t, false)
-	// Another envelope can own most allowance even while its payload is small.
 	queued := submit(t, q, s)
-	target := *q.s.Machines[m.ID]
-	target.FreeHostMemoryGB = 1.0571327209472656
-	target.HostAvailableMemoryGB = 19.742050170898438
-	candidate := q.memoryCandidate(queued, &target)
-	if candidate.MemoryEnvelope.HostGB < 4 || hostFits(&target, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) {
-		t.Fatalf("unknown check used tiny residual: %+v", candidate.MemoryEnvelope)
-	}
 	run := assignedJob(machineCheck(t, q, m))
 	if run == nil {
 		t.Fatal("check not assigned after capacity")
@@ -268,14 +260,73 @@ func TestExploratoryOOMUnifiedCheckRecoveryKeepsSharedSplit(t *testing.T) {
 	}
 }
 
-func TestExploratoryOOMUnifiedCheckWaitsForPhysicalOpportunity(t *testing.T) {
-	q, _, m, s := unifiedCheckOOMFixture(t)
-	queued := submit(t, q, s)
-	target := m.Devices[0].machine(*q.s.Machines[m.ID])
-	target.FreeHostMemoryGB = 1.0571327209472656
-	target.HostAvailableMemoryGB = 19.742050170898438
-	candidate := q.memoryCandidate(queued, &target)
-	if candidate.MemoryEnvelope.HostGB < 4 || hostFits(&target, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) {
-		t.Fatalf("unified check launched in tiny ledger remainder: %+v", candidate.MemoryEnvelope)
+func TestExploratoryOOMExtensionCheckWaitsForUsableProbe(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fixture func(*testing.T) (*Queue, *fakeClock, Machine, Spec)
+	}{
+		{"discrete", func(t *testing.T) (*Queue, *fakeClock, Machine, Spec) { return coldProbeAdmissionFixture(t, false) }},
+		{"unified", unifiedCheckOOMFixture},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, wallTime := range []string{"", "1h"} {
+				t.Run("wall time="+wallTime, func(t *testing.T) {
+					q, clock, m, check := tc.fixture(t)
+					const available, tinyRoom = 19.742050170898438, 1.0571327209472656
+					m.HostAvailableMemoryGB = 24
+					cpu := cpuSpec(1, available-tinyRoom)
+					cpu.WallTime = wallTime
+					holder := submit(t, q, cpu)
+					running := assignedJob(machineCheck(t, q, m))
+					if running == nil || running.ID != holder.ID {
+						t.Fatal("missing CPU holder", running)
+					}
+					if err := q.Started(result(running, false)); err != nil {
+						t.Fatal(err)
+					}
+					m.HostAvailableMemoryGB = available
+					clock.Advance(time.Second)
+					machineCheck(t, q, m, running)
+					queued := submit(t, q, check)
+					if offer := assignedJob(machineCheck(t, q, m, running)); offer != nil {
+						t.Fatalf("tiny ledger remainder admitted a check: %+v", offer.MemoryEnvelope)
+					}
+					status, err := q.jobSnapshot(queued.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if wallTime == "" {
+						if status.Hold == nil || status.Hold.Kind != "memory" || !strings.Contains(status.Hold.Detail, "minimum probe") {
+							t.Fatalf("expected the probe-floor RAM hold: %+v", status.Hold)
+						}
+					} else if status.Hold == nil || status.Hold.Kind != "host_memory_headroom" {
+						t.Fatalf("expected the forecast RAM hold: %+v", status.Hold)
+					}
+					if wallTime == "" {
+						other := submit(t, q, cpuSpec(1, .5))
+						backfill := assignedJob(machineCheck(t, q, m, running))
+						if backfill == nil || backfill.ID != other.ID {
+							t.Fatal("unforecastable check blocked fitting work", job(t, q, other.ID).Reason)
+						}
+						finish(t, q, backfill, true)
+					}
+					m.HostAvailableMemoryGB = 22
+					offer := assignedJob(machineCheck(t, q, m, running))
+					if wallTime != "" {
+						if offer != nil {
+							t.Fatal("check did not wait for a forecastable larger probe", offer.MemoryEnvelope)
+						}
+						finish(t, q, running, true)
+						offer = assignedJob(machineCheck(t, q, m))
+					}
+					if offer == nil || offer.ID != queued.ID || offer.Attempt != 1 {
+						t.Fatal("check did not start with sufficient RAM", job(t, q, queued.ID).Reason)
+					}
+					if err := q.Started(result(offer, false)); err != nil {
+						t.Fatal(err)
+					}
+				})
+			}
+		})
 	}
 }

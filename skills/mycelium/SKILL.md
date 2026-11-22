@@ -85,8 +85,11 @@ when an upload-creation response has no accepted offset.
   workstation. Light work still uses its measured allowances. Queued GPU work
   protects its resolved CPU/RAM needs from CPU backfill, including internal
   extension checks, CPU maintenance resumes, and waits for a finite GPU execution
-  to finish. Freed capacity accumulates toward that demand; portable queued CPU
-  work can use another eligible host. No fixed core reserve or GPU-host exclusion is needed.
+  to finish. A cold accelerator check can start within measured admission RAM
+  above its evidence-backed probe minimum, or wait for a larger forecast offer.
+  A blocked check protects accumulating capacity only if the forecast can satisfy
+  it and exact card custody permits the projection. Portable queued CPU work can use
+  another eligible host. No fixed core reserve or GPU-host exclusion is needed.
   Production's relative start budget renews when it expires behind a
   `host_capacity_accumulation` fence; status may show a countdown that re-arms.
   First assignment grants a full relative budget for preparation. An explicit
@@ -777,6 +780,10 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   can overlap; do not sum them or label assignment-to-staged as transfer time. Fix what you authored, or record the owner and
   action on your work record and move on. Keep the same job and key; resubmitting,
   pinning or running locally only hides a hold ([waiting](references/waiting.md)).
+  `yield_plan` in the job JSON describes possible relocation or why it is
+  unavailable. Read `hold` for the current admission blocker, including RAM
+  headroom or capacity accumulating for another job. A worker check-in can
+  admit the same job once its current requirements fit and it has the turn.
   Resolve (`myce spec check --resolve FILE`) and status give a compatibility
   action under `hold.next` with its evidence source in `hold.reason`. A terminal
   compatibility finding has its action and source under `finding`. For a newly
