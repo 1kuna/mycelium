@@ -122,11 +122,15 @@ func TestStagingPhasesRecordedInAttemptHistory(t *testing.T) {
 		t.Fatal("input changed", string(data), err)
 	}
 	// The same evidence must be rejected from the wrong execution.
-	report := AttemptReport{Execution: Execution{ID: a.ID, Attempt: a.Attempt + 1}, Session: a.Session, StagingTimings: value}
+	launch := &LaunchTimings{
+		AssignmentReceivedAt: value.StartedAt, ObservedAt: *value.CompletedAt,
+		Phases: []LaunchPhaseTiming{{Phase: launchStaging, Seconds: value.ElapsedSeconds}},
+	}
+	report := AttemptReport{Execution: Execution{ID: a.ID, Attempt: a.Attempt + 1}, Session: a.Session, StagingTimings: value, LaunchTimings: launch}
 	if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{report}}); err != nil {
 		t.Fatal(err)
 	}
-	if got := job(t, q, j.ID); got.StagingTimings != nil {
+	if got := job(t, q, j.ID); got.StagingTimings != nil || got.LaunchTimings != nil {
 		t.Fatal("stale timing accepted")
 	}
 	report.Attempt = a.Attempt
@@ -139,7 +143,7 @@ func TestStagingPhasesRecordedInAttemptHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := job(t, q, j.ID)
-	if got.StagingTimings != nil || len(got.AttemptHistory) != 1 || got.AttemptHistory[0].StagingTimings == nil {
+	if got.StagingTimings != nil || got.LaunchTimings != nil || len(got.AttemptHistory) != 1 || got.AttemptHistory[0].StagingTimings == nil || got.AttemptHistory[0].LaunchTimings == nil {
 		t.Fatal("retry lost history or retained live facts", got)
 	}
 	// Read from SQLite again, then through the real status history HTTP projection.
@@ -156,7 +160,7 @@ func TestStagingPhasesRecordedInAttemptHistory(t *testing.T) {
 	if err := (Client{URL: api.URL, Token: "test"}).Call(context.Background(), "GET", "/api/status?detail=full", nil, &history); err != nil {
 		t.Fatal(err)
 	}
-	if len(history.Jobs) != 1 || len(history.Jobs[0].AttemptHistory) != 1 || history.Jobs[0].AttemptHistory[0].StagingTimings == nil {
+	if len(history.Jobs) != 1 || len(history.Jobs[0].AttemptHistory) != 1 || history.Jobs[0].AttemptHistory[0].StagingTimings == nil || history.Jobs[0].AttemptHistory[0].LaunchTimings == nil {
 		t.Fatal("full history omitted phases")
 	}
 	got, err = (Client{URL: api.URL, Token: "test"}).GetJob(context.Background(), j.ID)
@@ -190,6 +194,7 @@ func (b *stagingTimedBody) Read(p []byte) (int, error) {
 // the wire copy, and a queue replacement's decode refusal is safe to retry once.
 func TestStagingPhasesWireCompatibility(t *testing.T) {
 	var advertised, allow bool
+	var seenLaunch []bool
 	var mu sync.Mutex
 	applied := 0
 	var seen []bool
@@ -201,6 +206,7 @@ func TestStagingPhasesWireCompatibility(t *testing.T) {
 			t.Error(err)
 		}
 		present := body["staging_timings"] != nil
+		launchPresent := body["launch_timings"] != nil
 		if raw := body["attempts"]; raw != nil {
 			var reports []map[string]json.RawMessage
 			if err := json.Unmarshal(raw, &reports); err != nil {
@@ -208,14 +214,19 @@ func TestStagingPhasesWireCompatibility(t *testing.T) {
 			}
 			for _, report := range reports {
 				present = present || report["staging_timings"] != nil
+				launchPresent = launchPresent || report["launch_timings"] != nil
 			}
 		}
 		seen = append(seen, present)
+		seenLaunch = append(seenLaunch, launchPresent)
 		w.Header().Set("Content-Type", "application/json")
 		if advertised {
 			w.Header().Set(stagingPhasesHeader, stagingPhasesProtocol)
 		}
-		if present && !allow {
+		if allow {
+			w.Header().Set(launchTimingsHeader, launchTimingsWire)
+		}
+		if launchPresent && !allow {
 			w.WriteHeader(400)
 			_, _ = io.WriteString(w, `{"code":"request_invalid","error":"unknown field"}`)
 			return
@@ -225,9 +236,11 @@ func TestStagingPhasesWireCompatibility(t *testing.T) {
 	}))
 	defer server.Close()
 	wire := &atomic.Bool{}
-	client := Client{URL: server.URL, stagingWire: wire}
+	launchWire := &atomic.Bool{}
+	client := Client{URL: server.URL, stagingWire: wire, launchTimingWire: launchWire}
 	facts := &StagingTimings{StartedAt: time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)}
-	report := Checkin{Attempts: []AttemptReport{{StagingTimings: facts}}}
+	launchFacts := &LaunchTimings{AssignmentReceivedAt: facts.StartedAt}
+	report := Checkin{Attempts: []AttemptReport{{StagingTimings: facts, LaunchTimings: launchFacts}}}
 	send := func(path string, value any) {
 		t.Helper()
 		if err := client.Call(context.Background(), "POST", path, value, nil); err != nil {
@@ -240,16 +253,20 @@ func TestStagingPhasesWireCompatibility(t *testing.T) {
 	mu.Unlock()
 	send("/api/workers/checkin", report) // discover support without new JSON fields
 	send("/api/workers/checkin", report) // telemetry now sent
-	r := Result{StagingTimings: facts}
+	r := Result{StagingTimings: facts, LaunchTimings: launchFacts}
 	send("/api/workers/started", &r)
 	mu.Lock()
-	advertised, allow = false, false
+	allow = false
 	mu.Unlock()
-	send("/api/workers/complete", &r) // decode refusal then stripped replay
+	send("/api/workers/complete", &r) // downgrade to a staging-only queue
+	send("/api/workers/started", &r)  // staging and launch negotiate independently
 	mu.Lock()
 	defer mu.Unlock()
-	want := []bool{false, false, true, true, true, false}
-	if applied != 5 || !slices.Equal(seen, want) || wire.Load() || report.Attempts[0].StagingTimings != facts || r.StagingTimings != facts {
-		t.Fatal("wire negotiation lost evidence or changed application count", seen, wire.Load())
+	want := []bool{false, false, true, true, true, true, true}
+	wantLaunch := []bool{false, false, true, true, true, false, false}
+	if applied != 6 || !slices.Equal(seen, want) || !slices.Equal(seenLaunch, wantLaunch) ||
+		!wire.Load() || launchWire.Load() || report.Attempts[0].StagingTimings != facts ||
+		r.StagingTimings != facts || r.LaunchTimings != launchFacts {
+		t.Fatal("wire negotiation lost evidence or changed application count", seen, seenLaunch)
 	}
 }

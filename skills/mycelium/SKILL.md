@@ -747,6 +747,13 @@ difference from `queued` to `started_at`, or from `dependency.ready_at` for a
 dependent job. It uses the timestamps exposed by the API, not process-local
 monotonic clock readings.
 
+For assignment-to-command diagnosis, `myce status JOB_ID --history`
+shows launch phases for each retained attempt. Add `--json` to read
+`attempt_history[].launch_timings` and its worker-observed
+`command_start_boundary`. Join the same attempt in `myce ledger JOB_ID` for
+queue assignment and authorization times. See
+[attempt launch timings](https://github.com/1kuna/mycelium/blob/main/docs/status.md#attempt-launch-timings).
+
 For a preservation snapshot, `myce status --history --json` streams one complete
 document from a consistent committed publication, with bounded job projection
 on the queue. Save it to a file and check exit status before using it. Python

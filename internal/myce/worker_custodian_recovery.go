@@ -65,6 +65,9 @@ func (w Worker) recoverUnstartedCustodian(parent *workerStore) error {
 	facts := memberOutcome{Infrastructure: []infrastructureFact{{Kind: launchRefused, At: w.Clock.Now(), Predicate: "launch_authorization", LaunchRefusal: custodianStartupFailed, PrelaunchRefused: true}}}
 	cause := &recordedStartError{cause: errCustodianStartup, facts: facts}
 	r := startFailureOutcome(Result{Machine: j.Machine, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: errCustodianStartup.Error()}, &executionEvidenceError{cause, unstartedExecution(j.Attempt)})
+	timing := newLaunchRecorder(w.Clock, v.State.Job.LaunchTimings)
+	timing.finish("")
+	r.LaunchTimings = timing.snapshot()
 	v.Finished, v.At, v.State = true, w.Clock.Now(), req.State
 	v.State.Result = &r
 	return saveWorkerJSON(dir, custodianName(id, "snapshot"), v)

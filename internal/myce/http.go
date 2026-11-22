@@ -551,6 +551,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			w.Header().Set(cpuPressureProtocolHeader, cpuPressureProtocol)
 			w.Header().Set(faultEvidenceHeader, faultEvidenceProtocol)
 			w.Header().Set(stagingPhasesHeader, stagingPhasesProtocol)
+			w.Header().Set(launchTimingsHeader, launchTimingsWire)
 		}
 		// Liveness is a fixed-size authenticated response, not a projection.
 		// A progress probe must not wait on the OS memory observation used to
@@ -731,14 +732,15 @@ func (q *Queue) Run(ctx context.Context) error {
 var clientTransport = &http.Transport{Proxy: http.ProxyFromEnvironment}
 
 type Client struct {
-	publication     *publicationProgress
-	publicationWire *atomic.Bool
-	inventoryWire   *atomic.Bool
-	stagingWire     *atomic.Bool
-	faultWire       *atomic.Bool
-	URL             string
-	Token           string
-	HTTP            *http.Client // Its Timeout bounds API calls; file transfers use progress budgets.
+	publication      *publicationProgress
+	publicationWire  *atomic.Bool
+	inventoryWire    *atomic.Bool
+	stagingWire      *atomic.Bool
+	launchTimingWire *atomic.Bool
+	faultWire        *atomic.Bool
+	URL              string
+	Token            string
+	HTTP             *http.Client // Its Timeout bounds API calls; file transfers use progress budgets.
 	// Tests shorten the file transfer budgets; zero uses the defaults.
 	transferIdle  time.Duration
 	uploadTiming  *uploadTiming
@@ -760,6 +762,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 	for {
 		started := clock.Now()
 		prepared, stagingFields := stagingWireInput(in, c.stagingWire != nil && c.stagingWire.Load())
+		prepared, launchFields := launchTimingWireInput(prepared, c.launchTimingWire != nil && c.launchTimingWire.Load())
 		wireIn, faultFields := faultWireInput(prepared, c.faultWire != nil && c.faultWire.Load())
 		err := c.callWatched(ctx, method, path, wireIn, out)
 		if method == http.MethodPost && path == "/api/workers/complete" && requestDecodeRefused(err) {
@@ -768,15 +771,23 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 				err = c.callWatched(ctx, method, path, wireIn, out)
 			}
 		}
-		if (faultFields || stagingFields) && requestDecodeRefused(err) {
-			if c.faultWire != nil {
+		if (faultFields || stagingFields || launchFields) && requestDecodeRefused(err) {
+			// A staging-capable predecessor can reject launch timings alone.
+			launchDowngrade := launchFields && !c.launchTimingWire.Load()
+			keepStaging := launchDowngrade && c.stagingWire != nil && c.stagingWire.Load()
+			keepFaults := launchDowngrade && c.faultWire != nil && c.faultWire.Load()
+			if c.faultWire != nil && !keepFaults {
 				c.faultWire.Store(false)
 			}
-			if c.stagingWire != nil {
+			if c.stagingWire != nil && !keepStaging {
 				c.stagingWire.Store(false)
 			}
-			legacy, _ := faultWireInput(wireIn, false)
-			legacy, _ = stagingWireInput(legacy, false)
+			if c.launchTimingWire != nil {
+				c.launchTimingWire.Store(false)
+			}
+			legacy, _ := faultWireInput(wireIn, keepFaults)
+			legacy, _ = stagingWireInput(legacy, keepStaging)
+			legacy, _ = launchTimingWireInput(legacy, false)
 			err = c.callWatched(ctx, method, path, legacy, out)
 		}
 		if err == nil {
@@ -868,6 +879,9 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	defer res.Body.Close()
 	if c.stagingWire != nil && workerProtocolEndpoint(path) {
 		c.stagingWire.Store(res.Header.Get(stagingPhasesHeader) == stagingPhasesProtocol)
+	}
+	if c.launchTimingWire != nil && workerProtocolEndpoint(path) {
+		c.launchTimingWire.Store(res.Header.Get(launchTimingsHeader) == launchTimingsWire)
 	}
 	if c.faultWire != nil && workerProtocolEndpoint(path) {
 		c.faultWire.Store(res.Header.Get(faultEvidenceHeader) == faultEvidenceProtocol)

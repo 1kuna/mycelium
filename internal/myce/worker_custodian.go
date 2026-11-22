@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -117,7 +118,9 @@ func RecordCustodianStartupFailure(spool, id string) error {
 	}
 	j := *req.State.Job
 	s := &workerStore{dir: spool, state: req.State}
-	cause := s.startFailure(j, launchRefused, errCustodianStartup)
+	clock := RealClock{}
+	at := clock.Now()
+	cause := s.startFailureAt(j, launchRefused, errCustodianStartup, at)
 	// A refusal without its durable launch cause must not become a finished
 	// result: ordinary replay could otherwise charge/lose a resumable experiment.
 	var recorded *recordedStartError
@@ -125,6 +128,9 @@ func RecordCustodianStartupFailure(spool, id string) error {
 		return cause
 	}
 	r := startFailureOutcome(Result{Machine: j.Machine, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: errCustodianStartup.Error()}, &executionEvidenceError{cause, unstartedExecution(j.Attempt)})
+	timing := s.launchRecorder(clock)
+	timing.finish("")
+	r.LaunchTimings = timing.snapshot()
 	s.state.Result = &r
 	return saveWorkerJSON(dir, custodianName(id, "snapshot"), custodianSnapshot{Protocol: custodianProtocol, ID: id, Finished: true, State: s.state})
 }
@@ -165,6 +171,8 @@ func (w Worker) startCustodian(ctx context.Context, s *workerStore, j Job) (*pro
 		}
 		return p, nil
 	}
+	timing := s.launchRecorder(w.Clock)
+	timing.enter(launchCustodianSetup)
 	id := ID()
 	dir := custodianDir(s.dir)
 	if err := PrepareStateRoots(dir); err != nil {
@@ -173,6 +181,7 @@ func (w Worker) startCustodian(ctx context.Context, s *workerStore, j Job) (*pro
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
+	j.LaunchTimings = timing.snapshot()
 	state := s.state
 	state.Job, state.Custodian = &j, ""
 	r := custodianRequest{Protocol: custodianProtocol, ID: id, Machine: w.Machine, State: state}
@@ -457,6 +466,10 @@ func (w *Worker) initAttemptRuntime(stop context.Context, s *workerStore) error 
 }
 
 func (w Worker) runCustodian(stop context.Context) error {
+	if w.Clock == nil {
+		w.Clock = RealClock{}
+	}
+	entered := w.Clock.Now()
 	if w.ServiceConfig == nil || !validCustodianID(w.Custodian) {
 		return errors.New("custodian requires installed worker configuration and exact identity")
 	}
@@ -482,14 +495,12 @@ func (w Worker) runCustodian(stop context.Context) error {
 		return errors.New("custodian request identity mismatch")
 	}
 	w.Machine = req.Machine
-	if w.Clock == nil {
-		w.Clock = RealClock{}
-	}
 	if w.Interval <= 0 {
 		w.Interval = time.Second
 	}
 	w.initInventoryProbe()
 	w.Client.Clock = w.Clock
+	w.Client.launchTimingWire = &atomic.Bool{}
 	w.rootMonitor = &workerRootMonitor{expected: map[string]string{}}
 	// Linux adoption requires the delegated worker leaf. Refuse before the first
 	// snapshot if setup fails, so a helper can never wait at an unserviceable gate.
@@ -512,6 +523,13 @@ func (w Worker) runCustodian(stop context.Context) error {
 		}
 	}
 	s := &workerStore{dir: spool, stateName: custodianName(id, "state"), state: req.State, liveEvidence: unstartedExecution(req.State.Job.Attempt), liveEvidenceKey: jobKey(*req.State.Job)}
+	timing := s.launchRecorder(w.Clock)
+	// The detached process starts with a serialized same-host timestamp.
+	// Reattach the local monotonic clock at the first available observation.
+	if timing != nil && timing.value.CurrentPhase != "" {
+		timing.advance(entered)
+		timing.value.CurrentPhase = launchCustodianInit
+	}
 	w.checkpointExpiry = newWorkerCheckpointExpiry()
 	w.checkNativeSeqpacketStartup()
 	if w.memoryCeilings != nil {
@@ -539,6 +557,16 @@ func (w Worker) runCustodian(stop context.Context) error {
 	v := custodianSnapshot{Protocol: custodianProtocol, ID: id, PID: pid, Birth: birth, Cgroup: cgroup}
 	publish := func(p *process, finished bool) error {
 		v.At, v.State, v.Finished = w.Clock.Now(), s.state, finished
+		if timing := s.launch.snapshot(); timing != nil {
+			job := *s.state.Job
+			job.LaunchTimings = timing
+			v.State.Job = &job
+		}
+		if finished && v.State.Result != nil && v.State.Result.LaunchTimings == nil {
+			r := *v.State.Result
+			r.LaunchTimings = v.State.Job.LaunchTimings
+			v.State.Result = &r
+		}
 		if p != nil {
 			v.Started, v.Resources = p.started(), p.resourceSnapshot()
 			v.Memory = p.currentProcessHostMemory()

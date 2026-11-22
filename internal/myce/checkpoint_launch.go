@@ -51,6 +51,15 @@ func (w Worker) startAssignedAttempt(ctx context.Context, s *workerStore, j Job)
 	if j.Spec.Resident == nil && w.detachesAssignedAttempts() {
 		return w.startCustodian(ctx, s, j)
 	}
+	timing := s.launchRecorder(w.Clock)
+	timing.enter(launchBinding)
+	defer func() {
+		if errors.Is(startErr, errWorkerCheckpoint) || errors.Is(startErr, errWorkerUnavailable) {
+			timing.enter(launchRetry)
+		} else if startErr != nil {
+			timing.finish("")
+		}
+	}()
 	if err := s.waitCheckpointPreparation(ctx); err != nil {
 		return nil, err
 	}

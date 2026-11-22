@@ -294,6 +294,12 @@ func (q *Queue) NativeCustody(r NativeCustodyReport, requestContexts ...context.
 }
 
 func (w Worker) reportNativeCustody(j Job, session, execution, custody, phase string, supervisors ...int) error {
+	switch phase {
+	case "reserved":
+		defer w.launchTiming.within(launchReserve)()
+	case "started":
+		defer w.launchTiming.within(launchReport)()
+	}
 	report := NativeCustodyReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: w.Machine.ID, Session: session, ProcessID: execution, CustodyID: custody, Phase: phase}
 	if len(supervisors) > 0 {
 		report.SupervisorPID = supervisors[0]

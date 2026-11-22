@@ -32,6 +32,10 @@ func TestStatusJSONPressureView(t *testing.T) {
 		{ID: "unrelated-job", State: "queued", Spec: myce.Spec{Name: "unrelated"}},
 	}}
 	history.Jobs[0].AttemptHistory[0].StagingTimings = &myce.StagingTimings{StartedAt: time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC), CacheHits: 1}
+	history.Jobs[0].AttemptHistory[0].LaunchTimings = &myce.LaunchTimings{
+		AssignmentReceivedAt: history.Jobs[0].AttemptHistory[0].StagingTimings.StartedAt,
+		Phases:               []myce.LaunchPhaseTiming{{Phase: "custodian_setup", Seconds: 1.25}},
+	}
 	releaseState := "pending"
 	history.Jobs[0].Cancellation = &myce.Cancellation{WillNotRun: true, Release: &releaseState}
 	history.Jobs[0].CancellationScope = &myce.CancellationScope{
@@ -95,7 +99,7 @@ func TestStatusJSONPressureView(t *testing.T) {
 	}
 	historyMode.Store(true)
 	out = captureJoiningOutput(t, func() error { return run([]string{"status", "--history", "--queue", server.URL, "12345678"}) })
-	for _, want := range []string{"attempt 1", "state=queued", "operator=true", "attempt 2", "command_exit (exit 1)", "native_workdir_containment", "workdir beneath {work}", "staging worker_started=2026-11-13T12:00:00Z", "cache_hits=1"} {
+	for _, want := range []string{"attempt 1", "state=queued", "operator=true", "attempt 2", "command_exit (exit 1)", "native_workdir_containment", "workdir beneath {work}", "staging worker_started=2026-11-13T12:00:00Z", "cache_hits=1", "launch received=2026-11-13T12:00:00Z", "custodian_setup=1.250s"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("status missing %q: %s", want, out)
 		}
@@ -104,6 +108,10 @@ func TestStatusJSONPressureView(t *testing.T) {
 	var historyJob myce.Job
 	if err := json.Unmarshal([]byte(historyJSON), &historyJob); err != nil || historyJob.AttemptHistory[0].StagingTimings == nil || historyJob.AttemptHistory[0].StagingTimings.CacheHits != 1 {
 		t.Fatal("status history JSON lost staging evidence", err, historyJSON)
+	}
+	if launch := historyJob.AttemptHistory[0].LaunchTimings; launch == nil || len(launch.Phases) != 1 ||
+		launch.Phases[0].Phase != "custodian_setup" || launch.Phases[0].Seconds != 1.25 {
+		t.Fatal("status history JSON lost launch evidence", historyJSON)
 	}
 	if strings.Contains(out, "unrelated") {
 		t.Fatal("status ignored job selector", out)

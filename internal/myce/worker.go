@@ -27,8 +27,9 @@ var workerCheckpointPrepare = prepareCheckpoint
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
-	cleanupFS            workerDataFS // nil uses the real filesystem; tests inject unlink/sync faults.
-	ephemeralProbe       func() error // test-only capability seam; production always probes the kernel.
+	launchTiming         *launchRecorder // Set only on the attempt runner copy.
+	cleanupFS            workerDataFS    // nil uses the real filesystem; tests inject unlink/sync faults.
+	ephemeralProbe       func() error    // test-only capability seam; production always probes the kernel.
 	storageHealth        *hostHealthMonitor
 	hygieneCollector     *workerHygieneCollector
 	HostHealthSource     func(context.Context) (HostHealthReading, error)
@@ -438,6 +439,9 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 }
 
 func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (startedProcess *process, startErr error) {
+	timing := s.launchRecorder(w.Clock)
+	w.launchTiming = timing
+	timing.enter(launchStaging)
 	launchCtx, cancel := context.WithCancel(ctx)
 	w.launchCtx, w.cancelStart = launchCtx, cancel
 	// Input/checkpoint copies outlive a pending start observation. Their ctx
@@ -620,6 +624,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		retainInputsStagedAt(&j, &staged.at)
 	}
 
+	timing.enter(launchPrechecks)
 	executionWork := j.Spec.Run.Workdir
 	if err := checkPayloadMachOLinkage(ctx, machineTarget(&w.Machine), executionWork); err != nil {
 		return nil, err
@@ -649,6 +654,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if err := w.authorizeLaunch(HostLaunch{Machine: w.Machine.ID, Session: s.state.Session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)}); err != nil {
 		return nil, s.startFailure(j, launchRefused, err)
 	}
+	timing.enter(launchCheckpoint)
 	prepare := workerCheckpointPrepare
 	if j.FileTransport {
 		prepare = func(value Job) (string, error) { return w.prepareFileCheckpoint(value, s.dir) }
@@ -685,6 +691,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 			return nil, err
 		}
 	}
+	timing.enter(launchEnvironment)
 	var environmentPath string
 	var release func()
 	environmentStarted := false
@@ -791,6 +798,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	timing.enter(launchCommandSetup)
 	if err := w.checkHostMemoryBudget(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
 		return nil, err
 	}
@@ -935,9 +943,13 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		cmd.Env = append(cmd.Env, k+"="+env[k])
 	}
 	cmd.Args = append(slices.Clone(cmd.Args[:4]), sharedHostCommand(environmentCommand(cmd.Args[4:], cmd.Env), w.Machine.SharedHost)...)
-	if err := w.isolateNativeAttempt(&j, nil, cmd, s.dir, executionWork, env, nil, true); err != nil {
+	finishSandbox := timing.within(launchSandbox)
+	isolateErr := w.isolateNativeAttempt(&j, nil, cmd, s.dir, executionWork, env, nil, true)
+	finishSandbox()
+	if err := isolateErr; err != nil {
 		return nil, s.startFailure(j, launchRefused, reject("native_isolation", err))
 	}
+	timing.enter(launchSupervisor)
 	cmd.SysProcAttr = commandProcessAttributes()
 	logName := identity + ".log"
 	if j.Spec.ephemeral() {
@@ -980,6 +992,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	// the command until its group identity has been durably recorded.
 	assigned := j
 	assigned.ExecutionEvidence = nil
+	assigned.LaunchTimings = timing.snapshot()
 	s.state.Job = &assigned
 	s.state.Identity = identity
 	s.state.Log = logName
@@ -1112,6 +1125,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 			return nil, abort(s.startFailure(j, launchRefused, err))
 		}
 	}
+	timing.enter(launchPayload)
 	commandStartedAt := w.Clock.Now()
 	payloadPossible = true
 	if readyReader == nil {
@@ -1119,6 +1133,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	}
 	if _, err = gateWriter.Write([]byte("start\n")); err != nil {
 		return nil, abort(err)
+	}
+	if readyReader == nil {
+		timing.finish(launchGateReleased)
 	}
 	// The shell's wait status cannot distinguish a signal from exit(139).
 	// Retain the actual child PID, then require a matching kernel/core record
@@ -1157,6 +1174,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 				}
 				return nil, abort(s.startFailure(j, launchFailed, errors.New(string(receipt))))
 			}
+			timing.finish(launchExecConfirmed)
+		} else {
+			timing.finish("")
 		}
 	}
 	launchErr := err
@@ -1169,7 +1189,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 			p.mu.Unlock()
 		}
 	}
-	result := Result{ExecutionEvidence: safeExecutionEvidence(j.ExecutionEvidence, j.Attempt), InputsStagedAt: j.InputsStagedAt, StagingTimings: s.staging.snapshot(), Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
+	result := Result{LaunchTimings: timing.snapshot(), ExecutionEvidence: safeExecutionEvidence(j.ExecutionEvidence, j.Attempt), InputsStagedAt: j.InputsStagedAt, StagingTimings: s.staging.snapshot(), Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 	environmentStarted = true
 	extensionStarted = true
 	sharedStarted = true
@@ -1383,6 +1403,7 @@ func (w Worker) Run(stop context.Context) error {
 	w.Client.publicationWire.Store(true)
 	w.Client.faultWire = &atomic.Bool{}
 	w.Client.stagingWire = &atomic.Bool{}
+	w.Client.launchTimingWire = &atomic.Bool{}
 	w.launchCtx = stop
 	if w.ServiceConfig != nil {
 		w.serviceStop = stop

@@ -145,6 +145,15 @@ check: [test, -s, result]
 	if err != nil || finished.State != "succeeded" || finished.FileTransport || len(receipt.Spec.Files) != 2 {
 		t.Fatalf("NAS profile execution: %+v %v", finished, err)
 	}
+	if len(finished.AttemptHistory) != 1 {
+		t.Fatalf("profile attempt missing: %+v", finished.AttemptHistory)
+	}
+	launch := finished.AttemptHistory[0].LaunchTimings
+	if launch == nil || launch.AssignmentReceivedAt.IsZero() || launch.InputsReadyAt == nil ||
+		launch.PreparationReadyAt == nil || launch.CommandStartAt == nil ||
+		launch.CommandStartBoundary == "" || launch.CurrentPhase != "" {
+		t.Fatalf("ordinary check-in and completion lost launch timings: %+v", launch)
+	}
 	dest := filepath.Join(root, "profile-result")
 	if err := client.DownloadResult(ctx, receipt.JobID, "result", dest); err != nil {
 		t.Fatal(err)

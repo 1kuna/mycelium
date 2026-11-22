@@ -439,12 +439,25 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		}
 		if s.state.Job != nil {
 			report.InputsStagedAt = s.state.Job.InputsStagedAt
+			report.LaunchTimings = s.state.Job.LaunchTimings
+			if s.state.Custodian == "" {
+				timing := s.launchRecorder(w.Clock)
+				if s.state.Result != nil && s.state.Result.LaunchTimings == nil {
+					timing.finish("")
+				}
+				report.LaunchTimings = timing.snapshot()
+			}
 			report.StagingTimings = s.staging.snapshot()
 			if report.StagingTimings == nil {
 				report.StagingTimings = s.state.Job.StagingTimings
 			}
 			if s.state.Result != nil {
 				s.state.Result.InputsStagedAt = s.state.Job.InputsStagedAt
+				if s.state.Result.LaunchTimings == nil {
+					s.state.Result.LaunchTimings = report.LaunchTimings
+				} else {
+					report.LaunchTimings = s.state.Result.LaunchTimings
+				}
 				s.state.Result.StagingTimings = report.StagingTimings
 			}
 		}
@@ -1516,7 +1529,8 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			w.Machine.SharedHostPressure = m.SharedHostPressure
 			heartbeatStarted := w.Clock.Now()
 			reply, err := w.checkin(observeCtx, Checkin{NASPathReports: w.nasPathReports(), Machine: m, fleetProofIssue: w.fleet.proofIssue(), ephemeralRefusal: refusal, Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
-			health.noteHeartbeat(w.Clock.Now().Sub(heartbeatStarted))
+			received := w.Clock.Now()
+			health.noteHeartbeat(received.Sub(heartbeatStarted))
 			if err == nil {
 				if receiptErr := saveEnrollmentReceipt(root.dir, m); receiptErr != nil {
 					// Enrollment is an observer, never authority to terminate live work.
@@ -1584,6 +1598,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 					key := attemptKey{d.ID, d.Attempt, d.Session}
 					if d.Job != nil {
 						j := *d.Job
+						j.LaunchTimings = &LaunchTimings{AssignmentReceivedAt: received, ObservedAt: received, CurrentPhase: launchDispatch}
 						if !j.Spec.Needs.cpuOnly() && len(j.AllocatedDevices) == 0 {
 							j.AllocatedDevices = []string{firstDevice(j, w.Machine)}
 						}

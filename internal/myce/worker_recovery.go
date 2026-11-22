@@ -86,6 +86,7 @@ type workerState struct {
 	Log             string                 `json:"log,omitempty"`
 }
 type workerStore struct {
+	launch                  *launchRecorder
 	staging                 *stagingRecorder
 	stagingKey              attemptKey
 	inputTransferRecovering atomic.Bool // Written by detached staging; read by its attempt actor.

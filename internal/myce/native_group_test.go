@@ -165,6 +165,9 @@ func nativeStart(t *testing.T, spec Spec, platform string, catalogs ...Environme
 		t.Fatal(err)
 	}
 	store.state.Session = m.Session
+	received := w.Clock.Now()
+	reply.Job.LaunchTimings = &LaunchTimings{AssignmentReceivedAt: received, ObservedAt: received, CurrentPhase: launchDispatch}
+	store.state.Job = reply.Job
 	var p *process
 	// Reuse the pending input copy before exercising the native lifecycle.
 	await(t, func() bool {
@@ -333,8 +336,20 @@ func TestNativeGroupReadyEnvironmentAndCleanup(t *testing.T) {
 				t.Fatal("missing shared work enumeration", status, err)
 			}
 			nativeTouch(t, r.dir, "finish")
-			if result := nativeFinish(t, r); !result.Success {
+			result := nativeFinish(t, r)
+			if !result.Success {
 				t.Fatal(result)
+			}
+			launch := result.LaunchTimings
+			if launch == nil || launch.CommandStartAt == nil || launch.CommandStartBoundary != launchGateReleased {
+				t.Fatalf("main payload gate missing from launch timing: %+v", launch)
+			}
+			seen := map[launchPhase]bool{}
+			for _, span := range launch.Phases {
+				seen[span.Phase] = true
+			}
+			if !seen[launchSandbox] || !seen[launchSidecars] || !seen[launchPayload] {
+				t.Fatalf("group launch phases incomplete: %+v", launch.Phases)
 			}
 			if r.calls.Load() < 5 {
 				t.Fatal("missing per-member authorization", r.calls.Load())

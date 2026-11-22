@@ -38,6 +38,8 @@ func TestCustodianEntryScopeIdentity(t *testing.T) {
 func TestCustodianLauncherExitProducesRefusal(t *testing.T) {
 	q, clock, host := fleetAtStartProbe(t)
 	j := job(t, q, host.StartProbe)
+	received := clock.Now()
+	j.LaunchTimings = &LaunchTimings{AssignmentReceivedAt: received, ObservedAt: received, CurrentPhase: launchDispatch}
 	var dbPath string
 	if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&dbPath); err != nil {
 		t.Fatal(err)
@@ -65,6 +67,11 @@ func TestCustodianLauncherExitProducesRefusal(t *testing.T) {
 		r := f.result
 		if r.Error != errCustodianStartup.Error() || r.ReleasePending || r.ExecutionEvidence == nil || r.ExecutionEvidence.Main != executionNotStarted || r.ExecutionEvidence.Sidecars != executionNotStarted || r.ExecutionCause == nil || !r.ExecutionCause.PrelaunchRefused || r.ExecutionCause.LaunchRefusal != custodianStartupFailed {
 			t.Fatalf("launcher exit lost startup refusal: %+v", f.result)
+		}
+		if r.LaunchTimings == nil || !r.LaunchTimings.AssignmentReceivedAt.Equal(received) ||
+			r.LaunchTimings.CurrentPhase != "" || r.LaunchTimings.CommandStartAt != nil ||
+			r.LaunchTimings.Phases[len(r.LaunchTimings.Phases)-1].Phase != launchCustodianSetup {
+			t.Fatalf("launcher refusal lost the launch boundaries: %+v", r.LaunchTimings)
 		}
 		if err := q.Complete(r); err != nil {
 			t.Fatal(err)
