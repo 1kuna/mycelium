@@ -10,13 +10,11 @@ const workerDiskHeadroomProtocol = "worker-disk-headroom-v1"
 // Queues advertising this accept each volume's decline age and cause (#834).
 const workerDiskTrendProtocol = "worker-disk-trend-v1"
 
-// The previous release strictly decodes check-ins and predates disk headroom
-// telemetry. Only additive fields wait for an advertisement on the serialized
-// check-in lane; a strict refusal retries once without them. The
-// foreign-consumer detail fields (#834) negotiate on the same lane.
+// Additive disk fields wait together for an advertisement on the serialized
+// check-in lane. Foreign-consumer detail fields negotiate on the same lane.
 type workerDiskBudgetWire struct {
-	machine, session                    string
-	supported, headroom, foreign, trend bool
+	machine, session   string
+	supported, foreign bool
 }
 
 func (w Worker) diskBudgetCheckin(c Checkin) Checkin {
@@ -27,14 +25,8 @@ func (w Worker) diskBudgetCheckin(c Checkin) Checkin {
 		if r.machine != c.Machine.ID || r.session != c.Machine.Session {
 			*r = workerDiskBudgetWire{machine: c.Machine.ID, session: c.Machine.Session}
 		}
-		if r.supported && r.headroom && r.trend {
-			return c
-		}
-		if r.supported && r.headroom {
-			return withoutDiskTrendFields(c)
-		}
 		if r.supported {
-			return withoutDiskTrendFields(withoutDiskHeadroomFields(c))
+			return c
 		}
 	}
 	return withoutDiskBudgetFields(c)
@@ -48,35 +40,6 @@ func withoutDiskBudgetFields(c Checkin) Checkin {
 		r.UnmanagedCompilerBytes = 0
 		c.Machine.HygieneCollection = &r
 	}
-	return c
-}
-
-// Copies the collection; local evidence keeps its headroom fields.
-func withoutDiskHeadroomFields(c Checkin) Checkin {
-	if c.Machine.HygieneCollection == nil || len(c.Machine.HygieneCollection.DiskBudget) == 0 {
-		return c
-	}
-	r := *c.Machine.HygieneCollection
-	r.DiskBudget = append([]DiskBudgetVolume(nil), r.DiskBudget...)
-	for i := range r.DiskBudget {
-		v := &r.DiskBudget[i]
-		v.ForeignBytes, v.ForeignPeakBytes, v.ForeignPeakGrowthBytes, v.ForeignHeadroomBytes = 0, 0, 0, 0
-	}
-	c.Machine.HygieneCollection = &r
-	return c
-}
-
-// Copies the collection; local evidence keeps its decline fields.
-func withoutDiskTrendFields(c Checkin) Checkin {
-	if c.Machine.HygieneCollection == nil || len(c.Machine.HygieneCollection.DiskBudget) == 0 {
-		return c
-	}
-	r := *c.Machine.HygieneCollection
-	r.DiskBudget = append([]DiskBudgetVolume(nil), r.DiskBudget...)
-	for i := range r.DiskBudget {
-		r.DiskBudget[i].DecliningSeconds, r.DiskBudget[i].DeclineCause = 0, ""
-	}
-	c.Machine.HygieneCollection = &r
 	return c
 }
 

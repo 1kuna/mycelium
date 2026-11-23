@@ -48,11 +48,12 @@ func TestLogsFollowUsesOnlyJobReadsAndDrainsFinalLogs(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			out := captureJoiningOutput(t, func() error {
-				return logs(context.Background(), myce.Client{URL: server.URL, Token: "test"}, "12345678", true)
-			})
-			if reads != 2 || logsReads != 2 || !strings.Contains(out, "[attempt 1]\nfirst\n[attempt 1]\nfinal\n") {
-				t.Fatalf("reads=%d logs=%d output=%q", reads, logsReads, out)
+			var out bytes.Buffer
+			if err := logsAfter(context.Background(), myce.Client{URL: server.URL, Token: "test"}, "12345678", true, 0, &out); err != nil {
+				t.Fatal(err)
+			}
+			if reads != 2 || logsReads != 2 || !strings.Contains(out.String(), "[attempt 1]\nfirst\n[attempt 1]\nfinal\n") {
+				t.Fatalf("reads=%d logs=%d output=%q", reads, logsReads, out.String())
 			}
 		})
 	}
