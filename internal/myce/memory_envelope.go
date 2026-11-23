@@ -1045,20 +1045,26 @@ func (q *Queue) exploratoryDeviceRoom(j *Job, m *Machine) float64 {
 	return room
 }
 
-func (q *Queue) hostSizingInputs(m *Machine) MemorySizingInputs {
-	e := MemorySizingInputs{LedgerRemainderGB: q.hostRoomArms(m).gb(), AllowanceGB: hostMemoryAllowanceGB(m), SlackGB: m.MemoryCeilingSlackGB}
+func (q *Queue) hostSizingInputs(m *Machine) (sizing MemorySizingInputs, idleBurst float64) {
+	sizing = MemorySizingInputs{LedgerRemainderGB: q.hostRoomArms(m).gb(), AllowanceGB: hostMemoryAllowanceGB(m), SlackGB: m.MemoryCeilingSlackGB}
 	if l := q.hostMemoryLedgers[m.ID]; l != nil {
-		e.LedgerRemainderGB = l.SignedRoomGB
+		sizing.LedgerRemainderGB = l.SignedRoomGB
 	}
 	if h := q.externalMemoryStatus(hostID(m)); h != nil && h.Quiescent != nil && h.Quiescent.Week.Samples > 0 && validHostMemoryObservation(m.MemoryObservation) {
-		total := m.MemoryObservation.TotalGB
+		o := m.MemoryObservation
+		total := o.TotalGB
 		if p := m.CapabilityProfile; p != nil && p.SystemMemoryBytes > 0 {
 			total = min(total, float64(p.SystemMemoryBytes)/(1<<30))
 		}
-		bound := max(0, total-h.Quiescent.Week.MaxGB-q.hostMemoryMargin(m, m))
-		e.IdleHistoryBoundGB = &bound
+		margin := q.hostMemoryMargin(m, m)
+		week := h.Quiescent.Week
+		bound := max(0, total-week.MaxGB-margin)
+		sizing.IdleHistoryBoundGB = &bound
+		// The worker's live check already subtracts its explicit reserve. Any
+		// extra physical margin charged by the planner covers part of the burst.
+		idleBurst = max(0, week.MaxGB-week.P50GB-max(0, margin-o.ReserveGB))
 	}
-	return e
+	return sizing, idleBurst
 }
 
 func nativeCheckProbeHostFloor(j *Job) float64 {
@@ -1079,8 +1085,12 @@ func nativeCheckProbeMemoryWait(minimum, offer float64) string {
 // Transfer-prior exceptions also use this capacity comparison, never the CPU
 // bootstrap charge.
 func (q *Queue) physicalProbeMemoryStatus(j *Job, m *Machine, inputs *MemorySizingInputs) (float64, string, bool) {
-	sizing := q.hostSizingInputs(m)
+	sizing, idleBurst := q.hostSizingInputs(m)
 	drift, allowance := exploratoryDriftMarginGB(m), sizing.AllowanceGB
+	accelerator := !j.Spec.Needs.cpuOnly()
+	if accelerator {
+		drift = max(drift, idleBurst)
+	}
 	if allowance <= 0 || !m.HostMemoryMeasured || m.HostMemoryError != "" {
 		return 0, "exploratory first run needs measured host memory and a known allowance or physical capacity", false
 	}
@@ -1131,14 +1141,17 @@ func (q *Queue) physicalProbeMemoryStatus(j *Job, m *Machine, inputs *MemorySizi
 	if sizing.IdleHistoryBoundGB != nil {
 		idle = min(idle, *sizing.IdleHistoryBoundGB)
 	}
-	// Without idle history, a refused prelaunch still measures how much room
-	// disappeared. Keep that exact-session gap for this job's next cold offer;
-	// an unchanged heartbeat must not recreate the same near-miss forever.
+	// Re-anchor a retry to the failed comparison. Its measured shortfall is
+	// also evidence of launch variation below the previous offer, even when
+	// the host has no idle history. Leave room for that change to recur.
 	gap := 0.0
 	for _, w := range j.LaunchCapacityWait {
 		d := w.Admission
 		if w.Machine == m.ID && w.Session == m.Session && d != nil && !d.Unavailable && d.Available != nil && (d.Subcheck == "live_host_growth" || d.Subcheck == "live_host_ram") {
 			deficit := d.Required - *d.Available
+			if accelerator {
+				drift = max(drift, deficit)
+			}
 			if d.EnvelopeHostGB > 0 {
 				// Keep earlier offer reductions when a second refusal reports
 				// only the remaining deficit, including launch-helper growth.
@@ -1159,7 +1172,7 @@ func (q *Queue) physicalProbeMemoryStatus(j *Job, m *Machine, inputs *MemorySizi
 		}
 		*inputs = sizing
 	}
-	if !j.Spec.Needs.cpuOnly() && j.Spec.ExtensionCheck == nil && j.MemoryOOMFloor == nil && j.OOMRetries == 0 {
+	if accelerator && j.Spec.ExtensionCheck == nil && j.MemoryOOMFloor == nil && j.OOMRetries == 0 {
 		if ledger := q.hostMemoryLedgers[m.ID]; ledger != nil && ledger.ReservedGB > 0 {
 			unoccupied, _ := q.hostMemoryRoom(m, ledger.CapacityGB, 0, 0)
 			unoccupied = min(idle, min(unoccupied, allowance)-gap)

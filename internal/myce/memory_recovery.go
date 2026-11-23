@@ -143,7 +143,7 @@ func (q *Queue) censoredOOMMemory(j *Job, m *Machine, growth float64, inputs *Me
 	if m.UnifiedMemory {
 		check = max(0, check-j.MemoryOOMFloor.MemoryGB-m.MemoryCeilingSlackGB)
 	}
-	*inputs = q.hostSizingInputs(m)
+	*inputs, _ = q.hostSizingInputs(m)
 	inputs.RecoveryCapacityGB, inputs.ConstrainedCheckHostGB = room, check
 	// A check's constrained peak supplies a floor only. If it establishes
 	// no demand above the failed ceiling, use the measured physical
