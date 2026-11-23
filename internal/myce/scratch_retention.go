@@ -210,25 +210,10 @@ func (c *attemptFilesCollector) record(path, reason string) (int64, error) {
 
 func (w Worker) retainWorkerFiles(ctx context.Context, dir string, now time.Time) error {
 	c := &attemptFilesCollector{ctx: ctx, report: AttemptFilesCollection{Reasons: map[string]int64{}}}
-	c.resolve = func(id string, attempt int) (AttemptFilesDisposition, error) {
-		var d AttemptFilesDisposition
-		err := w.Client.Call(ctx, "POST", "/api/workers/attempt-files", AttemptFilesRequest{Execution: Execution{ID: id, Attempt: attempt}, Machine: w.Machine.ID}, &d)
-		return d, err
-	}
 	c.batch = func(attempts []Execution) ([]AttemptFilesDisposition, error) {
 		var reply AttemptFilesBatchReply
 		err := w.Client.Call(ctx, "POST", "/api/workers/attempt-files/batch", AttemptFilesBatchRequest{Machine: w.Machine.ID, Attempts: attempts}, &reply)
-		if !previousReleaseRoute(err) {
-			return reply.Dispositions, err
-		}
-		// The previous release (MY-42) has only the single-folder route.
-		out := make([]AttemptFilesDisposition, len(attempts))
-		for i, e := range attempts {
-			if out[i], err = c.resolve(e.ID, e.Attempt); err != nil {
-				return nil, err
-			}
-		}
-		return out, nil
+		return reply.Dispositions, err
 	}
 	err := errors.Join(pruneWorkerLogs(dir, "", now, w.LogRetention), pruneAttemptFiles(dir, now, c), pruneAttemptState(dir, now, w.LogRetention))
 	// Same confined collector, separate authority: checkpoint folders retain the
@@ -270,11 +255,4 @@ func attemptFolderNumber(name string) (int, bool) {
 	}
 	attempt, err := strconv.Atoi(name)
 	return attempt, err == nil && attempt >= 1 && strconv.Itoa(attempt) == name
-}
-
-// previousReleaseRoute reports the plain 404 a previous-release queue returns
-// for a worker route it does not have. Typed 404s are real answers.
-func previousReleaseRoute(err error) bool {
-	var refusal *HTTPError
-	return errors.As(err, &refusal) && refusal.Status == http.StatusNotFound && refusal.Code == ""
 }
