@@ -36,7 +36,7 @@ func (q *Queue) recordLearnedMemory(j *Job, m *Machine) {
 	if j != nil && q.s.Jobs[j.ID] == j {
 		q.touchJob(j.ID)
 	}
-	if j.MemoryEnvelope == nil {
+	if j.MemoryEnvelope == nil || pooledMemory(j) {
 		return
 	}
 	estimate := q.memoryEstimate(j, m)

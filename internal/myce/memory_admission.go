@@ -360,6 +360,9 @@ func (q *Queue) yieldMemoryOvercommit() {
 	}
 	horizon := q.preemptionGrace()
 	for _, j := range q.liveJobs() {
+		if pooledMemory(j) {
+			continue
+		}
 		owner := q.planningAllocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
 		if owner == nil || j.ReleaseConfirmed || (j.State != "running" && j.State != "stopping") {
 			continue
