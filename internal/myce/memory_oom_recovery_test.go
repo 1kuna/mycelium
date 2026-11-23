@@ -189,6 +189,8 @@ func TestOOMRecoveryUsesDemandNotFreeRAM(t *testing.T) {
 			q, clock, m, s := coldProbeAdmissionFixture(t, cpu)
 			if cpu {
 				s.Priority, s.Class = "production", "production"
+				// Model the capability advertised by a native cgroup worker.
+				m.Capabilities = append(m.Capabilities, learnedMemoryGuardCapability, firstRunFloorCapability)
 			}
 			queued := submit(t, q, s)
 			run := assignedJob(machineCheck(t, q, m))
