@@ -574,6 +574,8 @@ func TestMemoryCeilingWorkerOOMBeforeExecApproval(t *testing.T) {
 			defer store.close()
 			j := recoveryJob(t, []string{"true"})
 			j.Spec.Resumable = false
+			j.Spec.Needs.Platform = Platform{Required: []string{"cpu"}}
+			j.Spec.Needs.MemoryGB = 0
 			j.Spec.Needs.HostMemoryGB = firstRunStartupGB
 			j.Spec.Run.Env = map[string]string{"MYCE_TEST_EXIT_BEFORE_COMMAND_READY": "1"}
 			deadline := w.Clock.Now().Add(testWaitTimeout)
@@ -588,7 +590,8 @@ func TestMemoryCeilingWorkerOOMBeforeExecApproval(t *testing.T) {
 			}
 			if tc.oom {
 				f := resourceStopFinding(&j, r.ExecutionCause)
-				if r.ExecutionCause.Class != "oom" || r.MemoryPeak == nil || r.MemoryPeak.Events == nil || r.MemoryPeak.Events.OOMKill != 2 || f == nil || f.Code != "out_of_memory" {
+				if r.ExecutionCause.Class != "oom" || r.MemoryPeak == nil || r.MemoryPeak.Events == nil || r.MemoryPeak.Events.OOMKill != 2 ||
+					f == nil || f.Code != "out_of_memory" || !strings.Contains(f.Action, "needs.memory_gb") {
 					t.Fatalf("lost kernel evidence or resize guidance: %+v, %+v", r, f)
 				}
 			} else if r.ExecutionCause.Class != "io_error" {

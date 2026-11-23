@@ -34,7 +34,8 @@ capacity. It needs a worker that supports this guard.
 Strict shell starts use a measured shell startup minimum. A memory stop reruns
 the same job at its measured peak without an infrastructure loss; keep its job
 and key. A recorded `launch: oom` means the enforced ceiling was hit during
-startup. For a terminal memory failure, follow the job's resize guidance.
+startup. If a plain CPU job fails terminally at launch, set a larger explicit
+`needs.memory_gb` and submit the changed spec with a new key.
 Supporting workers refuse an exploratory launch with `custodian_ledger_read_failed`,
 `exploratory_capacity_unavailable`, `exploratory_host_memory_unavailable` or
 `exploratory_memory_room` when they cannot establish room above its accounting
