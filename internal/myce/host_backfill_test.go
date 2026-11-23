@@ -463,44 +463,97 @@ func TestHostBackfillFullyOccupiedThenPartialRelease(t *testing.T) {
 	}
 }
 
-// A queued GPU execution is known future demand even while the only CUDA
-// device is occupied. CPU backfill must leave its resolved host vector intact.
+// CPU backfill can use surplus beside a finite device holder. The next GPU
+// execution still needs its full host vector when the card releases.
 func TestHostBackfillProtectsNextGPUWhileDeviceBusy(t *testing.T) {
-	for _, cores := range []int{2, 6} {
-		t.Run(fmt.Sprint(cores), func(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		background        bool
+		tooLarge, surplus Spec
+	}{
+		{"RAM", false, cpuSpec(1, 8), cpuSpec(1, 7)},
+		{"cores", false, cpuSpec(6, 1), cpuSpec(5, 1)},
+		{"unrelated CPU holder", true, cpuSpec(1, 6), cpuSpec(1, 5)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			q, clock := fixture(t)
-			m := backfillMachine("accelerator", 64)
-			m.Devices[0].TotalMemoryGB, m.Devices[0].BudgetGB, m.Devices[0].FreeMemoryGB = 16, 16, 16
+			m := m3Machine()
+			m.Devices = m.Devices[:1]
+			m.HostMemoryBudgetGB = 16
 			machineCheck(t, q, m)
 			gpu := spec("experiment")
-			gpu.Needs.Platform = Platform{Required: []string{"cuda"}}
-			gpu.Needs.MemoryGB, gpu.Needs.HostMemoryGB, gpu.Needs.CPUCores = 16, 1, 1
+			gpu.Needs.Platform = Platform{Required: []string{"fake"}}
+			gpu.Needs.MemoryGB, gpu.Needs.HostMemoryGB, gpu.Needs.CPUCores = 8, 8, 2
+			gpu.WallTime = "1h"
 			first := submit(t, q, gpu)
 			running := assignedJob(machineCheck(t, q, m))
 			if running == nil || running.ID != first.ID {
 				t.Fatal("initial GPU execution missing", running)
 			}
-			gpu.Needs.CPUCores = cores
+			holders := []*Job{running}
+			if tc.background {
+				cpu := submit(t, q, cpuSpec(1, 2))
+				background := assignedJob(machineCheck(t, q, m, holders...))
+				if background == nil || background.ID != cpu.ID {
+					t.Fatal("background CPU execution missing", background)
+				}
+				holders = append(holders, background)
+			}
+			gpu.Needs.HostMemoryGB, gpu.Needs.CPUCores = 9, 3
 			demand := submit(t, q, gpu)
 			clock.Advance(time.Second)
-			cpu := submit(t, q, cpuSpec(8-cores, 1))
-			if got := assignedJob(machineCheck(t, q, m, running)); got != nil {
-				t.Fatal("CPU backfill took the next GPU execution's cores", got.ID)
+			cpu := submit(t, q, tc.tooLarge)
+			if got := assignedJob(machineCheck(t, q, m, holders...)); got != nil {
+				t.Fatal("CPU backfill took capacity needed by the next GPU execution", got.ID)
 			}
 			status, err := q.jobSnapshot(cpu.ID, context.Background())
 			if err != nil || status.DiagnosticCode != "host_capacity_accumulation" || !strings.Contains(status.Reason, demand.ID) {
 				t.Fatal("missing next-GPU capacity fence", status, err)
 			}
-			// Capacity beyond the actual demand remains useful; no fixed core hold.
-			light := submit(t, q, cpuSpec(7-cores, 1))
-			backfill := assignedJob(machineCheck(t, q, m, running))
+			light := submit(t, q, tc.surplus)
+			backfill := assignedJob(machineCheck(t, q, m, holders...))
 			if backfill == nil || backfill.ID != light.ID {
-				t.Fatal("excess CPU capacity withheld", backfill)
+				t.Fatalf("surplus CPU capacity withheld: %v (%s)", backfill, job(t, q, light.ID).Reason)
 			}
 			finish(t, q, running, true)
-			if got := assignedJob(machineCheck(t, q, m, backfill)); got == nil || got.ID != demand.ID {
+			remaining := append(holders[1:], backfill)
+			if got := assignedJob(machineCheck(t, q, m, remaining...)); got == nil || got.ID != demand.ID {
 				t.Fatal("waiting GPU execution stranded after device release", got)
 			}
 		})
+	}
+}
+
+func TestHostBackfillDeviceReleaseRequiresDeviceWait(t *testing.T) {
+	q, _ := fixture(t)
+	m := m3Machine()
+	m.Devices = m.Devices[:1]
+	m.HostMemoryBudgetGB = 16
+	gpu := spec("experiment")
+	gpu.Needs.MemoryGB, gpu.Needs.HostMemoryGB = 4, 8
+	first := submit(t, q, gpu)
+	running := assignedJob(machineCheck(t, q, m))
+	if running == nil || running.ID != first.ID {
+		t.Fatal("initial GPU execution missing", running)
+	}
+	cpu := submit(t, q, cpuSpec(1, 2))
+	background := assignedJob(machineCheck(t, q, m, running))
+	if background == nil || background.ID != cpu.ID {
+		t.Fatal("background CPU execution missing", background)
+	}
+	// The GPU can share the card as soon as the CPU holder releases 2 GiB.
+	// Borrowing from the first GPU's future release would delay that start.
+	demand := submit(t, q, gpu)
+	later := submit(t, q, cpuSpec(1, 1))
+	if got := assignedJob(machineCheck(t, q, m, running, background)); got != nil {
+		t.Fatal("CPU work borrowed RAM from a GPU that can still share its card", got.ID)
+	}
+	status, err := q.jobSnapshot(later.ID, context.Background())
+	if err != nil || status.DiagnosticCode != "host_capacity_accumulation" || !strings.Contains(status.Reason, demand.ID) {
+		t.Fatal("missing next-GPU capacity fence", status, err)
+	}
+	finish(t, q, background, true)
+	if got := assignedJob(machineCheck(t, q, m, running)); got == nil || got.ID != demand.ID {
+		t.Fatal("GPU demand did not share the card after CPU release", got)
 	}
 }
