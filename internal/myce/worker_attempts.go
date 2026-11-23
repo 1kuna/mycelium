@@ -355,11 +355,6 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					if p == nil && d.Stop && s.state.Custodian == "" && !errors.Is(err, errWorkerReleasePending) {
 						err = s.startFailureAt(a.job, launchRefused, errAssignmentWithdrawn, now)
 					}
-					if errors.Is(err, errWorkerMemory) {
-						// RAM may disappear after assignment or during preparation.
-						// Release unstarted custody so the queue can wait for capacity.
-						err = s.startFailure(a.job, launchRefused, err)
-					}
 					if err != nil && !errors.Is(err, errWorkerCheckpoint) && !errors.Is(err, errWorkerUnavailable) {
 						if initial.serviceStop != nil && initial.serviceStop.Err() != nil && errors.Is(err, context.Canceled) {
 							// Cancellation of staging/launch belongs to installed

@@ -712,6 +712,8 @@ func TestLaunchCapacityInitialColdMemory(t *testing.T) {
 		for _, caller := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/caller=%v", shortage, caller), func(t *testing.T) {
 				q, clock, m, s := observationFixture(t)
+				m.Capabilities = append(m.Capabilities, learnedMemoryGuardCapability)
+				m.CapabilityProfile.SystemMemoryBytes = 32 << 30
 				var old *Job
 				if shortage == "release" {
 					other := cpuSpec(1, 4)

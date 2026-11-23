@@ -699,7 +699,11 @@ limit and submit the changed work. Missing tools or exec failures can still
 produce coverage findings on an unproven type.
 
 Leave cold accelerator work queued when status says
-`exploratory first run waiting for occupied host RAM`. After a kernel OOM at
+`exploratory first run waiting for occupied host RAM`. A cold accelerator
+offer leaves headroom based on measured idle RAM variation and any retained
+launch shortfall. A live RAM refusal before main can retry under the same key
+after capacity or the offer changes. Read `execution_cause.admission` for the
+worker's required and available RAM on that attempt. After a kernel OOM at
 the attempt's host ceiling, an auto accelerator workload can retry with its
 existing device reservation and host RAM sized from measured growth, eligible
 host capacity and any comparable constrained native-check floor. The retry
