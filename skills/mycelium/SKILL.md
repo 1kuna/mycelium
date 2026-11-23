@@ -770,6 +770,9 @@ resubmitting the job does not repair that evidence. Report a persistent wait to 
 
 A `host_backfill` hold (`host_capacity_accumulation`) names queued work whose
 resolved host RAM or cores Mycelium is protecting in tier/fair-turn order.
+When an accelerator job needs a card's sole finite holder to finish, equal-tier
+CPU work can start if it fits now and leaves the successor's RAM and cores
+available after that holder releases.
 Even a GPU job that fits now can wait when starting it would deepen that demand's
 capacity deficit. Existing attempts finish normally; the hold clears when the
 named demand starts or no longer withholds capacity. Keep the existing job queued.

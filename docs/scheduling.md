@@ -20,6 +20,10 @@ The same host fence applies to CPU maintenance resumes: within a tier, CPU
 backfill uses only capacity beyond queued accelerator demand. Higher tiers and
 already committed preemption releases retain precedence. Other eligible hosts
 and excess capacity remain usable; there is no fixed or whole-host reserve.
+While an accelerator job waits for a card held by a single finite execution,
+equal-tier CPU backfill can use the RAM and cores that fit now and will still
+leave enough for the successor when that holder releases. Other running work
+remains charged in that calculation.
 Running equal-tier attempts are not stopped by this admission fence. Existing
 checkpoint/requeue relocation still requires proven portability and a qualified,
 currently admissible destination (MY-18/MY-26); queued CPU work uses those other

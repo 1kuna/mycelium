@@ -21,6 +21,9 @@ type hostBackfillDemand struct {
 	// and lower-tier GPU work observe production's fence;
 	// the projection grants no accelerator admission.
 	devicePending bool
+	// Host room returned by the sole running device holder, with unrelated
+	// attempts still charged. Used only to fence same-tier CPU backfill.
+	deviceReleaseRoom *Machine
 	// A deferred startup probe has first use of non-production backfill.
 	// When production owns the main fence, its vector is protected first.
 	fleetProbe bool
@@ -68,6 +71,7 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 	live := q.placementLiveness(scan)
 	projections := map[string]*Machine{}
 	deviceProjections := map[string]*Machine{}
+	deviceReleaseRooms := map[string]*Machine{}
 	checkProjections := map[string]*Machine{}
 	for _, m := range scan.machines {
 		if !live[m.ID] || q.preparationActive(m) || q.preparationStopping(m) || m.HostMemoryError != "" || hostHasUnifiedCUDA(m) && !validHostMemoryObservation(m.MemoryObservation) {
@@ -92,13 +96,19 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 				}
 			}
 			if len(deviceJobs) > 0 {
-				future := q.afterReleases(m, append(jobs, deviceJobs...), nil)
+				future := projected // jobs already includes these device holders.
 				for _, running := range deviceJobs {
 					future.FreeMemoryGB += deviceShareGB(running)
 				}
 				future.FreeMemoryGB = min(m.TotalMemoryGB, future.FreeMemoryGB)
-				future.FreeHostMemoryGB = min(capacity.FreeHostMemoryGB, future.FreeHostMemoryGB)
 				deviceProjections[targetKey(m)] = &future
+				// With shared device custody, a successor may fit before all
+				// holders release. Only lend the sole holder's host capacity.
+				if len(deviceJobs) == 1 && deviceJobs[0].StartedAt != nil {
+					room := q.afterReleases(m, deviceJobs, nil)
+					room.FreeHostMemoryGB = min(capacity.FreeHostMemoryGB, room.FreeHostMemoryGB)
+					deviceReleaseRooms[targetKey(m)] = &room
+				}
 			}
 		}
 	}
@@ -163,6 +173,9 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 				bestReady := best != nil && fits(best.job, best.machine, best.machine.FreeMemoryGB)
 				if best == nil || ready && !bestReady || ready == bestReady && q.targetPlacementBetter(candidate, m, best.machine, scan) {
 					best = &hostBackfillDemand{job: candidate, machine: m, drain: drain, devicePending: devicePending}
+					if devicePending && (!slotFree || candidate.Spec.Needs.MemoryGB > m.FreeMemoryGB) {
+						best.deviceReleaseRoom = deviceReleaseRooms[key]
+					}
 				}
 			}
 		}
@@ -311,10 +324,10 @@ func (q *Queue) hostBackfillBlocker(j *Job, m *Machine, fence *hostBackfillDeman
 func fleetProbeBackfillFits(j *Job, m *Machine, probe, production *hostBackfillDemand) bool {
 	// A worker only receives one offer per pull. Take that turn when the
 	// probe is ready, even if the experiment would fit alongside it.
-	return !(probe.probeReady && m.ID == probe.machine.ID) && hostBackfillRoom(j, m, probe, production)
+	return !(probe.probeReady && m.ID == probe.machine.ID) && hostBackfillRoom(j, m, m, probe, production)
 }
 
-func hostBackfillRoom(j *Job, m *Machine, fence, extra *hostBackfillDemand) bool {
+func hostBackfillRoom(j *Job, m, room *Machine, fence, extra *hostBackfillDemand) bool {
 	need := fence.job.Spec.Needs
 	memory, cores := hostNeed(fence.machine, need.MemoryGB, need.HostMemoryGB), need.cores()
 	if extra != nil {
@@ -324,12 +337,17 @@ func hostBackfillRoom(j *Job, m *Machine, fence, extra *hostBackfillDemand) bool
 	}
 	// Backfill can use only capacity in excess of the demand. While a dimension
 	// is short, new work cannot deepen that deficit; other hosts remain free.
-	return hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) <= max(0, m.FreeHostMemoryGB-m.hostReservationDebtGB-memory) &&
-		j.Spec.Needs.cores() <= max(0, m.FreeCPUCores-cores)
+	return hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) <= max(0, room.FreeHostMemoryGB-room.hostReservationDebtGB-memory) &&
+		j.Spec.Needs.cores() <= max(0, room.FreeCPUCores-cores)
 }
 
 func (q *Queue) hostBackfillFits(j *Job, m *Machine, fence *hostBackfillDemand) bool {
-	room := hostBackfillRoom(j, m, fence, nil)
+	capacity := m
+	if fence.deviceReleaseRoom != nil && j.Spec.Needs.cpuOnly() && q.comparePriority(j.Spec, fence.job.Spec) == 0 &&
+		(jobClass(fence.job.Spec) != "production" || jobClass(j.Spec) == "production") {
+		capacity = fence.deviceReleaseRoom
+	}
+	room := hostBackfillRoom(j, m, capacity, fence, nil)
 	if !fence.drain {
 		return room
 	}
