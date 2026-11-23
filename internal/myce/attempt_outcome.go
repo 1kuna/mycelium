@@ -127,6 +127,13 @@ type recordedStartError struct {
 func (e *recordedStartError) Error() string { return e.cause.Error() }
 func (e *recordedStartError) Unwrap() error { return e.cause }
 
+func (s *workerStore) recordMemoryWait(j Job, err error) error {
+	if s == nil || !pooledMemory(&j) {
+		return err
+	}
+	return s.startFailure(j, launchRefused, err)
+}
+
 func (s *workerStore) startFailure(j Job, kind string, cause error) error {
 	return s.startFailureAt(j, kind, cause, time.Now().UTC())
 }

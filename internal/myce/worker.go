@@ -513,7 +513,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		return nil, err
 	}
 	if err := w.checkJobRAM(ctx, j); err != nil {
-		return nil, s.startFailure(j, launchRefused, err)
+		return nil, s.recordMemoryWait(j, err)
 	}
 	if floorCharged(j.MemoryEnvelope) {
 		decision, err := w.firstRunMemoryAdmission(ctx, j)
@@ -651,7 +651,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 				free, known = value, err == nil && validMemoryValue(value)
 			}
 			if err := checkMemoryPool(card.TypicalGB, free, 0, 0, known); err != nil {
-				return nil, s.startFailure(j, launchRefused, err)
+				return nil, s.recordMemoryWait(j, err)
 			}
 		}
 	} else if w.MemorySource != nil {
@@ -733,7 +733,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		j.Spec.Run.Workdir = executionWork
 	}
 	if err := w.checkJobRAM(ctx, j); err != nil {
-		return nil, s.startFailure(j, launchRefused, err)
+		return nil, s.recordMemoryWait(j, err)
 	}
 	if err := w.checkAvailability(); err != nil {
 		return nil, err
