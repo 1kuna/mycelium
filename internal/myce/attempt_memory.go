@@ -261,7 +261,10 @@ func (w Worker) observeProcessMemoryWith(groups func() []int, sink attemptMemory
 	guard := learnedMemoryGuard{}
 	probe := w.processMemory
 	footprint := sink != nil && w.Machine.GPU == "metal" && probe.OwnedFootprint != nil
-	if attempt != nil && attempt.job.Spec.Needs.cpuOnly() {
+	if attempt != nil && pooledMemory(&attempt.job) {
+		footprint = probe.OwnedFootprint != nil
+		guard = w.learnedGuard(attempt.job)
+	} else if attempt != nil && attempt.job.Spec.Needs.cpuOnly() {
 		guard = w.learnedGuard(attempt.job)
 	} else if attempt != nil && w.footprintGuarded(attempt.job) {
 		footprint, guard = true, w.footprintGuard(attempt.job)

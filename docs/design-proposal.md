@@ -592,6 +592,11 @@ cutover are separate from laptop proof.
 Agents state needs, and Mycelium learns memory from its own measurements
 (MY-31). Its limits are measured or physical (MY-34).
 
+[Memory admission from physical pools](design-memory-admission.md) specifies
+the estimates, containment, launch waits and backfill rule for workers that
+advertise pooled memory support. The earlier envelope rules below cover
+running legacy attempts and adjacent-release workers during the transition.
+
 ### Per-attempt RAM ceilings
 
 Declared batch/model host RAM is enforced on Linux cgroup v2 workers with

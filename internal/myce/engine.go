@@ -538,6 +538,7 @@ type modelRuntime struct {
 	admissionMu            sync.Mutex // Coherent stop publication and final accounting; no I/O.
 	batchHostMemorySamples map[attemptKey]hostMemorySample
 	hostLedger             atomic.Pointer[hostLedger]
+	poolHostMemorySource   MemorySource
 	verifyDevice           func() error
 	deviceEnv              map[string]string
 	authorize              func(context.Context, HostLaunch) error
@@ -647,6 +648,12 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	rt.environmentSourceRoot = w.EnvironmentSourceRoot
 	rt.memoryCeilings, rt.memoryMachine, rt.memorySwapMaxBytes = w.memoryCeilings, w.Machine, w.MemorySwapMaxBytes
 	rt.requireMemoryCeilings = w.RequireMemoryCeilings
+	if w.HostMemorySource != nil || w.hostRawMemorySource != nil {
+		rt.poolHostMemorySource = func(ctx context.Context) (float64, error) {
+			_, raw, err := w.sampleHostMemory(ctx)
+			return raw, err
+		}
+	}
 	if w.HostMemorySource != nil {
 		rt.hostMemorySource = func(ctx context.Context) (float64, error) {
 			rt.mu.Lock()
@@ -1285,6 +1292,30 @@ func (rt *modelRuntime) hostChargesExcept(key attemptKey) (charge, pending float
 // Queue authorization can outlast preparation or any sensor read. Revalidate
 // the exact local reservation after those reads and before releasing a batch.
 func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostLaunch) error {
+	attempt, err := strconv.Atoi(launch.Attempt)
+	key := attemptKey{launch.Key, attempt, launch.Session}
+	rt.mu.Lock()
+	actor := rt.batchSupervisors[key]
+	pooled := actor != nil && pooledMemory(&actor.job)
+	rt.mu.Unlock()
+	if pooled {
+		free, known := 0.0, false
+		if rt.poolHostMemorySource != nil {
+			var probeErr error
+			free, probeErr = rt.poolHostMemorySource(ctx)
+			known = probeErr == nil && validMemoryValue(free)
+		}
+		rt.mu.Lock()
+		defer rt.mu.Unlock()
+		rt.admissionMu.Lock()
+		defer rt.admissionMu.Unlock()
+		if err != nil || rt.batchSupervisors[key] != actor || launch.Machine != rt.machine || actor.admissionJob().State == "stopping" || actor.admissionJob().ReleaseConfirmed {
+			return fmt.Errorf("%w: batch admission custody changed", errWorkerMemory)
+		}
+		_, pending := rt.hostChargesExcept(key)
+		pools := memoryPools(&actor.job)
+		return checkMemoryPool(pools.RAM.TypicalGB, free, pools.KeepGB, pending, known)
+	}
 	samples := rt.admissionMemorySnapshot()
 	hostFree, measured := 0.0, rt.hostMemorySource != nil
 	if measured {
@@ -1298,8 +1329,7 @@ func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostL
 	defer rt.mu.Unlock()
 	rt.admissionMu.Lock()
 	defer rt.admissionMu.Unlock()
-	attempt, err := strconv.Atoi(launch.Attempt)
-	actor := rt.batchSupervisors[attemptKey{launch.Key, attempt, launch.Session}]
+	actor = rt.batchSupervisors[key]
 	if err != nil || actor == nil || launch.Machine != rt.machine || actor.admissionJob().State == "stopping" || actor.admissionJob().ReleaseConfirmed {
 		return fmt.Errorf("%w: batch admission custody changed", errWorkerMemory)
 	}

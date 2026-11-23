@@ -39,8 +39,9 @@ type Advanced struct {
 	StartWindow     string     `json:"start_window,omitempty" yaml:"start_window,omitempty"`
 
 	// Disk and memory hints.
-	Disk     *DiskNeeds `json:"disk,omitempty" yaml:"disk,omitempty"`
-	SizeHint SizeHint   `json:"size_hint,omitempty" yaml:"size_hint,omitempty"`
+	Disk          *DiskNeeds `json:"disk,omitempty" yaml:"disk,omitempty"`
+	SizeHint      SizeHint   `json:"size_hint,omitempty" yaml:"size_hint,omitempty"`
+	MemoryLimitGB *float64   `json:"memory_limit_gb,omitempty" yaml:"memory_limit_gb,omitempty"`
 
 	// Placement exceptions. Mycelium places work; pins are situational (MY-31).
 	AllowedMachines    []string          `json:"allowed_machines,omitempty" yaml:"allowed_machines,omitempty"`

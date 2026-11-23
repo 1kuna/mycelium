@@ -76,6 +76,12 @@
         "envelope_source": {
           "type": "string"
         },
+        "held_gb": {
+          "type": "number"
+        },
+        "keep_gb": {
+          "type": "number"
+        },
         "memory_room": {
           "$ref": "#/$defs/MemoryRoomDecision"
         },
@@ -454,6 +460,9 @@
         },
         "logs": {
           "type": "string"
+        },
+        "memory_limit_gb": {
+          "type": "number"
         },
         "output_delivery": {
           "type": "string"
@@ -3804,6 +3813,10 @@
           "$ref": "#/$defs/SizeHint",
           "x-contract": "diagnostic"
         },
+        "memory": {
+          "$ref": "#/$defs/MemoryPools",
+          "x-contract": "diagnostic"
+        },
         "memory_attempts": {
           "description": "Persisted memory facts, independent of learning and diagnostic history. Retention follows local capacity and evidence dependencies; open attempts and distinct measurements are preserved. memory_attempts_dropped counts historical evictions. Prelaunch attempts without a peak are omitted. Exact attempt/machine/session, observed memory_peak when available, and the resolved memory_envelope. Missing counters are unknown, not zero. Historical readings cannot be reconstructed.",
           "items": {
@@ -4791,6 +4804,27 @@
         "oom",
         "oom_kill",
         "oom_group_kill"
+      ],
+      "type": "object"
+    },
+    "MemoryPools": {
+      "properties": {
+        "card": {
+          "$ref": "#/$defs/memoryPoolEstimate"
+        },
+        "keep_gb": {
+          "type": "number"
+        },
+        "limit_gb": {
+          "type": "number"
+        },
+        "ram": {
+          "$ref": "#/$defs/memoryPoolEstimate"
+        }
+      },
+      "required": [
+        "ram",
+        "keep_gb"
       ],
       "type": "object"
     },
@@ -6749,6 +6783,10 @@
           "type": "string",
           "x-contract": "diagnostic"
         },
+        "memory_limit_gb": {
+          "type": "number",
+          "x-contract": "diagnostic"
+        },
         "model_snapshots": {
           "additionalProperties": {
             "$ref": "#/$defs/ModelSnapshot"
@@ -7675,6 +7713,49 @@
         "reserved_cpu_cores",
         "measured_memory_gb",
         "valid_until"
+      ],
+      "type": "object"
+    },
+    "memoryEstimateEvidence": {
+      "properties": {
+        "level": {
+          "type": "string"
+        },
+        "runs": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "level",
+        "runs"
+      ],
+      "type": "object"
+    },
+    "memoryPoolEstimate": {
+      "properties": {
+        "alone": {
+          "type": "boolean"
+        },
+        "charge_gb": {
+          "type": "number"
+        },
+        "evidence": {
+          "$ref": "#/$defs/memoryEstimateEvidence"
+        },
+        "held_gb": {
+          "type": "number"
+        },
+        "peak_gb": {
+          "type": "number"
+        },
+        "typical_gb": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "typical_gb",
+        "charge_gb",
+        "evidence"
       ],
       "type": "object"
     },

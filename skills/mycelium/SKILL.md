@@ -23,9 +23,10 @@ for logical cores. For CPU jobs, `--mem 8G` sizes host RAM. With
 `--gpu cuda|xpu|metal`, `--mem` sizes device memory and `--host-mem` sizes
 additional host RAM. Omit memory to use automatic sizing. In a plain spec or
 entry, size CPU RAM with `needs.memory_gb` and additional GPU host RAM with
-`needs.host_memory_gb`. `advanced.size_hint` is for extension work. Read
-[needs and sizing](references/submit.md#needs-targets-and-variants) before
-changing a limit or requesting a larger measurement envelope.
+`needs.host_memory_gb`. On pooled-memory workers those figures seed an
+estimate. Use `advanced.memory_limit_gb` only for an explicit host RAM cap.
+`advanced.size_hint` is for extension work. See
+[needs and sizing](references/submit.md#needs-targets-and-variants).
 
 Use `--key NAME` on inline commands you may need to recover. The default
 inline key is fresh for each invocation. `--detach` returns a job ID.
@@ -107,6 +108,10 @@ only for future production stages you cannot submit yet. A lease protects drain
 coverage and grants no priority or reservation.
 
 ## Checkpoints
+
+Make work checkpointable or otherwise resumable. When higher-priority work
+needs its memory, Mycelium can stop and requeue the attempt. Work that cannot
+resume starts from scratch.
 
 Before marking work `advanced: {resumable: true}`, make it save atomically
 under `MYCE_CHECKPOINT_DIR`, reopen the last verified generation at startup

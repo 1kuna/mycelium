@@ -36,15 +36,6 @@ type admissionWaitBuilder struct {
 // that read planning state never race a background publication.
 var synchronousAdmissionWaitDefault = false
 
-// WithSynchronousAdmissionWait selects the admission-wait evidence mode. When
-// on, a committing transaction returns only after its post-commit capture,
-// and any capture still pending from a concurrent commit, has been published
-// or fenced off. Builds stay serialized and revision-ordered. Production uses
-// the asynchronous, cooled-down builder; tests of that path opt into it here.
-func WithSynchronousAdmissionWait(on bool) QueueOption {
-	return func(q *Queue) { q.admissionWaitBuild.synchronous = on }
-}
-
 func (q *Queue) enqueueAdmissionWait(c *admissionWaitCapture) {
 	if c.index == nil || q.stopping.Load() {
 		return

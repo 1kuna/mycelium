@@ -153,8 +153,6 @@ func (q *Queue) observeReservationPending(r Reservation, pending []string) {
 	}
 }
 
-func memoryAdmissionKey(j *Job, m *Machine) string { return j.ID + "/" + targetKey(m) }
-
 func (q *Queue) observeMemoryAdmission(j *Job, m *Machine) {
 	c := q.memoryAdmissionCapture
 	if c == nil || j.State != "queued" || j.MemoryEnvelope == nil || !q.jobAllowsMachine(j, m.ID) {

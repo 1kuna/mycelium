@@ -25,6 +25,12 @@ func fanOutDeviceSampleReady(s hostMemorySample, now time.Time) bool {
 
 func sampledDeviceCharge(j *Job, m *Machine, s hostMemorySample, now time.Time) float64 {
 	charge := deviceShareGB(j)
+	if pooledMemory(j) {
+		if m.UnifiedMemory {
+			return 0
+		}
+		return max(charge, s.devicePeakGB, s.deviceGB)
+	}
 	if sharedDeviceSampleReady(s, now) {
 		if unifiedCUDA(m) {
 			charge = max(charge, s.deviceGB+s.deviceGrowthGB)

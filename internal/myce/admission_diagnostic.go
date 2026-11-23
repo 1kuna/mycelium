@@ -16,6 +16,8 @@ type AdmissionDetail struct {
 	Required         float64                 `json:"required"`
 	Available        *float64                `json:"available,omitempty"`
 	Unavailable      bool                    `json:"unavailable,omitempty"`
+	KeepGB           float64                 `json:"keep_gb,omitempty"`
+	HeldGB           float64                 `json:"held_gb,omitempty"`
 	EnvelopeSource   string                  `json:"envelope_source,omitempty"`
 	EnvelopeHostGB   float64                 `json:"envelope_host_gb"`
 	EnvelopeDeviceGB float64                 `json:"envelope_device_gb"`
@@ -86,6 +88,7 @@ func safeAdmissionDetail(d *AdmissionDetail) *AdmissionDetail {
 		"device_budget": "GiB", "aggregate_cpu_allowance": "cores",
 		"aggregate_host_allowance": "GiB", "configured_host_allowance": "GiB",
 		"live_host_ram": "GiB", "live_host_growth": "GiB", "live_gpu_memory": "GiB",
+		memoryWaitReason:                   "GiB",
 		"shared_cpu_controller":            "controllers",
 		"exploratory_capacity_unavailable": "GiB", "custodian_ledger_read_failed": "GiB",
 		"exploratory_host_memory_unavailable": "GiB", "exploratory_memory_room": "GiB",
@@ -94,6 +97,9 @@ func safeAdmissionDetail(d *AdmissionDetail) *AdmissionDetail {
 		return nil
 	}
 	out := *d
+	if d.Subcheck != memoryWaitReason || !validMemoryValue(d.KeepGB) || !validMemoryValue(d.HeldGB) {
+		out.KeepGB, out.HeldGB = 0, 0
+	}
 	out.MemoryRoom = safeMemoryRoom(d.MemoryRoom)
 	out.Contributors = nil
 	if d.Subcheck == "live_host_growth" {

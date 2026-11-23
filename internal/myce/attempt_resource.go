@@ -12,6 +12,17 @@ func classifyAttemptResourceFailure(j *Job, r Result) Result {
 	if r.Success {
 		return r
 	}
+	if pooledMemory(j) && memoryPools(j).LimitGB == 0 && r.MemoryPeak != nil && r.MemoryPeak.Events != nil {
+		e := r.MemoryPeak.Events
+		if (e.OOMKill > 0 || e.OOMGroupKill > 0) && e.OOM == 0 && e.Max == 0 {
+			r.ExecutionCause = &RuntimeCause{Operation: "command", Class: "memory_pressure"}
+			r.OutOfMemory, r.Interrupted = false, true
+			return r
+		}
+	}
+	if r.ExecutionCause != nil && r.ExecutionCause.Class == "memory_pressure" {
+		return r
+	}
 	kernelOOM := false
 	if p := r.MemoryPeak; p != nil && p.Source != processGroupMemorySource && p.Events != nil && j.MemoryEnvelope != nil && j.MemoryEnvelope.HostGB > 0 && memoryConstraintResult(j.StartedAt != nil, r) {
 		e := p.Events

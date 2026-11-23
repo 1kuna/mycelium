@@ -183,6 +183,11 @@ func startFailureOutcome(owner Result, err error) Result {
 		owner.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "oom"}
 	}
 	owner = classifyAttemptOutcome(owner, attemptCause{memberOutcome: facts, OutOfMemory: oom != nil})
+	var admission *admissionError
+	if !owner.OutOfMemory && errors.As(err, &admission) && admission.detail.Subcheck == memoryWaitReason {
+		owner.Interrupted = true
+		owner.ExecutionCause = safeRuntimeCause(&RuntimeCause{Operation: "launch", Class: "resource_limit", Predicate: "memory_capacity", Admission: &admission.detail})
+	}
 	if !owner.OutOfMemory && errors.As(err, &staging) && (staging.diagnostic.Class == "tools_missing" || staging.diagnostic.Class == machoLibraryMissing) {
 		owner.ExecutionCause = runtimeDiagnostic(staging)
 	}
@@ -229,6 +234,10 @@ func classifyAttemptOutcome(result Result, facts attemptCause) Result {
 	result.PriorityStop = nil
 	if facts.Stale || facts.Cancelled {
 		result.Success, result.Forced = false, false
+		return result
+	}
+	if result.ExecutionCause != nil && result.ExecutionCause.Class == "memory_pressure" {
+		result.Success, result.Interrupted = false, true
 		return result
 	}
 	if result.OutOfMemory || facts.Exit != nil && facts.Exit.Status != 0 {

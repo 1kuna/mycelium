@@ -222,7 +222,11 @@ func pageAlignedMemory(bytes int64, pageSize int) (int64, error) {
 	return max(page, bytes/page*page), nil
 }
 func (c *memoryCeilings) create(id string, bytes, swap int64) (*memoryAttempt, error) {
-	if c == nil || bytes == 0 {
+	return c.createAttempt(id, bytes, swap, false)
+}
+
+func (c *memoryCeilings) createAttempt(id string, bytes, swap int64, account bool) (*memoryAttempt, error) {
+	if c == nil || bytes == 0 && !account {
 		return nil, nil
 	}
 	if id == "" || filepath.Base(id) != id || id == "." || id == ".." {
@@ -244,7 +248,11 @@ func (c *memoryCeilings) create(id string, bytes, swap int64) (*memoryAttempt, e
 	if err := c.fs.Mkdir(a.path); err != nil {
 		return nil, err
 	}
-	for _, v := range []struct{ name, value string }{{"memory.max", strconv.FormatInt(bytes, 10)}, {"memory.swap.max", strconv.FormatInt(swap, 10)}, {"memory.oom.group", "1"}} {
+	limit := "max"
+	if bytes > 0 {
+		limit = strconv.FormatInt(bytes, 10)
+	}
+	for _, v := range []struct{ name, value string }{{"memory.max", limit}, {"memory.swap.max", strconv.FormatInt(swap, 10)}, {"memory.oom.group", "1"}} {
 		if err := c.fs.WriteFile(filepath.Join(a.path, v.name), []byte(v.value)); err != nil {
 			_ = a.cleanup(RealClock{})
 			return nil, err
@@ -301,6 +309,8 @@ func (a *memoryAttempt) attach(pid int) error {
 
 type memoryCeilingExceeded struct{ bytes int64 }
 
+var errMemoryPoolExhausted = errors.New("memory pool exhausted")
+
 func (e *memoryCeilingExceeded) Error() string {
 	return fmt.Sprintf("exceeded its %g GiB memory ceiling", float64(e.bytes)/(1<<30))
 }
@@ -321,6 +331,9 @@ func (a *memoryAttempt) failure() error {
 				return err
 			}
 			if n > 0 {
+				if a.bytes == 0 {
+					return errMemoryPoolExhausted
+				}
 				return &memoryCeilingExceeded{a.bytes}
 			}
 			return nil

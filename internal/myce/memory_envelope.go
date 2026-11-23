@@ -410,6 +410,13 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 // The caller owns this candidate. Resolve against its original needs and only
 // install the result after all evidence reads, avoiding another full Job copy.
 func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
+	if q.memoryEvidence != nil && workerUsesMemoryPools(m) && j.Spec.Needs.Model == "" {
+		return q.pooledMemoryCandidate(j, m)
+	}
+	if j.Spec.MemoryLimitGB != nil {
+		j.MemoryEnvelope = &JobMemoryEnvelope{Refusal: "explicit memory limit requires a worker with pooled-memory support"}
+		return j
+	}
 	needs := j.Spec.Needs
 	n := &needs
 	source, refusal, basis, evidence := "declared", "", "declared", 0
@@ -1247,8 +1254,4 @@ func (q *Queue) memoryWait(j *Job, machines map[string]*Machine) *Hold {
 		return nil
 	}
 	return newHold("host_memory_headroom", "waiting for RAM envelope: "+strings.Join(reasons, "; "))
-}
-
-func estimatePhysicalSource(source string) bool {
-	return source == "exploratory first run" || strings.Contains(source, "physical headroom") || source == "exploratory (previous peak constrained)"
 }

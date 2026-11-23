@@ -81,6 +81,7 @@ var holdKinds = map[string]holdKind{
 	"upstream":                 {ownerProducer, "waiting for an upstream result", "the required upstream job succeeds and publishes its result", "complete and publish the required upstream result"},
 	deviceFaultRetryHold:       {ownerQueue, "waiting for healthy accelerator capacity after a driver fault", "another healthy device or host fits, or the quarantined device proves healthy", "wait; Mycelium retries on healthy capacity automatically"},
 	"launch_capacity":          {ownerQueue, "waiting for launch capacity or an exact release", "exact cleanup is confirmed and capacity permits a new offer", "wait; nothing to do"},
+	memoryWaitReason:           {ownerQueue, "waiting for physical memory", "enough memory is free and any earlier attempt has released", "wait; Mycelium retries admission automatically"},
 	"helper_charge":            {ownerQueue, "waiting for launch capacity that covers the job's measured helper memory", "exact cleanup is confirmed and capacity permits a new offer", "wait; nothing to do"},
 	"checkpoint_root":          {ownerStorage, "saved progress storage is unavailable", "the queue's checkpoint root is reachable again", "restore the queue's checkpoint storage mount"},
 	checkpointTargetHold:       {ownerQueue, "resuming on the target that wrote its checkpoint", "a host of that target can take it, or none remains in the fleet", "wait; if its checkpoints resume correctly on other targets, declare resume_compatibility for them"},

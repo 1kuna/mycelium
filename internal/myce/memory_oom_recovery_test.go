@@ -189,6 +189,9 @@ func TestOOMRecoveryUsesDemandNotFreeRAM(t *testing.T) {
 			q, clock, m, s := coldProbeAdmissionFixture(t, cpu)
 			if cpu {
 				s.Priority, s.Class = "production", "production"
+				// The legacy Linux route can offer a shell-sized CPU first
+				// run only when the worker advertises the adaptive guard.
+				m.Capabilities = append(m.Capabilities, learnedMemoryGuardCapability)
 			}
 			queued := submit(t, q, s)
 			run := assignedJob(machineCheck(t, q, m))

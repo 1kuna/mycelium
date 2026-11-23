@@ -28,6 +28,9 @@ func hostNeed(m *Machine, gpu, host float64) float64 {
 		need += gpu
 	}
 	if host > 0 {
+		if workerUsesMemoryPools(m) {
+			return need
+		}
 		return max(need+m.MemoryCeilingSlackGB, minimumHostMemoryGB)
 	}
 	return need
@@ -558,10 +561,14 @@ func retainedHostCharge(j *Job) float64 {
 func (q *Queue) retainHostMemoryCharges(machine string, now time.Time) {
 	for _, j := range q.liveJobs() {
 		m := q.s.Machines[j.Machine]
-		if j.Machine != machine || j.ReleaseConfirmed || (j.State != "running" && j.State != "stopping") || adaptiveMemoryCeilingGB(j, m) <= 0 && !chargedBelowLimit(j) {
+		if j.Machine != machine || j.ReleaseConfirmed || (j.State != "running" && j.State != "stopping") || !pooledMemory(j) && adaptiveMemoryCeilingGB(j, m) <= 0 && !chargedBelowLimit(j) {
 			continue
 		}
 		sample := q.hostMemorySamples[machine][jobKey(*j)]
+		if j.Memory != nil {
+			q.touchJob(j.ID)
+			retainPoolPeaks(j, max(sample.peakGB, pooledFootprint(sample, unifiedCUDA(m))), sample.devicePeakGB)
+		}
 		charge, _ := memoryChargeForGrace(j, m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), sample, now, q.preemptionGrace())
 		observed, id := 0.0, int64(0)
 		if old := j.HostMemoryCharge; retainedHostCharge(j) > 0 && old != nil {

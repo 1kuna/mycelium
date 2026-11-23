@@ -919,6 +919,9 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 	if w.Machine.SharedHost != nil && !sharedHostJobFits(&next, &w.Machine) {
 		return fmt.Errorf("shared host requires a native CPU command with a prepared environment")
 	}
+	if pooledMemory(&next) {
+		return localPooledAdmission(w, jobs, next, models, preparationCores)
+	}
 	cores, why := cpuCapacity(&w.Machine)
 	usedCores, usedRAM := next.Spec.Needs.cores(), localJobCharge(w, next)
 	for _, n := range preparationCores {
@@ -1443,6 +1446,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
 			m.Capabilities = append(slices.Clone(w.Machine.Capabilities), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1", "nas_inspection_v1", residentJobsCapability, scarceHostYieldCapability, localFirstProtocol)
+			if w.supportsMemoryPools() {
+				m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
+			}
 			if w.modelSnapshots != nil {
 				// Any worker with a snapshot cache fetches missing snapshots itself.
 				m.Capabilities = append(m.Capabilities, modelSnapshotsCapability)

@@ -901,7 +901,7 @@ func (q *Queue) freezeReadCapture() *committedReadCapture {
 	generation, models, environments, runtime := q.readGeneration, q.readModels, q.readEnvironments, q.readRuntime
 	source := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable, evidenceRetention: q.evidenceRetention, checkpointExpiryStatus: q.checkpointExpiryStatus, efficiencyView: q.efficiencyView,
 		simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts, productionInfrastructureRetries: q.productionInfrastructureRetries,
-		networkQuiet: q.networkQuiet, root: q.root, files: q.files, diskHost: q.diskHost, fileRetention: q.fileRetention, hostMemorySamples: q.readSamples, detachedRead: true}
+		networkQuiet: q.networkQuiet, root: q.root, files: q.files, diskHost: q.diskHost, fileRetention: q.fileRetention, hostMemorySamples: q.readSamples, memoryEvidence: q.memoryEvidence, detachedRead: true}
 	ledgers := make(map[string]observationMachineLedger, len(q.s.Machines))
 	fresh := make(map[string]readFreshness, len(q.s.Machines))
 	for key, m := range q.s.Machines {
@@ -1047,7 +1047,7 @@ func (capture *committedReadCapture) detachedQueue(ctx context.Context, readAt t
 	source := &Queue{clock: committedClock{at: readAt, committed: base.clock.Now()}, nasAvailable: base.nasAvailable, evidenceRetention: base.evidenceRetention, checkpointExpiryStatus: base.checkpointExpiryStatus, efficiencyView: base.efficiencyView,
 		simulation: base.simulation, productionGrace: base.productionGrace, lossTimeouts: base.lossTimeouts, productionInfrastructureRetries: base.productionInfrastructureRetries,
 		restartUntil: contact.restartUntil, restartGraceDuration: contact.restartGraceDuration, restartService: contact.restartService, networkQuiet: base.networkQuiet, root: base.root, files: base.files, fileRetention: base.fileRetention, hostMemorySamples: base.hostMemorySamples,
-		contacts: contact.contacts, detachedRead: true}
+		contacts: contact.contacts, memoryEvidence: base.memoryEvidence, detachedRead: true}
 	if contact.mu.control != nil {
 		source.mu.control = &controlClock{clock: source.clock.Now, at: source.clock.Now(), opportunity: contact.controlNow()}
 	}

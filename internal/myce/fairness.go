@@ -484,7 +484,7 @@ func (q *Queue) plannedPick(m *Machine, scan *placementScan) *Job {
 
 func (q *Queue) immediateCandidate(best *Job, m *Machine) *Job {
 	if best != nil {
-		if !q.admissionGate(best, m, !q.preemptionReleasesPending(best), predicateReleasePending) || !q.admissionGate(best, m, !q.preparationActive(m), predicatePreparationActive) || !q.admissionGate(best, m, !q.preparationStopping(m), predicatePreparationStopping) || !q.admissionGate(best, m, q.calls[best.ID] == nil, predicateModelCall) || !q.admissionGate(best, m, fits(best, m, m.FreeMemoryGB), predicateResources) {
+		if !q.admissionGate(best, m, !q.preemptionReleasesPending(best), predicateReleasePending) || !q.admissionGate(best, m, !q.preparationActive(m), predicatePreparationActive) || !q.admissionGate(best, m, !q.preparationStopping(m), predicatePreparationStopping) || !q.admissionGate(best, m, q.calls[best.ID] == nil, predicateModelCall) || !q.admissionGate(best, m, fits(best, m, m.FreeMemoryGB) && q.poolCustodyAllows(best, m), predicateResources) {
 			return nil
 		}
 		failure := q.residentJobFailure(best, m)
@@ -730,10 +730,16 @@ func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
 	if reason := q.preparationWaitingReason(j, machines); reason != "" {
 		return newHold("waiting_for_builder", reason)
 	}
+	if h := q.memoryPoolHold(j, machines); h != nil {
+		return h
+	}
 	if h := q.memoryWait(j, machines); h != nil {
 		return h
 	}
 	if reason := q.hostBackfillWaitingReason(j, q.placementScan(scans...)); reason != "" {
+		if strings.HasPrefix(reason, memoryWaitReason+":") {
+			return newHold(memoryWaitReason, reason)
+		}
 		return newHold("host_backfill", reason)
 	}
 	h := waitingHold(j, machines, q.s.Jobs)

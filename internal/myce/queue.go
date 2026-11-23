@@ -302,6 +302,10 @@ type Queue struct {
 	retainedMemoryRevision  uint64
 	expiredMemory           []learnedMemoryFact // Memory evidence of expired job records; append-only.
 	checkinMemoryIdentities map[*Job]string     // Fenced, transaction-local planner input.
+	memoryEvidence          *memoryEvidence     // Immutable committed estimates and calibration.
+	memoryEvidencePending   *memoryEvidence     // Staged with the result transaction.
+	poolAvailability        map[string]poolAvailability
+	poolLastStop            map[string]time.Time
 }
 
 func ID() string {
@@ -427,6 +431,11 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 	if err = q.loadPersistedState(); err != nil {
 		db.Close()
 		return nil, err
+	}
+	q.memoryEvidence, err = loadMemoryEvidence(db, q.s.WorkObservations)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("load memory evidence: %w", err)
 	}
 	q.traceStartup("load_indexes")
 	q.retireWholeMachineHolds()
@@ -742,6 +751,7 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	q.admissionTrace = nil
 	q.memoryObservationIndex = nil
 	defer func() { q.memoryObservationIndex = nil }()
+	defer func() { q.memoryEvidencePending = nil }()
 	old, err := q.beginRecords()
 	if err != nil {
 		return err
@@ -1339,6 +1349,10 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	}
 	j.Machine = ""
 	j.StorageEnvelope = nil
+	if pooledMemory(j) && j.MemoryFallback != nil {
+		j.Spec.Needs.HostMemoryGB, j.Spec.Needs.MemoryGB = j.MemoryFallback.HostMemoryGB, j.MemoryFallback.MemoryGB
+	}
+	j.Memory = nil
 	j.MemoryEnvelope = nil // Re-resolve variants and live sizing for every retry.
 	j.Session = ""
 	j.StopAt = nil
@@ -1432,6 +1446,7 @@ func (q *Queue) maintain() {
 	q.maintainHostMaintenance()
 	q.maintainSharedHosts()
 	q.yieldMemoryOvercommit()
+	q.yieldPooledMemory()
 	q.maintainDeviceMaintenance()
 	q.maintainExtensionQualifications()
 	now := q.clock.Now()
@@ -1942,6 +1957,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		}
 		body.next("checkin_memory")
 		q.recordExternalMemory(&m)
+		q.observePoolAvailability(&m, c.period)
 		if q.hostMemorySamples == nil {
 			q.hostMemorySamples = map[string]map[attemptKey]hostMemorySample{}
 		}
@@ -2464,6 +2480,7 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 	outcome := attemptOutcome(j, r)
 	q.recordAttemptStorage(j, r)
 	q.recordAttemptMemory(j, r) // Preserve facts before retry clears the envelope.
+	q.recordPoolEvidence(j, r)
 	j.ExecutionEvidence = safeExecutionEvidence(r.ExecutionEvidence, j.Attempt)
 	j.ExecutionCause = safeRuntimeCause(r.ExecutionCause)
 	j.CleanupCause = safeRuntimeCause(r.CleanupCause)
@@ -2474,10 +2491,11 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 	// Native ceiling pressure censors true need even when the payload succeeds.
 	// Invalidate comparable memory without changing that successful outcome.
 	// Unenforced process-group pressure never invalidates; a real OOM still does.
-	if oomFailure || r.MemoryPeak.constrained() && r.MemoryPeak.Source != processGroupMemorySource {
+	if !pooledMemory(j) && (oomFailure || r.MemoryPeak.constrained() && r.MemoryPeak.Source != processGroupMemorySource) {
 		q.recordWorkOOM(j, r, oomFailure)
 	}
 	stageFailure := (j.Spec.Priority == "production" || plannedPriorityStop(j)) && !r.Success && !r.Interrupted
+	poolPressure := pooledMemory(j) && (j.Reason == memoryPressureCause || r.ExecutionCause != nil && r.ExecutionCause.Class == memoryPressureCause)
 	// Bridge cleanup-to-inventory telemetry with the same absolute bound as
 	// pending cleanup. Completion and heartbeats cannot renew planning credit.
 	if j.State == "stopping" && !r.ReleasePending && j.StopAt != nil {
@@ -2496,7 +2514,7 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 			}
 		}
 	}
-	if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure && !diskFailure && !wallFailure && !wallTimeStopped(j) && !launchCapacityRefusal(r) {
+	if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure && !diskFailure && !wallFailure && !wallTimeStopped(j) && !launchCapacityRefusal(r) && !poolPressure {
 		if cancelled(j) {
 			q.finishCancellation(j)
 		} else {
@@ -2509,6 +2527,11 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 		j.State, j.Reason = "failed", "execution failed: "+j.ExecutionCause.String()
 	} else if launchCapacityRefusal(r) {
 		q.waitLaunchCapacity(j, r)
+		if j.State == "queued" && j.Reason == memoryWaitReason {
+			admissionRequeueOutcome(&outcome)
+		}
+	} else if poolPressure && !r.Success && !oomFailure {
+		q.requeueMemoryPressure(j)
 	} else if !r.Success && !oomFailure && cancelledPreparation(r) {
 		// Started is an authorization fence, not proof main executed. A worker
 		// lifecycle cancellation with exact no-main evidence spends no budget.
@@ -2542,6 +2565,8 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 		if j.State == "queued" {
 			admissionRequeueOutcome(&outcome)
 		}
+	} else if oomFailure && pooledMemory(j) && memoryPools(j).LimitGB > 0 {
+		j.State, j.Reason = "failed", "command exceeded explicit memory limit"
 	} else if oomFailure && j.Spec.Needs.Memory == "auto" {
 		q.retryOOM(j)
 	} else if (j.Spec.Priority == "production" || plannedPriorityStop(j)) && (stageFailure || oomFailure) {
@@ -3456,7 +3481,8 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j.Spec.Needs = selected.Spec.Needs
 	j.CPUFallbackFrom = selected.CPUFallbackFrom
 	j.MemoryEnvelope, j.MemoryFallback = selected.MemoryEnvelope, selected.MemoryFallback
-	if e := j.MemoryEnvelope; e != nil && e.LimitHostGB > 0 && e.ChargeHostGB == j.Spec.Needs.HostMemoryGB {
+	j.Memory = selected.Memory
+	if e := j.MemoryEnvelope; !pooledMemory(j) && e != nil && e.LimitHostGB > 0 && e.ChargeHostGB == j.Spec.Needs.HostMemoryGB {
 		// Admission used the learned charge; the typed figure stays the limit.
 		j.Spec.Needs.HostMemoryGB = e.LimitHostGB
 	}

@@ -13,6 +13,7 @@ type hostBackfillDemand struct {
 	job     *Job
 	machine *Machine
 	order   *candidateSet
+	pooled  bool
 	// drain marks a maintenance resume's fence; start is when it is expected
 	// to fit anyway, or nil when unknown.
 	drain bool
@@ -128,6 +129,9 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 		drain := maintenanceResume(j) && j.Spec.FanOut == nil
 		start := q.fleetStartReservation(j)
 		for _, m := range scan.machines {
+			if workerUsesMemoryPools(m) && !drain && start == nil {
+				continue
+			}
 			projected := projections[targetKey(m)]
 			if projected == nil || start != nil && !q.fleetStartReserves(start, m) || !q.placementAllowed(j, m) || !q.preemptionPlacementAllows(j, m) || q.preemptionReleasesPending(j) || !q.checkpointReady(j, m) || q.environmentFailureBlocked(j, m) {
 				continue
@@ -216,6 +220,7 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 			scan.hostBackfill[host] = probe
 		}
 	}
+	q.addPoolBackfillHeads(scan, demands, live)
 	return scan.hostBackfill
 }
 
@@ -291,6 +296,12 @@ func (q *Queue) hostBackfillBlocker(j *Job, m *Machine, fence *hostBackfillDeman
 	if fence == nil || j.ID == fence.job.ID {
 		return nil
 	}
+	if fence.pooled {
+		if q.beforeWithFair(j, fence.job, fence.machine, fence.order.score, fence.order.active) || q.poolBackfillFits(j, m, fence) {
+			return nil
+		}
+		return fence.job
+	}
 	production := jobClass(j.Spec) == "production"
 	switch {
 	case fence.fleetProbe:
@@ -362,6 +373,7 @@ func (q *Queue) hostBackfillFits(j *Job, m *Machine, fence *hostBackfillDemand) 
 
 func (q *Queue) hostBackfillWaitingReason(j *Job, scan *placementScan) string {
 	var demand *Job
+	var poolFence bool
 	for _, m := range scan.machines {
 		if !q.placementLiveness(scan)[m.ID] || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) || !environmentReady(j, m) || q.preparationActive(m) || q.preparationStopping(m) {
 			continue
@@ -372,16 +384,21 @@ func (q *Queue) hostBackfillWaitingReason(j *Job, scan *placementScan) string {
 			}
 			// No fitting target means capacity accumulation cannot be this job's
 			// blocker. Avoid sizing the entire backlog just to discover that.
-			blocker := q.hostBackfillBlocker(candidate, m, q.hostBackfillFences(scan)[hostID(m)])
+			fence := q.hostBackfillFences(scan)[hostID(m)]
+			blocker := q.hostBackfillBlocker(candidate, m, fence)
 			if blocker == nil {
 				return "" // Another currently fitting host is not withheld.
 			}
 			if demand == nil || blocker.ID < demand.ID {
 				demand = blocker
+				poolFence = fence.pooled
 			}
 		}
 	}
 	if demand != nil {
+		if poolFence {
+			return fmt.Sprintf("memory_wait: waiting for job %s to acquire its reserved pool capacity", demand.ID)
+		}
 		return fmt.Sprintf("host_capacity_accumulation: waiting for job %s to acquire host RAM/cores; running attempts finish normally", demand.ID)
 	}
 	return ""

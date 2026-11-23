@@ -72,7 +72,7 @@ func (q *Queue) hostMemoryMargin(m, worker *Machine) float64 {
 	if d := m.HostMemoryDerivation; d != nil && d.Source == "quiescent_v1" {
 		margin = max(margin, d.ReserveGB)
 	}
-	if floor, ok := unifiedCUDAFloor(worker); ok && hostHasUnifiedCUDA(m) {
+	if floor, ok := unifiedCUDAFloor(worker); !workerUsesMemoryPools(m) && ok && hostHasUnifiedCUDA(m) {
 		margin = max(margin, floor)
 	}
 	if p := q.s.HostMaintenance[hostID(m)].SharedHost; p != nil {
@@ -146,6 +146,9 @@ func memoryCharge(j *Job, m *Machine, envelope float64, s hostMemorySample, now 
 func memoryChargeForGrace(j *Job, m *Machine, envelope float64, s hostMemorySample, now time.Time, grace time.Duration, deviceCredit ...float64) (charge, growth float64) {
 	if j == nil || m == nil {
 		return envelope, envelope
+	}
+	if pooledMemory(j) || workerUsesMemoryPools(m) {
+		return pooledHostCharge(j, m, s, now, envelope)
 	}
 	if grace <= 0 {
 		grace = defaultGPUStopGrace
@@ -381,6 +384,12 @@ func (s hostMemorySample) freshAt(now time.Time) bool {
 // allowance workers enforce at launch less every charge, lowered to the
 // interactive host's measured owner cap.
 func (q *Queue) hostMemoryRoom(m *Machine, capacity, reserved, growth float64) (room, enforced float64) {
+	if workerUsesMemoryPools(m) {
+		if allowance := q.poolAllowance(m); allowance > 0 {
+			capacity = min(capacity, allowance-max(0, reserved-growth))
+		}
+		return capacity - growth, math.Inf(1)
+	}
 	enforced = math.Inf(1)
 	if m.EffectiveHostMemoryBudgetGB > 0 || m.HostMemoryDerivation != nil {
 		enforced = m.EffectiveHostMemoryBudgetGB - reserved
@@ -443,6 +452,9 @@ func (q *Queue) jobRelease(m *Machine, j *Job) roomArms {
 		return roomArms{}
 	}
 	charge, growth := q.hostJobChargeGrowth(j)
+	if workerUsesMemoryPools(m) {
+		return roomArms{charge, charge}
+	}
 	sample, now := q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now()
 	_, lend := lendingFloor(j, owner, sample, now)
 	rss := owner.MemoryEnforcement == darwinRSSGuardStatus && (lend == lendByUse || chargedBelowLimit(j))

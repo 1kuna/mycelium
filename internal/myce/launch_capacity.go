@@ -162,6 +162,14 @@ func (q *Queue) liveGrowthShortfall(j *Job, m *Machine, key string, h LaunchCapa
 func (q *Queue) waitLaunchCapacity(j *Job, r Result) {
 	q.recordLaunchCapacityWait(j, r)
 	q.requeueLaunchCapacity(j)
+	if j.State == "queued" && r.ExecutionCause.Admission != nil && r.ExecutionCause.Admission.Subcheck == memoryWaitReason {
+		j.Reason = memoryWaitReason
+		j.StartCapacityWaiting = !absoluteStartBy(j)
+		if j.Starts > 0 {
+			j.Starts--
+			j.AdmissionRequeues++
+		}
+	}
 }
 
 func (q *Queue) requeueLaunchCapacity(j *Job) {
@@ -217,6 +225,13 @@ func launchCapacityHold(j *Job) *Hold {
 		if w.Attempt != j.Attempt || w.Admission == nil {
 			continue
 		}
+		if d := w.Admission; d.Subcheck == memoryWaitReason {
+			available := "unknown"
+			if d.Available != nil {
+				available = fmt.Sprintf("%.3f GiB", *d.Available)
+			}
+			return newHold(memoryWaitReason, fmt.Sprintf("needs %.3f GiB, available %s, keep %.3f GiB, outstanding reservations %.3f GiB", d.Required, available, d.KeepGB, d.HeldGB))
+		}
 		if liveGrowthDeficit(w.Admission) > 0 {
 			detail = "waiting for enough live host RAM to cover the launch shortfall and for exact release"
 		}
@@ -247,7 +262,7 @@ func (q *Queue) launchCapacityPending(j *Job) bool {
 // A qualified route with occupied resources is capacity waiting even before its
 // first offer. Missing/incompatible/disabled hosts retain their existing startup
 // diagnosis. This uses the existing fit checks with only resources released.
-func (q *Queue) queuedCapacityStatus(j *Job) (waiting, ready bool) {
+func (q *Queue) queuedCapacityStatus(j *Job, scans ...*placementScan) (waiting, ready bool) {
 	if !dependencyReady(j) || cancelled(j) {
 		return false, false
 	}
@@ -280,7 +295,9 @@ func (q *Queue) queuedCapacityStatus(j *Job) (waiting, ready bool) {
 			if !fitsResources(c, &room, room.TotalMemoryGB) {
 				continue
 			}
-			if drained || temporary || !hostFits(m, c.Spec.Needs.MemoryGB, c.Spec.Needs.HostMemoryGB) || !cpuFits(c, m) || !q.batchSlotFree(m, c) || m.FreeMemoryGB < c.Spec.Needs.MemoryGB {
+			if drained || temporary || !hostFits(m, c.Spec.Needs.MemoryGB, c.Spec.Needs.HostMemoryGB) || !cpuFits(c, m) || !q.batchSlotFree(m, c) || m.FreeMemoryGB < c.Spec.Needs.MemoryGB || !q.poolCustodyAllows(c, m) {
+				waiting = true
+			} else if pooledMemory(c) && !q.hostBackfillAllows(c, m, q.hostBackfillFences(q.placementScan(scans...))[hostID(m)]) {
 				waiting = true
 			} else {
 				ready = true

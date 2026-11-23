@@ -57,6 +57,9 @@ const metalFootprintGuardCapability = "metal_footprint_guard_v1"
 
 func (w Worker) footprintGuarded(j Job) bool {
 	n := j.Spec.Needs
+	if pooledMemory(&j) {
+		return w.processMemory != nil && w.processMemory.OwnedFootprint != nil
+	}
 	return w.processMemory != nil && w.processMemory.OwnedFootprint != nil && backendFor(w.Machine.GPU).processFootprint &&
 		!n.cpuOnly() && n.HostMemoryGB > 0
 }
@@ -69,6 +72,9 @@ func adaptiveFootprintCeilingGB(j *Job, m *Machine) float64 {
 }
 
 func (w Worker) footprintGuard(j Job) learnedMemoryGuard {
+	if pooledMemory(&j) {
+		return w.learnedGuard(j)
+	}
 	m := w.Machine
 	m.UnifiedMemory, m.HostMemoryMeasured = true, true
 	limit, err := memoryBytes(hostNeed(&m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB))
@@ -110,12 +116,18 @@ func footprintOOMFloor(j *Job) *SizeHint {
 // guarded Metal work. Other jobs keep sending none, so unguarded RSS never
 // earns resident credit.
 func (w Worker) reportsProcessSample(j Job) bool {
+	if pooledMemory(&j) {
+		return true
+	}
 	n := j.Spec.Needs
 	return adaptiveMemoryCeilingGB(&j, &w.Machine) > 0 || w.footprintGuarded(j) ||
 		w.Machine.MemoryEnforcement == darwinRSSGuardStatus && n.cpuOnly() && n.Memory != "auto" && n.HostMemoryGB > 0
 }
 
 func (w Worker) jobCeilingBytes(j Job) (int64, error) {
+	if pooledMemory(&j) {
+		return memoryBytes(memoryPools(&j).LimitGB)
+	}
 	bytes, err := w.ceilingBytes(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
 	if err != nil {
 		return 0, err
@@ -147,6 +159,10 @@ type learnedMemoryGuard struct {
 }
 
 func (w Worker) learnedGuard(j Job) learnedMemoryGuard {
+	if pooledMemory(&j) {
+		limit, _ := memoryBytes(memoryPools(&j).LimitGB)
+		return learnedMemoryGuard{rssGuard: rssGuard{limit: limit}}
+	}
 	limit, _ := w.ceilingBytes(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
 	cap, _ := memoryBytes(adaptiveMemoryCeilingGB(&j, &w.Machine))
 	hard, _ := memoryBytes(w.Machine.HostMemoryBudgetGB)

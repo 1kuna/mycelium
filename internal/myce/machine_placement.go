@@ -212,6 +212,10 @@ func batchOnTarget(j *Job, m *Machine) bool {
 // does a hint naming no device memory: its device figure is only a default.
 func sharesDevice(j *Job) bool {
 	n, e := j.Spec.Needs, j.MemoryEnvelope
+	if pooledMemory(j) {
+		p := memoryPools(j)
+		return !n.cpuOnly() && !p.RAM.Alone && (p.Card == nil || !p.Card.Alone) && n.Model == "" && len(j.AllocatedDevices) <= 1
+	}
 	unstated := e != nil && (e.Basis == "exploratory" || e.Basis == "hint" && (j.MemoryFallback == nil || j.MemoryFallback.MemoryGB <= 0))
 	// Host-only learning can retain a recipe default for device memory. The
 	// attempt keeps the card until that vector is measured.
@@ -249,7 +253,7 @@ func (q *Queue) deviceCoTenants(m *Machine, demand *Job, joining bool) (int, boo
 		if joining && fanOutDeviceSharing(demand) != fanOutDeviceSharing(j) {
 			return 0, false // Opt-in work cannot enlist an ordinary or default-off tenant.
 		}
-		if joining && unifiedCUDA(m) && !sharedDeviceSampleReady(q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now()) {
+		if joining && unifiedCUDA(m) && !(pooledMemory(j) && pooledMemory(demand)) && !sharedDeviceSampleReady(q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now()) {
 			return 0, false
 		}
 		n++
