@@ -21,6 +21,9 @@ func coreTestMain(m *testing.M) int {
 		return 0
 	}
 	if len(os.Args) > 1 && os.Args[1] == "_command-exec" {
+		if os.Getenv("MYCE_TEST_EXIT_BEFORE_COMMAND_READY") == "1" {
+			return 125
+		}
 		if CommandExec(os.Args[2:]) != nil {
 			return 125
 		}

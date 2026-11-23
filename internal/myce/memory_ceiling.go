@@ -298,6 +298,13 @@ func (a *memoryAttempt) attach(pid int) error {
 	}
 	return errors.New("memory ceiling process membership not confirmed")
 }
+
+type memoryCeilingExceeded struct{ bytes int64 }
+
+func (e *memoryCeilingExceeded) Error() string {
+	return fmt.Sprintf("exceeded its %g GiB memory ceiling", float64(e.bytes)/(1<<30))
+}
+
 func (a *memoryAttempt) failure() error {
 	if a == nil {
 		return nil
@@ -314,7 +321,7 @@ func (a *memoryAttempt) failure() error {
 				return err
 			}
 			if n > 0 {
-				return fmt.Errorf("exceeded its %g GiB memory ceiling", float64(a.bytes)/(1<<30))
+				return &memoryCeilingExceeded{a.bytes}
 			}
 			return nil
 		}

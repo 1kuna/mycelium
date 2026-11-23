@@ -671,16 +671,17 @@ func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
 		envelope.ProbeFloorGB = hostNeed(m, 0, probeFloor)
 	}
 	j.Spec.Needs, j.MemoryEnvelope = needs, envelope
+	needsGuard := floorCharged(envelope) || m.MemoryEnforcement == cgroupMemoryEnforcement && needsAdaptiveCPUStart(j)
 	// The envelope acknowledgement keeps new workers on the old stop contract
 	// with older queues, and older workers on their existing kernel ceilings.
-	if contains(m.Capabilities, learnedMemoryGuardCapability) && !(probeFloor > 0 && !floorCharged(envelope)) {
+	if contains(m.Capabilities, learnedMemoryGuardCapability) && (probeFloor == 0 || needsGuard) {
 		envelope.Enforcement = learnedMemoryGuardEnforcement
 		if adaptiveMemoryCeilingGB(j, m) <= 0 {
 			envelope.Enforcement = enforcement
-			if floorCharged(envelope) {
-				envelope.Refusal = "exploratory adaptive capacity unavailable; accounting floor cannot be enforced as a ceiling"
-			}
 		}
+	}
+	if needsGuard && envelope.Enforcement != learnedMemoryGuardEnforcement && envelope.Refusal == "" {
+		envelope.Refusal = "exploratory adaptive capacity unavailable; accounting floor cannot be enforced as a ceiling"
 	}
 	q.observeMemoryAdmission(j, m)
 	return j

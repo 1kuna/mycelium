@@ -28,9 +28,14 @@ with the worker's installed tools in an empty folder. `--cpu N`, `--mem 8G` and
 A typed memory figure is a limit, not a reservation: once the work has run,
 Mycelium charges what it measured and keeps your figure as the ceiling.
 An unknown CPU command starts with a small physical accounting floor. Its
-charge follows measured use on supporting workers; protected/shared or older
-workers keep strict containment with a measured shell startup minimum. A memory
-stop reruns the same job at its measured peak without an infrastructure loss; keep its job and key.
+charge follows measured use on supporting workers. An exploratory Linux CPU
+first run with a start deadline uses an adaptive guard within measured host
+capacity. It needs a worker that supports this guard.
+Strict shell starts use a measured shell startup minimum. A memory stop reruns
+the same job at its measured peak without an infrastructure loss; keep its job
+and key. A recorded `launch: oom` means the enforced ceiling was hit during
+startup. If a plain CPU job fails terminally at launch, set a larger explicit
+`needs.memory_gb` and submit the changed spec with a new key.
 Supporting workers refuse an exploratory launch with `custodian_ledger_read_failed`,
 `exploratory_capacity_unavailable`, `exploratory_host_memory_unavailable` or
 `exploratory_memory_room` when they cannot establish room above its accounting

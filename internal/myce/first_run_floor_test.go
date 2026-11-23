@@ -239,12 +239,12 @@ func TestFirstRunFloorRoomLossKeepsCapacityEvidence(t *testing.T) {
 	}
 }
 
-// Shared/protected and previous-release workers reserve measured shell startup
-// even without launch slack. They never gain unqualified room lending.
+// Strict shell starts reserve measured shell startup even without launch
+// slack. Deadline-gated cgroup starts need room for the Go launch helper.
 func TestFirstRunFloorStrictContainment(t *testing.T) {
 	for _, platform := range []string{"linux", "darwin"} {
 		for _, slack := range []float64{0, firstRunStartupGB / 2, .125} {
-			for _, kind := range []string{"older worker", "production", "shared interactive host", "unguarded"} {
+			for _, kind := range []string{"older worker", "production", "shared interactive host", "shared deadline", "legacy deadline", "unguarded"} {
 				t.Run(fmt.Sprintf("%s/%g/%s", platform, slack, kind), func(t *testing.T) {
 					q, clock, m := floorFixture(t, platform)
 					s := autoSpec("echo", "echo", "hello")
@@ -265,6 +265,14 @@ func TestFirstRunFloorStrictContainment(t *testing.T) {
 						j.Spec.Priority = "production"
 					case "shared interactive host":
 						m.SharedHost = &SharedHostProfile{}
+					case "shared deadline", "legacy deadline":
+						deadline := clock.Now().Add(time.Minute)
+						j.Spec.StartBy = &deadline
+						if kind == "shared deadline" {
+							m.SharedHost = &SharedHostProfile{}
+						} else {
+							m.Capabilities = slices.DeleteFunc(slices.Clone(m.Capabilities), func(c string) bool { return c == learnedMemoryGuardCapability })
+						}
 					case "unguarded":
 						m.MemoryEnforcement = "admission-only"
 					}
@@ -275,11 +283,27 @@ func TestFirstRunFloorStrictContainment(t *testing.T) {
 						}
 						return
 					}
+					if platform == "linux" && kind == "legacy deadline" {
+						if got.MemoryEnvelope.Refusal == "" {
+							t.Fatal("cold launch admitted without an adaptive guard")
+						}
+						return
+					}
 					want := max(firstRunStartupGB, minimumHostMemoryGB+slack)
 					if got.MemoryEnvelope.HostGB != want || got.MemoryEnvelope.Refusal != "" || floorCharged(got.MemoryEnvelope) {
 						t.Fatalf("not a small strictly contained attempt: %+v", got.MemoryEnvelope)
 					}
 					bytes, err := (Worker{Machine: m}).jobCeilingBytes(*got)
+					if platform == "linux" && (kind == "production" || kind == "shared deadline") {
+						if err != nil || bytes != 28<<30 || got.MemoryEnvelope.Enforcement != learnedMemoryGuardEnforcement {
+							t.Fatalf("gated launch ceiling = %d bytes, %v; envelope %+v", bytes, err, got.MemoryEnvelope)
+						}
+						m.HostMemoryBudgetGB = want
+						if _, err := (Worker{Machine: m}).jobCeilingBytes(*got); !errors.Is(err, errWorkerMemory) {
+							t.Fatalf("capacity loss fell back to the shell ceiling: %v", err)
+						}
+						return
+					}
 					if err != nil || math.Abs(float64(bytes)/(1<<30)-got.MemoryEnvelope.HostGB) > minimumHostMemoryGB {
 						t.Fatalf("kernel ceiling %d differs from charged %.8f GiB: %v", bytes, got.MemoryEnvelope.HostGB, err)
 					}

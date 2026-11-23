@@ -8,6 +8,15 @@ import (
 const learnedMemoryGuardCapability = "learned_cpu_memory_growth_v1"
 const learnedMemoryGuardEnforcement = "adaptive native CPU memory guard"
 
+// Deadline-gated native launches run the Go exec helper inside the attempt.
+// Shell startup measurements cannot bound that helper.
+func needsAdaptiveCPUStart(j *Job) bool {
+	n, e := j.Spec.Needs, j.MemoryEnvelope
+	return n.cpuOnly() && n.Memory == "auto" && n.HostMemoryGB <= firstRunStartupGB &&
+		e != nil && e.Basis == "exploratory" && e.ProbeFloorGB > 0 &&
+		(j.Spec.StartBy != nil || j.Spec.Priority == "production")
+}
+
 // Learned and bounded exploratory CPU reservations are predictions, not authored
 // limits. Cold CPU probes use the same physical guard: residual admission
 // headroom is not a measured upper bound on an unknown command.
@@ -117,7 +126,7 @@ func (w Worker) jobCeilingBytes(j Job) (int64, error) {
 		}
 		return memoryBytes(cap)
 	}
-	if floorCharged(j.MemoryEnvelope) {
+	if floorCharged(j.MemoryEnvelope) || needsAdaptiveCPUStart(&j) && j.MemoryEnvelope.Enforcement == learnedMemoryGuardEnforcement {
 		return 0, refuseAdmission("exploratory_capacity_unavailable", "GiB", j.MemoryEnvelope.HostGB, 0, true)
 	}
 	return bytes, nil

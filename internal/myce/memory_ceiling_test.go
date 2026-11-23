@@ -541,6 +541,66 @@ func TestMemoryCeilingWorkerOOMIsCommandFailure(t *testing.T) {
 	}
 }
 
+type launchMemoryEventsFS struct {
+	fakeMemoryFS
+	events string
+}
+
+func (f launchMemoryEventsFS) Mkdir(path string) error {
+	if err := f.fakeMemoryFS.Mkdir(path); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(path, "memory.events"), []byte(f.events), 0600)
+}
+
+func TestMemoryCeilingWorkerOOMBeforeExecApproval(t *testing.T) {
+	for _, tc := range []struct {
+		name, events string
+		oom          bool
+	}{
+		{"attempt ceiling", "max 19\noom 1\noom_kill 2\noom_group_kill 1\n", true},
+		{"pressure only", "max 19\noom 0\noom_kill 0\n", false},
+		{"no local trigger", "max 19\noom 0\noom_kill 1\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := recoveryWorker(t)
+			w.memoryCeilings = fakeCeilings(t)
+			w.memoryCeilings.fs = launchMemoryEventsFS{events: tc.events}
+			w.HostMemorySource = func(context.Context) (float64, error) { return 31, nil }
+			store, err := w.openStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.close()
+			j := recoveryJob(t, []string{"true"})
+			j.Spec.Resumable = false
+			j.Spec.Needs.Platform = Platform{Required: []string{"cpu"}}
+			j.Spec.Needs.MemoryGB = 0
+			j.Spec.Needs.HostMemoryGB = firstRunStartupGB
+			j.Spec.Run.Env = map[string]string{"MYCE_TEST_EXIT_BEFORE_COMMAND_READY": "1"}
+			deadline := w.Clock.Now().Add(testWaitTimeout)
+			j.Spec.StartBy = &deadline
+			p, err := startAfterFixtureInputs(t, w, store, j)
+			if p != nil || err == nil || !strings.Contains(err.Error(), "command start gate unavailable: EOF") {
+				t.Fatalf("expected a failed exec handshake, got %v", err)
+			}
+			r := startFailureOutcome(Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: err.Error()}, err)
+			if r.Interrupted || r.OutOfMemory != tc.oom || r.ExecutionEvidence == nil || r.ExecutionEvidence.Main != executionNotStarted || r.ExecutionCause == nil || r.ExecutionCause.Operation != "launch" {
+				t.Fatalf("unexpected launch outcome: %+v", r)
+			}
+			if tc.oom {
+				f := resourceStopFinding(&j, r.ExecutionCause)
+				if r.ExecutionCause.Class != "oom" || r.MemoryPeak == nil || r.MemoryPeak.Events == nil || r.MemoryPeak.Events.OOMKill != 2 ||
+					f == nil || f.Code != "out_of_memory" || !strings.Contains(f.Action, "needs.memory_gb") {
+					t.Fatalf("lost kernel evidence or resize guidance: %+v, %+v", r, f)
+				}
+			} else if r.ExecutionCause.Class != "io_error" {
+				t.Fatalf("EOF without local OOM became %v", r.ExecutionCause)
+			}
+		})
+	}
+}
+
 func TestMemoryCeilingModelOOMAfterReady(t *testing.T) {
 	c := fakeCeilings(t)
 	m := serverTestModel(t, "ready")

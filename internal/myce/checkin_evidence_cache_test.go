@@ -137,7 +137,9 @@ func TestCheckinRetainedEvidenceDecisionEquivalence(t *testing.T) {
 		}
 	}
 	q.memoryObservationIndex = nil
-	compare("changed identity", "11ea8a68d50a2a5b599a13f37f0114d210c713de208222feb60afebd015f13a7")
+	// After the identity change, 150 shell-sized CPU starts with deadlines
+	// add only the guard-unavailable refusal and its fit predicate (#1967).
+	compare("changed identity", "d415204cce98441b2c958219772d9f4e22cf4855cc894add104c062ceb39dd54")
 }
 
 func TestCheckinRetainedEvidenceScans(t *testing.T) {
