@@ -629,7 +629,7 @@ print('queue accepted local generation', flush=True)
         # real dev API: one command, files back, myce init, then the entry's whole
         # trip. The YAML block is the entry after adding outputs; the Python
         # example then reruns that entry and adopts the same job.
-        guide = (ROOT / "skills/mycelium/SKILL.md").read_text()
+        guide = (ROOT / "skills/mycelium/references/quickstart.md").read_text()
         blocks = re.findall(r"^```sh\n(.*?)^```$", guide, re.M | re.S)
         self.assertEqual(len(blocks), 4, "consumer guide CLI ladder changed shape")
         entry = re.findall(r"^```yaml\n(project: .*?)^```$", guide, re.M | re.S)
