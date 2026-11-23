@@ -280,6 +280,11 @@ func resourceStopFinding(j *Job, c *RuntimeCause) *JobFinding {
 			"The host denied further writes because the attempt reached its declared disk bound.",
 			"raise `disk` (input, output or checkpoint bytes) to what the job writes, or write less."}
 	case "oom":
+		if c.Operation == "launch" {
+			return &JobFinding{"out_of_memory", findingOwnerJob,
+				"The attempt hit its enforced memory ceiling while starting your command.",
+				"declare more memory (`needs.host_memory_gb`, or `needs.memory: auto`) or reduce the job's memory use."}
+		}
 		return &JobFinding{"out_of_memory", findingOwnerJob,
 			"The host's memory guard stopped your command for running out of memory.",
 			"declare more memory (`needs.host_memory_gb`, or `needs.memory: auto`) or reduce the job's memory use."}

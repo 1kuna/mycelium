@@ -147,6 +147,12 @@ func (s *workerStore) startFailureAt(j Job, kind string, cause error, at time.Ti
 	}
 	return &recordedStartError{cause: cause, facts: facts}
 }
+
+type launchMemoryCeilingError struct {
+	*memoryCeilingExceeded
+	peak *AttemptMemoryPeak
+}
+
 func startFailureOutcome(owner Result, err error) Result {
 	var observed *executionEvidenceError
 	if errors.As(err, &observed) {
@@ -171,8 +177,13 @@ func startFailureOutcome(owner Result, err error) Result {
 	if errors.Is(err, errWorkerStartAuthorization) {
 		owner.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("start_authorization", err))
 	}
-	owner = classifyAttemptOutcome(owner, attemptCause{memberOutcome: facts})
-	if errors.As(err, &staging) && (staging.diagnostic.Class == "tools_missing" || staging.diagnostic.Class == machoLibraryMissing) {
+	var oom *launchMemoryCeilingError
+	if errors.As(err, &oom) {
+		owner.Error, owner.MemoryPeak = oom.Error(), oom.peak
+		owner.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "oom"}
+	}
+	owner = classifyAttemptOutcome(owner, attemptCause{memberOutcome: facts, OutOfMemory: oom != nil})
+	if !owner.OutOfMemory && errors.As(err, &staging) && (staging.diagnostic.Class == "tools_missing" || staging.diagnostic.Class == machoLibraryMissing) {
 		owner.ExecutionCause = runtimeDiagnostic(staging)
 	}
 	if execFormatFailure(err) && !owner.OutOfMemory {

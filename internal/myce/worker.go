@@ -815,6 +815,10 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	started := false
 	defer func() {
 		if !started {
+			var exceeded *memoryCeilingExceeded
+			if startErr != nil && errors.As(memoryAttempt.localLimitFailure(), &exceeded) {
+				startErr = errors.Join(&launchMemoryCeilingError{exceeded, memoryAttempt.peak()}, startErr)
+			}
 			if err := memoryAttempt.cleanup(w.Clock); err != nil {
 				startErr = errors.Join(startErr, fmt.Errorf("%w: %v", errWorkerReleasePending, err))
 			}
