@@ -34,6 +34,8 @@ Exit 0 establishes verified delivery. Check the content against your task.
 See [exit codes](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md#run-wait-and-fetch-in-one-command)
 and [result recovery](references/results.md) for interrupted publication,
 failed-attempt diagnostics and storage release.
+Follow the [runnable examples](references/quickstart.md) to try the full path
+from a one-off command to a reusable entry and Python.
 
 ## Reusable entries
 

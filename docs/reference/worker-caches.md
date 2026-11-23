@@ -136,10 +136,12 @@ still overrides the automatic allowance, but not the headroom kept by eviction
 and reservations.
 
 `hygiene_collection.disk_budget[]` reports `foreign_bytes`, `foreign_peak_bytes`,
-`foreign_peak_growth_bytes` and `foreign_headroom_bytes` to queues that
-advertise `worker-disk-headroom-v1`; older queues receive the budget without
-these fields. This only keeps what it measures: a writer that outgrows anything
-seen so far can still find less space than it needs until the next collection.
+`foreign_peak_growth_bytes` and `foreign_headroom_bytes` in the full disk report.
+The r6.31, r6.33 and r6.34 queue tags advertise budget, headroom and trend
+together. Workers start with the baseline report, send the full disk report
+after all three advertisements, and use the shared baseline retry after a
+strict refusal. The partial disk report shapes were removed. A writer that
+outgrows the measured headroom can still run short until the next collection.
 
 These are admission and sampled-pressure protections, not a filesystem quota
 on arbitrary payload/foreign writes. Active or unique data can exhaust a volume
@@ -186,8 +188,9 @@ observation for diagnosis; its age neither authorizes deletion nor prevents
 collection of accepted/released data. Eligible folders and their markers are
 removed together. Unknown jobs, unknown folder names, unmatched attempts,
 unconfirmed custody and failed queue lookups remain protected. Absence from a
-fleet status page never proves release. An older queue without this endpoint
-keeps unconfirmed folders; existing local publication receipts still work.
+fleet status page never proves release. If the batch route cannot supply
+authority, the worker keeps unconfirmed folders. Existing local publication
+receipts still work.
 
 Cancellation does not publish partial outputs into `output_refs`. Recover them
 from the exact assigned attempt before its configured file-retention deadline
@@ -204,15 +207,13 @@ The release applies to the selected terminal job's files, including scratch;
 it is not a force-delete for an unknown or live attempt. Retain the plan/apply
 receipts. `file_release_stale` requires a fresh plan. Queue references still
 protect shared blobs; scratch reclamation leaves the accepted queue manifest
-and its referenced blobs intact. The authenticated worker endpoint
-`POST /api/workers/attempt-files` takes `id`, `attempt`, and `machine` and returns
-`reclaim`, a fixed `reason`, and an optional policy deadline `until`; it is a
-read-only exact-attempt check, not an override or a paginated status lookup.
-Each retention pass sends one `POST /api/workers/attempt-files/batch` with
+and its referenced blobs intact. Each scratch retention pass sends one
+authenticated `POST /api/workers/attempt-files/batch` with
 `machine` and `attempts` (`id`, `attempt` pairs) and gets `dispositions` back in
-the same order; the queue takes its lock for one lookup at a time. Against a
-previous-release queue, which answers that route with a plain 404, the worker
-falls back to one single-attempt request per folder.
+the same order. Each disposition supplies `reclaim`, a fixed `reason`, and an
+optional policy deadline `until`. The queue takes its lock for one lookup at a
+time. Checkpoint folder retention still uses the single-attempt route
+`POST /api/workers/attempt-files` with `id`, `attempt`, and `machine`.
 
 Worker logs report `worker scratch retention` with allocated `retained_bytes`,
 `reclaimed_bytes`, and `retained_bytes_by_reason` (for example `local_custody`,
