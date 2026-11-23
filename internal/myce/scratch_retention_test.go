@@ -248,11 +248,10 @@ func TestScratchRetentionReportingAndUnavailableQueue(t *testing.T) {
 // released attempts go on the next sweep; the current, recoverable, unreleased
 // and locally held attempts stay.
 //
-// One pass asks the queue once (#slim-chatty-calls). A previous-release queue
-// has only the single-folder route, which the worker falls back to, and a
-// previous-release worker still uses it against this queue (MY-42).
+// One pass asks the queue once. The documented single-folder route makes the
+// same custody decisions when called individually.
 func TestScratchRetentionCollectsSupersededAttempts(t *testing.T) {
-	for _, mode := range []string{"current", "previous queue", "previous worker"} {
+	for _, mode := range []string{"batch", "single folder"} {
 		t.Run(mode, func(t *testing.T) { scratchRetentionSupersededAttempts(t, mode) })
 	}
 }
@@ -271,10 +270,6 @@ func scratchRetentionSupersededAttempts(t *testing.T, mode string) {
 			single.Add(1)
 		case "/api/workers/attempt-files/batch":
 			batch.Add(1)
-			if mode == "previous queue" {
-				http.NotFound(w, r)
-				return
-			}
 		}
 		api.ServeHTTP(w, r)
 	}))
@@ -331,7 +326,7 @@ func scratchRetentionSupersededAttempts(t *testing.T, mode string) {
 		err := w.Client.Call(context.Background(), "POST", "/api/workers/attempt-files", AttemptFilesRequest{Execution: Execution{ID: id, Attempt: attempt}, Machine: m.ID}, &d)
 		return d, err
 	}
-	if mode == "previous worker" {
+	if mode == "single folder" {
 		if err := pruneAttemptFiles(dir, clock.Now(), c); err != nil {
 			t.Fatal(err)
 		}
@@ -344,11 +339,8 @@ func scratchRetentionSupersededAttempts(t *testing.T, mode string) {
 	}
 	// Attempt 4 is locally held; the other five folders need the queue.
 	wantSingle, wantBatch := int32(5), int32(0)
-	switch mode {
-	case "current":
+	if mode == "batch" {
 		wantSingle, wantBatch = 0, 1
-	case "previous queue":
-		wantBatch = 1
 	}
 	if single.Load() != wantSingle || batch.Load() != wantBatch {
 		t.Fatalf("queue requests single=%d batch=%d, want %d and %d", single.Load(), batch.Load(), wantSingle, wantBatch)

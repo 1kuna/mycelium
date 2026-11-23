@@ -215,10 +215,6 @@ func observeProfile(ctx context.Context, c myce.Client, dir string, r profileRec
 	return finishProfileObservationUsing(ctx, &c, dir, r, cfg, j, waitErr)
 }
 
-func finishProfileObservation(ctx context.Context, dir string, r profileReceipt, cfg profileObserver, j *myce.Job, waitErr error, notifyEnv ...[]string) error {
-	return finishProfileObservationUsing(ctx, nil, dir, r, cfg, j, waitErr, notifyEnv...)
-}
-
 func finishProfileObservationUsing(ctx context.Context, c *myce.Client, dir string, r profileReceipt, cfg profileObserver, j *myce.Job, waitErr error, notifyEnv ...[]string) error {
 	var notification profileNotification
 	if r.PendingNotification != nil {
