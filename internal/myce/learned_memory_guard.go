@@ -8,13 +8,13 @@ import (
 const learnedMemoryGuardCapability = "learned_cpu_memory_growth_v1"
 const learnedMemoryGuardEnforcement = "adaptive native CPU memory guard"
 
-// Deadline-gated and sandboxed native launches run a Go helper inside the
-// attempt. Shell startup measurements cannot bound these helpers.
+// Deadline-gated native launches run the Go exec helper inside the attempt.
+// Shell startup measurements cannot bound that helper.
 func needsAdaptiveCPUStart(j *Job) bool {
-	e := j.MemoryEnvelope
-	return j.Spec.Needs.cpuOnly() && j.Spec.Needs.Memory == "auto" && j.OOMRetries == 0 &&
-		e != nil && e.Basis == "exploratory" &&
-		(j.Spec.StartBy != nil || j.Spec.Priority == "production" || !nativeUnsandboxed(j))
+	n, e := j.Spec.Needs, j.MemoryEnvelope
+	return n.cpuOnly() && n.Memory == "auto" && n.HostMemoryGB <= firstRunStartupGB &&
+		e != nil && e.Basis == "exploratory" && e.ProbeFloorGB > 0 &&
+		(j.Spec.StartBy != nil || j.Spec.Priority == "production")
 }
 
 // Learned and bounded exploratory CPU reservations are predictions, not authored

@@ -244,7 +244,7 @@ func TestFirstRunFloorRoomLossKeepsCapacityEvidence(t *testing.T) {
 func TestFirstRunFloorStrictContainment(t *testing.T) {
 	for _, platform := range []string{"linux", "darwin"} {
 		for _, slack := range []float64{0, firstRunStartupGB / 2, .125} {
-			for _, kind := range []string{"older worker", "production", "shared interactive host", "shared deadline", "legacy deadline", "shared sandbox", "unguarded"} {
+			for _, kind := range []string{"older worker", "production", "shared interactive host", "shared deadline", "legacy deadline", "unguarded"} {
 				t.Run(fmt.Sprintf("%s/%g/%s", platform, slack, kind), func(t *testing.T) {
 					q, clock, m := floorFixture(t, platform)
 					s := autoSpec("echo", "echo", "hello")
@@ -265,9 +265,6 @@ func TestFirstRunFloorStrictContainment(t *testing.T) {
 						j.Spec.Priority = "production"
 					case "shared interactive host":
 						m.SharedHost = &SharedHostProfile{}
-					case "shared sandbox":
-						m.SharedHost = &SharedHostProfile{}
-						j.Spec.Isolation = "sandboxed"
 					case "shared deadline", "legacy deadline":
 						deadline := clock.Now().Add(time.Minute)
 						j.Spec.StartBy = &deadline
@@ -297,7 +294,7 @@ func TestFirstRunFloorStrictContainment(t *testing.T) {
 						t.Fatalf("not a small strictly contained attempt: %+v", got.MemoryEnvelope)
 					}
 					bytes, err := (Worker{Machine: m}).jobCeilingBytes(*got)
-					if platform == "linux" && (kind == "production" || kind == "shared deadline" || kind == "shared sandbox") {
+					if platform == "linux" && (kind == "production" || kind == "shared deadline") {
 						if err != nil || bytes != 28<<30 || got.MemoryEnvelope.Enforcement != learnedMemoryGuardEnforcement {
 							t.Fatalf("gated launch ceiling = %d bytes, %v; envelope %+v", bytes, err, got.MemoryEnvelope)
 						}

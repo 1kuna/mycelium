@@ -213,6 +213,8 @@ func TestMemoryEnvelopeIncidentSamplesIgnoreInfrastructure(t *testing.T) {
 func TestMemoryEnvelopeExhaustedLossLateReleaseSample(t *testing.T) {
 	q, clock, m, s := observationFixture(t)
 	s.Needs.Memory, s.Priority = "auto", "production"
+	m.Capabilities = append(m.Capabilities, learnedMemoryGuardCapability)
+	m.CapabilityProfile.SystemMemoryBytes = 32 << 30
 	if err := q.SetProductionInfrastructureRetries(0); err != nil {
 		t.Fatal(err)
 	}

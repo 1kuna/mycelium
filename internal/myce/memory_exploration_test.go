@@ -31,6 +31,7 @@ func memoryExplorationFixture(t *testing.T) (*Queue, *fakeClock, Machine, Machin
 	darwin.CapabilityProfile.OS, darwin.CapabilityProfile.Arch = "darwin", "arm64"
 	linux.MemoryEnforcement, darwin.MemoryEnforcement = cgroupMemoryEnforcement, darwinRSSGuardStatus
 	linux.HostMemoryBudgetGB, darwin.HostMemoryBudgetGB = 32, 8
+	linux.Capabilities = append(linux.Capabilities, learnedMemoryGuardCapability)
 	for _, m := range []*Machine{&linux, &darwin} {
 		m.ExtensionFingerprint = "cpu-v1"
 		m.MemoryCeilingSlackGB = .125
