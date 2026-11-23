@@ -187,9 +187,18 @@ to the proof instead of tolerance for error.
 | #1484, #1110 | First runs lost to drift; pressure noise stopped jobs | C2, C5 | As #1970; pressure noise is not a stop signal |
 | #1958, #1955 | Checkpoint expiry and input-claim holdings | not memory | Out of scope: file custody |
 
-An issue-triage worker is labelling the open cluster `memory-redesign`. Its
-list had not been posted when this was written; it maps onto C1–C7 when it
-lands.
+The backlog audit on #1972 labelled 71 open issues `memory-redesign` in five
+groups. They map onto the causes as follows. The grouping is the audit's;
+each issue keeps its own acceptance, and this design does not claim to close
+any of them by itself.
+
+| Audit group | Issues | Causes | Where this design answers |
+|---|---|---|---|
+| Cold starts, sizing and probe budgets | 11 | C1, C2, C5 | 2.3, 2.4 |
+| Learned peaks, accounting and telemetry | 15 | C3, C4 | 2.2, 2.3 |
+| Backfill, contention and reservations | 20 | C6 | 2.4, 2.11; #1824 is question 6 |
+| Shared device memory and host pressure | 16 | C1, C6 | 2.5, 2.6, 2.9; depends on #1762 and #1771 |
+| Placement, launch and maintenance boundaries | 9 | C5, C7 | 2.4 for launch refusals; qualification and maintenance start probes are outside this design |
 
 ## 2. The proposed model
 
@@ -374,6 +383,14 @@ is a possible later refinement and is not part of this proposal.
 
 **Hosts where the slice ceiling is unavailable** (older service units outside
 the slice; `myce dev` foreground workers) use the sampled path, as macOS does.
+
+**Two open issues are prerequisites on Linux.** Workers installed by earlier
+releases sit outside the slice and need a supported unit migration (#1771).
+An unprivileged worker can raise `oom_score_adj` but not lower it (measured in
+#1762; the kernel documents the same rule, [proc][k-proc]), so tier scores
+must be relative to the inherited value: the highest tier keeps it and lower
+tiers are raised. The kill order the slice produces also still needs the VM
+evidence #1500 asks for.
 
 ### 2.6 When a pool runs short
 
@@ -582,7 +599,9 @@ it keeps legacy envelopes, so a mixed fleet is safe.
    coverage meets `c` within sampling error.
 3. **Pooled for non-production tiers, host by host.** A host qualifies when
    its worker advertises the capability and, on Linux, its slice ceiling is
-   confirmed. Attempts already running keep the containment they started with;
+   confirmed and tier scoring works unprivileged (#1771, #1762). A Linux host
+   that has not reached that state uses the sampled path or stays on legacy.
+   Attempts already running keep the containment they started with;
    in the room formula a legacy attempt's `held` is its envelope. Production
    stays on legacy.
 4. **Pooled for production**, after a production window in which shadow shows
@@ -669,6 +688,8 @@ Native acceptance is separately authorized, as the approved design requires.
 
 - Kernel behaviour is cited from documentation, not exercised on the fleet.
   This pass did not touch the fleet.
+- Which live Linux workers already have the slice ceiling in force was not
+  checked.
 - Device allocations escaping the cgroup on unified CUDA, and Metal buffers in
   `phys_footprint`, rest on the repository's earlier measurements (#1044).
 - macOS has no kernel containment. A process that allocates faster than the
