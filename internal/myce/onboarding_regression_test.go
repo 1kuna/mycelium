@@ -63,7 +63,7 @@ func TestOnboardingLegacyMountFlagCannotCreateLocalNAS(t *testing.T) {
 			c, _ := PlanInstall("worker", home, "", home+"/absent-nas", "http://queue.invalid", "hypha", Detection{OS: osname, Arch: "arm64", Platform: "cpu", MemoryMode: "fixed"})
 			c.RequireMountedNAS = false
 			c.AllowDeviceless = allow
-			err := prepareInstallNAS(context.Background(), c, func(context.Context, string, ...string) ([]byte, error) { return nil, nil })
+			err := prepareInstallNASMode(context.Background(), c, func(context.Context, string, ...string) ([]byte, error) { return nil, nil }, installStorageWrite)
 			if err == nil {
 				t.Fatalf("%s created local storage for an absent NAS", osname)
 			}

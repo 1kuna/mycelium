@@ -77,10 +77,6 @@ func ReadFleetEnvironment(path string) (token, queue string, err error) {
 	return token, queue, nil
 }
 
-func prepareInstallNAS(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error)) error {
-	return prepareInstallNASMode(ctx, c, command, installStorageWrite)
-}
-
 type installStorageMode int
 
 const (

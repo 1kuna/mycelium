@@ -617,7 +617,7 @@ func TestWaitReconnectsAfterQueueRestartWithoutProgress(t *testing.T) {
 	}
 	var out, diagnostics bytes.Buffer
 	pauses := 0
-	err := waitJobsReconnecting(context.Background(), stuck, reconnect, []string{j.ID}, 0, &out, &diagnostics, clock, func(_ context.Context, d time.Duration) error {
+	err := waitJobsReporting(context.Background(), stuck, reconnect, []string{j.ID}, 0, &out, &diagnostics, clock, func(_ context.Context, d time.Duration) error {
 		clock.advance(d)
 		if pauses++; pauses == 1 {
 			if e := q.Close(); e != nil {
@@ -632,7 +632,7 @@ func TestWaitReconnectsAfterQueueRestartWithoutProgress(t *testing.T) {
 			t.Fatalf("wait made no progress: %s", &diagnostics)
 		}
 		return nil
-	})
+	}, false)
 	if err != nil || reconnects != 1 || out.String() != j.ID+" succeeded\n" || !strings.Contains(diagnostics.String(), "blocked reading job "+j.ID+" (cause=timeout)") {
 		t.Fatalf("%v reconnects=%d out=%s diagnostics=%s", err, reconnects, &out, &diagnostics)
 	}

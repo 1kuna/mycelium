@@ -92,10 +92,10 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 		return Reply{}, err
 	}
 	if w.diskBudgetWire != nil {
-		w.diskBudgetWire.supported = reply.WorkerDiskBudgetProtocol == workerDiskBudgetProtocol
-		w.diskBudgetWire.headroom = reply.WorkerDiskHeadroomProtocol == workerDiskHeadroomProtocol
+		w.diskBudgetWire.supported = reply.WorkerDiskBudgetProtocol == workerDiskBudgetProtocol &&
+			reply.WorkerDiskHeadroomProtocol == workerDiskHeadroomProtocol &&
+			reply.WorkerDiskTrendProtocol == workerDiskTrendProtocol
 		w.diskBudgetWire.foreign = reply.HostForeignProtocol == hostForeignProtocol
-		w.diskBudgetWire.trend = reply.WorkerDiskTrendProtocol == workerDiskTrendProtocol
 	}
 	if w.toolReport != nil {
 		w.toolReport.accept(c, reply)

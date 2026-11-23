@@ -10,7 +10,7 @@ import (
 )
 
 func TestWorkerDiskBudgetWireStrictDowngrade(t *testing.T) {
-	var version atomic.Int32
+	var supportsDiskBudget atomic.Bool
 	reports := make(chan Checkin, 10)
 	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		var c Checkin
@@ -19,19 +19,15 @@ func TestWorkerDiskBudgetWireStrictDowngrade(t *testing.T) {
 			return
 		}
 		reports <- c
-		if version.Load() == 0 && hasDiskBudgetWireFields(c) {
+		if !supportsDiskBudget.Load() && hasDiskBudgetWireFields(c) {
 			rw.WriteHeader(400)
 			_ = json.NewEncoder(rw).Encode(map[string]string{"code": "request_invalid", "error": "unknown field"})
 			return
 		}
 		reply := Reply{AttemptProtocol: keyedAttemptProtocol, HostHygieneProtocol: hostHygieneProtocol, HostCollectionProtocol: hostCollectionProtocol}
-		if version.Load() > 0 {
+		if supportsDiskBudget.Load() {
 			reply.WorkerDiskBudgetProtocol = workerDiskBudgetProtocol
-		}
-		if version.Load() > 1 {
 			reply.WorkerDiskHeadroomProtocol = workerDiskHeadroomProtocol
-		}
-		if version.Load() > 2 {
 			reply.WorkerDiskTrendProtocol = workerDiskTrendProtocol
 		}
 		_ = json.NewEncoder(rw).Encode(reply)
@@ -53,22 +49,12 @@ func TestWorkerDiskBudgetWireStrictDowngrade(t *testing.T) {
 	if c := send(); c.Machine.HygieneCollection == nil || hasDiskBudgetWireFields(c) {
 		t.Fatal("old queue negotiation lost baseline report or sent new fields", c)
 	}
-	version.Store(1)
+	supportsDiskBudget.Store(true)
 	send()
-	if c := send(); !hasDiskBudgetWireFields(c) || c.Machine.HygieneCollection.DiskBudget[0].ForeignHeadroomBytes != 0 {
-		t.Fatal("budget-only queue lost disk budget or received headroom", c)
+	if c := send(); !hasDiskBudgetWireFields(c) || c.Machine.HygieneCollection.DiskBudget[0].ForeignHeadroomBytes != 5 || c.Machine.HygieneCollection.DiskBudget[0].DecliningSeconds != 7 || c.Machine.HygieneCollection.DiskBudget[0].DeclineCause != "foreign_disk_growth" {
+		t.Fatal("disk telemetry lost headroom or decline fields", c)
 	}
-	version.Store(2)
-	send()
-	if c := send(); c.Machine.HygieneCollection.DiskBudget[0].ForeignHeadroomBytes != 5 || c.Machine.HygieneCollection.DiskBudget[0].DecliningSeconds != 0 || c.Machine.HygieneCollection.DiskBudget[0].DeclineCause != "" {
-		t.Fatal("headroom queue lost headroom or received decline fields", c)
-	}
-	version.Store(3)
-	send()
-	if c := send(); c.Machine.HygieneCollection.DiskBudget[0].DecliningSeconds != 7 || c.Machine.HygieneCollection.DiskBudget[0].DeclineCause != "foreign_disk_growth" {
-		t.Fatal("trend queue lost decline fields", c)
-	}
-	version.Store(0)
+	supportsDiskBudget.Store(false)
 	send() // Strict rejection; checkin retries with just the old collection fields.
 	fallback := <-reports
 	if fallback.Machine.HygieneCollection == nil || fallback.Machine.HygieneCollection.FileCache.Bytes != 99 || hasDiskBudgetWireFields(fallback) {

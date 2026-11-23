@@ -1403,10 +1403,6 @@ func printStatusDetail(s myce.Snapshot, full, detail bool) {
 		fmt.Println("No jobs yet.")
 	}
 }
-func logs(ctx context.Context, c myce.Client, id string, follow bool) error {
-	return logsAfter(ctx, c, id, follow, 0, os.Stdout)
-}
-
 func logsAfter(ctx context.Context, c myce.Client, id string, follow bool, after int64, out io.Writer) (err error) {
 	if after < 0 {
 		return errors.New("logs --after must be nonnegative")
