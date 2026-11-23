@@ -7,8 +7,8 @@ import (
 	"time"
 )
 
-// The queue's page-sized gap cannot absorb the observed inventory-to-launch
-// drop. Use this host's idle high water, without adding its reserve twice.
+// Leave room for another measured swing below the idle high water or the
+// last launch comparison. The worker still enforces its exact live reading.
 func TestMemoryProbeLaunchNearMiss(t *testing.T) {
 	for _, history := range []bool{true, false} {
 		t.Run(map[bool]string{true: "idle history", false: "prelaunch evidence"}[history], func(t *testing.T) {
@@ -17,6 +17,8 @@ func TestMemoryProbeLaunchNearMiss(t *testing.T) {
 			const launch = 16.929885864257812
 			const total = 33507364864.0 / (1 << 30)
 			const reserve = 4.0
+			const swing = available - launch
+			const nextLaunch = launch - swing/2
 			m.CapabilityProfile.SystemMemoryBytes = uint64(total * (1 << 30))
 			m.HostAvailableMemoryGB = available
 			m.MemoryObservation = &HostMemoryObservation{BaselineVersion: 1, Quiescent: true,
@@ -54,9 +56,11 @@ func TestMemoryProbeLaunchNearMiss(t *testing.T) {
 			if run == nil || run.ID != queued.ID || len(run.AllocatedDevices) != 1 {
 				t.Fatalf("cold qualified work did not get one card: %+v; %s", run, job(t, q, queued.ID).Reason)
 			}
-			if e := run.MemoryEnvelope; e.Refusal != "" || e.Basis != "exploratory" || e.HostGB > launch || e.HostGB < launch-2*minimumHostMemoryGB {
-				t.Fatalf("probe did not fit the measured launch room: %+v", e)
+			if e := run.MemoryEnvelope; e.Refusal != "" || e.Basis != "exploratory" || e.HostGB > nextLaunch || e.HostGB < launch-swing-2*minimumHostMemoryGB ||
+				e.SizingInputs == nil || e.SizingInputs.DriftGB < swing-2*minimumHostMemoryGB {
+				t.Fatalf("probe did not fit the measured launch room: %+v; inputs %+v", e, e.SizingInputs)
 			}
+			w.HostMemorySource = func(context.Context) (float64, error) { return nextLaunch, nil }
 			if err := localAttemptAdmission(w, nil, *run, nil); err != nil {
 				t.Fatalf("near-miss still refused at worker launch: %v", err)
 			}

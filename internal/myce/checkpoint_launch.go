@@ -43,6 +43,12 @@ func (s *workerStore) waitCheckpointPreparation(ctx context.Context) error {
 func (w Worker) startAssignedAttempt(ctx context.Context, s *workerStore, j Job) (p *process, startErr error) {
 	defer func() {
 		if startErr != nil {
+			// Both the local actor and the detached custodian use this entry.
+			// Persist the comparison even when a local probe returns it directly.
+			var recorded *recordedStartError
+			if errors.Is(startErr, errWorkerMemory) && !errors.As(startErr, &recorded) {
+				startErr = s.startFailureAt(j, launchRefused, startErr, w.Clock.Now())
+			}
 			startErr = &executionEvidenceError{startErr, safeExecutionEvidence(s.startExecutionEvidence(j), j.Attempt)}
 		}
 	}()

@@ -32,6 +32,10 @@ func TestAdmissionDiagnosticRetained(t *testing.T) {
 			m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 64
 			s := spec("experiment")
 			s.Needs.HostMemoryGB = 22
+			if subcheck == "live_host_ram" {
+				m = cpuMachine("admission", "admission-host", "cpu", 2, 64)
+				s = cpuSpec(1, 22)
+			}
 			submitted := submit(t, q, s)
 			j := check(t, q, m, nil).Job
 			if j == nil {
@@ -39,6 +43,7 @@ func TestAdmissionDiagnosticRetained(t *testing.T) {
 			}
 			w := recoveryWorker(t)
 			w.Machine, w.Clock = m, clock
+			w.CPUIsolationProbe = func(context.Context) error { return nil }
 			w.HostMemorySource = func(context.Context) (float64, error) { return 21.9, nil }
 			store, err := w.openStore()
 			if err != nil {
@@ -55,8 +60,9 @@ func TestAdmissionDiagnosticRetained(t *testing.T) {
 				}
 				refusal = e
 			} else if subcheck == "live_host_ram" {
-				// Exercise the first startContext RAM check: no process/custody.
-				p, e := w.startContext(context.Background(), store, *j)
+				// The detached custodian uses this entry and classifies the
+				// returned error directly. No actor rewrites the refusal first.
+				p, e := w.startAssignedAttempt(context.Background(), store, *j)
 				if p != nil {
 					t.Fatal("started without RAM")
 				}
@@ -70,9 +76,12 @@ func TestAdmissionDiagnosticRetained(t *testing.T) {
 			if !errors.Is(refusal, errWorkerMemory) {
 				t.Fatal("no memory refusal", refusal)
 			}
-			startErr := store.startFailure(*j, launchRefused, refusal)
+			startErr := refusal
+			if subcheck != "live_host_ram" {
+				startErr = store.startFailure(*j, launchRefused, refusal)
+			}
 			live := startFailureOutcome(result(j, false), startErr)
-			if live.ExecutionCause == nil || live.ExecutionCause.Admission == nil {
+			if !launchCapacityRefusal(live) || live.ExecutionCause.Admission == nil || live.ExecutionCause.Admission.Subcheck != subcheck {
 				t.Fatal("missing live detail", live)
 			}
 			data, err := os.ReadFile(filepath.Join(store.dir, store.state.LaunchOutcome))
