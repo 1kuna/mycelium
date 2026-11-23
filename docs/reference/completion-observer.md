@@ -1,4 +1,5 @@
-# Completion observer upgrade and recovery (next release)
+# Completion observer upgrade and recovery
+<a id="completion-observer-upgrade-and-recovery-next-release"></a>
 
 Managed observers adopt all armed registrations in their private user registry.
 From the release containing #1160, caller-started shared owners have their own

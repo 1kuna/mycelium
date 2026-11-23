@@ -1,4 +1,4 @@
-# Adaptive host observations (#809, next release)
+# Adaptive host observations
 
 Host probes protect the owner before maximizing background throughput. MY-34
 requires measurements from the running host; a canary on one machine does not

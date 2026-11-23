@@ -1,4 +1,4 @@
-# Capacity-aware API budgets (#804, next release)
+# Capacity-aware API budgets
 
 Budgets use the queue host's current memory and disk headroom, the requested
 payload's representation, measured control/projection cost, and negotiated peer

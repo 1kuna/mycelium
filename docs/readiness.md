@@ -1,4 +1,4 @@
-# Adaptive runtime readiness (#808, next release)
+# Adaptive runtime readiness
 
 Readiness observes the worker's own latency and forward progress. It has no
 automatic whole-load wall deadline. An advancing load can continue indefinitely.

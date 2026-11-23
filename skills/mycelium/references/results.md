@@ -74,6 +74,10 @@ the job stays failed. See
 
 ## Large outputs and release
 
+Start with `myce file holdings --project NAME` to identify each payload's
+owners and exact custody blockers. The [file holdings reference](https://github.com/1kuna/mycelium/blob/main/docs/files.md#see-and-release-project-file-holdings)
+covers retained versus stored bytes, abandoned claims and shared digests.
+
 For large outputs, publish to the project's own storage inside the job and
 return a small path/size/SHA-256 receipt. Verify downstream copies and finish
 every use before releasing only your own terminal results:

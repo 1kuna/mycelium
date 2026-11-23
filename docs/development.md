@@ -927,47 +927,10 @@ with `python3 scripts/test-gate-budget.py`.
 
 ## Automatic main full gates
 
-The [`main-full` workflow](../.github/workflows/main-full.yml) provides
-**coalesced, optional evidence of main commits**. It runs only on pushes
-to `main`, on `[self-hosted, mycelium-ci]`; there are no PR, manual-dispatch or
-schedule triggers. Its workflow/ref concurrency group keeps the running member
-and replaces an older pending member with the newest pending member
-(`cancel-in-progress: false`). Started runs are never cancelled to reduce backlog:
-runner cancellation cleanup previously killed shared helpers
-([#919](https://github.com/1kuna/mycelium/issues/919),
-[#1159](https://github.com/1kuna/mycelium/issues/1159)). See
-[GitHub's concurrency contract](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency).
-The deliberately disabled server-side workflow remains disabled; this change
-does not authorize enabling it or triggering a run.
-
-Each retained run checks out and tests its event's own commit (`github.sha`),
-so GitHub attaches the result to the same SHA that was tested. The summary
-records that tested SHA, always equal to the event SHA. The concurrency group
-retains the newest pending **arrival**, not necessarily the newest commit:
-GitHub does not guarantee event order. In the rare case that a delayed B event
-replaces pending C, B may be the last commit tested. The orchestrator explicitly
-accepts this because main CI is optional evidence; pre-merge exact-head proof
-remains the per-PR guarantee. Runs do not resolve or chase the current main tip.
-
-Zach, 2026-11-09, relayed by the orchestrator and received by the CI implementation
-worker: “yes skip CI runs i think. we should be running the tests where it makes
-sense not repetitive nonsense that just wastes compute for no gain.” The
-orchestrator's scope decision after review round 5 withdraws the review-imposed
-requirement to prove every intermediate main tree in CI. **Each PR's pre-merge
-exact-head local proof is the per-PR guarantee.** Main CI is optional additional
-evidence; coalesced intermediate commits need no separate main run. A failed or
-missing optional main run does not replace or waive pre-merge proof.
-
-[#751](https://github.com/1kuna/mycelium/issues/751) added two lightweight
-submitter-role runner services to the fleet pool. The T3 host and hosts in a
-production hold are excluded from new runner placement. Both use the same
-repository scope, `mycelium-ci` label, clean environment and low-priority
-settings described below, with separate installation and work directories. No
-full suite runs in a runner service; Mycelium admits and places all gate work.
-The concurrency group admits one workflow at a time. The submitter waits
-cheaply through `myce wait` and verifies accepted results rather than
-reporting success immediately after submission. The pre-coalescing capacity
-estimate is in #751 and Git history.
+The [`main-full` workflow](../.github/workflows/main-full.yml) runs on pushes
+to `main` and tests the triggering SHA. Its concurrency group keeps the
+running job and coalesces pending arrivals. Coverage of an intermediate SHA is
+optional under the [maintainer's CI direction](DECISIONS.md#my-41).
 
 ### Local merge proof
 
@@ -986,11 +949,7 @@ silently revert merged work, as the holds commit did to #1356 and #1357. For an
 intended revert, pass `--allow-reverts` and say so in the PR. The script then
 writes the would-be merge with `git merge-tree` (no working-tree change), checks
 it out at `.gate/merge-check`, and runs `go build ./...`, `go vet ./...` and a
-Linux `go vet ./...`. A conflict or a compile/vet failure means main would break
-as it did after #1359: rebase and rerun. It takes about 13 s warm and 35 s cold
-on the development host. Replaying today's 103 PR merges flagged only the holds
-PR and its intended repair; replaying #1359 onto its actual main fails to
-compile, as main did. The detector regression is
+Linux `go vet ./...`. If the merge conflicts or would break compilation or vet, rebase and rerun. The detector regression is
 `python3 scripts/test-gate-revert-check.py`.
 
 Gate tooling is development tooling: if its custody or guard state blocks work, reset it (stop the gate VM, clear the control-directory records) and fix the tool forward.
@@ -1271,40 +1230,12 @@ and explicit discrete-memory budgets. `TestConsolidatedSparkAbsentXPUHealthy`
 projects the shared probe through a worker and queue and requires healthy host
 status. These hermetic fixtures supplement the separate native preflight gate.
 
-## Comparable accepted work (slice 1, #107; MY-49)
+<a id="comparable-accepted-work-slice-1-107-my-49"></a>
 
-Mycelium keeps one record per kind of work: its last accepted duration and its
-accepted memory peak. There are no throughput curves, onboarding benchmarks,
-calibrated forecasts or batch plans (MY-49). Extension work opts into a
-comparable key per variant, using the same work key as its native baseline:
-
-```yaml
-variants:
-  - target: {os: linux, arch: amd64, platform: cpu}
-    # Existing needs, execution, check and baselines remain required.
-    references:
-      extension:example.stage:
-        input_shape: small-v1
-        unit: records
-        units: 100
-```
-
-`input_shape` is an opaque compatibility bucket and `unit` a generic unit name.
-Both use lowercase letters/digits, dots, underscores or hyphens, up to 64
-characters. Reference metadata never qualifies a variant: the exact
-native-baseline check still must pass, and a changed recipe/reference invalidates
-its digest and qualification. An ordinary job selects the extension and declares
-`workload: {input_shape: small-v1, units: 250}`. Plain commands and fan-out
-pieces are comparable by their own identity, without a reference.
-
-An accepted success records its queue-Clock duration from Started to completion,
-including cleanup/handoff but excluding preparation, replacing the previous
-one. A job's `timing.last_accepted_seconds` is frozen at Started; its actual
-appears only after accepted success. Failed, duplicate, stale, interrupted,
-stopped, resumed, release-pending and check attempts never update it, and an
-identity or qualification change during the attempt discards it. Placement
-prefers the eligible target with the shorter last accepted duration (MY-31);
-fake-clock tests are in `last_duration_test.go` and `completion_placement_test.go`.
+For comparable timing identity and current fields, see
+[measurement mechanisms](reference/measurement-mechanisms.md#comparable-observations)
+and [elapsed time](status.md#execution-elapsed-time-last-accepted-duration-and-application-progress).
+The placement tests are `last_duration_test.go` and `completion_placement_test.go`.
 
 ## Current worker protocol
 
@@ -1660,24 +1591,10 @@ measurements are in Git history (#857).
 
 ## Existing test-suite pruning record
 
-[#1086](https://github.com/1kuna/mycelium/issues/1086) owns the measured suite
-reduction and assertion-transfer ledger; [#1128](https://github.com/1kuna/mycelium/pull/1128)
-owns package-slot scheduling. Keep their current proof and failure-backed coverage
-on those records rather than starting a parallel pruning effort. A source-function
-count or measured idle slot is not wall-time/fleet-cost savings. Compare accepted
-before artifacts with the first combined after full, recording exact source,
-platform/toolchain, package overlap, wall and resource-cost coverage. Preserve
-original verdicts, retained incident/security assertions and unproved donors;
-no runtime target by itself waives the existing gates.
-
-Do not delete or consolidate a test merely to reach a number. For every removed
-or replaced test, retain the duplicate/obsolete reason, any incident/security
-behavior, named surviving assertions and validation disposition. Keep uncertain
-donors. Retaining an operational time budget requires a measured cost rationale
-and its source authority. Report actual before/after wall and fleet resource
-cost, with missing measurements explicit. A final count or passing full alone
-does not prove retained behavior. The withdrawn function-count target, the
-historical 21m30s goal and dated inventories are on #1086.
+Apply [MY-53](DECISIONS.md#my-53) and record which surviving checks preserve
+each removed test's contract. [#1086](https://github.com/1kuna/mycelium/issues/1086)
+contains the prior pruning evidence. Measure wall time and resource cost when
+claiming performance gains.
 
 ### Fault evidence cost and native qualification
 

@@ -1817,7 +1817,7 @@ with `myce host status HOST` / `myce host budget`). It is absent while the
 host's RAM reading is unknown. Text: `host H RAM capacity C, charged X, room R
 GiB`; the page shows a Host RAM row.
 
-Deprecated in status (still emitted this release; removed next release, MY-42):
+Use `host_memory` in preference to these legacy status fields:
 `free_host_memory_gb` (room, floored at zero), `host_memory_in_use_gb`
 (charged), `host_available_memory_gb` (the worker's live reading, which stays
 on check-in), `effective_host_memory_budget_gb` and `memory_allowance_bytes`
@@ -2075,13 +2075,10 @@ changed attempt or identity. It is history, never a forecast, remaining time or
 deadline, and it has no age limit; the next accepted run replaces it. Status
 shows `last accepted duration Ns` or `unknown`.
 
-Retired with the curves (MY-49), for the adjacent release only (MY-42):
-`timing.predicted_seconds` mirrors `last_accepted_seconds` and is then removed.
-Gone now: `runtime.remaining_seconds`, `remaining_work_unknown`, `source`,
-`unit`, `samples`, `history_age_seconds`, and `timing.service_estimate`,
-`samples`, `comparability`, `uncertainty`, `history_source`,
-`history_recorded_at` and `repeated_key`. Consumers that read them see them
-absent.
+For compatibility, `timing.predicted_seconds` mirrors the last accepted
+duration. `runtime.remaining_work_unknown` describes forecast coverage and
+`runtime.samples` counts accepted history. Use `last_accepted_seconds` as
+elapsed history.
 
 Placement uses the same record (MY-31): among already eligible targets, the one
 whose last accepted run of this kind of work was shorter goes first, and the
@@ -2121,17 +2118,14 @@ and covers all stages.
 Zero/zero is allowed. Unit is a single generic name of at most 64 characters
 using the extension-name syntax (lowercase letters, digits, `_`, `-`, `.`,
 starting with a letter or digit).
-The worker reads only regular files up to 4096 bytes. Invalid, partial, oversized
-or missing reports retain the last valid report and do not refresh its age.
-File modification age is measured by the worker; queue time since receipt adds
-to it, so worker and queue clocks need not agree. `application_progress` contains
-counts, unit, exact attempt/machine/session, receipt time, age and `stale`.
-More than 30 seconds without a file update marks it stale; this is a display
-threshold and never stops work. Rewrite even unchanged counts to indicate a
-live reporter. Worker restart preserves file age. Queue restart preserves receipt
-age. New attempts clear reports; old attempts/sessions cannot replace them.
-Delayed older file evidence and a backwards stage index cannot replace newer
-evidence within the same attempt either.
+The worker reads regular files within its current diagnostic-memory grant.
+Invalid, partial, oversized or missing files leave the last valid report aging
+in place. The queue adds receipt age to the worker-observed modification age.
+`application_progress` binds counts and age to the exact attempt and session.
+`cadence_seconds` is the longest observed interval between ordered source
+updates. A report is stale once its age exceeds a known cadence. Without a
+cadence the age is visible and staleness is unknown. Fresh atomic reports with
+unchanged counts can establish liveness. A new attempt clears the report.
 Worker-observed `updated_at` is the local file modification time, used only to
 order reports within the same attempt/session; it is not a queue-clock time or
 an application-authored timestamp. Repeated equal timestamps do not renew age.

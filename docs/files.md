@@ -677,6 +677,16 @@ are not native SMB durability or sustained write/flush/close qualification.
 
 ## Diagnosing input staging
 
+Workers expose acquired input and model paths in the attempt-local JSON file
+`MYCE_BINDINGS_FILE`, with maps `inputs` and `models` keyed by declared name.
+Main and sidecars share it. If the combined legacy `MYCE_INPUT_*` and
+`MYCE_MODEL_*` environment entries exceed 32 KiB, the manifest carries the
+complete map and the worker omits those individual variables. The manifest
+lives for the attempt. An `exec_argument_limit` refusal is terminal. Move
+oversized arguments or environment values into declared files and use a new
+key for the corrected spec.
+
+
 Before the command starts, staging failures appear on the exact attempt in
 `myce status JOB_ID`, job GET `execution_cause.staging`, and `myce logs JOB_ID`
 (unless `logs: none`). The detail names the declared input and SHA-256 blob,
@@ -856,11 +866,11 @@ Extension commands receive the same environment variables; their NAS output and
 checkpoint contracts are unchanged. Extension execution must be native.
 
 `spec check --resolve` evaluates target eligibility and labels worker NAS reads
-as unverified. From the next release, optional `--inspect-nas` requests cached,
+as unverified. Optional `--inspect-nas` requests cached,
 authenticated worker existence evidence; repeat after worker heartbeats.
 `pending` or `unverified` remains unknown. `present` does not verify bytes,
 and `missing` flags a wrong checkpoint-root-relative path before submission.
-From the next release, samples expire with their worker session freshness fence
+Samples expire with their worker session freshness fence
 ([request budgets](request-budgets.md)); upgraded workers are required. A path relative to the NAS mount can therefore
 resolve successfully and still be missing beneath `--checkpoint-root`. Import
 such a file with profile `local:` or `myce file put`, then omit `nas` and use its

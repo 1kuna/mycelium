@@ -3,9 +3,8 @@
 `mycelium-host-telemetry-v1` is the versioned, private JSONL artifact for a
 benchmark's time-aligned host observations. Validate **each line** against
 [the host telemetry schema](schemas/host-telemetry-v1.schema.json). The local
-`myce telemetry capture` sampler is available in candidate builds containing
-this change; it is not implied by an earlier installed release. It neither
-contacts the queue nor reads credentials, the database, worker state or spool.
+`myce telemetry capture` sampler runs without contacting the queue or reading
+credentials, the database, worker state or spool.
 It does not change services, settings or admission policy.
 
 ## Attach to each baseline and candidate run
@@ -31,7 +30,7 @@ myce telemetry capture --run-id baseline-r1 --host-ref host-a \
 On worker-only hosts, omit `--queue-pid`. Queue RSS is then explicitly missing
 with `not_configured`, without probing PID zero or inventing zero RSS. Worker
 identity fencing, host/device probes and worker-tree attribution remain active.
-This is included in r6.19 (`7f10215c`). If a capture appears to require a queue
+If a capture appears to require a queue
 PID, retain the exact invocation, error and `version` output from the same
 executable path used for capture. A version from another CLI or a refusal from
 an earlier release does not establish which sampler ran.

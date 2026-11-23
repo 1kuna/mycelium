@@ -1,6 +1,6 @@
 # Wait and status
 
-Detail for "Long waits" in [the guide](../SKILL.md). A field your installed
+Detail for [wait and recovery](../SKILL.md#wait-inspect-and-recover). A field your installed
 queue or worker doesn't return is unknown, not false.
 
 ## Waiting
@@ -48,8 +48,7 @@ project and reason with their `ids`. Full job objects need
   host RAM is `host_memory`: `capacity_gb`, `charged_gb`, `room_gb` (room =
   capacity − charged; negative is debt). `free_host_memory_gb`,
   `host_memory_in_use_gb`, `host_available_memory_gb`,
-  `effective_host_memory_budget_gb` and `memory_allowance_bytes` are deprecated
-  and leave status next release. Replaced worker identities appear only in
+  `effective_host_memory_budget_gb` and `memory_allowance_bytes` are legacy fields. Replaced worker identities appear only in
   `--history`.
 - `myce status --jobs all --limit N --before CURSOR --json` pages history;
   Python `client.list()` walks the pages.
@@ -73,9 +72,8 @@ key.
 
 `myce efficiency` gives one read of reservation versus measured use, blocker
 wait totals and wasted attempts; missing samples are unknown, not zero.
-`myce efficiency --project NAME` shows only your project's waits, the queue
-hours your host lists and targets cost, typed sizing against learned peaks,
-and one advice line per item. See
+`myce efficiency --project NAME` shows only your project's waits, the observed waits for named-host lists and platform targets, typed sizing against learned peaks,
+and one advice line per item. An observed wait alone cannot establish the cost of a restriction. See
 [queue efficiency](https://github.com/1kuna/mycelium/blob/main/docs/status.md).
 
 ## Host status

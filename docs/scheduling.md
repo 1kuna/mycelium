@@ -38,9 +38,9 @@ Declared independent pieces are a current contract in the [spec](design-proposal
 and [jobs reference](jobs.md). Placement keeps one measured record per kind of
 work, its last accepted duration and peak (MY-49); there are no throughput
 curves, benchmarks, completion forecasts or batch plans.
-Automatic same-tier scarce-host yield and arbitrary workflow orchestration
-remain pending in [#324](https://github.com/1kuna/mycelium/issues/324) and
-[#107](https://github.com/1kuna/mycelium/issues/107). A job no single card holds
+[Scarce-host yield](design-proposal.md#scarce-host-yield) can requeue portable
+work for a hard requirement that only one physical host can satisfy. General
+workflow orchestration remains outside that mechanism. A job no single card holds
 gets several cards of one host from its `memory_gb`
 ([cards per job](design-proposal.md#inventory-and-resource-ownership)); cross-machine
 gang execution remains deferred. Portability advice does not implement migration
@@ -389,7 +389,7 @@ zero-based `index`, `selector` and `revision`, plus the current policy record on
 the snapshot. CLI and browser status show the tier, selector and revision.
 Placement, preparation and existing reclamation use one tier comparator.
 
-Placement, status and simulation use the same admission planner and comparator.
+Placement and status use the same admission planner and comparator.
 Higher tiers can reclaim batch attempts, native sidecar groups, model calls and
 loads, idle engines (including pins), and environment builds. Each exact planned
 stop records `priority_preemption`, demand/victim identity and policy revision.
@@ -398,8 +398,8 @@ losses and checkpoint progress. A successful completion wins over preemption;
 cancellation wins over both. Independent exit/OOM still fails under the shared
 outcome classifier. A deadline authorizes stopping, never assumes cleanup.
 
-Resumable victims get ten seconds by default, non-resumable commands stop
-immediately. Deadline demand preserves non-resumable commands and keeps the
+Accelerator victims and resumable CPU commands get ten seconds by default.
+Non-resumable CPU victims stop immediately. Deadline demand preserves non-resumable commands and keeps the
 120-second grace for resumable commands. `queue --preemption-stop-grace`
 configures the other priority-stop interval; the legacy
 `--production-stop-grace` flag remains an alias. After two displacements, resumed
@@ -533,7 +533,7 @@ The authenticated `GET /api/usage?since=168h` API returns project GPU-hours,
 machine busy percent, idle hours, pinned reservation hours, daily totals,
 preemptions, and production submission-to-start acknowledgement seconds.
 The command always includes machine occupancy to answer whether pooling fills
-idle time. Durations must be positive and no greater than 90 days.
+idle time. The duration must be positive and representable.
 
 Usage is **observed allocation time**, not hardware compute utilization. A started
 command or assigned model call makes its device busy. Simultaneous projects share
@@ -553,10 +553,8 @@ estimate. Pinned memory is a subset of used memory, not extra consumption.
 A machine worker reports a device vector; count each physical device once and
 shared CPU/RAM once per host. Legacy per-device reports are transitional only.
 
-A minute can contain multiple workload rows. After seven days, samples are
-combined into hourly rows retaining dimensions and sums. Retention maintenance
-runs hourly and removes data older than 90 days. Queries proportionally estimate
-partial boundary buckets; daily charts use UTC days and only actual samples.
+The queue retains exact accounting without age-based downsampling or expiry.
+Queries proportionally estimate partial boundary buckets; daily charts use UTC days and only actual samples.
 Gaps without heartbeat coverage (including restart recovery and network loss)
 are unknown time, not idle time. The busy denominator includes only observed
 online intervals. Consequently, usage reports cannot claim pooling efficiency
@@ -583,7 +581,7 @@ Finished durations appear when start and finish are known.
 
 ## Live portability advice
 
-From the next release, plain-command reports include `authored_eligibility`,
+Plain-command reports include `authored_eligibility`,
 `environment_coverage` and `parity` per target. Resolve includes the same report
 under `portability`. Rows come from observed inventory, authored exact targets
 and the selected immutable Pixi lock's package keys, including absent targets.
@@ -669,7 +667,7 @@ device. Keep the supporting evidence in the project's own records. Free-form
 reason text is omitted from advice output.
 
 `myce run` for adapters/profiles and `myce submit` print a non-blocking advisory
-for pins without a declared matching reason. From the next release, plain profiles and job YAML also accept
+for pins without a declared matching reason. Plain profiles and job YAML also accept
 `requirement_reasons`; submission retains the map with the job and private receipt.
 Status/job GET show sanitized constraint, authored/missing state and source field,
 while omitting raw text. Keep intentional exception evidence in authored metadata. `myce portability --adapter …` uses the same

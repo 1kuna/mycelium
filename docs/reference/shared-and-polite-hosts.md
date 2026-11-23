@@ -14,7 +14,7 @@ No GPU, power, fan, sleep or screen settings are changed. No input is recorded.
 myce join --daily-use --max-jobs 1
 ```
 
-From the next release, daily-use hyphae take work after **locally measured owner idle recovery**, on confirmed external
+Daily-use hyphae take work after **locally measured owner idle recovery**, on confirmed external
 power when battery-equipped, with a known safe heat signal. Batteryless desktops
 need a confirmed batteryless power report. Plugging in never overrides owner
 activity. An unknown required signal means waiting with a reason in CLI/HTML

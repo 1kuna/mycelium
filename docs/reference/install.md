@@ -51,7 +51,7 @@ restart and verify before resuming admission, following the
 [file-store retirement procedure](file-store.md#production-file-store-reserve).
 Run a normal install afterward if the binary also needs upgrading.
 
-From the next release (#1081), Linux installer stop/start/restart waits read the
+Linux installer stop/start/restart waits read the
 unit's effective `TimeoutStopUSec` and `TimeoutStartUSec` from systemd, including
 drop-ins. Starts/restarts allow both a pending stop and the start phase, plus two
 measured manager round trips for dispatch/completion. Zero/infinite manager

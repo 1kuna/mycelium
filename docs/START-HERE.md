@@ -18,21 +18,9 @@ A few words you'll see in commands and output:
 
 ## 1. Try it on one laptop
 
-With Git, [Go](https://go.dev/dl/) 1.25.6+ and a Unix shell on macOS or Linux
-(the first build downloads Go modules, so it needs internet access):
-
-```sh
-git clone https://github.com/1kuna/mycelium.git
-cd mycelium
-go build -o myce ./cmd/myce
-./myce dev -- sh examples/quickstart.sh
-cat quickstart-result/result.txt
-```
-
-The script runs a CPU command that prints `hello from CPU`, then a job on a
-pretend GPU, waits for it to succeed and downloads its checked result. The last
-line prints `hello from Mycelium`. Both jobs really run through the queue and
-worker; only the GPU is simulated, so you need no GPU or drivers.
+Follow the [README quick start](../README.md#quick-start) to build `myce` and
+run a real CPU command and a command on fake GPU inventory. Continue from
+that checkout.
 
 `./myce dev -- COMMAND` starts a temporary queue with two pretend machines on a
 free local port, points COMMAND at it (ignoring any other Mycelium settings),
@@ -92,8 +80,7 @@ set -a; . ./mycelium.env; set +a
 ```
 
 `join` connects to the queue named in `MYCE_QUEUE` and waits for work. Add
-`--daily-use` on a computer someone uses, so it only takes work after five idle
-minutes on external power. To have the hub run jobs too, start another
+`--daily-use` on a computer someone uses, so it only takes work after measured owner idle recovery on external power and with safe heat. To have the hub run jobs too, start another
 `./myce join --name hub` there, in a second terminal and its own folder, after
 loading `mycelium.env` the same way.
 
@@ -203,7 +190,7 @@ A job can run more than once: when a machine disappears, or when more important
 work needs its machine. Its class decides how often: `production` work is
 never stopped for a lower class and can stop `experiment` work (the default).
 Choose the class before you submit; see
-[classes and preemption](../skills/mycelium/references/waiting.md#classes-and-preemption). Set `resumable: true` only for commands that save
+[classes and preemption](../skills/mycelium/references/waiting.md#classes-and-preemption). Set `advanced: {resumable: true}` only for commands that save
 [checkpoints](files.md#resumable-jobs) and can pick up from them. Cancelling
 asks the job to stop. `cancelled` means it won't run again, but it doesn't mean
 the machine has confirmed its processes are gone; if a machine dropped out, it
