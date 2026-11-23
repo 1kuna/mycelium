@@ -37,7 +37,7 @@ A recipe key identifies content, Python/backend/build settings and platform,
 not the library's physical mount path. Cache readiness is separate from source
 visibility, runtime coverage and output qualification.
 
-From the next release, each platform's `lock_coverage` reports the selected Pixi
+Each platform's `lock_coverage` reports the selected Pixi
 lock environment, its OS/architecture/backend `targets`, and whether unmapped
 package-manager platforms remain. Missing, malformed or unsupported metadata
 reports `unknown`; uv and binary recipes do not imply an OS list. Readback uses

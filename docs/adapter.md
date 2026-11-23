@@ -1180,7 +1180,7 @@ With an authored `references` entry, a successful solo auto check can seed
 the memory envelope of later work with the same frozen variant, work type and
 input shape until that work has accepted peaks of its own, which then replace
 the seed. Later jobs declare `workload: {input_shape: sample-v1, units: 10}`.
-Checks teach no duration, and the peak stays usable for 30 days from the check.
+Checks teach memory rather than duration. Reuse depends on matching evidence identity and qualification.
 Failed or ceiling-constrained peaks
 cannot seed an estimate. The variant's auto mode applies when the caller omits
 `needs.memory`; an explicit caller mode takes precedence. Numeric variants keep

@@ -434,7 +434,7 @@ reporting infrastructure interruptions. Installed shutdown also stops
 non-resumable CPU attempts; an interactive `join` still lets those finish.
 After 45 seconds systemd retains a final group-wide KILL, including delegated
 attempt cgroups. Payload failures observed before worker stop remain failures.
-From the next release (#1081), installed TERM cancels GPU inventory, host
+Installed TERM cancels GPU inventory, host
 observations and pending queue I/O immediately. After local attempt cleanup is
 durable, exit does not require a queue reply or a remote model plan; unacknowledged
 results retain their exact attempt identity for startup replay. Interactive leave
@@ -1420,16 +1420,7 @@ live policy; a different startup file is refused, so edit host policy with
 
 ## Queue history retention
 
-Maintenance retires terminal job rows after 168 hours (or longer configured
-result/log retention), once all attempts are released, files have expired and log cleanup is
-complete. Pending file cleanup transfers to durable per-hash ownership. Each tick removes at most 64 jobs. Keyed replay answers remain for
-30 days after removal, followed by permanent expired-key digests. Learned
-work-curve, memory and storage observations stay until every one of their
-timestamps is older than 30 days, the age past which no reader uses them
-(#597); each tick then deletes at most 64 of each. Points forbidden after an
-OOM and constrained memory peaks stay at any age, because sweeps and first-run
-bounds still read them. Expired jobs disappear from listing and ID lookup. See the
-[retention contract](design-proposal.md#submission-identity-and-cancellation-80).
+See [retention](retention.md#job-records) for expiry eligibility, custody, retained summaries and keyed replay.
 
 Deleted SQLite pages are reused. Retention bounds full history by age, not total
 bytes: permanent key digests and unresolved custody still accumulate. To reclaim
@@ -1790,7 +1781,7 @@ Older links to these anchors land here; each entry points to the section's curre
 - <a id="standard-systemd-policy"></a>[Standard systemd policy](reference/queue-io.md#standard-systemd-policy)
 - <a id="laptop-experiment-and-native-acceptance"></a>[Laptop experiment and native acceptance](reference/queue-io.md#laptop-experiment-and-native-acceptance)
 - <a id="durable-model-engine-interval-history-663"></a>[Durable model-engine interval history (#663)](reference/models.md#durable-model-engine-interval-history-663)
-- <a id="completion-observer-upgrade-and-recovery-next-release"></a>[Completion observer upgrade and recovery (next release)](reference/completion-observer.md#completion-observer-upgrade-and-recovery-next-release)
+- <a id="completion-observer-upgrade-and-recovery-next-release"></a>[Completion observer upgrade and recovery](reference/completion-observer.md#completion-observer-upgrade-and-recovery-next-release)
 - <a id="completion-and-health-delivery-acceptance"></a>[Completion and health delivery acceptance](reference/completion-observer.md#completion-and-health-delivery-acceptance)
 
 ### Candidate version diagnostics

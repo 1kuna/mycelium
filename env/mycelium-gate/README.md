@@ -7,12 +7,10 @@ its C compiler/sysroot, because the gate runs Go's race detector. Bash remains a
 host prerequisite; macOS also needs its native Xcode/Command Line Tools SDK for
 the gate's CGO build.
 
-## Registration at the next queue deploy
+## Catalog registration
 
-Copy `pixi.toml` and `pixi.lock` into `mycelium-gate/` beside the existing queue
-catalog. Verify their SHA-256 hashes against the delivery receipt, then add this
-entry under the existing `environments` mapping, preserving all three existing
-entries:
+Copy `pixi.toml` and `pixi.lock` into `mycelium-gate/` beside the queue catalog. Verify the lock and manifest against the approved
+source. Add this entry to the existing `environments` mapping.
 
 ```yaml
 environments:

@@ -1,12 +1,9 @@
 # Checkpoint metadata access
 
-**Job status and progress come only from the machine running the job. The NAS
-is never read for status.** This implements the orchestrator's interpretation of
-Zach's question, relayed and received by the implementation worker on 2026-11-15
-(#1670): “shouldnt status come from the machine it runs on? not just constantly
-streamed to the nas for no reason?” The queue consumes the worker's check-in;
-process/liveness observations and checkpoint publication signals are local to
-that attempt.
+Job status and progress come from the executing worker's local observations
+and publication signals. Status reads never inspect the NAS. See
+[the maintainer's source](../DECISIONS.md#my-43) and
+[#1670](https://github.com/1kuna/mycelium/issues/1670).
 
 ## Save notification
 

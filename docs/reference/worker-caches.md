@@ -3,7 +3,8 @@
 Worker scratch retention, the file and shared-input cache, the environment cache,
 and how to verify the loaded environment catalog.
 
-## Shared filesystem budget (#811, next release)
+## Shared filesystem budget
+<a id="shared-filesystem-budget-811-next-release"></a>
 
 Each worker shares one physical-filesystem ledger across model copies and
 snapshots, private-file/shared-input caches, prepared environments, shared

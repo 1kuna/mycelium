@@ -13,7 +13,8 @@ files from eviction and keep recoverable copies. Use `model sync` for pre-copy;
 partial transfers and pins persist through restart. See [models](../services.md)
 and [files](../files.md) for transfer, retention and cache limits.
 
-### Local acquisition root (#1248, next release)
+### Local acquisition root
+<a id="local-acquisition-root-1248-next-release"></a>
 
 The supported installer accepts a selected local model source/acquisition root:
 

@@ -1,8 +1,6 @@
 # Decisions
 
-Owner: project maintainer (Zach). [The approved design](design-proposal.md) is the only product spec; this file records Zach's rulings as twelve principles. Each section states the current rule first, then Zach's words and dates as the source. Old MY numbers keep their anchors on the section that now holds them; the [index](#old-numbers) maps every number. Consolidated 2026-11-11 from MY-01 to MY-45 without changing any ruling. Agent defaults are kept apart and labelled. Exact source records, host details and deployment receipts stay in private local history; dates identify the original rulings, not new qualification.
-
-The goal behind all of them, as relayed from Zach on 2026-11-11 when asking for this consolidation (paraphrase, not a quote): one general cluster in which the compute of any of Zach's machines is simply given to whatever work needs it.
+The [approved design](design-proposal.md) is the product spec. Current maintainer rulings appear first, with dated sources and stable MY anchors. Agent decisions are labeled. Earlier wording and release records are in git history.
 
 ## Current rulings
 
@@ -13,7 +11,6 @@ The goal behind all of them, as relayed from Zach on 2026-11-11 when asking for 
 
 - One mycelium is the cluster; a hypha is one machine, and its CPU, RAM and accelerators are components. A GPU is not a hypha, and a worker is not a separate mycelium. (MY-06)
 - Mycelium is an open, general compute platform: general compute and third-party extensions across machine types, including serving, joining and daily-use participation. Any one consumer is an example, never the product definition. Check the vision before cutting a feature. (MY-11)
-- Destination, confirmed 2026-11-12: any job an agent submits runs on every machine its software can run on, with no per-machine setup. Mycelium picks the machine, spreads independent pieces across whatever is free, and moves lower-priority work off a machine when a job arrives that only that machine can run. The agent does only light preparation: an environment locked for every platform, and a device chosen at run time. Only a hard software limit names a machine type. Idle machines work whenever any project has work they could run. This restates MY-11 and MY-26 and adds no new rule. (MY-11, MY-26)
 - Mycelium creates no work of its own. It is a queue that keeps submitted work running. The agents that submit work keep the queue full, at the priority levels they choose, and results go back to the agent that submitted the job. The goal is a fully loaded queue that runs jobs on the machines effectively all the time. (MY-52)
 - Arrival is measured by three numbers he agreed to: idle hours while runnable work waited (about zero); jobs that name a machine without a real software reason (zero); and the share of the non-production week the GPUs are busy (rising; no fixed target). Where each is read is settled in #1493. (MY-52)
 - Bounds the maintainer agreed to (proposed by an advisory thread, 2026-11-12): a queue that places whole jobs and pieces is the right shape, with no switch to an external scheduler. More machines speed up divisible work, not one indivisible job. One job spanning several machines stays parked (#69). Software built for one accelerator is not translated to another; a single-platform program is a hard limit to state. Roadmap: [#1485](https://github.com/1kuna/mycelium/issues/1485).
@@ -23,7 +20,12 @@ The goal behind all of them, as relayed from Zach on 2026-11-11 when asking for 
 
 <details><summary>Sources</summary>
 
-MY-06 terminology ruling, 2026-10-21. MY-11 scope ruling, 2026-10-19 (#16, #17, #22, #69); it superseded job-only simplification. MY-01 general-not-consumer-specific ruling, 2026-10-23. Destination confirmation, 2026-11-12, to the advisory thread's restatement: “yes that's exactly what i want. you've got the idea right.” In his words: “if any of my agents wants to run a job then they should be able to just throw it in the queue and mycelium takes it, puts it on the machine that makes the most sense for it, and runs it” and “i just don't want there to need to be a ton of pre-configuration by the user and i want it to just be possible that the agent does some light preconfig with the job before they throw it out to make it fully fleet compatible unless it's literally impossible”. He also said the dual-GPU host's GPUs sit idle about 95% of the week, and he wants that time used for training, fine-tuning and local model testing. Relayed by the advisory thread; received by the Mycelium orchestrator. MY-52, 2026-11-12, maintainer, answering #1492 and #1493 through the advisory thread: “mycelium isn't trying to create new work out of thin air. it's just a queue that keeps stuff running. agents submit jobs ... set their jobs at specific priority levels ... whenever a job finishes the results are sent to the agent that started them”, with the goal of “a full loaded queue that runs jobs on my machines effectively 24/7”, and “sure to those 3 yeah” to the three arrival numbers. He called this “just an idea”: a webhook per agent that wakes it on Mycelium events, instead of polling. How contested idle capacity is shared between projects is not answered. MY-29, 2026-11-01, policy intent (not implemented learning or holds). MY-13 runtime ruling, 2026-10-19: Docker is optional; installation and normal operation must work without it, native processes, environments and sidecars are the default, and managed Docker commands remain an explicit supported option for a concrete need. Retirement of that option, 2026-11-12: orchestrator decision under MY-49, not a maintainer ruling.
+- MY-06 terminology ruling, 2026-10-21.
+- MY-11 scope ruling, 2026-10-19 (#16, #17, #22, #69).
+- MY-01 general-not-consumer-specific ruling, 2026-10-23. Destination confirmation, 2026-11-12, to the advisory thread's restatement: “yes that's exactly what i want. you've got the idea right.” In his words: “if any of my agents wants to run a job then they should be able to just throw it in the queue and mycelium takes it, puts it on the machine that makes the most sense for it, and runs it” and “i just don't want there to need to be a ton of pre-configuration by the user and i want it to just be possible that the agent does some light preconfig with the job before they throw it out to make it fully fleet compatible unless it's literally impossible”.
+- MY-52, 2026-11-12, maintainer, answering #1492 and #1493 through the advisory thread: “mycelium isn't trying to create new work out of thin air. it's just a queue that keeps stuff running. agents submit jobs ... set their jobs at specific priority levels ... whenever a job finishes the results are sent to the agent that started them”, with the goal of “a full loaded queue that runs jobs on my machines effectively 24/7”, and “sure to those 3 yeah” to the three arrival numbers.
+- MY-29 policy intent, 2026-11-01.
+- MY-13 runtime ruling, 2026-10-19: Docker is optional; installation and normal operation must work without it, native processes, environments and sidecars are the default, and managed Docker commands remain an explicit supported option for a concrete need. Retirement of that option, 2026-11-12: orchestrator decision under MY-49, not a maintainer ruling.
 
 </details>
 
@@ -41,7 +43,13 @@ MY-06 terminology ruling, 2026-10-21. MY-11 scope ruling, 2026-10-19 (#16, #17, 
 
 <details><summary>Sources</summary>
 
-MY-54, 2026-11-12, maintainer, answering the orchestrator's question about two 2026-10-14 preferences: “don't let gpu work fall back to cpu by default but i think we should make a config for the job that allows agents to say they're ok with that, even though i think it's likely not gonna be something anyone cares about. we should have a section in the job ledger called "advanced" where it picks good defaults but allows changes if necessary. there should be the major things they care about then the advanced shit that mostly doesnt change unless necessary”. The second preference, no lossy model conversion by default, was not answered. Agent default (orchestrator, not his words): it stays off by default, as an advanced opt-in, under the same pattern. Received by the Mycelium orchestrator. MY-17 vision statement, 2026-10-25 (#192). MY-22, 2026-10-27: “if you recommend merging them then i'm fine with it”. Agent reading (orchestrator, 2026-11-12): MY-44 covers project-carried lock files (#1163, #1297); operator registration is not required. MY-12 extension ruling, 2026-10-19. MY-27, 2026-10-31: “yes i like the variants model. whatever can simplify mycelium to handle all the work so agents don’t necessarily need to. and so things can run on as many machines as possible.” MY-26, 2026-10-29; records intent, not implemented migration or new platforms ([implementation proposal](https://github.com/1kuna/mycelium/blob/12bb6b7826153c38d356555b711c9ba4a11f856a/docs/design-run-anywhere.md)). Maintainer, orchestrator thread, 2026-11-20: “i just want to strive towards the best overall interoperability between platforms so the least amount of effort needs to go into compatibility as possible”. Follow-up in the same thread: “least amount of effort for compatibility per job i meant, but i think you got the idea”. This restates MY-26 and MY-27 and adds no new rule. Wording received by the Mycelium orchestrator. MY-20 vision ruling, 2026-10-25 (#194).
+- MY-54, 2026-11-12, maintainer, answering the orchestrator's question about two 2026-10-14 preferences: “don't let gpu work fall back to cpu by default but i think we should make a config for the job that allows agents to say they're ok with that, even though i think it's likely not gonna be something anyone cares about. we should have a section in the job ledger called "advanced" where it picks good defaults but allows changes if necessary. there should be the major things they care about then the advanced shit that mostly doesnt change unless necessary”. Agent default: lossy model conversion requires an explicit opt-in.
+- MY-17 vision statement, 2026-10-25 (#192).
+- MY-22, 2026-10-27: “if you recommend merging them then i'm fine with it”. Agent reading (orchestrator, 2026-11-12): MY-44 covers project-carried lock files (#1163, #1297); operator registration is not required.
+- MY-12 extension ruling, 2026-10-19.
+- MY-27, 2026-10-31: “yes i like the variants model. whatever can simplify mycelium to handle all the work so agents don’t necessarily need to. and so things can run on as many machines as possible.”
+- MY-26, 2026-10-29; records intent, not implemented migration or new platforms ([implementation proposal](https://github.com/1kuna/mycelium/blob/12bb6b7826153c38d356555b711c9ba4a11f856a/docs/design-run-anywhere.md)). Maintainer, orchestrator thread, 2026-11-20: “i just want to strive towards the best overall interoperability between platforms so the least amount of effort needs to go into compatibility as possible”. Follow-up in the same thread: “least amount of effort for compatibility per job i meant, but i think you got the idea”.
+- MY-20 vision ruling, 2026-10-25 (#194).
 
 </details>
 
@@ -54,15 +62,21 @@ MY-54, 2026-11-12, maintainer, answering the orchestrator's question about two 2
 - Place work on the least valuable machine that fits: work needing only CPU and time, such as CI, goes to an idle general-purpose machine; scarce machines (large accelerator memory, a unique accelerator) stay free for work only they can do. (MY-18) When queued work can run only on a scarce machine, portable work occupying it moves to another compatible, qualified host where possible through supported checkpoint/requeue; experiment-tier work may be preempted under its restart contract. Durable progress is preserved; stopping a process or losing a host is not migration. (MY-26)
 - Use measured per-work-type capability to place and split compatible work across the shared pool. Where the owner wants speed, split each pipeline stage across the machines that can run it, in parallel. A machine or variant joins a split only after its outputs match the reference within the owner's accuracy criteria; agents resolve discrepancies before splitting is accepted. Multi-machine/gang execution stays deferred until its design and qualification land. The vision is not evidence that every workload or mode is implemented. (MY-07, MY-19)
 - A multi-GPU host is one machine. Mycelium uses its GPUs separately (one job per card, experiments filling idle cards) or together (one job sharded across cards), whichever benefits the running projects most. This supersedes the earlier one-GPU-per-execution scope limit and, where it conflicts, the approved design's device-selection scope (an implementation task). (MY-30)
-- Production priority uses the existing priority tiers and preemption, not host-wide exclusion, blackout holds or orchestrator-negotiated special cases. Existing consumer customer-window records remain unless Zach changes them. (MY-30)
+- Production priority uses the existing priority tiers and preemption, not host-wide exclusion, blackout holds or orchestrator-negotiated special cases. Existing consumer customer-window records remain unless the maintainer changes them. (MY-30)
 - No machine is hard-reserved. Production priority on a GPU host covers only its GPU, never the whole machine, so its CPU and memory keep serving other work. (MY-50)
-- When production needs a machine's memory, CPU or device, Mycelium pauses lower-priority work there or moves it to another machine, so production does not wait on co-tenants. Other work still uses that capacity until production needs it (MY-50). Interpretation (the receiving orchestrator's, not his words): resumable work is paused by checkpoint and requeue, keeping its progress. Not answered (asked 2026-11-16): whether running non-resumable lower-tier work is stopped and restarted from scratch, as today, or left to finish while production waits. A 2026-11-16 claim here that the 2026-11-08 relay objected to stopping such work was wrong: that relay objected to holding other projects' submissions. (MY-56)
-- None of this relaxes MY-19 parity, exact-release custody before reuse, or the deploy guardrails in section 6; work moves only through supported checkpoint/requeue. MY-31 records intent, not implemented learning.
+- When production needs a machine's memory, CPU or device, Mycelium pauses lower-priority work there or moves it to another machine, so production does not wait on co-tenants. Other work still uses that capacity until production needs it (MY-50). Interpretation (the receiving orchestrator's, not his words): resumable work is paused by checkpoint and requeue, keeping its progress. Not answered (asked 2026-11-16): whether running non-resumable lower-tier work is stopped and restarted from scratch, as today, or left to finish while production waits. (MY-56)
 - Production approval names what the work needs or is compatible with (for example Mac, CUDA, Arm, x86), never a specific machine. MY-19's output check stays and attaches to that kind of machine. (MY-51)
 
 <details><summary>Sources</summary>
 
-MY-56, 2026-11-16 about 02:15Z, maintainer, relayed verbatim by the production consumer's orchestrator (recorded there as its VE-41) and received by the Mycelium orchestrator: “no i think we can pause other projects or move them to other machines when [the production consumer] needs to run so we don't spend time waiting.” It amends the 2026-11-08 relay recorded under MY-30. MY-51, 2026-11-12, maintainer, answering #1490 ("Should production approve a machine type instead of a named host?") through the advisory thread: “something like just naming what it needs. mac, cuda, arm, x86, whatever. or whatever it can be compatible with ... definitely not naming specific boxes absolutely not.” He marked as unsure, not a ruling: rewarding projects for being compatible with as much of the fleet as possible. Whether a new machine of an approved kind gets its own automatic check is not answered; any such check is an agent default. Received by the Mycelium orchestrator. MY-50, 2026-11-12, maintainer, answering the orchestrator's question about the CUDA node's whole-machine production hold, relayed by the setup-audit orchestrator: “i dont want mycelium to just hard reserve the [CUDA node] at all. but yes if we're talking about priority then only the gpu not the whole machine.” Received by the Mycelium orchestrator. MY-31, 2026-11-02: “yes telemetry needs to be integral so mycelium can learn about jobs, cards, system setups, storage, memory, unified vs dedicated, etc. and picking the system, cards, amount of cards to use, when to transfer jobs, etc. is all on mycelium to figure out. truly a self improving, load balancing, local server cluster.” Pins: “i think pins are okay as a feature but definitely i wanna keep them as optional and situational like a single box for CI runners and builds or something for example”. MY-18 placement ruling, 2026-10-25 (#193). MY-07 vision ruling, 2026-10-21 (#107). MY-19 vision ruling, 2026-10-25 (#107). MY-30, 2026-11-02: “[the two-GPU host] is meant to be a dual card system. 64gb of vram. this whole "split the cards" thing is nonsense to me. we can either split the cards or shard the models across both cards. mycelium should understand that and handle it, whichever way is most beneficial to the running projects, that's the point. we need to stop with this whole [the production consumer] production paranoia stuff and get mycelium to a place where it can actually do its job for all my projects.” See [the dual-GPU research](research/dual-b70-and-xpu-variants.md).
+- MY-56, 2026-11-16 about 02:15Z, maintainer, relayed verbatim by the production consumer's orchestrator: “no i think we can pause other projects or move them to other machines when [the production consumer] needs to run so we don't spend time waiting.”
+- MY-51, 2026-11-12, maintainer, answering #1490 ("Should production approve a machine type instead of a named host?") through the advisory thread: “something like just naming what it needs. mac, cuda, arm, x86, whatever. or whatever it can be compatible with ... definitely not naming specific boxes absolutely not.” Whether a new machine of an approved kind gets its own automatic check is not answered; any such check is an agent default.
+- MY-50, 2026-11-12, maintainer, answering the orchestrator's question about the CUDA node's whole-machine production hold, relayed by the setup-audit orchestrator: “i dont want mycelium to just hard reserve the [CUDA node] at all. but yes if we're talking about priority then only the gpu not the whole machine.”
+- MY-31, 2026-11-02: “yes telemetry needs to be integral so mycelium can learn about jobs, cards, system setups, storage, memory, unified vs dedicated, etc. and picking the system, cards, amount of cards to use, when to transfer jobs, etc. is all on mycelium to figure out. truly a self improving, load balancing, local server cluster.” Pins: “i think pins are okay as a feature but definitely i wanna keep them as optional and situational like a single box for CI runners and builds or something for example”.
+- MY-18 placement ruling, 2026-10-25 (#193).
+- MY-07 vision ruling, 2026-10-21 (#107).
+- MY-19 vision ruling, 2026-10-25 (#107).
+- MY-30, 2026-11-02: “[the two-GPU host] is meant to be a dual card system. 64gb of vram. this whole "split the cards" thing is nonsense to me. we can either split the cards or shard the models across both cards. mycelium should understand that and handle it, whichever way is most beneficial to the running projects, that's the point. we need to stop with this whole [the production consumer] production paranoia stuff and get mycelium to a place where it can actually do its job for all my projects.” See [the dual-GPU research](research/dual-b70-and-xpu-variants.md).
 
 </details>
 
@@ -77,7 +91,9 @@ MY-56, 2026-11-16 about 02:15Z, maintainer, relayed verbatim by the production c
 
 <details><summary>Sources</summary>
 
-MY-30, 2026-11-02: “i agree on the next stretch being adoption rather than new stuff unless adoption requires new things to be added. i want it to be fully unmanaged and automatic and smart. if we run into bugs then we'll fix them. it's all part of the process.” MY-34, 2026-11-05: “i don't want us to just have a bunch of arbitrary limits on things. i'd rather it be smart then try to be blindly safe ya know” and “it needs to be smart and dynamic rather than hardcoded because we're releasing this publicly so i needs to work for any system combination and any workload”. MY-44, 2026-11-10, about the `models.sources` allowlist: “i don't like that things need to be approved by you. mycelium needs to be able to run whatever can run on my systems. this is just excess friction”. Applied that day: queue policy revision 105 permits all repositories (`*/*`) and keeps a 100 GiB model-copy free floor; the code default follows.
+- MY-30, 2026-11-02: “i agree on the next stretch being adoption rather than new stuff unless adoption requires new things to be added. i want it to be fully unmanaged and automatic and smart. if we run into bugs then we'll fix them. it's all part of the process.”
+- MY-34, 2026-11-05: “i don't want us to just have a bunch of arbitrary limits on things. i'd rather it be smart then try to be blindly safe ya know” and “it needs to be smart and dynamic rather than hardcoded because we're releasing this publicly so i needs to work for any system combination and any workload”.
+- MY-44, 2026-11-10, about the `models.sources` allowlist: “i don't like that things need to be approved by you. mycelium needs to be able to run whatever can run on my systems. this is just excess friction”.
 
 </details>
 
@@ -89,12 +105,14 @@ MY-30, 2026-11-02: “i agree on the next stretch being adoption rather than new
 - The queue/GPU host is the only machine running work 24/7: every project's always-on services, kept light so its GPUs stay schedulable in the fleet. Every other machine except the agents' host is a managed on-demand node with nothing persistent on it, so Mycelium sizes its capacity from measured OS needs alone. The agents' host stays a Mycelium node under stricter limits. (MY-45)
 - Adding a supported machine type takes one command, using per-platform environments and qualification, not per-machine images. (MY-08)
 - The dedicated CUDA node keeps a 4 GB owner memory reserve. (MY-48)
-- One SQLite queue, as the approved design says. Direction (not yet a design): the queue becomes shared and load-balanced across machines so nothing is lost when a machine goes down. This authorizes no peer network or replicated queue until Zach approves a design with laptop-testable migration steps (#1176). (MY-40)
+- One SQLite queue, as the approved design says. Direction (not yet a design): the queue becomes shared and load-balanced across machines so nothing is lost when a machine goes down. This authorizes no peer network or replicated queue until the maintainer approves a design with laptop-testable migration steps (#1176). (MY-40)
 
 <details><summary>Sources</summary>
 
-MY-48, 2026-11-12, maintainer, answering the orchestrator's question about the CUDA node's 16 GB owner reserve: “[the CUDA node] let’s do 4gb”. Received by the Mycelium orchestrator.
-MY-45, 2026-11-11: “the only machine that should be running... work, 24/7, and in the background, is the [dual-GPU queue host]. And then everything else should just be, like, an on demand node. I still want the 2 [queue-host] GPUs to be part of the Mycelium Fleet ... it should be reserved effectively just for... the persistent projects, so things that have to constantly be online. Best case scenario is that... it would run something lightweight on the [queue host], all of the projects would. so that they're not taking up as much RAM, so that we're still able to use the [queue-host] GPUs with no problem.” And: “The host is still part of Mycelium, but it's got... harsher limits set just because that's where everything with the agents is hosted from, and if that machine goes down, then nothing works. So that one's gotta be coveted. But the rest of them are effectively just managed nodes as part of the cluster.” At the time Zach was moving one project's persistent service off a node himself. MY-08 onboarding ruling, 2026-10-21 (#108). MY-40, 2026-11-09: “i want the queue to be something the machines share rather than just running on one machine. just like we load balance the jobs, i think we should load balance the queue as well. ... so mycelium truly works as a biological mycelium could. where information is part of the collective in a way. that way if a machine goes down, nothing is truly lost.”
+- MY-48, 2026-11-12, maintainer, answering the orchestrator's question about the CUDA node's 16 GB owner reserve: “[the CUDA node] let’s do 4gb”.
+- MY-45, 2026-11-11: “the only machine that should be running... work, 24/7, and in the background, is the [dual-GPU queue host]. And then everything else should just be, like, an on demand node. I still want the 2 [queue-host] GPUs to be part of the Mycelium Fleet ... it should be reserved effectively just for... the persistent projects, so things that have to constantly be online. Best case scenario is that... it would run something lightweight on the [queue host], all of the projects would. so that they're not taking up as much RAM, so that we're still able to use the [queue-host] GPUs with no problem.” And: “The host is still part of Mycelium, but it's got... harsher limits set just because that's where everything with the agents is hosted from, and if that machine goes down, then nothing works. So that one's gotta be coveted. But the rest of them are effectively just managed nodes as part of the cluster.”
+- MY-08 onboarding ruling, 2026-10-21 (#108).
+- MY-40, 2026-11-09: “i want the queue to be something the machines share rather than just running on one machine. just like we load balance the jobs, i think we should load balance the queue as well. ... so mycelium truly works as a biological mycelium could. where information is part of the collective in a way. that way if a machine goes down, nothing is truly lost.”
 
 </details>
 
@@ -104,16 +122,22 @@ MY-45, 2026-11-11: “the only machine that should be running... work, 24/7, and
 **Tested fixes ship without asking, one release at a time, with rollback if the queue is unhealthy. Binary updates preserve running work (MY-55); explicit critical updates retain interruption authority (MY-35/MY-39).**
 
 - Tested fixes deploy to the fleet without separate authorization, bundled one release at a time. If the queue is not healthy afterwards, the operator rolls back. Fleet hardware, OS, driver and package changes are outside this authority. (MY-28)
-- No pre-production freeze, customer-window blackout, consumer canary gate, or asking Zach about deploy timing. Before each scheduled production window (twice weekly; schedule in private operator notes) the fleet is on a healthy, tested release. (MY-32, MY-33)
+- No pre-production freeze, customer-window blackout, consumer canary gate, or asking the maintainer about deploy timing. Before each scheduled production window the fleet is on a healthy, tested release. (MY-32, MY-33)
 - Critical updates may deploy during a production run so other work does not stall. Patch time is weighed when choosing how to roll out, and making it quick is a priority (#900), but it never defers a necessary critical update. Ordinary updates wait while a production run is succeeding; fixing a run that fails because of Mycelium is expected. (MY-39)
 - Updates roll out automatically with minimal downtime, for example between jobs; a critical update may stop work to apply immediately. “Automatic” means a release already signed and approved with `myce release approve` is applied without an operator stepping through each host. It is never silent: the rollout reports each step. It adds no automatic rollback machinery (MY-03): an unhealthy rollout stops advancing, and the operator rolls back if the queue is unhealthy, otherwise fix forward. (MY-35)
 - Mycelium updates itself without emptying machines: replacing its own binary on a host must not stop or wait for that host's running work, which keeps running and is taken over by the new release. (MY-55)
 - `myce fleet upgrade` is an explicit operator command that replaces only Mycelium's own binary and restarts only its existing service unit on enrolled hosts, for a signed, approved release. Workers fetch and verify the bytes themselves through the authenticated control path; no SSH. No silent updates or downgrades, and no GPU driver, OS, package or other host changes. #183's downgrade credential scope is separate. This is a scoped exception to the design's M4 service/host-change prohibition; its native acceptance still needs separate authorization. (MY-21)
-- Agent defaults (orchestrator, updated 2026-11-16; not Zach's words): reading MY-55 with MY-35/MY-39, hosts upgrade one at a time by live takeover, without stopping or waiting for their running jobs. When takeover cannot be proved, normal updates wait for natural completion and report why; they never checkpoint-stop or kill at grace. This supersedes #1591's ordinary-update bounded-stop default. Explicit critical updates try takeover first and retain the existing tier stops only when takeover is impossible or the fix needs work restarted; critical is never an automatic fallback. Verify service health, exact attempt preservation and release custody; stop advancement on unhealthy evidence. Announce rollouts to consumer orchestrators. This records the orchestrator's application, not additional maintainer words or a claim of deployed acceptance.
+- Agent procedure: follow [rolling fleet upgrades](operations.md#rolling-fleet-upgrades) and announce rollouts to consumer orchestrators.
 
 <details><summary>Sources</summary>
 
-MY-28, 2026-11-01, relayed by the guidance-review orchestrator; it replaced MY-21's separate live-rollout authorization. MY-32, 2026-11-02, answering whether to drop the customer-window clause: “i agree with your recommendation for the production rule removal”. MY-33, 2026-11-03, sanitized: “Be ready for production [on the scheduled production mornings] and don't patch during a successful production run.” MY-39, 2026-11-09: “i think depending on patch time (which we should work on making quick) critical updates should be able to run during [the production consumer's] production runs. because i don't wanna have the rest of my work stall on the fact that we're waiting on a [production consumer] run that takes several hours.” MY-55, 2026-11-16, maintainer, answering the orchestrator's offer to start "upgrading machines without emptying them first": “im saying mycelium should be able to update without emptying them”. Received by the Mycelium orchestrator; tracked in #900. MY-35, 2026-11-06: “we need a way to do automatic update deployments that run without needing to take an entire system down i think. or for it to have minimal downtime like between jobs unless it’s critical and needs immediate deployment (stopping everything and applying the update)”. MY-21, 2026-10-27: “make a fast and easy way to update the version on all hyphae seamlessly” (#244).
+- MY-28, 2026-11-01, relayed by the guidance-review orchestrator; it replaced MY-21's separate live-rollout authorization.
+- MY-32, 2026-11-02, answering whether to drop the customer-window clause: “i agree with your recommendation for the production rule removal”.
+- MY-33, 2026-11-03, sanitized: “Be ready for production [on the scheduled production mornings] and don't patch during a successful production run.”
+- MY-39, 2026-11-09: “i think depending on patch time (which we should work on making quick) critical updates should be able to run during [the production consumer's] production runs. because i don't wanna have the rest of my work stall on the fact that we're waiting on a [production consumer] run that takes several hours.”
+- MY-55, 2026-11-16, maintainer, answering the orchestrator's offer to start "upgrading machines without emptying them first": “im saying mycelium should be able to update without emptying them”. Tracked in #900.
+- MY-35, 2026-11-06: “we need a way to do automatic update deployments that run without needing to take an entire system down i think. or for it to have minimal downtime like between jobs unless it’s critical and needs immediate deployment (stopping everything and applying the update)”.
+- MY-21, 2026-10-27: “make a fast and easy way to update the version on all hyphae seamlessly” (#244).
 
 </details>
 
@@ -124,16 +148,16 @@ MY-28, 2026-11-01, relayed by the guidance-review orchestrator; it replaced MY-2
 
 - Maintain one v3 runtime. Earlier versions live only in tagged source history: no compatibility layers, old-version fallback or automatic rollback machinery. Fix forward. The approved design's checkpoint/retry contracts stay. (MY-03)
 - The one exception is the adjacent release pair: the current release interoperates with the previous one during rolling upgrades (MY-35). Older protocols, importers, converters and persistence formats belong in tagged history. Before deleting their runtime paths, verify every active installation and the production database meet the floor. (MY-42)
-- Release-specific: on 2026-11-10 Zach required candidate r6.9 to support queue rollback to the live r6.8, preferably by converting the v3 database to v2 without losing jobs, custody or decisions; see [the rollback procedure as shipped](https://github.com/1kuna/mycelium/blob/302620cacaace8a16e7ed424e1183dbb10f46414/docs/operations.md#queue-only-rollback-from-r69-to-r68). Agent note (2026-11-11, not a ruling): this applied to the r6.8/r6.9 pair; with r6.10 live everywhere the converter left main under MY-42 and lives in source history at that commit (no r6.x tags exist yet).
 
 <details><summary>Sources</summary>
 
-MY-03, 2026-10-22 (#80). MY-42, 2026-11-10, Zach answering refactor review finding 10, which proposed “current and previous release only”: “yes drop old migration code”. At r6.8 (`v3.1.0-rc.20261110.s076r6.8`) the floor was r6.7.
+- MY-03, 2026-10-22 (#80).
+- MY-42, 2026-11-10, the maintainer answering refactor review finding 10, which proposed “current and previous release only”: “yes drop old migration code”.
 
 </details>
 
 ### 8. Iterate fast: local first, quick gates, changeable tooling
-<a id="my-53"></a><a id="my-41"></a><a id="my-38"></a><a id="my-37"></a><a id="my-04"></a><a id="my-02"></a><a id="my-16"></a>
+<a id="my-16"></a><a id="my-53"></a><a id="my-41"></a><a id="my-38"></a><a id="my-37"></a><a id="my-04"></a><a id="my-02"></a>
 
 **Iteration speed comes first: a faster test suite, then faster iteration. Develop locally, merge on quick plus targeted tests, run the full suite once per release batch, and change any tooling that blocks work.**
 
@@ -141,13 +165,19 @@ MY-03, 2026-10-22 (#80). MY-42, 2026-11-10, Zach answering refactor review findi
 - Tests cover behaviour, security invariants and real incidents; no repeated full suites per fix, speculative matrices or assertion-count preservation. (MY-04)
 - A test of something a user, an agent or another program sees or relies on stays: command output, API responses, job results, error codes, security rules, past production incidents. A test that checks only internal details nobody outside the code depends on may be deleted when another test already exercises that code. (MY-53)
 - Priority 1 is a faster test suite; priority 2 is faster iteration toward stability. Pausing the queue or fleet is authorized when it lets that work be applied. (MY-38)
-- Most, if not all, development runs on the 64 GB development host and never depends on fleet availability. Quick and full gates run natively on Darwin and on Linux in a directly invoked local VM, with persistent caches, idle cache trimming, disk floors and measured capacity admission; fleet gates are optional extra evidence. When the host can't run gates (for example under memory pressure), use the fleet instead of waiting. (MY-37)
+- Most, if not all, development runs on the development host and never depends on fleet availability. Quick and full gates run natively on Darwin and on Linux in a directly invoked local VM, with persistent caches, idle cache trimming, disk floors and measured capacity admission; fleet gates are optional extra evidence. When the host can't run gates (for example under memory pressure), use the fleet instead of waiting. (MY-37)
 - Share normal Go build and module caches; remove owned rebuildable per-run scratch when done (no routine Trash retention of reproducible caches) and keep the evidence. (MY-02)
-- Agent defaults for fleet pauses (orchestrator, not Zach's words): hold new placements while running jobs finish or reach a checkpoint, never kill them, announce each pause to affected consumer orchestrators (notify the orchestrator before pausing a production host), then resume. Local never-admitted gate waiters may be cancelled and restarted with current helpers; an admitted gate is cancelled only through supported cancellation and its replacement restarts immediately. Release-critical work keeps priority; post each replacement receipt or session on its PR.
+- Agent defaults for fleet pauses (orchestrator, not the maintainer's words): hold new placements while running jobs finish or reach a checkpoint, never kill them, announce each pause to affected consumer orchestrators (notify the orchestrator before pausing a production host), then resume. Local never-admitted gate waiters may be cancelled and restarted with current helpers; an admitted gate is cancelled only through supported cancellation and its replacement restarts immediately. Release-critical work keeps priority; post each replacement receipt or session on its PR.
 
 <details><summary>Sources</summary>
 
-MY-53, 2026-11-12, maintainer, answering the orchestrator's question on how far test cuts may go (whether tests that only check internal details may be deleted when another test exercises the same code), with the recommendation to keep anything users or programs see or rely on: “i agree with your recommendations”. Received by the Mycelium orchestrator. MY-41, 2026-11-09, lightly redacted: “get rid of the fresh independent review [requirement] honestly. get rid of whatever rule is telling you our test tooling is untouchable. and get rid of whatever other bureaucratic [process] you've got. how ... do you expect to change anything if you've got a rule against changing everything? ... i work fast and messy. if something breaks then [so be it], we just fix it.” It superseded review rounds, exact-head full gates per PR, gate-exception procedures, “never clear” custody rules and MY-16's concurrency cap. MY-38, 2026-11-09: “if you need to pause the queue to update and make iteration faster i'd prefer you did that rather than just constantly waiting. us being able to iterate fast matters much more”; clarified: “i meant pausing the fleet if it means you can apply whatever you need to so we can iterate quicker. but i want you to make the test suite faster too so we can iterate quicker. top priority is faster test suite and second priority is faster iteration so we can reach better stability quicker which can't be done without a faster test suite” ([#1086](https://github.com/1kuna/mycelium/issues/1086#issuecomment-6744698723)); it superseded the orchestrator's local-gate-only reading and its default of draining older waiters naturally. MY-37, 2026-11-09: “Most, if not all, mycelium development should be able to occur” on that host; “And iteration should not be dependent on the availability of the nodes. It should just be dependent on the host machine that's being used for development.” (#1086); it superseded the 2026-11-03 fleet-only gate location and exact-head fleet-gate merge requirement. The fleet fallback is Zach's 2026-11-10 approval of ledger C9. MY-04 test ruling, 2026-10-22. MY-02 cache-storage incident ruling, 2026-10-23. See [development](development.md).
+- MY-53, 2026-11-12, maintainer, answering the orchestrator's question on how far test cuts may go (whether tests that only check internal details may be deleted when another test exercises the same code), with the recommendation to keep anything users or programs see or rely on: “i agree with your recommendations”.
+- MY-41, 2026-11-09, lightly redacted: “get rid of the fresh independent review [requirement] honestly. get rid of whatever rule is telling you our test tooling is untouchable. and get rid of whatever other bureaucratic [process] you've got. how ... do you expect to change anything if you've got a rule against changing everything? ... i work fast and messy. if something breaks then [so be it], we just fix it.”
+- Maintainer on main CI, 2026-11-09, via the CI implementation brief: “yes skip CI runs i think. we should be running the tests where it makes sense not repetitive nonsense that just wastes compute for no gain.”
+- MY-38, 2026-11-09: “if you need to pause the queue to update and make iteration faster i'd prefer you did that rather than just constantly waiting. us being able to iterate fast matters much more”; clarified: “i meant pausing the fleet if it means you can apply whatever you need to so we can iterate quicker. but i want you to make the test suite faster too so we can iterate quicker. top priority is faster test suite and second priority is faster iteration so we can reach better stability quicker which can't be done without a faster test suite” ([#1086](https://github.com/1kuna/mycelium/issues/1086#issuecomment-6744698723)).
+- MY-37, 2026-11-09: “Most, if not all, mycelium development should be able to occur” on that host; “And iteration should not be dependent on the availability of the nodes. It should just be dependent on the host machine that's being used for development.” (#1086). The fleet fallback is the maintainer's 2026-11-10 approval of ledger C9.
+- MY-04 test ruling, 2026-10-22.
+- MY-02 cache-storage incident ruling, 2026-10-23. See [development](development.md).
 
 </details>
 
@@ -164,7 +194,9 @@ MY-53, 2026-11-12, maintainer, answering the orchestrator's question on how far 
 
 <details><summary>Sources</summary>
 
-MY-23, 2026-10-27: [#177](https://github.com/1kuna/mycelium/issues/177), [#219](https://github.com/1kuna/mycelium/issues/219), [#248 minimum](https://github.com/1kuna/mycelium/issues/248#issuecomment-6447873336), [network clarification](https://github.com/1kuna/mycelium/issues/248#issuecomment-6448371815), [v1 seqpacket ruling](https://github.com/1kuna/mycelium/issues/177#issuecomment-6453575275); it replaced #248's blanket deferral only for this minimum. The [design amendment](design-proposal.md#amendment-minimum-native-job-isolation-177-219-248) and [guarantee table](native-isolation.md) record limits, not qualification or rollout. MY-24, 2026-10-27, orchestrator implementation assignment for batch/s047 under #177; it does not qualify hardware or add Office/Docker helper work (#272). MY-25, 2026-10-28, maintainer's release-worker assignment, conditional fallback after the s047 inventory (#177).
+- MY-23, 2026-10-27: [#177](https://github.com/1kuna/mycelium/issues/177), [#219](https://github.com/1kuna/mycelium/issues/219), [#248 minimum](https://github.com/1kuna/mycelium/issues/248#issuecomment-6447873336), [network clarification](https://github.com/1kuna/mycelium/issues/248#issuecomment-6448371815), [v1 seqpacket ruling](https://github.com/1kuna/mycelium/issues/177#issuecomment-6453575275); it replaced #248's blanket deferral only for this minimum. The [design amendment](design-proposal.md#amendment-minimum-native-job-isolation-177-219-248) and [guarantee table](native-isolation.md) record limits, not qualification or rollout.
+- MY-24, 2026-10-27, orchestrator implementation assignment for batch/s047 under #177; it does not qualify hardware or add Office/Docker helper work (#272).
+- MY-25, 2026-10-28, maintainer's release-worker assignment, conditional fallback after the s047 inventory (#177).
 
 </details>
 
@@ -177,7 +209,7 @@ Every NAS input, whatever its size, is transferred to the executing machine's lo
 
 <details><summary>Sources</summary>
 
-MY-36, 2026-11-08 (#1061): “i think any files should transfer to the machines it's being processed on from the nas because processing bottleneck shouldn't be network because then local benchmarks become entirely irrelevant.”
+- MY-36, 2026-11-08 (#1061): “i think any files should transfer to the machines it's being processed on from the nas because processing bottleneck shouldn't be network because then local benchmarks become entirely irrelevant.”
 
 </details>
 
@@ -185,7 +217,7 @@ MY-36, 2026-11-08 (#1061): “i think any files should transfer to the machines 
 
 <details><summary>Sources</summary>
 
-MY-47, 2026-11-11, maintainer, answering the orchestrator's question after the queue host reached 97% disk with job files kept until explicit release: “keep finished job files for 3 days but clear out whatever’s stale right now so we can make space”. Received by the Mycelium orchestrator.
+- MY-47, 2026-11-11, maintainer, answering the orchestrator's question after the queue host reached 97% disk with job files kept until explicit release: “keep finished job files for 3 days but clear out whatever’s stale right now so we can make space”.
 
 </details>
 
@@ -194,31 +226,16 @@ MY-47, 2026-11-11, maintainer, answering the orchestrator's question after the q
 
 **Mycelium spends as little compute and as few tokens as it can, in the product and in how its agents report.**
 
-For checkpoint status, Zach asked, as relayed by the orchestrator on
-2026-11-15: “shouldnt status come from the machine it runs on? not just
-constantly streamed to the nas for no reason?” The orchestrator's interpretation,
-implemented by this PR, is that status and progress come from the executing
-worker's local signals and process view; the NAS is never read for status.
-Checkpoint saves, resume, and stop/release/finalization checks keep their
-durability contract. Received by the event-driven-progress implementation
-worker; implementation and release evidence belong to [#1670](https://github.com/1kuna/mycelium/issues/1670).
+Checkpoint status comes from the executing worker. The maintainer asked on 2026-11-15, through the orchestrator, “shouldnt status come from the machine it runs on? not just constantly streamed to the nas for no reason?” See [#1670](https://github.com/1kuna/mycelium/issues/1670) and the [checkpoint status contract](reference/checkpoint-scanning.md).
 
 Mycelium's product keeps control-plane cost per check-in low, default status output small, and gives consumer agents one batched wait (#1120, #1053). Mycelium's agents report only on a state change, a fault or a needed decision, plus one final summary.
 
-<a id="my-49"></a>Zach left the five slimming choices from the 2026-11-11 audit to the orchestrator (MY-49). The orchestrator chose the following. They are agent decisions, not his words, and can be changed on evidence:
-- Delete the simulator, the fleet viewer and the Windows host bridge. Git history keeps them, and the bridge comes back when a Windows machine joins.
-- Retire managed Docker (MY-13's supported option) once the one project still using it runs its model jobs natively. Done 2026-11-12, after that project's native run matched its Docker run ([#1456](https://github.com/1kuna/mycelium/issues/1456)).
-- Cut curves, benchmarks, time prediction and batch planning down to the last accepted duration and peak per kind of work. Placement keeps learning from its own measurements (MY-31).
-- Make `myce fleet upgrade` the one rollout path (MY-21, MY-35), reduced to what host-by-host rollouts have proven: prove live takeover (natural drain when unproved), swap the verified binary, restart, check health. Private per-release rollout scripts go.
-- Keep finished job records for 14 days after de-duplication, plus a one-line summary and what was learned. Files stay at 3 days (MY-47).
-- Send health problems to the Mycelium inbox as one opening and one closing per host-level problem. Efficiency and recipe findings stay in status only.
-- Consolidate the approved design into its current form, without changing what it says.
+<a id="my-49"></a>The maintainer delegated the slimming choices to the orchestrator (MY-49). The resulting agent decisions are recorded with the [approved design](design-proposal.md), [retention](retention.md) and [fleet upgrades](operations.md#rolling-fleet-upgrades). The simulator, fleet viewer, Windows host bridge, managed Docker runner and per-release rollout scripts were retired.
 
 <details><summary>Sources</summary>
 
-MY-43, 2026-11-10: “i want our program to be both compute and token efficient”, approving the orchestrator's reporting proposal.
-
-MY-49, 2026-11-12, maintainer, answering the orchestrator's five slimming questions: “the 5 slimming decisions do whatever is best idk”. Received by the Mycelium orchestrator.
+- MY-43, 2026-11-10: “i want our program to be both compute and token efficient”, approving the orchestrator's reporting proposal.
+- MY-49, 2026-11-12, maintainer, answering the orchestrator's five slimming questions: “the 5 slimming decisions do whatever is best idk”.
 
 </details>
 
@@ -235,97 +252,24 @@ MY-49, 2026-11-12, maintainer, answering the orchestrator's five slimming questi
 
 <details><summary>Sources</summary>
 
-MY-05 coordination ruling, 2026-10-16/22. MY-15 pause clarification, 2026-10-17. MY-09 integration ruling, 2026-10-21. MY-10 sequencing ruling, 2026-10-20 (#98). MY-14 runner ruling after #93, 2026-10-19.
+- MY-05 coordination ruling, 2026-10-16/22.
+- MY-15 pause clarification, 2026-10-17.
+- MY-09 integration ruling, 2026-10-21.
+- MY-10 sequencing ruling, 2026-10-20 (#98).
+- MY-14 runner ruling after #93, 2026-10-19.
 
 </details>
 
 ## Agent defaults
 
-These are agents' decisions, not Zach's rulings. Change them through their issues.
+These are agents' decisions, not the maintainer's rulings. Change them through their issues.
 
-- **Interactive hosts decline bulk classes** (implementation worker, 2026-11-15,
-  under MY-45 and MY-11/MY-26, [#1665](https://github.com/1kuna/mycelium/issues/1665)). The shared interactive profile refuses `batch`,
-  `test`, `ci`, `rollout` and `eval` classes and same-named owner tiers on every
-  OS, regardless of fleet pressure. Light prepared CPU commands remain eligible
-  within existing measured CPU/RAM allowances and owner-pressure protection.
-  Basis: a project's relayed ruling, "stop hogging [the agents’ host]" (host name redacted), keeps its
-  builds/tests off the agents' host because CI load disrupts its shared DEV
-  stack. A second project's relayed ruling keeps rollout/eval pools off the
-  overloaded coordination host and requests host-level protection. Received by
-  this implementation worker; these are scoped source rulings, not new words
-  from Zach about Mycelium. The general profile rule removes those projects'
-  need for routine host pins without changing any fleet policy. Capacity
-  accumulation also protects a queued GPU command's resolved host vector while
-  a finite GPU execution finishes, with excess capacity usable and no fixed
-  core reservation (MY-34). Existing stop contracts and exact release bind.
-
-- **One route to the destination** (orchestrator, 2026-11-12, acting on Zach's instruction to fix and prevent the problem: "those two things ... need to be told to the mycelium agent so it's aware and can rectify that stuff and prevent it from occurring in the future"). Map [#1485](https://github.com/1kuna/mycelium/issues/1485) is the single route to the destination in section 1. Older umbrella issues point to it. Before opening a new umbrella or feature issue, check whether a map ticket or its owner issue already covers it. Progress goes to Zach as the three MY-52 numbers, not as a status narrative; work that doesn't move them is off the route. The cadence is the orchestrator's choice; Zach set none.
+- **Shared interactive profile** (implementation worker, 2026-11-15, [#1665](https://github.com/1kuna/mycelium/issues/1665)). The [shared-host reference](reference/shared-and-polite-hosts.md#shared-interactive-hosts) covers class exclusion and measured allowances. [Scheduling](scheduling.md) covers capacity accumulation for queued accelerator work.
+- **One route to the destination** (orchestrator, 2026-11-12, acting on the maintainer's instruction to fix and prevent the problem: "those two things ... need to be told to the mycelium agent so it's aware and can rectify that stuff and prevent it from occurring in the future"). Map [#1485](https://github.com/1kuna/mycelium/issues/1485) is the single route to the destination in section 1. Older umbrella issues point to it. Before opening a new umbrella or feature issue, check whether a map ticket or its owner issue already covers it. Progress goes to the maintainer as the three MY-52 numbers, not as a status narrative; work that doesn't move them is off the route. The cadence is the orchestrator's choice; the maintainer set none.
 - **The skill follows the deployed release** (orchestrator, 2026-11-12, same instruction). The consumer skill agents load must match the release the fleet runs ([#1506](https://github.com/1kuna/mycelium/issues/1506)). A release note claims a skill change only after the release step has checked that the installed copies match.
-- **Measured local gate admission** (orchestrator, 2026-11-09, under MY-37). Admit full gates from measured per-leg CPU/RAM and live host capacity, not a fixed N=1, in head-of-line FIFO order; explicitly exclusive timing runs reserve all local capacity. CPU admission reserves a static fleet-worker share in local gate config (initially 4 cores, matching the admitted worker allowance), updated by the operator when that host's worker CPU budget changes; drift only overcommits CPU, an accepted tradeoff. RAM admission uses live available memory with no fleet allowance. Normal-pressure shortages keep their FIFO position with a visible memory reason; pressure, sustained-swap and disk stops remain, and a requirement above physical RAM is refused. Admission never depends on the fleet and never changes fleet-worker custody. Basis: four-core native peak 7.01 GiB, Linux/VM peak 10.57 GiB, measured headroom. It replaced the per-admission status-read, cache and generation-fencing design after reproduced races and starvation.
-- **Device-fault cascade protection and measured recovery** (#1142, implementation worker, 2026-11-09, from a relayed consumer request, applied generically). One faulting job must not consume a host's last healthy accelerator of the same backend. Placement uses attempt-specific fault history and current healthy capacity. Recovery needs positive vendor evidence and a quiet window derived from observed fault-to-normal latency, local probe gaps and prior recovery evidence (MY-34; no fixed duration or host policy). Repeated-teardown escalation stays with the operator. See [the mechanism](reference/accelerator-quarantine.md#accelerator-driver-fault-quarantine).
-- **Capability-based XPU recovery proof** (#1185, orchestrator, 2026-11-09, under MY-34). A required component reported `Unknown` on both the quarantined device and a healthy same-model sibling in the same health batch is excluded from that proof and recorded `unsupported_on_device`. Every other required component must report `OK`; missing, malformed or failed components block. Without a healthy same-model sibling, Unknown keeps quarantine. The comparison repeats per batch and is not a permanent allowlist; the kernel observation window and escalation policy are unchanged. The installer grants narrowly scoped GPU MEI/PMT access through the supported install path, with no manual host edits. Native rollout and automatic clear remain to be verified after release; fake-probe evidence is laptop proof only.
+- **Local gate admission** (orchestrator, 2026-11-09, under MY-37). [Development](development.md#laptop-test-gates) describes measured FIFO admission, exclusive timing runs and local pressure enforcement.
+- **Accelerator recovery** (implementation worker and orchestrator, 2026-11-09, #1142 and #1185). The [quarantine reference](reference/accelerator-quarantine.md#accelerator-driver-fault-quarantine) covers last-healthy-device protection, measured quiet windows and same-model sibling evidence.
 
 ## Old numbers
 
-Each old number, its original date and title, and where it lives now. All are current unless marked superseded.
-
-| Old | Date | Original title | Now |
-|---|---|---|---|
-| MY-01 | 2026-10-23 | general public presentation | §1 |
-| MY-02 | 2026-10-23 | shared build caches | §8 |
-| MY-03 | 2026-10-22 | v3 and fix forward | §7; narrowed by MY-42 for the adjacent pair |
-| MY-04 | 2026-10-22 | proportionate test gates | §8; merge rule refined by MY-41 |
-| MY-05 | 2026-10-22 | independent work continues across a blocked track | §12 |
-| MY-06 | 2026-10-21 | one cluster, machine hyphae | §1 |
-| MY-07 | 2026-10-21 | measured multiplexing | §3 |
-| MY-08 | 2026-10-21 | one-command machine onboarding | §5 |
-| MY-09 | 2026-10-21 | standalone proof before consumer integration | §12 |
-| MY-10 | 2026-10-20 | delivery sequence does not delete scope | §12 |
-| MY-11 | 2026-10-19 | open general compute platform | §1 |
-| MY-12 | 2026-10-19 | extensions wrap existing software | §2 |
-| MY-13 | 2026-10-19 | Docker is optional | §1 |
-| MY-14 | 2026-10-19 | verifier criteria judge product evidence | §12 |
-| MY-15 | 2026-10-17 | orchestration pauses apply to the orchestrator | §12 |
-| MY-16 | 2026-10-15 | bound concurrent full race gates | superseded by MY-41 (§8) |
-| MY-17 | 2026-10-25 | one agent-written instruction file | §2 |
-| MY-18 | 2026-10-25 | least valuable machine that fits | §3 |
-| MY-19 | 2026-10-25 | split for speed only after accuracy parity | §3 |
-| MY-20 | 2026-10-25 | agent-first, set up once, improves itself | §2 |
-| MY-21 | 2026-10-27 | one-command fleet upgrade | §6; live-rollout authorization superseded by MY-28 |
-| MY-22 | 2026-10-27 | merge profiles and extensions | §2 |
-| MY-23 | 2026-10-27 | minimum native isolation | §9; defaults narrowed by MY-24/25 |
-| MY-24 | 2026-10-27 | declared isolation exceptions | §9 |
-| MY-25 | 2026-10-28 | plain native v1 default | §9 |
-| MY-26 | 2026-10-29 | run anything anywhere; scarce machines yield | §2 and §3 |
-| MY-27 | 2026-10-31 | variants | §2 |
-| MY-28 | 2026-11-01 | tested fixes deploy without separate authorization | §6; its timing clauses superseded by MY-32, MY-33 and MY-39 |
-| MY-29 | 2026-11-01 | fleet policy local, mechanisms generic | §1 |
-| MY-30 | 2026-11-02 | unmanaged and automatic; multi-GPU hosts; production tiers | §3 and §4 |
-| MY-31 | 2026-11-02 | telemetry integral; Mycelium owns placement | §3 |
-| MY-32 | 2026-11-02 | no customer-window blackout | §6; active-run clause superseded by MY-33/MY-39 |
-| MY-33 | 2026-11-03 | production readiness and deploy timing | §6; critical-update timing superseded by MY-39 |
-| MY-34 | 2026-11-05 | smart adaptive limits | §4 |
-| MY-35 | 2026-11-06 | automatic rolling updates | §6; critical-update wait superseded by MY-39 |
-| MY-36 | 2026-11-08 | stage NAS inputs locally | §10 |
-| MY-37 | 2026-11-09 | local development independent of the fleet | §8 |
-| MY-38 | 2026-11-09 | faster tests first, faster iteration second | §8 |
-| MY-39 | 2026-11-09 | critical updates during production runs | §6 |
-| MY-40 | 2026-11-09 | direction | shared fault-tolerant queue: §5 |
-| MY-41 | 2026-11-09 | fast iteration, changeable tooling | §8 |
-| MY-42 | 2026-11-10 | current and previous release only | §7 |
-| MY-43 | 2026-11-10 | compute and token efficient | §11 |
-| MY-44 | 2026-11-10 | run whatever can run, no approval gates | §4 |
-| MY-45 | 2026-11-11 | fleet roles | §5 |
-| MY-46 | 2026-11-11 | withdrawn (restated MY-11/MY-26) | §1 |
-| MY-47 | 2026-11-11 | finished-job files kept 3 days | §10 |
-| MY-48 | 2026-11-12 | CUDA node owner reserve 4 GB | §5 |
-| MY-49 | 2026-11-12 | slimming choices left to the orchestrator | §11 |
-| MY-50 | 2026-11-12 | no hard reservation; production priority is GPU-only | §3 |
-| MY-51 | 2026-11-12 | production approval names a kind, never a machine | §3 |
-| MY-52 | 2026-11-12 | agents keep the queue full; three arrival numbers | §1 |
-| MY-53 | 2026-11-12 | test cuts: keep what outsiders see; internal-detail tests may go | §8 |
-| MY-54 | 2026-11-12 | no GPU→CPU fallback by default; "advanced" job section | §2 |
-| MY-55 | 2026-11-16 | updates never empty a machine; running work survives | §6 |
-| MY-56 | 2026-11-16 | production pauses (progress kept) or moves lower-priority work instead of waiting | §3 |
-
-Superseded agent defaults, both by MY-41: the 2026-11-07 orchestrator default that known, owned main failures do not block unrelated merges, and the 2026-11-08 weekly-review proposal on evidence for gate exceptions. Earlier version pins, private topology, temporary windows, routing recipes and receipts are in private local history and are not current fleet evidence.
+Use the original `#my-NN` bookmarks to reach the current section. The full index and release-specific decisions remain in the previous revision of this file.

@@ -12,8 +12,9 @@ placement restrictions.
   `myce adapter convert` turns profiles into entries).
 - One-off: `myce run -- CMD` runs an installed command; `--out DIR --output NAME`
   returns its files. `--gpu cuda|xpu|metal` requests an accelerator, and `--mem`
-  then means device memory and `--host-mem` host memory. One-offs take no
-  source, key, notifier or input files; use an entry for those.
+  then means device memory and `--host-mem` host memory. Inline commands
+  use a fresh key unless you pass `--key NAME`. Entries carry project source,
+  staged input files and notifier configuration.
 - Job file: `myce submit FILE`, or Python `client.submit(spec)`. Use it for
   `after:` stages and specs you build in code.
 
@@ -24,12 +25,19 @@ native output parity.
 
 ## Needs, targets and variants
 
-Describe needs and class, without a host or device selector. Leave memory out
-and Mycelium learns it. A typed figure is a limit, not a reservation: it stays
-the job's enforced ceiling, and once the work has accepted runs on a CPU
-target the queue charges their peak plus spread instead, so typing a large
-figure no longer holds memory other work could use. Production keeps its
-typed figure as the charge. A CPU entry's first run, with nothing learned, is
+Describe needs and class. For a plain CPU spec or entry, set
+`needs.memory_gb` to host RAM in GiB (the queue normalizes it to
+`host_memory_gb`). You can also set `needs.host_memory_gb` directly. For GPU work, `needs.memory_gb` is device memory and
+`needs.host_memory_gb` is additional host RAM. Leaving memory unspecified
+allows automatic sizing. On a supporting worker the declared limit is the
+ceiling and comparable accepted observations can lower the admission charge.
+Use `advanced.size_hint` only for extension jobs. For an exploratory extension
+measurement, use `needs: {memory: auto}` with `advanced.size_hint.host_memory_gb`
+or `advanced.size_hint.memory_gb` as appropriate. Preview the resulting needs
+with `myce spec check --resolve FILE`. Physical capacity, measured floors and
+member needs still bind. See [memory envelopes](https://github.com/1kuna/mycelium/blob/main/docs/reference/memory-mechanisms.md#job-memory-envelopes).
+
+Production keeps its typed figure as the charge. A CPU entry's first run, with nothing learned, is
 charged a physical accounting floor (one maximum supported kernel page plus
 existing launch slack), raised by any known member or measured floors.
 Supporting workers let it grow into measured room; protected/shared or older

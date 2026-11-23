@@ -45,89 +45,12 @@ That is the first-run charge [#1484](https://github.com/1kuna/mycelium/issues/14
 
 ## What the agent writes
 
-Four files, all ordinary Python packaging plus one short entry. Nothing names
-a backend except the one index line that tells uv where Intel's torch build lives.
-
-**The entry** ([`.mycelium/adapter.yaml`](../examples/run-anywhere/.mycelium/adapter.yaml)):
-
-```yaml
-project: run-anywhere-example
-entries:
-  train:
-    run: {command: [python, train.py]}
-    environment: {lock_file: uv.lock, python: "3.12"}
-    needs: {platform: any}
-    outputs: {metrics.json: results}
-```
-
-No `targets`, no host, no memory figure, no per-backend entry. `platform: any`
-means any accelerator the lock has a recipe for; it never selects CPU
-([environments](../environments.md#cpu-tools-with-pixi)).
-
-**The lock** ([`pyproject.toml`](../examples/run-anywhere/pyproject.toml), then
-`uv lock`): one `uv.lock` for all three OS/architecture pairs on the fleet.
-
-```toml
-[project]
-name = "digits-train"
-version = "0.1.0"
-requires-python = "==3.12.*"
-dependencies = [
-  "torch==2.15.0",
-  "scikit-learn>=1.6",
-  # torch+xpu needs Triton for XPU, which only the XPU index carries.
-  "triton-xpu; sys_platform == 'linux' and platform_machine == 'x86_64'",
-]
-
-[tool.uv]
-environments = [
-  "sys_platform == 'darwin' and platform_machine == 'arm64'",
-  "sys_platform == 'linux' and platform_machine == 'x86_64'",
-  "sys_platform == 'linux' and platform_machine == 'aarch64'",
-]
-
-[[tool.uv.index]]
-name = "pytorch-xpu"
-url = "https://download.pytorch.org/whl/xpu"
-explicit = true
-
-[tool.uv.sources]
-torch = [{ index = "pytorch-xpu", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }]
-triton-xpu = [{ index = "pytorch-xpu" }]
-```
-
-`uv lock` resolved 62 packages in under a second, reading only wheel metadata
-(the PyTorch index serves `.metadata` files), so locking needs no multi-GB
-download. The result pins `torch 2.15.0+xpu` with Intel's runtime wheels on
-Linux amd64, `torch 2.15.0` with CUDA 13 wheels on Linux arm64, and `torch 2.15.0`
-(MPS) on macOS arm64. Each worker installs only its own platform's part.
-
-Two lines are there only because uv applies `sources` to direct dependencies:
-`triton-xpu` must be listed directly, or uv looks for it on PyPI, which has only
-old pre-releases. Without that line the lock fails with "only triton-xpu<=3.3.0b1
-is available".
-
-**The job's change** ([`train.py`](../examples/run-anywhere/train.py)), against
-the usual CUDA-first script:
-
-```diff
--device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-+acc = torch.accelerator.current_accelerator() if torch.accelerator.is_available() else None
-+device = torch.device(os.environ.get("MYCE_DEVICE") or acc or "cpu")
-+torch.empty(1, device=device)  # fail now, loudly, if this build cannot use the device
-
--x = torch.tensor(digits.images).unsqueeze(1) / 16.0          # float64
-+x = torch.tensor(digits.images, dtype=torch.float32).unsqueeze(1) / 16.0
-
--torch.cuda.synchronize()
-+torch.accelerator.synchronize()
--torch.cuda.max_memory_allocated()
-+torch.accelerator.max_memory_allocated()
-```
-
-The job is a small CNN trained for 30 epochs on scikit-learn's bundled
-handwritten digits (1,797 real 8x8 images; no download, so no network need). It
-writes `metrics.json` with the device, torch build, loss, test accuracy and time.
+Use the checked-in [entry](../examples/run-anywhere/.mycelium/adapter.yaml),
+[manifest](../examples/run-anywhere/pyproject.toml), [lock](../examples/run-anywhere/uv.lock)
+and [training program](../examples/run-anywhere/train.py). The lock selects
+the PyTorch XPU index and its Triton dependency on Linux amd64. The script
+takes its device from `MYCE_DEVICE`. [The example guide](../examples/run-anywhere/README.md)
+has the run command. Submit an explicit CPU entry to reproduce the CPU control.
 
 ## The runs
 

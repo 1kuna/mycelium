@@ -8,9 +8,6 @@ work start with [an adapter](adapter.md). This reference covers
 the same queue. The caller owns business cancellation and publication fences;
 queue success is attempt-specific, with exact cleanup and accepted output checks.
 
-See [integration examples](jobs.md) and [operations](operations.md). The
-[approved design](design-proposal.md) remains the product spec. CPU commands and GPU work use the same queue; callers retain orchestration.
-
 ## One-line commands
 
 ```sh
@@ -165,7 +162,7 @@ which defeat store deduplication because every source change repacks them.
 1 when the spec is invalid or no target is. Resolve creates no job, upload,
 build or reservation, and grants nothing: submit revalidates every fence.
 
-From the next release, each command target also reports the immutable environment
+Each command target also reports the immutable environment
 key, backend and `ready`, `prepare-needed` or `blocked` state. A cold uv/Pixi
 builder can prepare a locked Python 3.12 environment even when system Python is
 older; use `python3` from the managed PATH, rather than an absolute system
@@ -535,7 +532,8 @@ Keep foreground waits owned by their agent session. Profile/adapter commands
 with a notifier use one managed completion observer per user; do not launch
 `wait --observer-dir ... --detached` yourself.
 
-### Managed completion observers (next release)
+### Managed completion observers
+<a id="managed-completion-observers-next-release"></a>
 
 An ordinary same-key profile/adapter replay starts an observer when its lifetime
 lock is free. It discovers every durable armed registration in the user registry,
@@ -657,18 +655,12 @@ from the bounded diagnostic arrays. An incomplete ledger must not be treated
 as proof of all historical execution. Native custody generations describe
 native supervisors.
 
-Retention follows [queue history pruning](design-proposal.md#submission-identity-and-cancellation-80):
-keep the entire ledger with its job, with no independent row eviction. Released
-terminal jobs remain for at least 168 hours after `finished_at`; longer configured
-result/log retention and cleanup backlog extend this. Never prune unresolved
-custody. A keyed job's complete ledger remains readable by ID during its extra
-30-day retained replay-answer window, even after ordinary job GET stops finding
-it. An unkeyed ledger expires with its job; a keyed ledger expires with the full
-replay answer. Thereafter this endpoint returns HTTP 410
-`job_ledger_unavailable`, also used for an unknown ID. Permanent expired-key
-digests do not retain ledger rows. Expired history is never returned as an empty
-complete page. The four-entry `attempt_history` and 32-entry `memory_attempts`
-remain bounded diagnostics with their existing contracts.
+Ledger retention follows the [job record](retention.md#job-records) and keyed
+replay answer. A keyed job can retain its ledger after ordinary job GET returns
+`job_expired`. An unkeyed ledger expires with its job. Unknown or expired
+ledgers return HTTP 410 `job_ledger_unavailable`. Treat incomplete coverage
+as incomplete even when a page is empty. Exact unresolved custody survives
+history cleanup.
 
 ## CLI control calls under load
 
@@ -820,7 +812,7 @@ No preparation step or ordinary unstarted retry renews a physical child's cutoff
 Retained jobs from before this declaration existed preserve their stored cutoff
 as absolute: older records did not record whether it was generated or submitted.
 
-From the next release, qualified resource contention and typed, uncharged
+Qualified resource contention and typed, uncharged
 launch-capacity refusals suspend **every relative** startup window, including an
 explicit `start_window: 600s` and the omitted `150s` default. This extends #1011's
 generated-window behavior. Memory, device and host-capacity waits use the same
@@ -1134,9 +1126,7 @@ complete local CPU or discrete xe host evidence plus the margin above
 the same recipe/work/shape
 × 1.25 × 1.5 for the same OS/architecture/accelerator/memory-layout family, or
 × 1.25 × 2 for another family. Cross-machine estimates are labelled in status.
-Unknown, constrained, stale-identity or failed measurements, and peaks
-recorded more than 30 days ago, are excluded. A peak's age is its own and does
-not follow the throughput measured at the same point; main-process RSS alone is not a whole-attempt observation. Next use
+Unknown, constrained, stale-identity or failed measurements are excluded. Use whole-attempt evidence for learning; a main-process RSS sample omits other attempt members. Next use
 the optional hint. Otherwise a cold accelerator workload uses measured physical
 room bounded by the host allowance, idle history, launch gaps and slack. When
 another reservation would lower that offer, status reports
@@ -1275,12 +1265,11 @@ Retry cancellation to recover a lost acknowledgement. An unseen key creates
 an `absent` cancelled reservation: its first later valid submit can only bind a
 minimal terminal cancelled job. It never executes or conflicts on spec.
 
-An unbound reservation lasts 30 days. After expiry submit returns HTTP 410
-`submission_key_expired`; cancel returns `unknown` and null release. Genuinely
-unseen keys return `absent`. Unknown/expired coverage blocks the consumer's
-reopen. Job-bound keys remain for the job lifetime, plus retention after removal.
-For isolated dev expiry tests use `myce dev clock advance 30d`; it has no production
-route. See the [full submission/cancellation contract](design-proposal.md#submission-identity-and-cancellation-80)
+Current queues retain keyed answers and unbound cancellation reservations
+without an age deadline. Historical digest-only markers still return HTTP 410
+`submission_key_expired` on submit and `unknown` with null release on cancel.
+Unknown coverage blocks the consumer's reopen. See the
+[identity contract](design-proposal.md#submission-identity-and-cancellation-80)
 and [wire schemas](schemas/job-v1.schema.json).
 
 ## Maintenance
@@ -1310,7 +1299,7 @@ splitting and reduction. Mycelium runs, retries and gathers them.
 name: parameter-sweep
 project: research
 priority: experiment
-extension: simulator@1
+extension: example.sweep@1
 workload: {input_shape: fixed-v1, units: 100}
 files: {}                       # immutable common input manifest, or NAS inputs
 outputs: {metrics.json: results}
@@ -1449,10 +1438,8 @@ Before abort, release only describes attempts so far; inspect `will_not_run`
 for exclusion. No child cancellation loop is needed.
 
 Scope survives restart and includes future registered consumers on later reads.
-It enumerates retained records: jobs are not automatically removed; keyed
-tombstones expire 30 days after explicit removal, followed by permanent digest
-markers. Once the source is unavailable, GET cannot enumerate it and new
-dependencies are rejected. Artifact expiry does not erase retained scope or
+It enumerates retained records. When the source is unavailable, GET cannot
+enumerate it and new dependencies are rejected. Artifact expiry does not erase retained scope or
 settle custody. Keep parent identity and acknowledgement locally across outages.
 
 ## Declared model-call groups

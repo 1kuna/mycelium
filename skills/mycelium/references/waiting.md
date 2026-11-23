@@ -76,6 +76,13 @@ measured check-in opportunity, not a start promise. Unchanged evidence keeps its
 timestamp; sibling `predicates` are diagnostic projections. See
 [actual decisions](https://github.com/1kuna/mycelium/blob/main/docs/status.md#actual-all-tier-admission-decisions-1158).
 
+Leave cold accelerator work queued while it waits for measured host RAM.
+The offer leaves headroom for measured idle variation and retained launch
+shortfalls. A live RAM refusal before main can retry under the same key after
+capacity or the offer changes. Read `execution_cause.admission` for required
+and available RAM on that attempt. A terminal plain CPU launch OOM requires
+a larger explicit `needs.memory_gb` or a smaller workload and a new key.
+
 Per-job JSON keeps `last_memory_admission` for a blocked RAM comparison:
 envelope, drift, signed headroom and charge/growth owners. It survives startup
 failure and restart. Its timestamp is historical evidence, not live usage or the
@@ -186,11 +193,12 @@ polling. Dedicated hosts are unaffected. See
 
 ## Classes and preemption
 
-Tiers run `production`, then `deadline`, then `experiment` (the default). A
-higher tier takes capacity from a lower one only when no idle worker fits;
-eligibility, qualification and exact release still apply. Equal tiers never
-preempt each other, and messages asking other consumers to stop don't change
-queue order.
+Owner policy orders project/class selectors. The default tiers are
+`production`, `deadline`, and the `experiment` catchall. The planner tries
+free capacity first. A priority stop waits for exact release and respects
+eligibility and qualification. Usage balancing does not interrupt equal-tier
+work. [Scarce-host yield](https://github.com/1kuna/mycelium/blob/main/docs/design-proposal.md#scarce-host-yield)
+can move eligible finite work for a hard requirement with only one capable host.
 
 Read `copies[].priority_stop.cause` (or the retained attempt's `stop_cause`)
 to distinguish scheduling from memory safety. `priority_preemption` names a
@@ -210,12 +218,12 @@ the job. Stale or unknown physical telemetry blocks admission and does not
 authorize a memory-safety yield.
 
 - **Production** is for work a person or customer is waiting on, as the
-  project defines it. When it preempts, resumable work gets 10 seconds to save
-  (queue setting `--preemption-stop-grace`) and non-resumable work stops at once
-  and requeues to start over, uncharged. A production job must start within its
+  project defines it. A priority stop requeues the displaced job without a
+  retry charge. Accelerator jobs and resumable CPU jobs get ten seconds by
+  default (`--preemption-stop-grace`); non-resumable CPU work stops immediately. A production job must start within its
   start window (`start_window`, default 150 s, at most 1 h; `start_by` for an
-  absolute time). Waiting for capacity doesn't spend it; a stuck start fails
-  visibly. Infrastructure interruptions requeue it at most twice; its own
+  absolute time). A stuck start fails
+  visibly. Read the [start-window contract](https://github.com/1kuna/mycelium/blob/main/docs/jobs.md#production-start-deadline) for which waits pause the relative budget. Infrastructure interruptions requeue it at most twice; its own
   command failures and OOMs fail without retry. Production needs explicit
   targets and runs only on machine kinds the project approved for that work.
 - **Deadline** needs a real owner-set date (`--class deadline --deadline
@@ -254,10 +262,13 @@ whole-host isolation needs its actual reason. After an unconfirmed write, inspec
 does not confirm a reservation. See
 [validation reservations](https://github.com/1kuna/mycelium/blob/main/docs/operations.md#reserve-a-host-or-its-devices-for-an-existing-validation-job).
 
-Pause only your own queued job: `myce pause JOB_ID --reason TEXT`, optionally
-`--until RFC3339`; `myce resume JOB_ID` keeps its key and queue age. Assigned or
-running attempts cannot be paused; cancelling and resubmitting does not improve
-their place. Shared policy belongs to the queue owner.
+A queued pause keeps the job's key and queue age. A running yield pause uses the
+planned maintenance stop and waits for exact release. It keeps saved progress
+and spends no infrastructure loss. Use the CLI commands in [Pause, resume and
+cancel](../SKILL.md#pause-resume-and-cancel). For the HTTP attempt and pause
+revision fences, Python arguments, and fan-out behavior see
+[Pause queued work](https://github.com/1kuna/mycelium/blob/main/docs/jobs.md#pause-queued-work).
+Shared policy belongs to the queue owner.
 
 ## Production leases
 

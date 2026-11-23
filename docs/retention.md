@@ -1,8 +1,6 @@
 # Adaptive evidence retention (#811)
 
-This is next-release behavior under MY-34. It changes neither configured
-retention policies nor the authority needed to release somebody else's data.
-There is no deployment in this change.
+MY-34 governs evidence collection. Configured retention and exact ownership govern job files and logs.
 
 The queue measures available host RAM and free bytes on its own database volume,
 not the summed capacity of its workers. Its soft evidence target is the smaller
@@ -87,9 +85,11 @@ a one-line summary and the record's learning inputs to the `job_summaries`
 SQLite table: the retained memory evidence (lower bound and recovery margin,
 with its key, configuration, host, end time and extension) and the work
 observations its ledger learned, which stay pinned against evidence expiry.
-Durations, curves and storage envelopes already live outside job records. The
+Durations and storage envelopes live outside job records. The
 record's logs are deleted with it; a keyed submission keeps only the job's
-identity and outcome for replay.
+identity and outcome for replay. Keyed answers and cancellation reservations
+have no age deadline. Historical expired-key digests remain authoritative
+([submission identity](design-proposal.md#submission-identity-and-cancellation)).
 
 A record stays past 14 days while it is running, queued or held, owes
 delivery, release or custody, still holds files, logs or a checkpoint folder,

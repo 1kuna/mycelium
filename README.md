@@ -52,8 +52,8 @@ everything down. The last line is the downloaded result.
 </picture>
 
 One machine that stays on runs the queue: one Go binary and one SQLite file.
-Every other machine runs a worker that reports its CPU, memory and GPUs and
-pulls the most important job it can run. Jobs say what they need, not where to
+Each participating machine runs a worker that reports its CPU, memory and GPUs
+and pulls the most important job it can run. The queue host can run a worker too. Jobs say what they need, not where to
 run. If the queue restarts, queued and running batch jobs survive and workers
 reconnect; in-flight model calls fail and are retried by the caller. There's no peer network or cluster database to manage.
 
@@ -80,19 +80,14 @@ each one shows up, and runs a test job. You need Linux or Apple Silicon Mac
 computers on one local network, a shared network drive (NAS) mounted on each
 for this automated route, and working GPU drivers where there's a GPU.
 
-## How ready it is
+<a id="how-ready-it-is"></a>
 
-**Solid, running real work every day:** the queue and scheduler, CPU and GPU
-batch jobs, checkpoint and resume, file transfer with or without a NAS, fair
-sharing between projects, and `myce dev`. Model calls and servers, software
-environments and native sidecars are also supported.
+## Supported systems
 
-**Experimental:** learned placement (Mycelium measuring jobs and machines to
-place work better) is young and changing fast. Sandboxing is opt-in for plain
-commands and has documented gaps; read [isolation limits](docs/native-isolation.md) before running code you
-don't trust.
-
-**Not yet:** Windows, and splitting one job across several machines.
+Run CPU or accelerator work on Linux and Apple Silicon Mac workers. Browse
+[isolation limits](docs/native-isolation.md) before submitting code you don't
+trust. The [approved design](docs/design-proposal.md#scope-and-later-work)
+lists supported scope and deferred work.
 
 ## Learn more
 

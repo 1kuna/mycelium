@@ -1,19 +1,9 @@
 # Mycelium v3: approved design
 
-This is the approved design and the only product spec. Each topic states the
-current design once. The maintainer's rulings are in [decisions](DECISIONS.md)
-and are cited here by MY number where they govern. The text was consolidated on
-2026-11-12 (MY-49) from its dated amendments without changing what it says.
-Approval dates, issue receipts and replaced wording stay in git: see the
-[text before consolidation](https://github.com/1kuna/mycelium/blob/e0488c0c5034b5a57827ceebfa69f770c060bb8f/docs/design-proposal.md) and the section map in
-[#1433](https://github.com/1kuna/mycelium/pull/1433). Old heading anchors still
-resolve here. Mechanism chapters under `reference/` linked below are part of
-this approved design; their relocation changes no product contract.
-
-Laptop tests and `myce dev` are implementation evidence. Native hardware
-qualification and deployment are separate and are never inferred from them
-(MY-10). A passage marked **Conflict** keeps two statements that disagree and
-that this consolidation did not resolve.
+This is the approved product design. [Decisions](DECISIONS.md) records
+maintainer rulings by MY number. Mechanism chapters linked from this document
+are part of the design. Laptop tests establish implementation behavior.
+Native qualification and deployment require their own evidence (MY-10).
 
 ## Why a redesign
 
@@ -42,7 +32,7 @@ accelerators as components (MY-06).
 ## Product decisions
 
 1. **CPU and GPU compute.** CPU commands and accelerator workloads share the queue. Applications retain file watching, submission and publication.
-2. **The queue owns GPU work.** Apps submit commands or model calls instead of keeping their own GPU processes between jobs. An unpinned idle model is unloaded after its configured interval (default 10 minutes), or when higher-priority work needs the memory. Explicit production pins are the reservation mechanism.
+2. **The queue owns GPU work.** Apps submit commands or model calls instead of keeping their own GPU processes between jobs. An unpinned idle model unloads after its [configured or learned interval](readiness.md), or when higher-priority work needs the memory. Explicit production pins are the reservation mechanism.
 3. **Progress can move.** NAS checkpoints or verified file-store checkpoint generations allow a resumable job to continue on another compatible machine. Outputs must be safe to repeat; attempt-specific results reject stale executions.
 4. **One local network, one queue.** No peer network, leases, leader election or replicated registry.
 5. **One machine is one hypha.** A worker owns the machine and selects its components; CPU/RAM capacity is shared once.
@@ -50,46 +40,14 @@ accelerators as components (MY-06).
 
 ## A job
 
-```yaml
-name: example-reindex
-project: example
-class: experiment           # arbitrary job class; legacy priority is accepted
-deadline: null              # a time, required when priority is "deadline"
-run:
-  command: ["python", "reindex.py", "--batch", "7"]
-  workdir: '{work}'         # worker-managed attempt directory; stage source as inputs
-  env: {}
-needs:
-  memory_gb: 40
-  platform: [cuda]          # any of: cuda, xpu, metal
-  network: false            # payload offline by default; true requires protected outbound
-  model: qwen3-32b          # optional; used to group jobs that share a model
-expected_minutes: 90        # rough guess; used for planning, never enforced
-resumable: true             # true = the job saves checkpoints and can be stopped and picked up later
-```
+See [job YAML and CLI commands](jobs.md), [local setup](START-HERE.md) and
+[worker installation](operations.md). The queue supplies job and attempt
+identity and `MYCE_CHECKPOINT_DIR`. A resumable command saves durable progress,
+handles a stop signal and restores from the last complete generation.
+The [checkpoint contract](files.md#resumable-jobs) covers NAS-relative
+assignments and portable file-store generations.
 
-The queue gives every job its job id, `MYCE_CHECKPOINT_DIR` and attempt number. With NAS configuration, assignments are NAS-relative and each worker resolves them under its own `--checkpoint-root`. Without a NAS, the file store transports verified checkpoint generations. A resumable job only has to (1) save to the checkpoint folder now and then, (2) save and exit when it gets a stop signal, and (3) pick up from the checkpoint folder when it starts. Only durable, complete progress can resume on another machine; see the resumable-jobs guide.
-
-## Using it
-
-```
-myce submit job.yaml        # prints the job id
-myce status                 # what's running where, what's waiting, and why
-myce logs <id> --follow
-myce cancel <id>
-myce join                   # turn this machine into a worker
-myce leave [--now]          # take it out of the fleet
-```
-
-The same actions are available as plain HTTP calls, so projects can submit from code. The status page shows the same information as `myce status`.
-
-These GPU-work and setup features are implemented now:
-
-- **Any GPU work, not just batch jobs and OpenAI model calls.** GPU commands run as batch jobs; general HTTP model servers keep their existing interfaces and are loaded and unloaded by the queue.
-- **GPU preference.** A job either requires a platform (`cuda`, `xpu`, `metal`/MLX), or states a preferred one, or doesn't care. If it doesn't care, it goes to any machine that can run it.
-- **Environments.** A job names the software it needs, either a named environment (like `torch-cuda` or `mlx`) or a lock file. Workers report which environments they already have ready. The queue prefers a machine whose environment is ready, the same way it prefers a machine with the model already loaded. If none has it ready, a machine that *can* build it does so first.
-- **Automatic setup.** `myce install worker` detects the GPU and operating system and installs the worker and its boot service; `myce install queue` sets up the queue service. Matching software recipes build on demand, rather than all being installed up front. Bare `myce join` uses the same GPU detection for a foreground worker; explicit GPU and device flags override it.
-- **Model reservations are implemented now:** project-owned pins can hold a model continuously or within explicit weekday/time-zone windows. See [Models](#models).
+<a id="using-it"></a>
 
 ## How the queue decides
 
@@ -190,8 +148,7 @@ caps retain their scope. Status uses the dispatch planner.
 This is admission fairness, with no same-tier interruption or bounded-wait
 promise for indefinite allocations. Strict higher tiers may starve lower ones.
 
-The same SQLite queue keeps minute-level device/project/job/model allocation
-samples for seven days, then hourly totals through 90 days. Busy allocation,
+The SQLite queue retains device, project, job and model allocation history. See [usage](scheduling.md#usage) for the current query and retention contract. Busy allocation,
 idle time, memory, pins, preemptions and production start latency distinguish
 active pool use from reservations and unknown downtime. `myce usage` reports
 these totals. A self-contained responsive status page shows the fleet, queue,
@@ -377,29 +334,14 @@ health-proof window or releasing exact-attempt custody.
 
 | Retained identity | Lifetime and answer |
 | --- | --- |
-| Job key, spec fingerprint and ID | Entire job lifetime plus 30 days after removal; return the original answer within retention. |
-| Cancelled reservation with no job | 30 days from creation; later submit can bind only a cancelled job. |
-| SHA-256 digest marker of `(project, key)` | Retained indefinitely after full-record expiry. Submit returns HTTP 410 `submission_key_expired`, never creating a job; cancel-by-key returns `unknown`. |
+| Job key, spec fingerprint and ID | Durable replay survives job removal. |
+| Cancelled reservation with no job | Retained until bound. A later submit can bind only a cancelled job. |
+| Historical SHA-256 expiry marker of `(project, key)` | Retained indefinitely. Submit returns HTTP 410 `submission_key_expired`; cancel-by-key returns `unknown`. |
 | No record, with intact durable marker store | Genuinely never seen; cancel-by-key records an `absent` reservation. A cache miss alone never proves absence. |
 
-**Queue history retention.** Finished job records leave job listing and ID
-lookup **14 days after `finished_at`** (MY-49). Result files use
-`--file-retention`, `72h` by default (MY-47). Missing terminal timestamps start
-their window at the first maintenance observation. A record stays while it is
-running, queued or held, owes delivery, release or custody, still holds files,
-logs or a checkpoint folder, is the `after:` parent of a retained job, or is an
-extension check that native qualification reads. Pending blob cleanup transfers
-atomically to a deduplicated set of expired hashes; shared blobs remain
-protected by their other owners. Before a record goes, a one-line summary (ID,
-project, name, final state, finish time, host, duration, peak memory) and every
-learning input it holds (retained memory evidence and the work observations its
-ledger learned) are written to the separate `job_summaries` table; ID lookup
-then answers HTTP 410 `job_expired` with the summary. A keyed answer keeps the
-job's identity and outcome for replay. Learned work-curve observations are not
-pruned. Removal is automatic, at most 64 records per maintenance pass: summaries
-are written outside the queue mutex, and each record is rechecked and removed in
-the existing crash-consistent SQLite transaction. Its logs are deleted after
-commit, outside the mutex.
+**Queue history retention.** [Retention](retention.md#job-records) describes
+job and file expiry (MY-47/MY-49), custody and the retained summary and learning
+data. Keyed replay and unresolved cleanup remain durable.
 
 **Retained execution ledger.** The per-job append-only ledger shares the
 existing job/replay record and transaction, not a separate service or retention
@@ -409,22 +351,16 @@ recorded before execution permission; port-collision replacements preserve their
 own identity and release evidence within one queue attempt. Read-only API/CLI and
 Python pages use immutable sequences and a fixed high-water mark, with no total
 row cap. Keep all entries while the job or keyed replay answer is retained,
-including the extra 30-day post-removal window below. Unresolved custody is never
+including after job removal. Unresolved custody is never
 pruned. An expired or unknown ledger returns explicit HTTP 410
 `job_ledger_unavailable`, never an empty complete history. Pre-ledger history and
 older workers without native custody receipts report incomplete coverage; missing
 historical custody cannot be reconstructed. See the
 [ledger contract](jobs.md#retained-per-job-ledger) for fields and commands.
 
-The existing key contract remains: after job removal the full answer, spec
-fingerprint and cancellation/release evidence remain available by submission key
-for another **30 days**, then become permanent digest-only markers. Thus ordinary
-full history is limited to the retention windows plus cleanup backlog; unresolved
-custody and permanent markers intentionally have no age limit. This is not a
-fixed byte quota. SQLite reuses deleted pages; physical file shrinkage is an
-offline compaction operation, never an automatic `VACUUM` on the live queue.
+SQLite reuses deleted pages. For physical compaction, follow the [offline procedure](operations.md#queue-history-retention).
 
-A key's acknowledged `will_not_run: true` remains true permanently, including after expiry. While a consumer operation is open, recover a lost response by retrying its stored identical spec/key within retention. Once closed, cancel by key only, never resubmit. An expired/unknown answer leaves consumer coverage unresolved and blocks its reopen. Consumers own key generation, stored specs, operation intent and acknowledgement persistence. This promises no exactly-once external effects; keep output writes safe to repeat.
+A key's acknowledged `will_not_run: true` remains true permanently, including after expiry. While a consumer operation is open, recover a lost response by retrying its stored identical spec/key. Once closed, cancel by key only, never resubmit. An expired/unknown answer leaves consumer coverage unresolved and blocks its reopen. Consumers own key generation, stored specs, operation intent and acknowledgement persistence. This promises no exactly-once external effects; keep output writes safe to repeat.
 
 ### Job reply contract
 
@@ -481,14 +417,10 @@ durable exclusion. No job or attempt is created for an undispatched piece.
 
 This is a snapshot of registered work, not a closed submission transaction:
 future valid dependencies appear on subsequent reads and remain fenced after
-abort. Finished job records expire 14 days after they finish (MY-49) unless a
-retained job names them in `after:`; see [queue history retention](#submission-identity-and-cancellation).
-Retained keyed answers follow the existing 30-day-after-removal limit, then
-digest-only expiry. Once a
-source is no longer retained, new dependencies are rejected rather than inferred;
-GET cannot enumerate an expired/unknown source. Artifact expiry is independent
-and does not erase retained keys, scope or release custody. This projection adds
-no dependency types or graph scheduler.
+abort. Retired job records and historical expired keys can prevent scope
+enumeration. Once a source is no longer retained, new dependencies are
+rejected. Artifact expiry is independent of scope and release custody. This
+projection adds no dependency types or graph scheduler.
 
 ## Queue-owned host maintenance
 
@@ -851,15 +783,8 @@ hardening remains separate from this minimum.
 ## Containers
 <a id="docker-command-containment-maintainer-2026-10-11"></a>
 
-Mycelium does not run containers. Managed Docker command containment, added
-on 2026-10-11 as an optional path (MY-13), was retired on 2026-11-12 under
-[MY-49](DECISIONS.md#my-49) once its last consumer ran its model jobs natively.
-A job spec, profile or adapter entry that still sets a `run.docker*` field is
-refused at submission with `job_docker_retired`, pointing to native
-environments and sidecars ([services](services.md#a-model-server-in-a-native-job-instead-of-a-container-image)).
-Historical Docker job records still load and display (MY-42); their retained
-specs do not authorize execution. Docker CLI flags and installer settings are
-removed. Old config keys are discarded when read and omitted on reinstall.
+Managed Docker execution was retired under MY-49. The [jobs reference](jobs.md#containers-managed-docker-was-retired)
+covers refusal and legacy records. Use [native environments and sidecars](services.md#a-model-server-in-a-native-job-instead-of-a-container-image).
 
 ## Models
 <a id="models-nas-masters-local-cache-and-production-pins-maintainer-2026-10-09"></a>
@@ -1538,25 +1463,18 @@ establish that a hard requirement is unjustified. See
 Mycelium learns from its own accepted attempts and uses those measurements to
 place work (MY-07, MY-31).
 
-> **Cut down by [MY-49](DECISIONS.md#my-49) (2026-11-12).** Each kind of work keeps one record: its last accepted duration and accepted peak. Throughput curves, sweeps, the onboarding benchmark, calibrated forecasts and batch/wave planning are removed; placement prefers the shorter last accepted duration on each eligible target (MY-31), and declared pieces run as ordinary serial jobs. The subsections below record the earlier design. See [status](status.md#execution-elapsed-time-last-accepted-duration-and-application-progress).
+Under [MY-49](DECISIONS.md#my-49), placement uses the last comparable accepted
+duration and memory peak. Throughput sweeps, the onboarding benchmark,
+calibrated forecasts and batch planning were retired. Read
+[measurement identity](reference/measurement-mechanisms.md#comparable-observations)
+and [status](status.md#execution-elapsed-time-last-accepted-duration-and-application-progress).
 
-### Comparable observations
+<a id="comparable-observations"></a>
 <a id="comparable-observations-slice-1-107-approved-2026-10-22"></a>
-
-See [comparable observations](reference/measurement-mechanisms.md#comparable-observations) for the
-approved mechanism and its constraints.
-
-### Safe sparse curves
+<a id="safe-sparse-curves"></a>
 <a id="safe-sparse-curves-slice-2-107-approved-2026-10-24"></a>
-
-See [safe sparse curves](reference/measurement-mechanisms.md#safe-sparse-curves) for the
-approved mechanism and its constraints.
-
-### Completion-aware placement
+<a id="completion-aware-placement"></a>
 <a id="completion-aware-placement-slice-3-107-approved-2026-10-24"></a>
-
-See [completion-aware placement](reference/measurement-mechanisms.md#completion-aware-placement) for the
-approved mechanism and its constraints.
 
 ### Repeated plain-command measurements
 <a id="repeated-plain-command-measurements-878"></a>
@@ -1567,24 +1485,13 @@ approved mechanism and its constraints.
 ## Declared fan-out and batch planning
 <a id="declared-fan-out-and-batch-planning-slice-4-107-approved-2026-10-24"></a>
 
-> **Batch planning removed by [MY-49](DECISIONS.md#my-49).** Declared pieces remain; each runs as an ordinary serial job.
-
-Splitting follows measured capability and output parity (MY-07, MY-19). This
-covers explicit homogeneous independent pieces, measured discrete horizon
-planning and the model-measurement binding. Generic stage graphs, dynamic
-enumeration and timed downstream batching are not part of it.
-
-An extension job may declare `fan_out: {pieces: [{key: ..., args: [...]}],
-max_concurrency: N}` with at most 256 unique, stable keys. Its `workload` describes
-one piece. The application supplies the pieces; Mycelium never splits a program.
-Inputs and output names use the existing artifact contract. A variant's reference
-sweep may additionally declare `run`, a command implementing the same measured
-internal concurrency mode on a keyed input manifest. Without this explicit
-execution contract or safe matching measurements, execution stays serial. One
-wave is one ordinary attempt on one component; independent GPU attempts remain
-one per device. A failed/lost wave retries only its own fixed membership, with
-existing cleanup and stale-attempt fences. Accepted outputs gather by piece key
-on the parent; the application owns semantic reduction of the gathered results.
+Splitting follows measured capability and output parity (MY-07, MY-19).
+An extension job can supply up to 256 independent pieces and a concurrency
+limit. Each piece is an ordinary serial job with its own attempts and
+accepted outputs. The caller supplies the pieces and owns reduction.
+See [declared pieces](jobs.md#declared-independent-pieces) and
+[model call groups](jobs.md#declared-model-call-groups). Batch and wave planning
+were retired under MY-49.
 
 **Explicit discrete-XPU sharing.**
 `fan_out.share_xpu: true` opts a declaration and its materialized/retried waves
@@ -1597,31 +1504,6 @@ code can ship with this off. Production opt-in requires owner-accepted matched
 replay benefit and unchanged output parity; baseline and candidate use the same
 release, workload and extension digest, changing only this flag. This permission
 does not change host allowances, qualification or worker configuration.
-
-Only declared groups use the new planner. Enumerate safe measured counts and
-integer waves over a completion horizon, including measured smaller tails.
-Filter through existing qualification, owner availability, placement, tier,
-fairness, caps, memory and release fences before considering capacity. Charge
-shared CPU/RAM once per host, conservatively scale declared per-piece floors,
-and never lower a floor below measured high-water memory. Forecasts grant no
-reservations: recompute on ordinary queue transitions and pull only currently
-admissible work. Busy daily hosts contribute zero. Jobs and calls without a
-fan-out declaration keep their existing placement and concurrency behavior.
-
-A model can bind a reference work type and exact frozen extension digest to its
-server configuration digest. The sweep explicitly declares that same server
-digest; extension-command concurrency alone is insufficient. Shape, model bytes,
-server command/arguments, environment, backend, component, allowances, freshness,
-qualification and OOM checks must all match. Only explicitly declared, compatible
-model-call groups may use these points, bounded by configured `max_in_flight`.
-Unbound, changed or unqualified evidence falls back to serial for declared groups;
-legacy undeclared calls retain configured admission, including zero-as-unlimited.
-No automatic quality-tolerance policy is added; #145 remains eligibility first.
-
-Laptop acceptance includes the research arithmetic, short tails, daily-owner
-exclusion, exact affected-piece retries/gather and unchanged undeclared decisions.
-The `myce sim` comparison of declared synthetic curves against unsplit and
-naive-split arrivals was removed with the simulator (MY-49); Git history keeps it.
 
 ### Per-piece accepted-output dependencies
 <a id="per-piece-accepted-output-dependencies-175-approved-2026-10-25"></a>
@@ -1762,65 +1644,15 @@ approve` is eligible. Never silently update, downgrade, change GPU drivers, OS
 or packages, or use SSH. The downgrade credential scope remains separate and
 unchanged.
 
-It is the one rollout path (MY-35, MY-49); the procedure is in
-[operations](operations.md#rolling-fleet-upgrades) and the failure codes in
-[fleet upgrade internals](reference/fleet-upgrades.md). The operation lives in
-the existing SQLite queue, continues after the CLI exits and survives the
-queue's own restart. One host is active at a time: idle hosts first, then busy
-hosts, then hosts running production, and the queue's host last, its worker
-before its queue. For each host the queue:
-
-1. proves live takeover of every retained batch attempt. Installed workers run
-   each attempt in an independent custodian: a delegated systemd scope under
-   `myce-jobs.slice` on Linux, or a separate launchd job on Darwin. Worker
-   service teardown cannot reach that custodian. Its existing runner retains
-   process waits, cache pins, memory/RSS guards, stop delivery and durable
-   results. The replacement worker checks the custodian's exact PID and process
-   birth, manager scope/job, attempt and session before adopting logs, result
-   publication and release custody. The queue sees the same execution, without
-   waiting for completion or changing attempt/session (MY-55). A brief admission
-   fence prevents new work racing the final update authorization; it does not
-   drain or stop running attempts. Before restart the queue durably retains the
-   exact session/attempt set. This planned handover survives health timeouts,
-   queue restart and operation reruns without declaring those executions lost
-   or accepting a different session. It ends only on exact replacement adoption
-   or positive release. Unknown custody can therefore hold capacity until the
-   worker is recovered; elapsed time cannot authorize duplicate work;
-2. otherwise drains naturally, reporting why takeover is unproved. Missing
-   custodians on an older release, unverifiable identities, resident-bound
-   commands, Linux shared-host aggregate CPU quotas, model engines/calls,
-   preparations and unresolved cleanup require
-   this fallback. Normal urgency never checkpoint-stops or kills work, including
-   resumable experiments; old undelivered bounded-stop plans are discarded.
-   The operation owns only the drain it took; an operator's drain/disable stays
-   theirs. Open production work keeps admission enabled where a drain would
-   strand it (#1387), until takeover is proved or it finishes;
-3. has each service fetch the release through the queue's authenticated
-   endpoint and verify it against its pinned publisher key, the signed size and
-   SHA-256, version and protocols, and on macOS its code-signing identity; a
-   finite helper of the same binary replaces the binary atomically and restarts
-   the existing unit;
-4. requires a fresh runtime proof from a new process with the release's exact
-   bytes, a healthy service manager and runner smoke, stable for the
-   enrollment window;
-5. resumes only the drain it took, then advances.
-
-Orchestrator reading of MY-55 with MY-35/MY-39 (not new maintainer words):
-`--urgency critical` tries takeover first. Only this explicit operator choice
-may use the existing tier stops when takeover is impossible or the fix requires
-running work restarted. It is never an automatic fallback. Resumable work keeps
-its planned-maintenance checkpoint/requeue contract, and status records each
-stop. An unhealthy result stops advancement; there is no automatic rollback
-(MY-03). Reruns adopt operation-owned drains. Existing operator policy survives
-both takeover and natural fallback.
-Decisions use the injected Clock; network, hashing and service probes run
-outside the queue lock. Fake-clock tests cover ordering, drains waiting on
-running work, critical stops, failure-stop and rerun; a real-process
-end-to-end rolls two workers and the queue between locally signed releases
-while each worker's production command, and a model stream on a drained
-worker, finish untouched. Tested releases roll out without separate authorization (MY-28);
-hardware, OS, driver and package changes stay outside that authority, and
-native manager/signature acceptance remains separate (MY-21).
+The upgrade runs one host at a time, survives CLI exit and queue restart, and
+proves exact attempt takeover before replacing a worker (MY-55). Normal
+updates wait for natural completion where takeover cannot be proved. Explicit
+critical urgency retains the scoped stop authority in
+[the maintainer rulings](DECISIONS.md#my-39). Failed health checks stop
+advancement. Rerun adopts operation-owned drains and leaves operator
+maintenance under its owner. See [the procedure](operations.md#rolling-fleet-upgrades)
+and [takeover and runtime proof](reference/fleet-upgrades.md) for ordering,
+identity checks, failure codes and recovery.
 
 ### Open production work
 <a id="amendment-to-the-fleet-upgrade-open-production-work-1009-my-35"></a>
@@ -1866,49 +1698,12 @@ shared-host guide for thresholds, evidence and costs.
 ## Health alerts
 <a id="minimal-health-alerts-v1-amendment-200--248"></a>
 
-The queue records health events from its existing check-ins, maintenance clock and
-attempt outcomes; no agent or user polls for alerts. V1 detects only measured disk
-free space below the existing guard (1%, minimum 256 MiB), an unhealthy or stale
-host, a production attempt lost to machine silence or a start/observation/cleanup
-timeout, and
-checkpoint/NAS/file storage unavailable continuously for a configurable
-duration (default five minutes). Planned leave and host maintenance suppress host
-alerts; planned and operator stops do not count as lost production attempts.
-A wholly quiet fleet still emits stale-host alerts even while loss/retry decisions
-wait for connectivity. Startup's existing restart grace applies to stale alerts.
-
-Events commit with queue state and appear in authenticated status as
-`health_alerts`. A condition emits once per episode, with a 15-minute cooldown
-across flaps; production losses emit once per exact job attempt. The last alerted attempt is
-persisted on the job independently of the bounded event window. The queue retains
-the latest 256 delivered events (or 256 total when no notifier is configured).
-Pending configured deliveries survive restart and remain until acknowledged;
-operators must repair a broken receiver to drain that backlog.
-
-An optional queue-local executable uses the existing completion notifier's
-`--check` and JSON-stdin/exit-status contract. Each delivery contains only a stable
-`delivery_id`, fixed `kind`, host/job/attempt identities and queue timestamp, plus
-`delivered: false`; no raw diagnostics, paths, job argv or fleet token. The
-operator's hook routes to their own wake or notification channel. File-store availability is sampled by the existing maintenance tick; it adds
-no probe or snapshot lock to ordinary control transactions. Execution is
-outside queue locks and never blocks worker control. Delivery is at least once:
-receivers deduplicate `delivery_id`. A successful hook acknowledgement is persisted;
-a failed/ambiguous delivery retries the same identity after one minute. Hooks are
-limited to one invocation per second and 30 seconds per invocation/check, preventing
-a burst or wedged hook from overwhelming delivery or stranding queue shutdown.
-These transport limits cost at most one second per queued notification and require
-a hook to deliver within 30 seconds. Health thresholds use the injected queue clock.
-
-Not implemented: #200's extension-configuration or architecture-caused
-workload-failure detectors, trend analysis or automatic issue filing. Those
-broader acceptance criteria remain open.
-
-A pending cleanup
-result can alert before release; neither alert path changes execution state or
-releases resources. Stale attempt diagnostics cannot emit a production-loss alert.
-
-A suspect worker ([adaptive worker loss](#adaptive-worker-loss)) also raises an
-owner-attention health alert.
+The queue derives health events from committed check-ins, maintenance and
+exact attempt outcomes. Events do not change admission or establish release.
+Optional queue-local delivery is asynchronous and at least once. A hook
+receives sanitized identities, never a fleet token or raw payload diagnostic.
+See the [health and notifier contract](reference/status-behavior.md#incident-health-alerts)
+for current triggers, retention, episode recovery and delivery acknowledgement.
 
 ## Testing
 
