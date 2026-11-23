@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from mycelium import Client, TransferStalledError
+from mycelium import Client
 from mycelium.transfer import UploadTiming, _ProgressSocket
 
 

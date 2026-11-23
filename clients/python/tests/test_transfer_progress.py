@@ -14,7 +14,7 @@ from unittest.mock import patch
 from urllib.error import URLError
 
 from mycelium import APIError, Client
-from mycelium.transfer import _ProgressSocket, _ProgressTLS
+from mycelium.transfer import _ProgressTLS
 
 
 class PartialUploadTests(unittest.TestCase):

@@ -15,8 +15,7 @@ import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
 
-from mycelium import (APIError, Checkpoint, Client, EntryFailedError, EntryInterrupted, EntryPreparationError,
-                      IncompleteReplyError, StopSignal)
+from mycelium import APIError, Checkpoint, Client, EntryFailedError, EntryInterrupted, EntryPreparationError, StopSignal
 
 ROOT = Path(__file__).resolve().parents[3]
 
