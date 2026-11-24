@@ -188,12 +188,11 @@ func testFileOwnershipCollectorAgreement(t *testing.T) {
 			ctx := context.Background()
 			q, clock := fixture(t)
 			c := retentionClient(t, q)
-			selected, _, ref := releaseTerminal(t, q, c, "shared payload")
+			selected, _, ref := releaseTerminal(t, q, c, "shared-payload")
 			if tc.keeper == "input_claim" {
 				if _, err := q.claimFileInput(ctx, Spec{Project: "foreign"}, ref); err != nil {
 					t.Fatal(err)
 				}
-
 			} else if tc.protected || tc.name == "expired and retained history" {
 				otherSpec := spec("experiment")
 				otherSpec.Project = "foreign"
