@@ -259,6 +259,9 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool, 
 	// Mandatory/local releases already provide RAM as well as GPU memory;
 	// the host-wide plan credits them once before asking for more.
 	projected := q.cpuAfterReleases(m, p.jobs, p.slots, p.preparationCores)
+	if jobClass(j.Spec) == "production" {
+		projected.hostReservationDebtGB -= q.unifiedReleaseDebtCredit(m, p.jobs)
+	}
 	releasedJobs, releasedSlots := map[*Job]bool{}, map[*ModelSlot]bool{}
 	for _, r := range p.jobs {
 		releasedJobs[r] = true
@@ -277,6 +280,43 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool, 
 		p.addSlot(s)
 	}
 	return p
+}
+
+// Without a device sample, live RAM already reflects unified CUDA allocations
+// while pending growth still carries their estimate (#598). Discount that
+// overlap only when planning stops. Admission still requires exact releases
+// and enough live RAM after they arrive.
+func (q *Queue) unifiedReleaseDebtCredit(m *Machine, jobs []*Job) float64 {
+	debt := m.hostReservationDebtGB
+	if debt <= 0 || !hostHasUnifiedCUDA(m) {
+		return 0
+	}
+	if allowance := q.poolAllowance(m); allowance > 0 {
+		debt = max(0, debt-max(0, m.HostMemoryInUseGB-allowance))
+	}
+	now := q.clock.Now()
+	credit := 0.0
+	for _, j := range jobs {
+		worker := q.s.Machines[j.Machine]
+		owner := q.planningAllocationMachine(worker, j.AllocatedDevices)
+		if !unifiedCUDA(owner) || j.StartedAt == nil || !batchReservesCapacity(j) {
+			continue
+		}
+		if _, known := q.workerLiveMemoryReading(m, worker); !known {
+			continue
+		}
+		sample := q.hostMemorySamples[j.Machine][jobKey(*j)]
+		if !sample.deviceAt.IsZero() && now.Sub(sample.deviceAt) < deviceMemorySampleFreshFor {
+			continue
+		}
+		device := max(j.Spec.Needs.MemoryGB, j.Spec.SizeHint.MemoryGB)
+		if j.MemoryFallback != nil {
+			device = max(device, j.MemoryFallback.MemoryGB)
+		}
+		_, growth := q.hostJobChargeGrowth(j)
+		credit += min(growth, device)
+	}
+	return min(debt, credit)
 }
 
 func (q *Queue) slotMemory(s *ModelSlot) float64 { model, _ := q.model(s.Model); return model.MemoryGB }

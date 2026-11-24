@@ -46,6 +46,10 @@ func TestUnifiedProductionPreemptsDeadlineHostMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock.Advance(time.Second)
+	if got := check(t, q, m, nil).Job; got != nil {
+		t.Fatal("release receipt bypassed the live RAM check", got.ID)
+	}
+	clock.Advance(time.Second)
 	m.HostAvailableMemoryGB, m.MemoryObservation.UsedGB = 90, 6
 	if got := check(t, q, m, nil).Job; got == nil || got.ID != demand.ID {
 		t.Fatalf("production not admitted after release: %v reason=%q", got, job(t, q, demand.ID).Reason)

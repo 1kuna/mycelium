@@ -66,11 +66,11 @@ func machineCheck(t *testing.T, q *Queue, m Machine, jobs ...*Job) Reply {
 		// This helper already models each reservation as resident in the card's
 		// free counter below. Supply the matching per-attempt sensor evidence;
 		// missing/stale/uncertain telemetry tests construct raw reports instead.
-		gb := j.Spec.Needs.MemoryGB
+		gb := deviceShareGB(j)
 		c.Attempts = append(c.Attempts, AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt, Progress: j.Progress}, Session: j.Session, Started: true, CurrentHostMemory: &CurrentHostMemory{DeviceGB: &gb}})
 		for i := range c.Machine.Devices {
 			if slices.Contains(j.AllocatedDevices, c.Machine.Devices[i].ID) {
-				c.Machine.Devices[i].FreeMemoryGB = max(0, c.Machine.Devices[i].FreeMemoryGB-j.Spec.Needs.MemoryGB)
+				c.Machine.Devices[i].FreeMemoryGB = max(0, c.Machine.Devices[i].FreeMemoryGB-gb)
 			}
 		}
 	}
