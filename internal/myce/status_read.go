@@ -863,7 +863,7 @@ func (q *Queue) statusSnapshotOptions(options *statusOptions, contexts ...contex
 
 // The serving queue owns this list. Client projections only forward it.
 func queueCapabilities() []string {
-	return []string{"paused_start_window_frozen"}
+	return []string{"paused_start_window_frozen", "fenced_job_control"}
 }
 
 func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...context.Context) (Snapshot, error) {

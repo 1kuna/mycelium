@@ -10,8 +10,8 @@ import (
 	"time"
 )
 
-// Cancellation excludes new attempts/assignments. A previously assigned attempt
-// may still begin before its next check; release is independent of exclusion.
+// Cancellation excludes new assignments and future launch/Started approvals.
+// Previously authorized work can race the stop, so release is separate.
 type Cancellation struct {
 	JobID          *string    `json:"job_id"`
 	Project        string     `json:"project"`

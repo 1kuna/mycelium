@@ -3554,6 +3554,11 @@
           "$ref": "#/$defs/CompletionState",
           "x-contract": "diagnostic"
         },
+        "control": {
+          "$ref": "#/$defs/JobControl",
+          "description": "Last committed fenced operation. Compare its revision with the current pause_revision to reconcile a retry. Omitted before the first fenced operation.",
+          "x-contract": "stable"
+        },
         "copies": {
           "items": {
             "$ref": "#/$defs/Copy"
@@ -4218,6 +4223,29 @@
         "queued",
         "front",
         "checkpoint"
+      ],
+      "type": "object"
+    },
+    "JobControl": {
+      "properties": {
+        "action": {
+          "enum": [
+            "pause",
+            "resume"
+          ],
+          "type": "string"
+        },
+        "generation": {
+          "type": "integer"
+        },
+        "revision": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "generation",
+        "action",
+        "revision"
       ],
       "type": "object"
     },

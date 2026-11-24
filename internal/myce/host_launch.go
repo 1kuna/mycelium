@@ -148,6 +148,11 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 				reject("attempt_custody")
 				return nil
 			}
+			// The offer may have left the queue before keyed cancellation won.
+			if cancelled(batch) {
+				reject("cancelled")
+				return nil
+			}
 		}
 		m := q.s.Machines[l.Machine]
 		allowed := q.hostLaunchAllowed(m, l.Session)
@@ -180,8 +185,6 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 				reject("job_state")
 			case j.ReleaseConfirmed:
 				reject("execution_released")
-			case cancelled(j):
-				reject("cancelled")
 			default:
 				predicate := q.startPlacementRejection(j)
 				if predicate == "" {

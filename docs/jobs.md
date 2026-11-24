@@ -115,7 +115,8 @@ older binaries do not understand these non-runnable states.
 ### Fenced job control
 
 Check the serving queue's `GET /api/status` for `queue_capabilities` containing
-`fenced_job_control` before using these routes. Use exact job IDs.
+`fenced_job_control` before using these routes. Use exact job IDs and keep the
+same request body across retries. A predecessor returns a route error.
 
 - `POST /api/jobs/JOB/control/pause` takes `project`, `reason`, `if_attempt`
   and `control_generation`. The current attempt must match. A new generation
@@ -125,17 +126,22 @@ Check the serving queue's `GET /api/status` for `queue_capabilities` containing
   A matching or newer generation can release a direct hold. On a queued job it
   records the resume fence while keeping the job runnable and preserving its
   start window. A parent-owned hold can only be released through its parent.
-- `POST /api/jobs/control/cancel` takes `project` and `submission_key`. It uses
+- `POST /api/jobs/control/cancel-by-key` takes `project` and `submission_key`. It uses
   the durable keyed exclusion and exact-attempt stop/release protocol described
   under [Abort and wait for release](#abort-and-wait-for-release).
 
 Use positive, increasing generations per job. A pause and its matching resume
 may share a generation. Resume seals its generation against delayed pauses.
-Repeat uncertain writes with the same body. Exact retries return the current
-job while their fence remains current. Superseded controls return a conflict.
+Exact retries return the current job while their fence remains current. If the
+pause committed first, a resume using the pre-pause revision conflicts. Read the
+hold's revision before resuming it. Superseded generations return HTTP 409
+`job_control_generation_conflict`, mismatched revisions return HTTP 409
+`job_pause_revision_conflict`, and cancellation returns HTTP 409
+`job_control_cancelled` on further fenced pause or resume requests.
 After a lost reply, read `GET /api/jobs/JOB` for `control.generation`,
 `control.action`, `control.revision`, current `pause_revision`, and job state.
-These fields persist with the job across queue restarts.
+These fields persist with the job across queue restarts. A legacy or parent-owned
+transition can advance `pause_revision` beyond the stored control receipt.
 
 ## Batch YAML
 
