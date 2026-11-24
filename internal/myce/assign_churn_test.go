@@ -69,6 +69,7 @@ func assignChurnWaveFixture(t *testing.T, ram float64) (*Queue, *workerFakeClock
 	t.Helper()
 	q, clock, m, wave := fanOutFixture(t, 1)
 	m.Devices = []MachineDevice{}
+	m.CapabilityProfile.SystemMemoryBytes = 32 << 30
 	m.CPUExtensionFingerprint = m.ExtensionFingerprint
 	check(t, q, m, nil)
 	wave.Priority, wave.SizeHint.HostMemoryGB = "production", ram

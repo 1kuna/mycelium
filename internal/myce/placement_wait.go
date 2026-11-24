@@ -104,10 +104,13 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 			if m.Disabled != "" || m.Gone || m.Leaving || m.Recovering || availabilityBlocked(m) {
 				block("host_unavailable", HyphaAvailability(m))
 			}
-			specific = specific || len(blocked) > 0
 			if why := hostFitFailure(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB); why != "" {
 				n := candidate.Spec.Needs
-				detail := fmt.Sprintf("RAM envelope: %.1f GiB needed, %.1f GiB available", hostNeed(m, n.MemoryGB, n.HostMemoryGB), m.FreeHostMemoryGB)
+				keep, pending := q.pooledKeep(m), 0.0
+				if ledger := q.hostMemoryLedgers[m.ID]; ledger != nil {
+					pending = ledger.GrowthGB
+				}
+				detail := fmt.Sprintf("RAM needs %.3f GiB, available %.3f GiB, keep %.3f GiB, outstanding reservations %.3f GiB", hostNeed(m, n.MemoryGB, n.HostMemoryGB), m.HostAvailableMemoryGB, keep, pending)
 				if candidate.MemoryEnvelope != nil {
 					detail += " (" + candidate.MemoryEnvelope.Origin() + ")"
 				}
@@ -116,6 +119,7 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 				}
 				block(memoryWaitReason, detail)
 			}
+			specific = specific || len(blocked) > 0
 			if len(blocked) == 0 {
 				return nil // Another target can serve it; retain ordinary queue ordering.
 			}

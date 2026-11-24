@@ -17,7 +17,7 @@ func TestSharedDeviceCUDATierIsolation(t *testing.T) {
 			}
 			var tenants []*Job
 			for _, gb := range []float64{3, 2} {
-				queued := submit(t, q, sharedSpec("experiment", gb))
+				queued := submitMeasuredCardJob(t, q, m, sharedSpec("experiment", gb))
 				run := assignedJob(machineCheck(t, q, m, tenants...))
 				if run == nil || run.ID != queued.ID {
 					t.Fatal("experiment did not pack", run, job(t, q, queued.ID).Reason)
@@ -28,7 +28,7 @@ func TestSharedDeviceCUDATierIsolation(t *testing.T) {
 				tenants = append(tenants, run)
 			}
 			// Reservations fit, but unobserved experiment growth could starve production.
-			demand := submit(t, q, sharedSpec("production", 1))
+			demand := submitMeasuredCardJob(t, q, m, sharedSpec("production", 1))
 			reply := machineCheck(t, q, m, tenants...)
 			if got := assignedJob(reply); got != nil {
 				t.Fatal("production joined lower-tier CUDA tenants", got.ID)
@@ -76,7 +76,7 @@ func TestSharedDeviceCUDAEqualTierPacks(t *testing.T) {
 				if topology == "unified" {
 					m = sharedUnifiedMachine()
 				}
-				first := submit(t, q, sharedSpec(priority, 3))
+				first := submitMeasuredCardJob(t, q, m, sharedSpec(priority, 3))
 				run := assignedJob(machineCheck(t, q, m))
 				if run == nil || run.ID != first.ID {
 					t.Fatal("first attempt not assigned", run)
@@ -84,7 +84,7 @@ func TestSharedDeviceCUDAEqualTierPacks(t *testing.T) {
 				if err := q.Started(result(run, false)); err != nil {
 					t.Fatal(err)
 				}
-				second := submit(t, q, sharedSpec(priority, 2))
+				second := submitMeasuredCardJob(t, q, m, sharedSpec(priority, 2))
 				got := assignedJob(machineCheck(t, q, m, run))
 				if got == nil || got.ID != second.ID || !slices.Equal(got.AllocatedDevices, run.AllocatedDevices) {
 					t.Fatal("equal-tier CUDA newcomer did not pack", got, job(t, q, second.ID).Reason)
@@ -115,7 +115,7 @@ func TestSharedDeviceCUDAModelLoadWaitsForTierRelease(t *testing.T) {
 				machineCheck(t, q, m)
 				var tenants []*Job
 				for _, gb := range []float64{3, 2} {
-					queued := submit(t, q, sharedSpec("experiment", gb))
+					queued := submitMeasuredCardJob(t, q, m, sharedSpec("experiment", gb))
 					run := assignedJob(machineCheck(t, q, m, tenants...))
 					if run == nil || run.ID != queued.ID {
 						t.Fatal("experiment did not pack", run, job(t, q, queued.ID).Reason)

@@ -85,7 +85,7 @@ func TestMemoryPoolReplay1970(t *testing.T) {
 			q, clock, m, _ := gpuHostFixture(t)
 			m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
 			m.HostAvailableMemoryGB, m.HostMemoryBudgetGB = 16.9, 24
-			m.Devices[0].MemoryMeasured = true
+			m.Devices[0].MemoryMode, m.Devices[0].MemoryMeasured = "fixed", false
 			s := spec("production")
 			s.Needs = ResourceNeeds{Memory: "auto", Platform: Platform{Required: []string{"xpu"}}}
 			s.StartWindow = "2m"

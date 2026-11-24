@@ -53,13 +53,14 @@ type memoryCeilings struct {
 	clock           Clock
 }
 type memoryAttempt struct {
-	oomScore        int
-	accountingRoots []string
-	fs              memoryFS
-	path            string
-	bytes           int64
-	pageSize        int
-	clock           Clock
+	availableAtLaunch *float64
+	oomScore          int
+	accountingRoots   []string
+	fs                memoryFS
+	path              string
+	bytes             int64
+	pageSize          int
+	clock             Clock
 	// Latest per-process device sample, for live planning credit (#596).
 	device atomic.Pointer[hostMemorySample]
 }

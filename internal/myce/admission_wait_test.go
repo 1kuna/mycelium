@@ -87,18 +87,8 @@ func TestIncidentHostRAMPreemptionReplay(t *testing.T) {
 			if err := q.update(func() error {
 				target := m.Devices[1].machine(*q.s.Machines[m.ID])
 				ordinary := extensionJobs(q.fanOutTemplate(q.s.Jobs[parent.ID]), &target, true)[0]
-				probe := *ordinary
-				probe.Machine, probe.Session, probe.AllocatedDevices = m.ID, target.Session, []string{"1"}
-				key, why := q.workObservationKey(&probe)
-				if key == nil {
-					return errors.New(why)
-				}
-				host, device := 11.5-minimumHostMemoryGB, 4.5-minimumHostMemoryGB
-				q.putWorkObservation(identityHash(key), WorkObservation{Key: *key, Source: "accepted work", Samples: 19,
-					RecordedAt: clock.Now(), MemoryRecordedAt: clock.Now(), MemoryLayout: "separate",
-					MemoryConfiguration: memoryConfiguration(probe.Spec.Needs, probe.Spec.Args, probe.Spec.Program),
-					MemoryPeak:          &AttemptMemoryPeak{HostGB: &host, NonreclaimableGB: &host, DeviceGB: &device, Events: &MemoryEventCounts{}},
-					MemoryRange:         &MemoryPeakRange{Samples: 19, MinGB: host, MaxGB: host}})
+				seedPoolReplay(q, ordinary, &target, "ram", 11.5, 11.5)
+				seedPoolReplay(q, ordinary, &target, "card", 4.5, 4.5)
 				return nil
 			}); err != nil {
 				t.Fatal(err)
@@ -166,7 +156,7 @@ func TestIncidentHostRAMPreemptionReplay(t *testing.T) {
 						t.Fatalf("missing exact holder %s: %+v", run.ID, target.Holders)
 					}
 					h := target.Holders[i]
-					if h.Tier == nil || h.Tier.Tier != run.Spec.Priority || h.ChargedHostGB == nil || math.Abs(*h.ChargedHostGB-run.Spec.Needs.HostMemoryGB) > 1e-6 || h.EnforcementBasis != "started_worker_contract_not_direct_read" || h.SampleFresh || h.ForecastHostGB != nil {
+					if h.Tier == nil || h.Tier.Tier != run.Spec.Priority || h.ChargedHostGB == nil || math.Abs(*h.ChargedHostGB-run.Spec.Needs.HostMemoryGB) > 1e-6 || h.EnforcedHostGB != nil || h.SampleFresh || h.ForecastHostGB != nil {
 						t.Fatalf("wrong holder policy, charge, enforcement or unknown sample: %+v", h)
 					}
 				}
@@ -373,9 +363,9 @@ func TestAdmissionWaitRetainsPhysicalMemoryAccounting(t *testing.T) {
 		}
 	}
 	near(l.AllowanceGB, 113.64812850952148)
-	near(l.ReservedGB, 65.54749156746104)
-	near(l.GrowthGB, 54.44652797493173)
-	near(l.CapacityGB-l.GrowthGB, 23.675794107587798)
+	near(l.ReservedGB, 65.17249156746104)
+	near(l.GrowthGB, 54.07152797493173)
+	near(l.CapacityGB-l.GrowthGB, 24.050794107587798)
 	near(l.FreeGB, target.AvailableHostGB)
 	near(l.AllowanceGB-l.ReservedGB-l.FreeGB, 24.42484283447265)
 	if len(l.Owners) != 3 {

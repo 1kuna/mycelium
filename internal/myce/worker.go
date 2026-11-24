@@ -802,6 +802,11 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if memoryAttempt != nil {
 		ceilingBytes = memoryAttempt.bytes
 		memoryAttempt.oomScore = attemptOOMScore(j)
+		if !j.Spec.Needs.cpuOnly() && j.Spec.Resident == nil && memoryPools(&j).RAM.Alone {
+			if available, ok := memoryAttempt.hostAvailable(); ok {
+				memoryAttempt.availableAtLaunch = &available
+			}
+		}
 	}
 	started := false
 	defer func() {

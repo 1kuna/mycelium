@@ -254,7 +254,18 @@ func (q *Queue) deviceCoTenants(m *Machine, demand *Job, joining bool) (int, boo
 		if !q.batchReleaseOnTarget(r, m) {
 			continue
 		}
-		if j := q.s.Jobs[r.Job]; j == nil || r.Device == "" || len(r.Devices) > 1 || !sharesDevice(j) {
+		j := q.s.Jobs[r.Job]
+		if j != nil && !joining {
+			for _, copy := range j.Copies {
+				if copy.Machine == r.Machine && copy.Session == r.Session && copy.Attempt == r.Attempt && copy.Memory != nil {
+					restored := *j
+					restored.restorePoolCustody(copy)
+					j = &restored
+					break
+				}
+			}
+		}
+		if j == nil || r.Device == "" || len(r.Devices) > 1 || !sharesDevice(j) {
 			return 0, false
 		}
 	}
@@ -551,6 +562,10 @@ func batchReleaseKey(m *Machine) string {
 // Recovery adopts an execution whose exact release is still charged. It cannot
 // claim another device's slot or add capacity to the shared host allowance.
 func (q *Queue) machineRecoveryFits(m *Machine, j *Job, copy Copy) bool {
+	restored := *j
+	restored.AllocatedDevices = copy.AllocatedDevices
+	restored.restorePoolCustody(copy)
+	j = &restored
 	if m.Devices == nil || !j.Spec.Needs.cpuOnly() && len(copy.AllocatedDevices) == 0 {
 		return !q.workerHasOtherAttempt(m.ID, m.Session, j.ID, copy.Attempt)
 	}

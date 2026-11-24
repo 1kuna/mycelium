@@ -119,8 +119,8 @@ func TestAttemptMemoryFactsAcceptedGET(t *testing.T) {
 		t.Fatal(err)
 	}
 	next := startObservation(t, q, m, s)
-	if next.MemoryEnvelope.Source != "accepted peak + measured uncertainty" || next.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
-		t.Fatal("accepted total peak lost headroom", next.MemoryEnvelope)
+	if next.Memory == nil || next.Memory.RAM.ChargeGB > memoryValue(peak.HostGB) {
+		t.Fatal("file cache was charged to the RAM pool", next.Memory)
 	}
 	// A second job with an unread platform reading remains distinct from zero.
 	r = result(&next, true)

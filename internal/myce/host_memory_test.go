@@ -155,7 +155,7 @@ func TestHostMemoryWorkerRefusesLatePressure(t *testing.T) {
 	j := Job{Spec: spec("experiment")}
 	j.Spec.Needs.HostMemoryGB = 10
 	_, err := w.start(nil, j)
-	if err == nil || !strings.Contains(err.Error(), "RAM") {
+	if err == nil || admissionDetail(err, j).Subcheck != memoryWaitReason {
 		t.Fatalf("%v", err)
 	}
 	if e := startFailureOutcome(Result{}, err).ExecutionEvidence; e != nil {
@@ -163,9 +163,10 @@ func TestHostMemoryWorkerRefusesLatePressure(t *testing.T) {
 	}
 }
 
-func TestHostMemoryFailedTelemetryAndLegacy(t *testing.T) {
+func TestHostMemoryFailedTelemetryRefusesAdmission(t *testing.T) {
 	q, _ := fixture(t)
 	m := machine("legacy", "fake")
+	m.HostMemoryMeasured = false
 	check(t, q, m, nil)
 	s := spec("experiment")
 	s.Needs.HostMemoryGB = 1
@@ -174,9 +175,9 @@ func TestHostMemoryFailedTelemetryAndLegacy(t *testing.T) {
 		t.Fatal("host request admitted without telemetry")
 	}
 	s.Needs.HostMemoryGB = 0
-	j := submit(t, q, s)
-	if r := check(t, q, m, nil); r.Job == nil || r.Job.ID != j.ID {
-		t.Fatal("legacy behavior changed")
+	submit(t, q, s)
+	if r := check(t, q, m, nil); r.Job != nil {
+		t.Fatal("an unestimated job was admitted without telemetry")
 	}
 }
 func TestHostMemoryRestartReconciliation(t *testing.T) {
@@ -343,12 +344,12 @@ func TestHostMemoryAllowanceAggregatePreparationsAndSidecars(t *testing.T) {
 	check(t, q, a, nil)
 	check(t, q, b, nil)
 	first := spec("experiment")
-	first.Needs.HostMemoryGB = 6
+	first.Needs.HostMemoryGB = 6.25
 	first.AllowedMachines = []string{a.ID}
 	submitted := submit(t, q, first)
 	preparing := check(t, q, a, nil).Job
 	if preparing != nil {
-		t.Fatal("slack exceeded host allowance")
+		t.Fatal("charge exceeded host allowance")
 	}
 	maintenanceChange(t, q, "drain", false)
 	value := 7.0

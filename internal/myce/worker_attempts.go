@@ -910,6 +910,7 @@ func localEnvironmentPreparationFits(w Worker, jobs []Job, models []ModelSlot, c
 }
 
 func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport, preparationCores ...int) error {
+	w.acceptMemoryOffer(&next)
 	if reason := w.storageRootReason(&next); reason != "" {
 		return errors.New(reason)
 	}
@@ -925,13 +926,6 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 func localJobHostNeed(w Worker, j Job) float64 {
 	m := localJobMachine(w, j)
 	return hostNeed(&m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
-}
-
-// localJobCharge is what launching j adds: its learned charge below a typed
-// limit, else its needs.
-func localJobCharge(w Worker, j Job) float64 {
-	m := localJobMachine(w, j)
-	return hostNeed(&m, j.Spec.Needs.MemoryGB, chargedHostGB(&j))
 }
 
 func localJobMachine(w Worker, j Job) Machine {

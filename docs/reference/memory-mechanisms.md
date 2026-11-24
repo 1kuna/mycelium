@@ -21,6 +21,8 @@ The available RAM reading already accounts for occupied memory. Mycelium
 subtracts the host reserve and the amount running work can still grow into.
 Each attempt holds the larger of its charge and its observed peak. For
 discrete cards, placement also respects the device's reported free memory.
+Cards configured with a fixed budget use that budget less known reservations
+when the worker has no live free-memory counter.
 The worker checks typical use against fresh room before releasing the
 payload. Relative start budgets pause during `memory_wait`.
 

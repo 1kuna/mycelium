@@ -43,6 +43,10 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 		if aok && sok && kok {
 			gb := (float64(anon) + float64(shmem) + float64(kernel)) / (1 << 30)
 			peak.HostGB = &gb
+			if device := a.device.Load(); device != nil && device.pinnedGB > 0 {
+				combined := gb + device.pinnedGB
+				peak.CombinedHostGB = &combined
+			}
 		}
 		if out := stats["pswpout"]; out > 0 {
 			peak.Pressure = &MemoryPressureEvidence{CgroupSwapOutPages: out}
@@ -55,8 +59,23 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 	if peak.HostGB == nil && peak.CgroupGB == nil && peak.SwapGB == nil && peak.Events == nil {
 		return nil
 	}
+	if a.availableAtLaunch != nil {
+		if available, ok := a.hostAvailable(); ok {
+			combined := max(memoryValue(peak.CombinedHostGB), memoryValue(peak.HostGB), *a.availableAtLaunch-available)
+			peak.CombinedHostGB = &combined
+		}
+	}
 	peak.Constrained = pooledSampleLimited(peak)
 	return peak
+}
+
+func (a *memoryAttempt) hostAvailable() (float64, bool) {
+	data, err := a.fs.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, false
+	}
+	available, err := parseMemAvailable(data)
+	return available, err == nil
 }
 
 func memoryCounters(b []byte) map[string]uint64 {
@@ -413,19 +432,6 @@ const (
 	ownedFootprintSource  = "owned phys_footprint"
 )
 
-// The fallback for a unified CUDA attempt whose processes nvidia-smi listed
-// without memory. Another process on the GPU makes the drop unattributable.
-func unifiedDevicePeak(complete, shared bool, outsideGB float64) *AttemptMemoryPeak {
-	switch {
-	case shared:
-		return &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryShared}
-	case !complete || !validMemoryValue(outsideGB):
-		return &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNotReported}
-	}
-	gb := max(0, outsideGB)
-	return &AttemptMemoryPeak{DeviceGB: &gb, DeviceSource: deviceHostDeltaSource}
-}
-
 // Anonymous, kernel and shmem pages charged to one cgroup subtree.
 func cgroupResidentGB(fs memoryFS, path string) (float64, bool) {
 	b, err := fs.ReadFile(filepath.Join(path, "memory.stat"))
@@ -507,9 +513,9 @@ func cudaAttemptMemoryReading(b []byte, selector string, ids map[int]bool, resid
 	return total, foreign, nil
 }
 
-func drmAttemptMemory(b []byte, pci string) (string, float64, error) {
+func drmAttemptMemory(b []byte, pci string) (string, float64, float64, error) {
 	client, pdev := "", ""
-	total := 0.0
+	var total, host float64
 	found := false
 	for _, line := range strings.Split(string(b), "\n") {
 		key, val, ok := strings.Cut(line, ":")
@@ -522,36 +528,45 @@ func drmAttemptMemory(b []byte, pci string) (string, float64, error) {
 			client = val
 		case "drm-pdev":
 			pdev = val
+		case "drm-resident-system", "drm-resident-gtt":
+			if gb, ok := drmMemoryGB(val); ok {
+				host = max(host, gb)
+			}
 		default:
 			if strings.HasPrefix(key, "drm-resident-vram") {
-				f := strings.Fields(val)
-				if len(f) == 0 || len(f) > 2 {
-					return "", 0, errAttemptMemoryUnsupported
+				gb, ok := drmMemoryGB(val)
+				if !ok {
+					return "", 0, 0, errAttemptMemoryUnsupported
 				}
-				scale := float64(1)
-				if len(f) == 2 {
-					switch f[1] {
-					case "KiB":
-						scale = 1 << 10
-					case "MiB":
-						scale = 1 << 20
-					default:
-						return "", 0, errAttemptMemoryUnsupported
-					}
-				}
-				n, err := strconv.ParseUint(f[0], 10, 64)
-				if err != nil {
-					return "", 0, errAttemptMemoryUnsupported
-				}
-				total += float64(n) * scale / (1 << 30)
+				total += gb
 				found = true
 			}
 		}
 	}
 	if !found || client == "" || normalizePCIAddress(pdev) != normalizePCIAddress(pci) {
-		return "", 0, errAttemptMemoryPending
+		return "", 0, 0, errAttemptMemoryPending
 	}
-	return pdev + "/" + client, total, nil
+	return pdev + "/" + client, total, host, nil
+}
+
+func drmMemoryGB(value string) (float64, bool) {
+	fields := strings.Fields(value)
+	if len(fields) == 0 || len(fields) > 2 {
+		return 0, false
+	}
+	scale := float64(1)
+	if len(fields) == 2 {
+		switch fields[1] {
+		case "KiB":
+			scale = 1 << 10
+		case "MiB":
+			scale = 1 << 20
+		default:
+			return 0, false
+		}
+	}
+	n, err := strconv.ParseUint(fields[0], 10, 64)
+	return float64(n) * scale / (1 << 30), err == nil
 }
 
 // memory.current includes reclaimable file cache that MemAvailable already
@@ -568,6 +583,9 @@ func (a *memoryAttempt) currentHostMemory(clock Clock) *CurrentHostMemory {
 	if device := a.device.Load(); device != nil {
 		gb := device.gb
 		sample.DeviceGB, sample.deviceSampledAt = &gb, device.at
+		if age := at.Sub(device.at); age >= 0 && age < deviceMemorySampleFreshFor {
+			sample.NonreclaimableGB += device.pinnedGB
+		}
 	}
 	return sample
 }
@@ -626,7 +644,12 @@ func (w Worker) observeDeviceMemoryWith(ctx context.Context, inventory func() (m
 					continue
 				}
 
-				gb, _, err := w.attemptDeviceMemoryReading(ctx, ids, fs, nil, known)
+				var pinned float64
+				var host *float64
+				if w.Machine.GPU == "xpu" && !w.Machine.UnifiedMemory {
+					host = &pinned
+				}
+				gb, _, err := w.attemptDeviceMemoryReading(ctx, ids, fs, host, known)
 				if errors.Is(err, errDeviceMemoryNotReported) {
 					unreported = true
 					report(&AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNotReported})
@@ -649,7 +672,7 @@ func (w Worker) observeDeviceMemoryWith(ctx context.Context, inventory func() (m
 				margin := growth.observe(now, gb)
 				peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceGB: &gb, DeviceGrowthGB: &margin})
 				if a != nil {
-					a.device.Store(&hostMemorySample{gb: gb, at: now})
+					a.device.Store(&hostMemorySample{gb: gb, pinnedGB: pinned, at: now})
 				}
 
 			}
@@ -691,12 +714,13 @@ func queryCUDAAttemptMemory(ctx context.Context) ([]byte, error) {
 	cmd.WaitDelay = attemptMemorySamplePeriod
 	return cmd.Output()
 }
-func xpuAttemptDeviceMemory(w Worker, _ context.Context, ids map[int]bool, fs memoryFS, _ *float64, _ ...map[int]bool) (float64, bool, error) {
+func xpuAttemptDeviceMemory(w Worker, _ context.Context, ids map[int]bool, fs memoryFS, host *float64, _ ...map[int]bool) (float64, bool, error) {
 	if w.selectedDevice == nil || w.selectedDevice.pciAddress == "" {
 		return 0, false, errAttemptMemoryUnsupported
 	}
 
 	clients := map[string]float64{}
+	system := map[string]float64{}
 	for pid := range ids {
 		entries, err := fs.ReadDir(filepath.Join("/proc", strconv.Itoa(pid), "fdinfo"))
 		if err != nil {
@@ -707,18 +731,24 @@ func xpuAttemptDeviceMemory(w Worker, _ context.Context, ids map[int]bool, fs me
 			if err != nil {
 				continue
 			}
-			key, gb, err := drmAttemptMemory(b, w.selectedDevice.pciAddress)
+			key, gb, pinned, err := drmAttemptMemory(b, w.selectedDevice.pciAddress)
 			if errors.Is(err, errAttemptMemoryUnsupported) {
 				return 0, false, err
 			}
 			if err == nil {
 				clients[key] = max(clients[key], gb)
+				if host != nil {
+					system[key] = max(system[key], pinned)
+				}
 			}
 		}
 	}
 	total := 0.0
 	for _, gb := range clients {
 		total += gb
+	}
+	for _, gb := range system {
+		*host += gb
 	}
 	if len(clients) == 0 {
 		return 0, false, errAttemptMemoryPending
@@ -728,4 +758,3 @@ func xpuAttemptDeviceMemory(w Worker, _ context.Context, ids map[int]bool, fs me
 
 const deviceUnifiedResidentSource = "unified RSS/cgroup upper estimate with host reconciliation"
 const deviceUnifiedUncertain = "unified device attribution uncertain; exclusive execution required"
-const deviceUnifiedStarting = "unified device sample pending first sensor cycle"

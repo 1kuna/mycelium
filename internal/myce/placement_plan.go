@@ -203,6 +203,9 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool, 
 	if len(yieldPlans) > 0 {
 		p.yields = yieldPlans[0]
 	}
+	if batch && pooledMemory(j) && !q.planPoolCustody(j, m, p) {
+		return nil
+	}
 	need, host := j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB
 	if !batch {
 		model, ok := q.model(j.Spec.Needs.Model)
@@ -338,6 +341,10 @@ func (q *Queue) cardRoom(j *Job, m *Machine, need float64, batch, releaseBatch, 
 		if !batchOnTarget(r, m) || !batchReservesCapacity(r) {
 			continue
 		}
+		if slices.Contains(p.jobs, r) {
+			room += deviceShareGB(r)
+			continue
+		}
 		isolateTier := isolatesDeviceTiers(m) && !j.Spec.Needs.cpuOnly() && !r.Spec.Needs.cpuOnly() && q.comparePriority(r.Spec, j.Spec) != 0
 		if !q.batchPreemptible(r, j.Spec) && p.yields[r.ID] == nil {
 			if batch && !shared || isolateTier {
@@ -355,6 +362,10 @@ func (q *Queue) cardRoom(j *Job, m *Machine, need float64, batch, releaseBatch, 
 	var slots []*ModelSlot
 	for _, s := range q.s.ModelSlots {
 		if ownsResidentSlot(j.Spec, s) {
+			continue
+		}
+		if slotOnTarget(s, m) && slices.Contains(p.slots, s) {
+			room += q.slotMemory(s)
 			continue
 		}
 		if slotOnTarget(s, m) && slotReservesMemory(s) && isolatesDeviceTiers(m) && !j.Spec.Needs.cpuOnly() && (batch || s.Model != j.Spec.Needs.Model) && q.comparePriority(q.slotSpec(s), j.Spec) != 0 {

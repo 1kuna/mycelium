@@ -2,10 +2,8 @@ package myce
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -83,14 +81,6 @@ func TestAttemptMemoryEventCountsPersist(t *testing.T) {
 	if p := a.peak(); p == nil || p.Events != nil {
 		t.Fatalf("missing memory.events became zero counts: %+v", p)
 	}
-	stored := func() string {
-		t.Helper()
-		var data string
-		if err := q.db.QueryRow("SELECT data FROM queue_state WHERE key LIKE 'work_observations/%'").Scan(&data); err != nil {
-			t.Fatal(err)
-		}
-		return data
-	}
 	complete := func(events string) Job {
 		t.Helper()
 		j := startObservation(t, q, m, s)
@@ -106,41 +96,16 @@ func TestAttemptMemoryEventCountsPersist(t *testing.T) {
 	// Unpressured samples remain learnable, with read zero counts retained.
 	accepted := complete("low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n")
 	acceptedPeak := a.peak()
-	if data := stored(); !strings.Contains(data, `"events":{"high":0,"max":0,"oom":0,"oom_kill":0,"oom_group_kill":0}`) || strings.Contains(data, `"constrained":true`) {
-		t.Fatalf("accepted peak lost its event counts: %s", data)
-	}
-	// Status must show the memory-only curve's observed peak, rather than its
-	// zero legacy host/device usage fields.
-	snap, err := q.Snapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(snap.WorkCurves) != 1 {
-		t.Fatalf("status lost memory-only curve: %+v", snap.WorkCurves)
-	}
-	point := snap.WorkCurves[0]
-	if point.MemoryPeak == nil || point.MemoryPeak.Events == nil || point.MemoryPeak.Events.Max != 0 || !strings.Contains(point.Summary(), "peak host 1.00 GiB") {
-		t.Fatalf("status lost memory-only facts: %+v; %s", point, point.Summary())
-	}
 	write("memory.stat", "anon 2684354560\nkernel 0\nshmem 0\n")
 	constrained := complete("low 0\nhigh 0\nmax 6264\noom 0\noom_kill 0\noom_group_kill 0\n")
-	// Native ceiling pressure invalidates memory even on success. Throughput
-	// and exact-attempt diagnostic facts remain independent.
-	assertInvalidated := func() {
-		t.Helper()
-		var learned WorkObservation
-		if err := json.Unmarshal([]byte(stored()), &learned); err != nil {
-			t.Fatal(err)
-		}
-		if !learned.MemoryPeak.constrained() || !learned.MemoryRecordedAt.IsZero() || learned.MemoryRange != nil || learned.GPUHostRange != nil || learned.Samples != point.Samples+1 {
-			t.Fatalf("constrained success retained accepted memory or lost throughput: %+v", learned)
-		}
-	}
-	assertInvalidated()
-	// Both eligible zero counters and rejected nonzero counters persist as job
-	// facts after restart, independently of the reusable accepted observation.
+	// A constrained sample supplies a lower bound. It keeps the earlier
+	// clean observation and preserves both executions' diagnostic counters.
 	q = memoryFactsRestart(t, q, clock)
-	assertInvalidated()
+	key := pooledEvidenceKey(&accepted, &m)
+	learned := q.memoryEvidence.exact[key]
+	if len(learned.Peaks) != 1 || learned.Peaks[0] != 1 || learned.Lower != 2.5 {
+		t.Fatalf("wrong retained evidence: %+v", learned)
+	}
 	memoryFactsGET(t, q, accepted, acceptedPeak, false, "eligible")
 	memoryFactsGET(t, q, constrained, a.peak(), false)
 }

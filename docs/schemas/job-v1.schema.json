@@ -1526,6 +1526,9 @@
         "machine": {
           "type": "string"
         },
+        "memory": {
+          "$ref": "#/$defs/MemoryPools"
+        },
         "priority_stop": {
           "$ref": "#/$defs/PriorityPreemption"
         },

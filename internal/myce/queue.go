@@ -62,7 +62,6 @@ type state struct {
 	StorageMigration       json.RawMessage                `json:"storage_migration,omitempty"`
 	StorageProtection      json.RawMessage                `json:"storage_protection,omitempty"`
 	StorageAdmissionActive bool                           `json:"storage_admission_active,omitempty"`
-	MemoryExplorations     map[string]memoryExploration   `json:"memory_explorations,omitempty"`
 	StorageObservations    map[string]StorageObservation  `json:"storage_observations,omitempty"`
 	ExternalMemory         map[string]*externalMemoryRing `json:"external_memory,omitempty"`
 	AttemptOutputUploads   map[string]time.Time           `json:"attempt_output_uploads,omitempty"`
@@ -1334,6 +1333,12 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 		}
 		if chargeInfrastructure {
 			j.InfrastructureRetries++
+		}
+	}
+	for i := range j.Copies {
+		c := &j.Copies[i]
+		if c.Attempt == j.Attempt && c.Machine == j.Machine && c.Session == j.Session && j.Memory != nil {
+			c.Memory = j.Memory
 		}
 	}
 	j.Machine = ""
@@ -3324,6 +3329,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 				j.Machine = m.ID
 				j.Session = m.Session
 				j.AllocatedDevices = slices.Clone(copy.AllocatedDevices)
+				j.restorePoolCustody(copy)
 				j.State = "running"
 				j.ReleaseConfirmed = false
 				j.StopAt = nil
@@ -3543,7 +3549,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	if m.Devices != nil && !j.Spec.Needs.cpuOnly() {
 		j.AllocatedDevices = slices.Clone(targetDevices(m))
 	}
-	j.Copies = append(j.Copies, Copy{AllocatedDevices: slices.Clone(j.AllocatedDevices), Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension, ReleaseReason: "awaiting_release"})
+	j.Copies = append(j.Copies, Copy{AllocatedDevices: slices.Clone(j.AllocatedDevices), Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension, Memory: j.Memory, ReleaseReason: "awaiting_release"})
 	j.Session = m.Session
 	if j.Spec.ephemeral() {
 		j.WorkerDataCleanup = &WorkerDataCleanup{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session, State: "pending", CheckedAt: q.clock.Now()}

@@ -18,7 +18,7 @@ import (
 // #456: distinct real worker admission checks survive acknowledgement,
 // replacement of the assignment envelope, success, and a durable queue reopen.
 func TestAdmissionDiagnosticRetained(t *testing.T) {
-	for _, subcheck := range []string{"live_host_ram", "aggregate_host_allowance", "live_host_growth", "live_gpu_memory"} {
+	for _, subcheck := range []string{"live_host_ram", "live_gpu_memory"} {
 		t.Run(subcheck, func(t *testing.T) {
 			path, root := filepath.Join(t.TempDir(), "queue.db"), t.TempDir()
 			clock := &fakeClock{now: time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC)}
@@ -67,11 +67,6 @@ func TestAdmissionDiagnosticRetained(t *testing.T) {
 					t.Fatal("started without RAM")
 				}
 				refusal = e
-			} else {
-				if subcheck == "aggregate_host_allowance" {
-					w.Machine.HostMemoryBudgetGB = 21.9
-				}
-				refusal = localAttemptAdmission(w, nil, *j, nil)
 			}
 			if !errors.Is(refusal, errWorkerMemory) {
 				t.Fatal("no memory refusal", refusal)
@@ -81,7 +76,7 @@ func TestAdmissionDiagnosticRetained(t *testing.T) {
 				startErr = store.startFailure(*j, launchRefused, refusal)
 			}
 			live := startFailureOutcome(result(j, false), startErr)
-			if !launchCapacityRefusal(live) || live.ExecutionCause.Admission == nil || live.ExecutionCause.Admission.Subcheck != subcheck {
+			if !launchCapacityRefusal(live) || live.ExecutionCause.Admission == nil || live.ExecutionCause.Admission.Subcheck != memoryWaitReason {
 				t.Fatal("missing live detail", live)
 			}
 			data, err := os.ReadFile(filepath.Join(store.dir, store.state.LaunchOutcome))
@@ -144,7 +139,7 @@ func TestAdmissionDiagnosticRetained(t *testing.T) {
 			if subcheck == "live_gpu_memory" {
 				required, available = 8, 7
 			}
-			if d == nil || d.Subcheck != subcheck || d.Unit != "GiB" || d.Required != required || d.Available == nil || *d.Available != available || d.Unavailable || d.EnvelopeSource != j.MemoryEnvelope.Source || d.EnvelopeHostGB != j.MemoryEnvelope.HostGB || d.EnvelopeDeviceGB != j.MemoryEnvelope.DeviceGB {
+			if d == nil || d.Subcheck != memoryWaitReason || d.Unit != "GiB" || d.Required != required || d.Available == nil || *d.Available != available || d.Unavailable || d.EnvelopeSource != j.MemoryEnvelope.Source || d.EnvelopeHostGB != j.MemoryEnvelope.HostGB || d.EnvelopeDeviceGB != j.MemoryEnvelope.DeviceGB {
 				t.Fatalf("lost original comparison: %+v", d)
 			}
 			var status Snapshot
@@ -152,8 +147,8 @@ func TestAdmissionDiagnosticRetained(t *testing.T) {
 				t.Fatal(err)
 			}
 			public, _ := json.Marshal(status)
-			comparison := fmt.Sprintf("%s required=%g available=%g unit=GiB", subcheck, required, available)
-			if !strings.Contains(string(public), `"subcheck":"`+subcheck+`"`) || !strings.Contains(logs.String(), comparison) || !strings.Contains(logs.String(), "envelope_source=") {
+			comparison := fmt.Sprintf("%s required=%g available=%g unit=GiB", memoryWaitReason, required, available)
+			if !strings.Contains(string(public), `"subcheck":"`+memoryWaitReason+`"`) || !strings.Contains(logs.String(), comparison) || !strings.Contains(logs.String(), "envelope_source=") {
 				t.Fatal("missing status/log detail", string(public), logs.String())
 			}
 			if strings.Contains(string(public)+logs.String(), "private-token") {

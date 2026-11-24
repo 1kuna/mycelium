@@ -426,6 +426,7 @@ func legacyRank(p string) int {
 }
 
 type Copy struct {
+	Memory           *MemoryPools        `json:"memory,omitempty"`
 	Liveness         *AttemptLiveness    `json:"liveness,omitempty"`
 	StartedAt        *time.Time          `json:"started_at,omitempty"`
 	StoppedAt        *time.Time          `json:"stopped_at,omitempty"`

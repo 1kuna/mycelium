@@ -59,8 +59,8 @@ func TestAttemptMemoryCeilingEventsConstrainPeak(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if p := a.peak(); p == nil || p.HostGB == nil || *p.HostGB != 2 || !p.Constrained {
-				t.Fatalf("ceiling-bound resident peak was unconstrained: %+v", p)
+			if p := a.peak(); p == nil || p.HostGB == nil || *p.HostGB != 2 || p.Constrained != (event == "max") {
+				t.Fatalf("incorrect cgroup limit evidence: %+v", p)
 			}
 		})
 	}
@@ -98,11 +98,11 @@ func TestAttemptMemoryDeviceAccounting(t *testing.T) {
 			t.Fatal("successful inventory without an attempt CUDA context is not a zero sample", gb, err)
 		}
 	}
-	client, peak, err := drmAttemptMemory([]byte("drm-client-id: 7\ndrm-pdev: 0000:03:00.0\ndrm-resident-vram0: 2048 MiB\n"), "0000:03:00.0")
-	if err != nil || peak != 2 || client != "0000:03:00.0/7" {
-		t.Fatal("bad DRM client memory", client, peak, err)
+	client, peak, host, err := drmAttemptMemory([]byte("drm-client-id: 7\ndrm-pdev: 0000:03:00.0\ndrm-resident-vram0: 2048 MiB\ndrm-resident-system: 0\ndrm-resident-gtt: 256 MiB\n"), "0000:03:00.0")
+	if err != nil || peak != 2 || host != .25 || client != "0000:03:00.0/7" {
+		t.Fatal("bad DRM client memory", client, peak, host, err)
 	}
-	if _, _, err := drmAttemptMemory([]byte("drm-client-id: 7\ndrm-pdev: 0000:03:00.0\n"), "0000:03:00.0"); err != errAttemptMemoryPending {
+	if _, _, _, err := drmAttemptMemory([]byte("drm-client-id: 7\ndrm-pdev: 0000:03:00.0\n"), "0000:03:00.0"); err != errAttemptMemoryPending {
 		t.Fatal("uninitialised DRM counters disabled sampling", err)
 	}
 }

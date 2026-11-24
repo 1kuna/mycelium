@@ -33,6 +33,21 @@ func memoryPools(j *Job) MemoryPools {
 	return MemoryPools{RAM: memoryPoolEstimate{TypicalGB: j.MemoryEnvelope.HostGB, ChargeGB: j.MemoryEnvelope.HostGB}, LimitGB: j.MemoryEnvelope.LimitHostGB}
 }
 
+func (j *Job) restorePoolCustody(copy Copy) {
+	if copy.Memory == nil {
+		return
+	}
+	j.Memory = copy.Memory
+	host := max(j.Memory.RAM.ChargeGB, minimumHostMemoryGB)
+	device := 0.0
+	if j.Memory.Card != nil {
+		device = j.Memory.Card.ChargeGB * float64(max(1, len(copy.AllocatedDevices)))
+	}
+	j.Spec.Needs.HostMemoryGB, j.Spec.Needs.MemoryGB = host, device
+	j.MemoryEnvelope = &JobMemoryEnvelope{Machine: copy.Machine, Source: "memory pool estimate", Basis: pooledMemoryCapability,
+		HostGB: j.Memory.RAM.ChargeGB, DeviceGB: device, LimitHostGB: j.Memory.LimitGB}
+}
+
 const memoryWaitReason = "memory_wait"
 
 func workerUsesMemoryPools(m *Machine) bool {
@@ -170,10 +185,7 @@ func (q *Queue) pooledKeep(m *Machine) float64 {
 }
 
 func (q *Queue) poolAllowance(m *Machine) float64 {
-	if m.HostMemoryDerivation != nil {
-		return m.HostMemoryDerivation.AllowanceGB
-	}
-	if m.EffectiveHostMemoryBudgetGB > 0 {
+	if m.HostMemoryDerivation != nil || m.EffectiveHostMemoryBudgetGB > 0 {
 		return m.EffectiveHostMemoryBudgetGB
 	}
 	if m.HostMemoryBudgetGB > 0 {
@@ -187,6 +199,7 @@ func (q *Queue) poolAllowance(m *Machine) float64 {
 
 func (q *Queue) addPoolBackfillHeads(scan *placementScan, demands []*Job, live map[string]bool) {
 	byHost := map[string][]*hostBackfillDemand{}
+	ready := map[string]bool{}
 	for _, m := range scan.machines {
 		host := hostID(m)
 		if workerMemoryHold(m) != nil || !live[m.ID] || scan.hostBackfill[host] != nil || q.preparationActive(m) || q.preparationStopping(m) {
@@ -202,18 +215,25 @@ func (q *Queue) addPoolBackfillHeads(scan *placementScan, demands []*Job, live m
 				if !pooledMemory(candidate) || !environmentReady(candidate, m) || q.capReasonFor(candidate, m) != "" || !fits(candidate, &capacity, capacity.FreeMemoryGB) {
 					continue
 				}
-				if !fits(candidate, m, m.FreeMemoryGB) || !q.batchSlotFree(m, candidate) || !q.poolCustodyAllows(candidate, m) {
-					byHost[host] = append(byHost[host], &hostBackfillDemand{job: candidate, machine: m, pooled: true})
+				if fits(candidate, m, m.FreeMemoryGB) && q.batchSlotFree(m, candidate) && q.poolCustodyAllows(candidate, m) {
+					ready[j.ID] = true
+					continue
 				}
+				byHost[host] = append(byHost[host], &hostBackfillDemand{job: candidate, machine: m, pooled: true})
 			}
 		}
 	}
 	for host, choices := range byHost {
 		set := &candidateSet{q: q, scores: map[string]float64{}, actives: map[string]float64{}}
 		for _, c := range choices {
-			set.jobs = append(set.jobs, c.job)
+			if !ready[c.job.ID] {
+				set.jobs = append(set.jobs, c.job)
+			}
 		}
 		for _, c := range choices {
+			if ready[c.job.ID] {
+				continue
+			}
 			old := scan.hostBackfill[host]
 			if old == nil || q.beforeWithFair(c.job, old.job, c.machine, set.score, set.active) {
 				c.order = set
@@ -266,12 +286,12 @@ func (q *Queue) memoryPoolHold(j *Job, machines map[string]*Machine) *Hold {
 				return nil
 			}
 			ledger := q.hostMemoryLedgers[m.ID]
-			if ledger != nil && (pools.RAM.ChargeGB > ledger.SignedRoomGB || !ledger.AvailableKnown) {
+			if ledger != nil && (!hostFits(m, c.Spec.Needs.MemoryGB, c.Spec.Needs.HostMemoryGB) || !ledger.AvailableKnown) {
 				available := "unknown"
 				if ledger.AvailableKnown {
 					available = fmt.Sprintf("%.3f GiB", ledger.AvailableGB)
 				}
-				blocked = newHold(memoryWaitReason, fmt.Sprintf("RAM needs %.3f GiB, available %s, keep %.3f GiB, outstanding reservations %.3f GiB", pools.RAM.ChargeGB, available, pools.KeepGB, ledger.GrowthGB))
+				blocked = newHold(memoryWaitReason, fmt.Sprintf("%s: RAM needs %.3f GiB, available %s, keep %.3f GiB, outstanding reservations %.3f GiB", m.ID, pools.RAM.ChargeGB, available, pools.KeepGB, ledger.GrowthGB))
 			} else if !q.poolCustodyAllows(c, m) {
 				blocked = newHold(memoryWaitReason, "waiting for exclusive access to the pool")
 			} else if pools.Card != nil && m.FreeMemoryGB < c.Spec.Needs.MemoryGB {
@@ -286,25 +306,52 @@ func (q *Queue) poolCustodyAllows(j *Job, m *Machine) bool {
 	if !pooledMemory(j) {
 		return true
 	}
-	pools := memoryPools(j)
 	for _, obligation := range q.hostObligations(hostID(m)) {
-		if obligation.Result.ID == j.ID {
+		if q.poolCustodyConflicts(j, m, obligation) {
+			return false
+		}
+	}
+	return true
+}
+
+func (q *Queue) poolCustodyConflicts(j *Job, m *Machine, obligation HostObligation) bool {
+	if obligation.Result.ID == j.ID || obligation.Call != nil {
+		return false
+	}
+	pools := memoryPools(j)
+	if e := obligation.Engine; e != nil {
+		if slot := q.s.ModelSlots[slotKey(e.Machine, e.Model, e.Device)]; slot != nil && e.Machine == m.ID && ownsResidentSlot(j.Spec, slot) {
+			return false
+		}
+		return pools.RAM.Alone || pools.Card != nil && pools.Card.Alone && e.Machine == m.ID && (e.Device == "" || slices.Contains(targetDevices(m), e.Device))
+	}
+	peer := q.s.Jobs[obligation.Result.ID]
+	return pools.RAM.Alone || peer != nil && (pooledMemory(peer) && memoryPools(peer).RAM.Alone ||
+		pools.Card != nil && pools.Card.Alone && batchOnTarget(peer, m))
+}
+
+// Exclusivity is part of the ordinary release plan. The final offer still
+// checks real custody and waits for each selected release to be confirmed.
+func (q *Queue) planPoolCustody(j *Job, m *Machine, plan *placementPlan) bool {
+	for _, obligation := range q.hostObligations(hostID(m)) {
+		if !q.poolCustodyConflicts(j, m, obligation) {
 			continue
 		}
-		if pools.RAM.Alone {
-			return false
-		}
-		if peer := q.s.Jobs[obligation.Result.ID]; peer != nil && pooledMemory(peer) && memoryPools(peer).RAM.Alone {
-			return false
-		}
-		if pools.Card != nil && pools.Card.Alone {
-			if peer := q.s.Jobs[obligation.Result.ID]; peer != nil && batchOnTarget(peer, m) {
+		if e := obligation.Engine; e != nil {
+			slot := q.s.ModelSlots[slotKey(e.Machine, e.Model, e.Device)]
+			if slot == nil || slot.Attempt != e.Attempt || slot.Session != e.Session || !q.slotReclaimableFor(slot, j.Spec) {
 				return false
 			}
-			if e := obligation.Engine; e != nil && e.Machine == m.ID && (e.Device == "" || slices.Contains(targetDevices(m), e.Device)) {
-				return false
-			}
+			plan.addSlot(slot)
+			continue
 		}
+		r := obligation.Result
+		peer := q.s.Jobs[r.ID]
+		if peer == nil || peer.Attempt != r.Attempt || peer.Session != r.Session || peer.Machine != r.Machine ||
+			!batchReservesCapacity(peer) || !q.batchPreemptible(peer, j.Spec) && plan.yields[peer.ID] == nil {
+			return false
+		}
+		plan.addJob(peer)
 	}
 	return true
 }
@@ -479,6 +526,10 @@ func localPooledAdmission(w Worker, jobs []Job, next Job, models []ModelReport, 
 		owner := allocationMachine(&w.Machine, j.AllocatedDevices)
 		_, growth := pooledHostCharge(&j, owner, w.hostMemorySamples[jobKey(j)], w.Clock.Now(), localJobHostNeed(w, j))
 		pending += growth
+		if !next.Spec.Needs.cpuOnly() && !j.Spec.Needs.cpuOnly() && (!sharesDevice(&next) || !sharesDevice(&j)) &&
+			slices.ContainsFunc(attemptCards(next, w.Machine), func(id string) bool { return slices.Contains(attemptCards(j, w.Machine), id) }) {
+			return refuseAdmission("local_device_reservation", "slots", 1, 0, false)
+		}
 		if pools.RAM.Alone || pooledMemory(&j) && memoryPools(&j).RAM.Alone {
 			return checkMemoryPool(pools.RAM.TypicalGB, 0, 0, pending, false)
 		}
@@ -511,9 +562,6 @@ func localPooledAdmission(w Worker, jobs []Job, next Job, models []ModelReport, 
 		var used float64
 		for _, j := range jobs {
 			if !j.ReleaseConfirmed && !j.Spec.Needs.cpuOnly() && slices.Contains(attemptCards(j, w.Machine), id) {
-				if !sharesDevice(&next) || !sharesDevice(&j) {
-					return checkMemoryPool(pools.Card.TypicalGB, 0, 0, 0, false)
-				}
 				used += max(deviceShareGB(&j), w.hostMemorySamples[jobKey(j)].devicePeakGB)
 			}
 		}
@@ -532,7 +580,11 @@ func localPooledAdmission(w Worker, jobs []Job, next Job, models []ModelReport, 
 			return checkMemoryPool(pools.Card.TypicalGB, 0, 0, used, false)
 		}
 		card := w.Machine.Devices[index]
-		if err := checkMemoryPool(pools.Card.TypicalGB, max(0, min(card.BudgetGB-used, card.FreeMemoryGB)), 0, 0, card.MemoryMeasured); err != nil {
+		free := max(0, card.BudgetGB-used)
+		if card.MemoryMeasured {
+			free = min(free, card.FreeMemoryGB)
+		}
+		if err := checkMemoryPool(pools.Card.TypicalGB, free, 0, 0, card.MemoryMeasured || card.MemoryMode == "fixed" && card.BudgetGB > 0); err != nil {
 			return err
 		}
 	}

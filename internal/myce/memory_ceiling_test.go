@@ -456,7 +456,7 @@ func TestMemoryCeilingUnavailableIsExplicit(t *testing.T) {
 	}
 }
 
-func TestHostMemoryBudgetIncludesSlackAcrossCards(t *testing.T) {
+func TestHostMemoryBudgetAppliesAcrossCards(t *testing.T) {
 	q, c := fixture(t)
 	a, b := machine("card0", "fake"), machine("card1", "fake")
 	for _, m := range []*Machine{&a, &b} {
@@ -469,7 +469,7 @@ func TestHostMemoryBudgetIncludesSlackAcrossCards(t *testing.T) {
 	check(t, q, a, nil)
 	check(t, q, b, nil)
 	s := spec("experiment")
-	s.Needs.HostMemoryGB = 2.5
+	s.Needs.HostMemoryGB = 2.75
 	first := submit(t, q, s)
 	c.Advance(1)
 	second := submit(t, q, s)
@@ -478,7 +478,7 @@ func TestHostMemoryBudgetIncludesSlackAcrossCards(t *testing.T) {
 		t.Fatal("first refused")
 	}
 	if r := check(t, q, b, nil); r.Job != nil {
-		t.Fatal("sum of ceilings exceeded 5 GiB")
+		t.Fatal("sum of charges exceeded 5 GiB")
 	}
 	finish(t, q, r.Job, true)
 	if r := check(t, q, b, nil); r.Job == nil || r.Job.ID != second.ID {
@@ -502,6 +502,8 @@ func TestMemoryCeilingWorkerOOMIsCommandFailure(t *testing.T) {
 	j := recoveryJob(t, []string{"sh", "-c", "exit 137"})
 	j.Spec.Resumable = false
 	j.Spec.Needs.HostMemoryGB = 5
+	limit := 5.0
+	j.Spec.MemoryLimitGB = &limit
 	w = workerWithPreparedCheckpoint(t, w, s, j)
 	p, err := startAfterFixtureInputs(t, w, s, j)
 	if err != nil {
@@ -535,7 +537,7 @@ func TestMemoryCeilingWorkerOOMIsCommandFailure(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, got := range public.Jobs {
-			if got.ID == submitted.ID && !strings.Contains(got.Reason, "exceeded its 5 GiB memory ceiling") {
+			if got.ID == submitted.ID && !strings.Contains(got.Reason, "explicit memory limit") {
 				t.Fatal(got.Reason)
 			}
 		}
@@ -580,6 +582,8 @@ func TestMemoryCeilingWorkerOOMBeforeExecApproval(t *testing.T) {
 			j.Spec.Needs.Platform = Platform{Required: []string{"cpu"}}
 			j.Spec.Needs.MemoryGB = 0
 			j.Spec.Needs.HostMemoryGB = minimumHostMemoryGB
+			limit := minimumHostMemoryGB
+			j.Spec.MemoryLimitGB = &limit
 			j.Spec.Run.Env = map[string]string{"MYCE_TEST_EXIT_BEFORE_COMMAND_READY": "1"}
 			deadline := w.Clock.Now().Add(testWaitTimeout)
 			j.Spec.StartBy = &deadline
@@ -704,11 +708,11 @@ func TestMemoryCeilingFinalLiveRAMGate(t *testing.T) {
 	j := recoveryJob(t, []string{"true"})
 	j.Spec.Resumable = false
 	j.Spec.Needs.HostMemoryGB = 5
-	if p, err := startAfterFixtureInputs(t, w, s, j); err == nil || p != nil || !strings.Contains(err.Error(), "host RAM") {
+	if p, err := startAfterFixtureInputs(t, w, s, j); err == nil || p != nil || !strings.Contains(err.Error(), memoryWaitReason) {
 		t.Fatalf("preparation stale RAM admitted: %v %v", p, err)
 	}
 }
-func TestMemoryCeilingSharedBudgetRejectsUndeclaredSibling(t *testing.T) {
+func TestMemoryCeilingSharedBudgetRejectsOverBudgetSibling(t *testing.T) {
 	q, _ := fixture(t)
 	a, b := machine("capped", "fake"), machine("legacy", "fake")
 	for _, m := range []*Machine{&a, &b} {
@@ -721,6 +725,7 @@ func TestMemoryCeilingSharedBudgetRejectsUndeclaredSibling(t *testing.T) {
 	check(t, q, b, nil)
 	s := spec("experiment")
 	s.AllowedMachines = []string{b.ID}
+	s.Needs.HostMemoryGB = 6
 	submit(t, q, s)
 	if r := check(t, q, b, nil); r.Job != nil {
 		t.Fatal("uncapped sibling bypassed host budget")

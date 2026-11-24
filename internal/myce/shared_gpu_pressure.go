@@ -9,7 +9,7 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 		return
 	}
 	for _, d := range m.Devices {
-		if d.UnifiedMemory || d.BudgetGB <= 0 || !d.MemoryMeasured {
+		if d.UnifiedMemory || d.BudgetGB <= 0 {
 			continue
 		}
 		card := d.machine(*m)
@@ -34,7 +34,8 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 				}
 			}
 		}
-		if victim == nil || pending || used <= d.BudgetGB && (d.FreeMemoryGB > 0 || overage <= 0) {
+		short := used > d.BudgetGB || d.MemoryMeasured && d.FreeMemoryGB <= 0 && overage > 0
+		if victim == nil || pending || !short {
 			continue
 		}
 		q.stopForPoolPressure(victim, "device/"+d.ID)

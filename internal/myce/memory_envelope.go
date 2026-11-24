@@ -14,11 +14,6 @@ import (
 // Without cgroup accounting (macOS), HostGB is the sampled process-group RSS
 // and Source names that unenforced measurement.
 type AttemptMemoryPeak struct {
-	// Raw counter reads are not completed peaks. Only observeAttemptMemory promotes a complete sample history.
-	nonreclaimableSampleGB *float64
-	pressureTotalUS        uint64
-	pressureAvg10          float64
-
 	// CombinedHostGB is the maximum per-attempt resident-plus-outside figure.
 	// Component maxima below remain diagnostics and must not be added across runs.
 	// GrowthGB is the largest observed positive memory growth over a sampling
@@ -166,15 +161,6 @@ func (q *Queue) recordAttemptMemory(j *Job, r Result) {
 
 }
 
-// Exact-attempt OOM telemetry is durable job-local evidence, independent of
-// successful learning and target comparability. With no peak, advance past the
-// failed host vector by one supported kernel page: it cannot authorize another
-// identical ceiling. Observed guard overshoot replaces the old fixed 1.25/2
-// multipliers. Sampling growth is forecast uncertainty, retained separately in
-// measuredOOMRecovery so permanent target capacity can bound it. An RSS stop
-// may retain a larger observation than the final sample, so consume its fenced
-// cause as well.
-
 func mergeMemoryEvents(old, next *MemoryEventCounts) *MemoryEventCounts {
 	if next == nil {
 		next = old
@@ -238,22 +224,6 @@ type MemorySizingInputs struct {
 	ConstrainedCheckHostGB float64  `json:"constrained_check_host_gb,omitempty"`
 }
 
-// chargedBelowLimit says a started or assigned typed job is charged its
-// learned figure below the typed limit its needs keep.
-func chargedBelowLimit(j *Job) bool {
-	e := j.MemoryEnvelope
-	return e != nil && e.ChargeHostGB > 0 && e.ChargeHostGB < e.LimitHostGB && e.LimitHostGB == j.Spec.Needs.HostMemoryGB && j.Spec.Needs.Memory != "auto"
-}
-
-// chargedHostGB is the host figure admission charged j: the learned charge
-// below a typed limit, else the needs.
-func chargedHostGB(j *Job) float64 {
-	if chargedBelowLimit(j) {
-		return j.MemoryEnvelope.ChargeHostGB
-	}
-	return j.Spec.Needs.HostMemoryGB
-}
-
 type LearnedMemory struct {
 	HostGB   float64  `json:"host_gb"`
 	DeviceGB *float64 `json:"device_gb,omitempty"`
@@ -265,9 +235,6 @@ type LearnedMemory struct {
 	PeakHostGB   float64 `json:"peak_host_gb,omitempty"`
 	PeakDeviceGB float64 `json:"peak_device_gb,omitempty"`
 }
-
-// Physical GPU probes retain configured launch slack and page rounding.
-// CPU bootstrap charges do not reserve snapshot-to-launch drift.
 
 func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 	if next == nil || next.Constrained {
@@ -288,7 +255,7 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 			out.DeviceSource = next.DeviceSource
 		}
 	}
-	for _, pair := range [][2]**float64{{&out.DeviceGrowthGB, &next.DeviceGrowthGB}, {&out.GrowthGB, &next.GrowthGB}, {&out.HostGB, &next.HostGB}, {&out.CgroupGB, &next.CgroupGB}, {&out.DeviceGB, &next.DeviceGB}, {&out.NonreclaimableGB, &next.NonreclaimableGB}, {&out.nonreclaimableSampleGB, &next.nonreclaimableSampleGB}} {
+	for _, pair := range [][2]**float64{{&out.DeviceGrowthGB, &next.DeviceGrowthGB}, {&out.GrowthGB, &next.GrowthGB}, {&out.HostGB, &next.HostGB}, {&out.CombinedHostGB, &next.CombinedHostGB}, {&out.CgroupGB, &next.CgroupGB}, {&out.DeviceGB, &next.DeviceGB}, {&out.NonreclaimableGB, &next.NonreclaimableGB}} {
 		if *pair[1] != nil && validMemoryValue(**pair[1]) && (*pair[0] == nil || **pair[1] > **pair[0]) {
 			n := **pair[1]
 			*pair[0] = &n
@@ -390,13 +357,6 @@ func memoryConfiguration(needs ResourceNeeds, args []string, program *Program) s
 	}{needs, args, program})
 }
 
-func memoryLayout(j *Job, m *Machine) string {
-	if m != nil && m.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
-		return "unified"
-	}
-	return "separate"
-}
-
 // RAM and VRAM have independent locality: sibling cards share the host pool,
 // but a sibling's device peak still needs the existing transfer margin.
 type MemoryPeakRange struct {
@@ -455,11 +415,6 @@ type learnedMemoryFact struct {
 	Extension     *Extension     `json:"extension,omitempty"`
 	Lower         float64        `json:"lower,omitempty"`
 	Recovery      float64        `json:"recovery,omitempty"`
-}
-
-type memoryExploration struct {
-	Execution Execution `json:"execution"`
-	PriorGB   float64   `json:"prior_gb"`
 }
 
 func (e *JobMemoryEnvelope) Origin() string {
