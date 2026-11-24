@@ -143,11 +143,12 @@ func TestCheckpointProgressEventDriven(t *testing.T) {
 		// Inject an already-running process. No payload, NAS mount, or native
 		// resource probes are needed to exercise the actual 100ms actor loop.
 		p := &process{job: j, done: make(chan workerFinish, 1)}
+		result := Result{Machine: w.Machine.ID, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 		ctx, cancel := context.WithCancel(context.Background())
 		a := &attemptSupervisor{store: s, job: j, worker: w, recovering: p, wake: make(chan struct{}, 1), done: make(chan struct{})}
 		go a.run(ctx)
 		defer func() {
-			p.done <- workerFinish{result: Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}}}
+			p.done <- workerFinish{result: result}
 			cancel()
 			<-a.done
 		}()
@@ -197,12 +198,12 @@ func TestCheckpointProgressEventDriven(t *testing.T) {
 		t.Logf("local counting filesystem, 60s, 100ms actor, 5s reports, three directories: round1=%d NAS reads/min (12 walks), after=%d NAS reads/min (zero walks), published save=%d local marker read", beforeFS.reads.Load(), afterFS.reads.Load(), markers.Load())
 		// An arbitrary final save (no notification) is read at finalization.
 		write("3")
-		p.done <- workerFinish{result: Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}}}
+		p.done <- workerFinish{result: result}
 		clock.Advance(100 * time.Millisecond)
 		time.Sleep(100 * time.Millisecond)
 		synctest.Wait()
-		if r, _, _, _ := a.snapshot(); r.Progress != 3 || afterFS.reads.Load() != 3 {
-			t.Fatal("finalization missed arbitrary save", r, afterFS.reads.Load())
+		if r, _, _, err := a.snapshot(); err != nil || r.Progress != 3 || afterFS.reads.Load() != 3 {
+			t.Fatal("finalization missed arbitrary save", r, afterFS.reads.Load(), err)
 		}
 	})
 }

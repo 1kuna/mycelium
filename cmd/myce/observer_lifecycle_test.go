@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -72,9 +73,17 @@ func TestObserverFixtureLifecycle(t *testing.T) {
 					cmd.Env = append(cmd.Env, e)
 				}
 			}
-			// Exercise the same prebuilt-image seam as the sharded gate. The
-			// borrowing child's suite still owns its detached observer teardown.
-			cmd.Env = append(cmd.Env, "TMPDIR="+tmp, "MYCE_OBSERVER_LIFECYCLE_HELPER="+mode, "GATE_TEST_CLI_BINARY="+binary, "MYCE_OBSERVER_TEST_QUEUE="+server.URL, "MYCE_OBSERVER_TEST_REPORT="+report)
+			fixtureTmp := tmp
+			if mode == "fixture" && runtime.GOOS == "linux" {
+				// Fleet jobs use a symlink for TMPDIR to keep socket paths short.
+				fixtureTmp = filepath.Join(tmp, "tmp")
+				if err := os.Symlink(t.TempDir(), fixtureTmp); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Reuse the compiled image while giving the child suite its own copy
+			// and ownership of its detached observer teardown.
+			cmd.Env = append(cmd.Env, "TMPDIR="+fixtureTmp, "MYCE_OBSERVER_LIFECYCLE_HELPER="+mode, "GATE_TEST_CLI_BINARY="+binary, "MYCE_OBSERVER_TEST_QUEUE="+server.URL, "MYCE_OBSERVER_TEST_REPORT="+report)
 			// Receipts can outlive the executable fixture (ordinary consumers keep
 			// them in a checkout). Deleting the fixture is not observer teardown.
 			if mode == "fixture" {
@@ -121,7 +130,7 @@ func TestObserverFixtureLifecycle(t *testing.T) {
 			}
 			wait(t, ctx, func() bool { return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) })
 			if mode == "fixture" {
-				dirs, _ := filepath.Glob(filepath.Join(tmp, "myce-cli-tests-*"))
+				dirs, _ := filepath.Glob(filepath.Join(fixtureTmp, "myce-cli-tests-*"))
 				if len(dirs) != 0 {
 					t.Fatal("fixture retained after observer stopped", strconv.Itoa(pid))
 				}

@@ -20,6 +20,15 @@ import (
 // helpers must never stop the owning suite's observer. Exact executable custody
 // excludes installed observers and other concurrently running suites.
 func stopCLIObserverFixtures(root string) error {
+	if runtime.GOOS == "linux" {
+		// The worker can expose TMPDIR through a short symlink, but /proc/PID/exe
+		// reports the resolved executable. Compare against the same spelling.
+		resolved, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			return fmt.Errorf("resolve observer fixture root: %w", err)
+		}
+		root = resolved
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 	defer cancel()
 	type identity struct{ executable, birth string }
