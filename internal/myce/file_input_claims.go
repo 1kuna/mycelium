@@ -230,10 +230,10 @@ func (q *Queue) inputClaimContext(ctx context.Context, ref FileRef, allocate boo
 }
 
 // q.mu held.
-func (q *Queue) visitFileInputClaimKeepers(visit func(FileInputClaim, fileKeeper)) {
+func (q *Queue) visitFileInputClaimKeepers(visit func(FileInputClaim, FileKeepingReference)) {
 	for _, claim := range q.s.FileInputClaims {
 		if claim.SettledAt.IsZero() {
-			visit(claim, fileKeeper{FileKeepingReference: FileKeepingReference{Kind: "input_claim", Name: claim.ID, Project: claim.Project}})
+			visit(claim, FileKeepingReference{Kind: "input_claim", Name: claim.ID, Project: claim.Project})
 		}
 	}
 }

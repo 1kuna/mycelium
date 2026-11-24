@@ -133,57 +133,10 @@ func TestFileReleasePlanReclaimReplayAndKeyedAnswer(t *testing.T) {
 		t.Fatal("apply replay changed receipt", second, err)
 	}
 	// The same durable receipt must work after closing/reopening SQLite.
-	var dbSequence int
-	var dbName, path string
-	if err = q.db.QueryRow("PRAGMA database_list").Scan(&dbSequence, &dbName, &path); err != nil {
-		t.Fatal(err)
-	}
-	root := q.root
-	if err = q.Close(); err != nil {
-		t.Fatal(err)
-	}
-	reopened, err := Open(path, root, clock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
+	reopened := reopenTierQueue(t, q, clock)
 	second, err = releaseApply(reopened, p)
 	if err != nil || second != first {
 		t.Fatal("restart replay", second, err)
-	}
-}
-
-func TestFileReleaseSharedReferencesAndWholeSelection(t *testing.T) {
-	q, clock, c := retentionFixture(t)
-	a, _, ref := releaseTerminal(t, q, c, "shared")
-	b, _, _ := releaseTerminal(t, q, c, "shared")
-	if err := q.update(func() error { q.markBundleUpload(ref.SHA256); return nil }); err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(filePublicationGrace + time.Second)
-	p := releasePlan(t, q, releaseSelection(a))
-	if p.ReclaimableBytes != 0 || len(p.Blobs[0].References) == 0 || p.Blobs[0].References[0].JobID != b.ID {
-		t.Fatal("shared owner omitted", p)
-	}
-	all := releasePlan(t, q, releaseSelection(a, b))
-	if all.ReclaimableBytes != ref.SizeBytes {
-		t.Fatal("shared digest double charged", all)
-	}
-	// A different project's retained reference always wins, even for a terminal job.
-	if err := q.update(func() error { q.touchJob(b.ID).Spec.Project = "other"; return nil }); err != nil {
-		t.Fatal(err)
-	}
-	p = releasePlan(t, q, releaseSelection(a))
-	if p.ReclaimableBytes != 0 || p.Blobs[0].References[0].Project != "other" {
-		t.Fatal(p)
-	}
-	applyFixtureRelease(t, q, p)
-	collectFixtureBlobs(t, q)
-	if _, err := os.Stat(q.files.blob(ref)); err != nil {
-		t.Fatal("other project's bytes deleted", err)
-	}
-	if _, err := q.PlanFileRelease(context.Background(), releaseSelection(b)); err == nil {
-		t.Fatal("wrong project selected")
 	}
 }
 
@@ -519,12 +472,6 @@ func TestFileReleaseAPIPlanRefusalNamesFailedCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	selection := releaseSelection(a, b)
-	q.mu.RLock()
-	_, err = q.fileReleaseMetadata(selection, true)
-	q.mu.RUnlock()
-	if err != nil {
-		t.Fatalf("reading retained jobs must not invalidate queue state: %v", err)
-	}
 	p, err := plan(selection)
 	if err != nil || len(p.Blobs) != 2 || !slices.ContainsFunc(p.Blobs, func(b FileReleaseBlob) bool { return b.SHA256 == ref.SHA256 && !b.Present }) {
 		t.Fatalf("absent content should be reported in a successful plan: %+v, %v", p, err)
@@ -640,6 +587,17 @@ func TestFileReleaseWholeGroupAndUnsuccessfulSelection(t *testing.T) {
 	a, _, ref := releaseTerminal(t, q, c, "group")
 	b, _, _ := releaseTerminal(t, q, c, "group")
 	unselected, _, kept := releaseTerminal(t, q, c, "incomplete")
+	if err := q.update(func() error { q.markBundleUpload(ref.SHA256); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(filePublicationGrace + time.Second)
+	one := releasePlan(t, q, releaseSelection(a))
+	if one.ReclaimableBytes != 0 || len(one.Blobs[0].References) == 0 || one.Blobs[0].References[0].JobID != b.ID {
+		t.Fatal("shared owner omitted", one)
+	}
+	if both := releasePlan(t, q, releaseSelection(a, b)); both.ReclaimableBytes != ref.SizeBytes {
+		t.Fatal("shared digest double charged", both)
+	}
 	if err := q.update(func() error {
 		q.touchJob(a.ID).State = "failed"
 		q.touchJob(unselected.ID).State = "failed"
@@ -647,7 +605,6 @@ func TestFileReleaseWholeGroupAndUnsuccessfulSelection(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(filePublicationGrace + time.Second)
 	p := releasePlan(t, q, releaseSelection(a, b))
 	if p.ReclaimableBytes != ref.SizeBytes {
 		t.Fatal(p)

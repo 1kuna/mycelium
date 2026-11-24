@@ -52,7 +52,7 @@ type projectFileFacts struct {
 	limits          map[string]ProjectPolicy
 }
 
-// Report callback for collectFileReferences. Worker-local custody lives on the
+// Report callback for durable references. Worker-local custody lives on the
 // worker, not in the queue store.
 func (f *projectFileFacts) retain(ref FileRef, owner FileKeepingReference) {
 	if projectFileCharge(owner) {
@@ -206,9 +206,9 @@ func fileStoreQuotaReason(project string, p ProjectPolicy, retained, added uint6
 // keeping facts. Historical additions retain their separate rolling window.
 func (q *Queue) captureProjectFileLedger(project string, jobs map[string]*Job) *projectFileLedger {
 	var facts projectFileFacts
-	q.visitDurableFileReferences(false, nil, func(ref FileRef, flags fileReferenceFlags, owner fileKeeper) {
+	q.visitDurableFileReferences(false, nil, func(ref FileRef, flags fileReferenceFlags, owner FileKeepingReference) {
 		if flags&fileKept != 0 && owner.Project == project {
-			facts.retain(ref, owner.FileKeepingReference)
+			facts.retain(ref, owner)
 		}
 	}, jobs)
 	q.noteProjectFileAdditions(&facts, jobs)
