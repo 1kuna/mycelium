@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"fmt"
 	"strings"
 )
 
@@ -17,12 +18,21 @@ func classifyAttemptResourceFailure(j *Job, r Result) Result {
 	if p := r.MemoryPeak; p != nil && p.Source != processGroupMemorySource && p.Events != nil && memoryConstraintResult(j.StartedAt != nil, r) {
 		e := p.Events
 		killed := e.OOMKill > 0 || e.OOMGroupKill > 0
-		if killed && e.OOM == 0 && e.Max == 0 && !ceiling {
+		limit := 0.0
+		if pooledMemory(j) {
+			limit = memoryPools(j).LimitGB
+		} else if j.MemoryEnvelope != nil {
+			limit = max(j.MemoryEnvelope.LimitHostGB, j.MemoryEnvelope.HostGB)
+		}
+		if !ceiling && limit > 0 && (e.OOM > 0 || e.Max > 0 && killed || !pooledMemory(j) && e.OOMGroupKill > 0) {
+			r.Error = fmt.Sprintf("exceeded its %g GiB memory ceiling", limit)
+			ceiling = true
+		}
+		if killed && !ceiling && pooledMemory(j) {
 			r.ExecutionCause = &RuntimeCause{Operation: "command", Class: memoryPressureCause}
 			r.OutOfMemory, r.Interrupted = false, true
 			return r
 		}
-		ceiling = ceiling || e.OOM > 0 && killed || e.Max > 0 && killed
 	}
 	if ceiling || rss {
 		r.OutOfMemory, r.Interrupted = true, false

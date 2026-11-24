@@ -15,21 +15,28 @@ import (
 func TestEngineLaunchAdmissionDiagnostic(t *testing.T) {
 	for _, check := range []string{"live_host_growth", "aggregate_cpu_allowance", "aggregate_host_allowance"} {
 		t.Run(check, func(t *testing.T) {
-			rt, _, _ := probeMemoryRuntimeFixture(t)
-			rt.models = map[string]*workerModel{}
+			_, clock := fixture(t)
+			m := cpuMachine("worker", "host", "cpu", 16, 16)
+			rt := &modelRuntime{machine: m.ID, memoryMachine: m, clock: clock}
 			next := Job{ID: "next", Attempt: 14, Session: "session", Machine: rt.machine, State: "running", Spec: cpuSpec(2, 2)}
 			if err := normalizeResources(&next.Spec); err != nil {
 				t.Fatal(err)
 			}
 			rt.batchJobs = []Job{next}
 			rt.batchSupervisors = map[attemptKey]*attemptSupervisor{jobKey(next): {job: next, admissionMu: &rt.admissionMu}}
-			rt.hostMemorySource = func(context.Context) (float64, error) { return 1, nil }
+			rt.poolHostMemorySource = func(context.Context) (float64, error) { return 1, nil }
 			required, available, unit := localJobHostNeed(Worker{Machine: rt.memoryMachine}, next), 1.0, "GiB"
 			if check == "aggregate_cpu_allowance" {
 				rt.memoryMachine.CapabilityProfile.LogicalCPUs = 1
 				required, available, unit = 2, 1, "cores"
 			} else if check == "aggregate_host_allowance" {
 				rt.memoryMachine.HostMemoryBudgetGB = 1
+				rt.poolHostMemorySource = func(context.Context) (float64, error) { return 16, nil }
+			}
+			rt.publishHostLedgerLocked()
+			want := memoryWaitReason
+			if check == "aggregate_cpu_allowance" {
+				want = check
 			}
 			var authorized atomic.Bool
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -59,7 +66,7 @@ func TestEngineLaunchAdmissionDiagnostic(t *testing.T) {
 				t.Fatalf("shared-host comparison lost: %+v", r.ExecutionCause)
 			}
 			d := r.ExecutionCause.Admission
-			if d.Subcheck != check || d.Unit != unit || d.Required != required || d.Available == nil || *d.Available != available || d.Unavailable || r.ExecutionCause.PrelaunchRefused {
+			if d.Subcheck != want || d.Unit != unit || d.Required != required || d.Available == nil || *d.Available != available || d.Unavailable || r.ExecutionCause.PrelaunchRefused {
 				t.Fatalf("wrong post-custody comparison: %+v cause=%+v", d, r.ExecutionCause)
 			}
 		})

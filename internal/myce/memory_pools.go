@@ -318,6 +318,9 @@ func (q *Queue) poolCustodyConflicts(j *Job, m *Machine, obligation HostObligati
 	if obligation.Result.ID == j.ID || obligation.Call != nil {
 		return false
 	}
+	if obligation.Launch != nil && !obligation.Launch.Started {
+		return false // A preparation offer has no process or memory custody.
+	}
 	pools := memoryPools(j)
 	if e := obligation.Engine; e != nil {
 		if slot := q.s.ModelSlots[slotKey(e.Machine, e.Model, e.Device)]; slot != nil && e.Machine == m.ID && ownsResidentSlot(j.Spec, slot) {

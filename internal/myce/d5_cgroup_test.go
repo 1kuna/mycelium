@@ -33,7 +33,7 @@ func TestNativeMainMemoryCapComposition(t *testing.T) {
 	// callback with this same process registered in control, as Worker.Run does.
 	j.Session, j.Machine = store.state.Session, w.Machine.ID
 	w.control = &processControl{clock: w.Clock}
-	rt := &modelRuntime{machine: w.Machine.ID, clock: w.Clock, memoryMachine: w.Machine, hostMemorySource: w.HostMemorySource, models: map[string]*workerModel{}, batchJobs: []Job{j}}
+	rt := &modelRuntime{machine: w.Machine.ID, clock: w.Clock, memoryMachine: w.Machine, poolHostMemorySource: w.HostMemorySource, models: map[string]*workerModel{}, batchJobs: []Job{j}}
 	a := &attemptSupervisor{job: j, worker: w, admissionMu: &rt.admissionMu}
 	rt.batchSupervisors = map[attemptKey]*attemptSupervisor{jobKey(j): a}
 	w.batchAdmission, w.stopAdmission = rt.checkBatchLaunchMemory, a.stopAdmission
@@ -329,9 +329,9 @@ func TestNativeGroupCgroupCapsAndOOM(t *testing.T) {
 			w, s, p := d5NativeStart(t, true, nil, []string{"sh", "-c", `while [ ! -f "$1" ]; do sleep .01; done`, "main", "{work}/finish"})
 			await(t, p.native.started)
 			parent := p.native.memory.path
-			for name, want := range map[string]int64{"control": 2 << 30, "main": 1 << 29, "sidecar-helper": 1 << 30} {
+			for name, want := range map[string]string{"control": "max", "main": strconv.FormatInt(1<<29, 10), "sidecar-helper": strconv.FormatInt(1<<30, 10)} {
 				data, err := os.ReadFile(filepath.Join(parent, name, "memory.max"))
-				if err != nil || string(data) != strconv.FormatInt(want, 10) {
+				if err != nil || string(data) != want {
 					t.Fatalf("%s cap=%s %v", name, data, err)
 				}
 				data, err = os.ReadFile(filepath.Join(parent, name, "cgroup.procs"))
@@ -344,8 +344,8 @@ func TestNativeGroupCgroupCapsAndOOM(t *testing.T) {
 				t.Fatal("parent contains internal processes")
 			}
 			data, _ = os.ReadFile(filepath.Join(parent, "memory.max"))
-			if string(data) != "2147483648" {
-				t.Fatal("parent charge changed")
+			if string(data) != "max" {
+				t.Fatal("parent estimate became a cap")
 			}
 			var leaf string
 			for _, m := range p.native.members {

@@ -142,12 +142,9 @@ func TestCheckinPlanningOutcomeEquivalence(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := fmt.Sprintf("%x", sha256.Sum256(data))
-			// The small first-run charge changes available-capacity placements;
-			// occupied capacity still has the same jobs, reasons and six picks.
-			// #1686 removes memory details for ineligible targets. Restoring only
-			// the former noFitDetail reproduces the old available-capacity digest;
-			// the changed snapshot retains all 270 jobs and six picks.
-			want := map[bool]string{true: "80e3a367392c6882691f3933a050cc97f4fee73a47d37f907a1611a494cb41e8", false: "8348d394dd1639faa5d718d9a648c8887a2b501744b4c2538edebe0d8a6197d5"}[occupied]
+			// Pooled admission changes the available-capacity wait descriptions.
+			// The snapshot retains all 270 jobs and six picks.
+			want := map[bool]string{true: "80e3a367392c6882691f3933a050cc97f4fee73a47d37f907a1611a494cb41e8", false: "17772267e95779e818a5391ffebfbf5f929648a1b7660b45652c55fac48be75c"}[occupied]
 			t.Logf("occupied=%v jobs=%d picks=%d digest=%s", occupied, len(jobs), len(picks), got)
 			if got != want {
 				t.Logf("planning records: %s", data)

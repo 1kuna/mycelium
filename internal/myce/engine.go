@@ -1141,7 +1141,7 @@ func (rt *modelRuntime) memoryStopGrace() time.Duration {
 // actor reads never acquire process/control locks or perform receipt I/O.
 
 func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured bool, samples map[attemptKey]hostMemorySample) error {
-	cores, pending := 0, 0.0
+	cores, charge, pending := 0, 0.0, 0.0
 	now := time.Time{}
 	if rt.clock != nil {
 		now = rt.clock.Now()
@@ -1155,10 +1155,10 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 		}
 		cores += j.Spec.Needs.cores()
 		owner := allocationMachine(&rt.memoryMachine, j.AllocatedDevices)
-		_, growth := pooledHostCharge(&j, owner, samples[jobKey(j)], now, localJobHostNeed(Worker{Machine: rt.memoryMachine}, j))
+		held, growth := pooledHostCharge(&j, owner, samples[jobKey(j)], now, localJobHostNeed(Worker{Machine: rt.memoryMachine}, j))
+		charge += held
 		pending += growth
 	}
-	var charge float64
 	for _, other := range rt.models {
 		if other.state != "unloaded" && other.state != "failed" {
 			cores++
@@ -1184,10 +1184,10 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 
 // hostLedger is this worker's ledger as launch admission computes it: what
 // each live attempt and loaded model is charged, and the part of that not yet
-// resident. Published under rt.mu wherever its inputs change, and read without
-// locks by attempt samplers (firstRunFloorRoom).
+// resident. Published under rt.mu wherever its inputs change.
 type hostLedger struct {
 	charge, pending float64
+	cores           int
 	attempts        map[attemptKey][2]float64
 }
 
@@ -1207,10 +1207,12 @@ func (rt *modelRuntime) publishHostLedgerLocked() {
 		}
 		owner := allocationMachine(&rt.memoryMachine, j.AllocatedDevices)
 		c, p := pooledHostCharge(&j, owner, rt.batchHostMemorySamples[jobKey(j)], now, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB))
+		l.cores += j.Spec.Needs.cores()
 		l.charge, l.pending, l.attempts[jobKey(j)] = l.charge+c, l.pending+p, [2]float64{c, p}
 	}
 	for _, other := range rt.models {
 		if other.state != "unloaded" && other.state != "failed" {
+			l.cores++
 			need := hostNeed(allocationMachine(&rt.memoryMachine, []string{other.device}), other.model.MemoryGB, other.model.HostMemoryGB)
 			l.charge, l.pending = l.charge+need, l.pending+need
 		}
@@ -1256,7 +1258,15 @@ func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostL
 		Worker{Machine: rt.memoryMachine}.acceptMemoryOffer(&job)
 	}
 	pools := memoryPools(&job)
-	_, pending := rt.hostChargesExcept(key)
+	if ledger := rt.hostLedger.Load(); ledger != nil {
+		if capacity, reason := cpuCapacity(&rt.memoryMachine); reason == "" && ledger.cores > capacity {
+			return refuseAdmission("aggregate_cpu_allowance", "cores", float64(ledger.cores), float64(capacity), false)
+		}
+	}
+	held, pending := rt.hostChargesExcept(key)
+	if budget := rt.memoryMachine.HostMemoryBudgetGB; budget > 0 || rt.memoryMachine.HostMemoryBudgetMeasured {
+		free = min(free, budget-max(0, held-pending)+pools.KeepGB)
+	}
 	return checkMemoryPool(pools.RAM.TypicalGB, free, pools.KeepGB, pending, known)
 }
 

@@ -364,7 +364,7 @@ func TestEfficiencyRequeuedCustodyRemainsCharged(t *testing.T) {
 	if err := normalizeResources(&s); err != nil {
 		t.Fatal(err)
 	}
-	j := &Job{ID: "work", Spec: s, State: "running", Machine: m.ID, Session: m.Session, Attempt: 1, MemoryEnvelope: &JobMemoryEnvelope{Basis: "exploratory"}}
+	j := &Job{ID: "work", Spec: s, State: "running", Machine: m.ID, Session: m.Session, Attempt: 1, MemoryEnvelope: &JobMemoryEnvelope{Basis: "declared", HostGB: 8}}
 	if err := q.update(func() error { q.putJob(j.ID, j); q.refreshHostMemory(); return nil }); err != nil {
 		t.Fatal(err)
 	}
@@ -391,7 +391,7 @@ func TestEfficiencyRequeuedCustodyRemainsCharged(t *testing.T) {
 		t.Fatal(j.Efficiency.Allocations)
 	}
 	a := j.Efficiency.Allocations[0]
-	if a.Host != "host" || a.Basis != "exploratory" || a.ReservedMemoryGBSeconds != 80 || a.ReservedCPUSeconds != 20 {
+	if a.Host != "host" || a.Basis != "declared" || a.ReservedMemoryGBSeconds != 80 || a.ReservedCPUSeconds != 20 {
 		t.Fatalf("custody charge ended before exact release or continued afterward: %+v", a)
 	}
 }
@@ -461,17 +461,18 @@ func TestEfficiencyReservationUsesLiveAdmissionCharge(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.Needs.Memory = "auto"
-	j := &Job{ID: "probe", State: "running", Spec: s, Machine: m.ID, Session: m.Session, Attempt: 1, MemoryEnvelope: &JobMemoryEnvelope{Basis: "exploratory", HostGB: 8, ProbeFloorGB: minimumHostMemoryGB}}
+	j := &Job{ID: "work", State: "running", Spec: s, Machine: m.ID, Session: m.Session, Attempt: 1,
+		Memory: &MemoryPools{RAM: memoryPoolEstimate{TypicalGB: 1, ChargeGB: 1}}}
 	if err := q.update(func() error {
 		q.putJob(j.ID, j)
-		q.hostMemorySamples = map[string]map[attemptKey]hostMemorySample{m.ID: {jobKey(*j): {at: c.Now(), gb: 1, footprintGB: 1, growthObserved: true}}}
+		q.hostMemorySamples = map[string]map[attemptKey]hostMemorySample{m.ID: {jobKey(*j): {at: c.Now(), gb: 2, footprintGB: 2, growthObserved: true}}}
 		q.refreshHostMemory()
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	charge := q.hostJobCharge(j)
-	if charge >= 8 || j.Efficiency.Rate.ReservedMemoryGB != charge || q.s.Machines[m.ID].HostMemoryInUseGB != charge {
+	if charge != 2 || j.Efficiency.Rate.ReservedMemoryGB != charge || q.s.Machines[m.ID].HostMemoryInUseGB != charge {
 		t.Fatalf("diagnostics disagree with admission: charge=%g rate=%g host=%g", charge, j.Efficiency.Rate.ReservedMemoryGB, q.s.Machines[m.ID].HostMemoryInUseGB)
 	}
 	c.Advance(time.Second)

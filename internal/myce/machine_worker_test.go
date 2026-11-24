@@ -138,7 +138,7 @@ func harnessWorker(t *testing.T, h *machineHarness) Worker {
 	m := machine("machine", "fake", "machine")
 	m.Devices = fakeMachineDevices()
 	m.HostMemoryBudgetGB = 32
-	return Worker{nativeGPUDeviceProbe: syntheticNativeGPUDeviceProbe(fakeMachineDevices()...), Machine: m, StateDir: newTestStateRoot(t), Interval: 10 * time.Millisecond, Clock: RealClock{}, Client: Client{URL: server.URL, Token: "harness-token"}, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return fakeMachineDevices(), nil }, CPUIsolationProbe: func(context.Context) error { return nil }, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
+	return Worker{devEnvironmentSizing: true, nativeGPUDeviceProbe: syntheticNativeGPUDeviceProbe(fakeMachineDevices()...), Machine: m, StateDir: newTestStateRoot(t), Interval: 10 * time.Millisecond, Clock: RealClock{}, Client: Client{URL: server.URL, Token: "harness-token"}, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return fakeMachineDevices(), nil }, CPUIsolationProbe: func(context.Context) error { return nil }, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
 }
 func harnessJob(t *testing.T, id, device, command string) Job {
 	t.Helper()

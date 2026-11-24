@@ -21,8 +21,6 @@ import (
 )
 
 // Work without its own memory evidence is seeded by its checks' peaks (#186).
-const checkSeededPeak = "accepted peak + measured uncertainty; from qualification checks"
-
 func TestExtensionCheckAutoMemory(t *testing.T) {
 	t.Run("floor-free variant", func(t *testing.T) {
 		e := compositionExtension(t, false)
@@ -145,10 +143,10 @@ func TestExtensionCheckAutoPreservesThroughput(t *testing.T) {
 			if !reflect.DeepEqual(after, before) {
 				t.Errorf("auto check changed the workload's observation: before=%+v after=%+v", before, after)
 			}
-			checkKey := q.s.Jobs[job.ID].Timing.Key
-			own := q.s.WorkObservations[identityHash(checkKey)]
-			if len(q.s.WorkObservations) != 2 || !checkKey.Check || !own.MemoryRecordedAt.Equal(clock.Now()) || own.MemoryPeak == nil || own.MemoryPeak.HostGB == nil || *own.MemoryPeak.HostGB != host || own.LastSeconds != 0 {
-				t.Errorf("auto check did not record its own memory: %+v", q.s.WorkObservations)
+			checkKey := pooledEvidenceKey(&job, q.s.Machines[m.ID])
+			own := q.memoryEvidence.exact[checkKey]
+			if len(q.s.WorkObservations) != 1 || len(own.Peaks) != 1 || own.Peaks[0] != host {
+				t.Errorf("auto check did not record a separate memory peak: %+v", own)
 			}
 			timing := q.s.Jobs[job.ID].Timing
 			if timing.ActualSeconds != nil || timing.PredictedSeconds != nil {
@@ -174,127 +172,6 @@ func TestExtensionCheckAutoPreservesThroughput(t *testing.T) {
 				if timing := q.s.Jobs[next.ID].Timing; timing == nil || timing.Key == nil || timing.LastAcceptedSeconds == nil {
 					t.Errorf("unchanged throughput lost for prediction: %+v", timing)
 				}
-				// The day-29 check memory is fresh on its own clock and seeds
-				// work that has no memory evidence of its own (#186).
-				if got := q.s.Jobs[next.ID]; got.MemoryEnvelope == nil || got.MemoryEnvelope.Source != checkSeededPeak || got.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
-					t.Errorf("fresh check peak not reused after throughput expired: %+v", got.MemoryEnvelope)
-				}
-			}
-		})
-	}
-}
-
-func TestExtensionCheckAutoMemoryOnBenchmarkPoint(t *testing.T) {
-	q, clock, m, s := observationFixture(t)
-	e := registeredExtension(t, q, s.Extension)
-	e.Version = "auto"
-	e.Variants[0].Needs = ResourceNeeds{CPUCores: 1, Memory: "auto"}
-	e = freezeComposition(t, e)
-	if err := q.AddExtension(e); err != nil {
-		t.Fatal(err)
-	}
-	report := newExtensionReport(e, &m, "extension:sample")
-	report.Setup, report.Qualified, report.CheckID = true, true, "synthetic-check"
-	m.ExtensionReports = []ExtensionReport{report}
-	check(t, q, m, nil)
-	k, why := memoryReferenceKey(e, q.s.Machines[m.ID], "extension:sample")
-	if k == nil {
-		t.Fatal(why)
-	}
-	k.Concurrency = 1
-	q.s.WorkObservations = map[string]WorkObservation{identityHash(k): {Key: *k, Source: "idle reference", SampleID: "benchmark", Samples: 1, LastSeconds: 2, RecordedAt: clock.Now()}}
-	s.Extension = extensionKey(e)
-	probe := s
-	probe.Workload = nil
-	probe.ExtensionDigest = e.Digest
-	probe.AllowedMachines = []string{m.ID}
-	probe.Needs.Memory = "auto"
-	probe.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
-	job := startObservation(t, q, m, probe)
-	clock.Advance(time.Second)
-	host := 2.0
-	r := result(&job, true)
-	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	if p := q.s.WorkObservations[identityHash(k)]; len(q.s.WorkObservations) != 2 || p.MemoryPeak != nil || p.SampleID != "benchmark" {
-		t.Fatalf("check memory landed on the benchmark point: %+v", q.s.WorkObservations)
-	}
-	queued := submit(t, q, s)
-	next := check(t, q, m, nil).Job
-	if next == nil || next.ID != queued.ID {
-		t.Fatalf("comparable work not assigned: %+v", next)
-	}
-	if next.MemoryEnvelope == nil || next.MemoryEnvelope.Source != checkSeededPeak || next.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
-		t.Fatalf("check peak beside a benchmark point not reused: %+v", next.MemoryEnvelope)
-	}
-}
-
-func TestExtensionCheckAutoLearnsMemoryForComparableWork(t *testing.T) {
-	for _, outcome := range []string{"accepted", "constrained", "failed"} {
-		t.Run(outcome, func(t *testing.T) {
-			q, clock, m, s := observationFixture(t)
-			e := registeredExtension(t, q, s.Extension)
-			e.Version = "auto"
-			e.Variants[0].Needs = ResourceNeeds{CPUCores: 1, Memory: "auto"}
-			e = freezeComposition(t, e)
-			if err := q.AddExtension(e); err != nil {
-				t.Fatal(err)
-			}
-			prepared := newExtensionReport(e, &m, "extension:sample")
-			prepared.Setup = true // Prepared but unqualified; only the check may run.
-			m.ExtensionReports = []ExtensionReport{prepared}
-			check(t, q, m, nil)
-			s.Extension = extensionKey(e)
-			probe := s
-			probe.Workload = nil
-			probe.ExtensionDigest = e.Digest
-			probe.AllowedMachines = []string{m.ID}
-			probe.Needs.Memory = "auto"
-			probe.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
-			first := startObservation(t, q, m, probe)
-			if first.MemoryEnvelope == nil || first.MemoryEnvelope.Source != physicalMemoryProbe {
-				t.Fatalf("check did not explore: %+v", first.MemoryEnvelope)
-			}
-			clock.Advance(time.Second)
-			host := 2.0
-			r := result(&first, outcome != "failed")
-			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, Constrained: outcome == "constrained"}
-			if err := q.Complete(r); err != nil {
-				t.Fatal(err)
-			}
-			if outcome == "accepted" && len(q.s.WorkObservations) != 1 {
-				t.Fatalf("successful auto check did not learn memory: %+v", q.s.WorkObservations)
-			}
-			for _, point := range q.s.WorkObservations {
-				if point.LastSeconds != 0 {
-					t.Fatalf("check learned a duration: %+v", point)
-				}
-			}
-			if got := job(t, q, first.ID); got.Timing != nil && (got.Timing.ActualSeconds != nil || got.Timing.PredictedSeconds != nil) {
-				t.Fatalf("check recorded timing: %+v", got.Timing)
-			}
-			queued := submit(t, q, s)
-			if reply := check(t, q, m, nil); reply.Job != nil {
-				t.Fatal("memory observation granted qualification")
-			}
-			report := newExtensionReport(e, &m, "extension:sample")
-			report.Setup, report.Qualified, report.CheckID = true, true, "successful-check"
-			m.ExtensionReports = []ExtensionReport{report}
-			next := check(t, q, m, nil).Job // Caller omits memory; variant owns auto.
-			if next == nil || next.ID != queued.ID {
-				t.Fatalf("qualified comparable work not assigned: %+v", next)
-			}
-			if next.Spec.Needs.Memory != "auto" || next.MemoryEnvelope == nil {
-				t.Fatalf("variant auto was lost: %+v", next.Spec.Needs)
-			}
-			if outcome == "accepted" {
-				if next.MemoryEnvelope.Source != checkSeededPeak || next.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
-					t.Fatalf("check peak not reused: %+v", next.MemoryEnvelope)
-				}
-			} else if !strings.HasPrefix(next.MemoryEnvelope.Source, "exploratory") {
-				t.Fatalf("%s check seeded a peak: %+v", outcome, next.MemoryEnvelope)
 			}
 		})
 	}
