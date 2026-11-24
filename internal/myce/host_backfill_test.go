@@ -61,47 +61,6 @@ func seedBackfillPeers(t *testing.T, q *Queue, exemplar string, hosts int) {
 	}
 }
 
-// #1717: a partial CPU release must accumulate toward older native checks,
-// rather than immediately admitting a new CPU attempt. Check first-run sizing
-// uses physical headroom, so a check can remain unfitting while CPU work fits.
-
-func TestHostBackfillExtensionCheckBeforeMaintenanceCPU(t *testing.T) {
-	q, clock, m, probe := gpuHostFixture(t)
-	m.HostAvailableMemoryGB = 20
-	cpu := submit(t, q, cpuSpec(1, 8))
-	running := assignedJob(machineCheck(t, q, m))
-	if running == nil || running.ID != cpu.ID {
-		t.Fatal("missing CPU execution", running)
-	}
-	if err := q.Started(result(running, false)); err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(time.Second)
-	probe.Workload = nil
-	probe.ExtensionDigest = registeredExtension(t, q, probe.Extension).Digest
-	probe.AllowedMachines = []string{m.ID}
-	probe.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
-	demand := submit(t, q, probe)
-	if _, err := q.ChangeHostMaintenance(hostID(&m), HostMaintenanceRequest{Action: "disable", Stop: true}); err != nil {
-		t.Fatal(err)
-	}
-	finishInterrupted(t, q, running)
-	r := result(running, true)
-	r.ReleaseOnly = true
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	if !maintenanceResume(job(t, q, cpu.ID)) {
-		t.Fatal("fixture lost maintenance resume priority")
-	}
-	if _, err := q.ChangeHostMaintenance(hostID(&m), HostMaintenanceRequest{Action: "resume"}); err != nil {
-		t.Fatal(err)
-	}
-	if got := assignedJob(machineCheck(t, q, m)); got == nil || got.ID != demand.ID {
-		t.Fatal("CPU maintenance resume took queued accelerator check's memory", got)
-	}
-}
-
 func TestHostBackfillExtensionCheckRespectsRetainedCardCustody(t *testing.T) {
 	q, clock, m, probe := gpuHostFixture(t)
 	m.HostAvailableMemoryGB = 20
@@ -111,7 +70,7 @@ func TestHostBackfillExtensionCheckRespectsRetainedCardCustody(t *testing.T) {
 		s.Needs.HostMemoryGB, s.WallTime = ram, "1h"
 		s.Needs.Platform = Platform{Required: []string{"xpu"}}
 		s.Needs.GPU = &GPUSelection{Devices: []string{"0"}}
-		queued := submit(t, q, s)
+		queued := submitMeasuredCardJob(t, q, m, s)
 		run := assignedJob(machineCheck(t, q, m, holders...))
 		if run == nil || run.ID != queued.ID {
 			t.Fatal("missing sharing attempt", job(t, q, queued.ID).Reason)

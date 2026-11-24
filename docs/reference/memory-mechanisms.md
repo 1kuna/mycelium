@@ -16,6 +16,8 @@ It learns from comparable runs on the same platform family and falls back to
 broader evidence or the supplied hint. A new discrete-card workload gets
 exclusive card access until it has measured device evidence. Unknown
 estimates run alone on their pool.
+When a run has been measured but there is too little evidence to calibrate
+its charge, an existing hint remains a floor alongside the observed peak.
 
 The available RAM reading already accounts for occupied memory. Mycelium
 subtracts the host reserve and the amount running work can still grow into.

@@ -551,7 +551,7 @@ func TestMachineWorkerCrashHelper(t *testing.T) {
 	m := machine("machine", "fake", "machine")
 	m.Devices = fakeMachineDevices()
 	m.HostMemoryBudgetGB = 32
-	w := Worker{EnvironmentLimit: 1 << 30, nativeGPUDeviceProbe: syntheticNativeGPUDeviceProbe(fakeMachineDevices()...), Machine: m, StateDir: os.Getenv("MYCE_MACHINE_CRASH_STATE"), Client: Client{URL: os.Getenv("MYCE_MACHINE_CRASH_URL")}, Interval: 10 * time.Millisecond, Clock: RealClock{}, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return fakeMachineDevices(), nil }, CPUIsolationProbe: func(context.Context) error { return nil }, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
+	w := Worker{devEnvironmentSizing: true, EnvironmentLimit: 1 << 30, nativeGPUDeviceProbe: syntheticNativeGPUDeviceProbe(fakeMachineDevices()...), Machine: m, StateDir: os.Getenv("MYCE_MACHINE_CRASH_STATE"), Client: Client{URL: os.Getenv("MYCE_MACHINE_CRASH_URL")}, Interval: 10 * time.Millisecond, Clock: RealClock{}, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return fakeMachineDevices(), nil }, CPUIsolationProbe: func(context.Context) error { return nil }, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
 	if err := w.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -645,9 +645,11 @@ func TestMachineInventoryAuthorityAllowsIndependentDeviceSlots(t *testing.T) {
 	if err := q.Cancel(oversized.ID); err != nil {
 		t.Fatal(err)
 	}
-	first := submit(t, q, spec("experiment"))
+	work := spec("experiment")
+	work.Needs.HostMemoryGB = 1
+	first := submit(t, q, work)
 	clock.Advance(time.Millisecond)
-	second := submit(t, q, spec("experiment"))
+	second := submit(t, q, work)
 	reply, err = q.Checkin(c)
 	if err != nil || len(reply.Attempts) != 1 || reply.Attempts[0].ID != first.ID {
 		t.Fatal("inventory first admission", err)

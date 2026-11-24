@@ -51,6 +51,13 @@ func TestM3DevTwoGPUScenario(t *testing.T) {
 			current, _ := d.Queue.Snapshot()
 			for _, job := range current.Jobs {
 				t.Logf("job=%s state=%s attempt=%d release=%t reason=%s", job.ID, job.State, job.Attempt, job.ReleaseConfirmed, job.Reason)
+				if job.AdmissionWait != nil && job.AdmissionWait.Latest != nil {
+					for _, target := range job.AdmissionWait.Latest.Targets {
+						if decision := target.AdmissionDecision; decision != nil {
+							t.Logf("device=%s admission=%s/%s/%s", target.Device, decision.Outcome, decision.Stage, decision.Predicate)
+						}
+					}
+				}
 			}
 			t.Fatal(err)
 		}

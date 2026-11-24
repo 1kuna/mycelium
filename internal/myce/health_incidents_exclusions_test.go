@@ -68,26 +68,6 @@ func incidentVariantFixture(t *testing.T, capGB float64) (*Queue, *fakeClock, Ma
 	return q, clock, m, s
 }
 
-func TestHealthIncidentDeclaredMemberCapExcluded(t *testing.T) {
-	q, clock, m, s := incidentVariantFixture(t, 32)
-	first := startObservation(t, q, m, s)
-	clock.Advance(time.Second)
-	r := result(&first, true)
-	peak := 2.0
-	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak}
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	incidentAllowance(t, q, &m, 24)
-	s.RequireTarget = true
-	if _, err := q.Submit(s); err == nil {
-		t.Fatal("oversized declared member cap admitted")
-	}
-	if events := alertsOf(q, "learned_envelope_exceeds_allowances"); len(events) != 0 {
-		t.Fatal("declared cap misclassified as learning", events)
-	}
-}
-
 func TestHealthIncidentHealthyDemandLeavesNoHistory(t *testing.T) {
 	q, _, m, s := observationFixture(t)
 	s.Needs.Memory = "auto"

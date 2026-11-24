@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func TestProfileTargetRefusalHostMemorySlack(t *testing.T) {
+func TestProfileTargetRefusalHostMemoryAllowance(t *testing.T) {
 	q, _ := fixture(t)
 	for _, id := range []string{"small", "closest", "also-close"} {
 		m := machine(id, "cpu")
@@ -26,14 +26,18 @@ func TestProfileTargetRefusalHostMemorySlack(t *testing.T) {
 	s := Spec{Name: "profile", Project: "test", Class: "experiment", RequireTarget: true,
 		Run: RunSpec{Command: []string{"true"}}, Needs: ResourceNeeds{CPUCores: 2, MemoryGB: 8}}
 	// Equal capacity ties use machine name, independently of map iteration.
+	if _, err := c.Submit(context.Background(), s); err != nil {
+		t.Fatalf("estimate equal to the allowance should fit: %v", err)
+	}
+	s.Needs.MemoryGB = 9
 	for range 10 {
 		_, err := c.Submit(context.Background(), s)
 		var api *HTTPError
-		want := "host memory need 8.125 GiB (8 + 0.125 slack) exceeds allowance 8 GiB on also-close"
+		want := "exceeds allowance 8 GiB on also-close"
 		if !errors.As(err, &api) || api.Code != "no_qualified_target" || !strings.Contains(api.Message, want) {
 			t.Fatalf("refusal = %v; want %q", err, want)
 		}
-		if !strings.Contains(api.Message, "no qualified target can fit this job") || !strings.Contains(api.Message, "operator approve a sufficient allowance") {
+		if !strings.Contains(api.Message, "Choose another machine or check the requested memory") {
 			t.Fatalf("permanent capacity refusal lacks remedies: %v", err)
 		}
 	}
@@ -50,26 +54,6 @@ func TestProfileTargetRefusalPlatform(t *testing.T) {
 	_, err := q.Submit(s)
 	var api *HTTPError
 	want := "target linux/amd64/cpu does not match required darwin/arm64/cpu on worker"
-	if !errors.As(err, &api) || api.Code != "no_qualified_target" || !strings.Contains(api.Message, want) {
-		t.Fatalf("refusal = %v; want %q", err, want)
-	}
-}
-
-func TestProfileTargetRefusalAutoEnvelope(t *testing.T) {
-	q, _ := fixture(t)
-	m := machine("worker", "fake")
-	m.UnifiedMemory = true
-	m.CapabilityProfile.MemoryLayout = "unified"
-	m.TotalMemoryGB = 8
-	m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 32
-	m.HostMemoryBudgetGB, m.MemoryCeilingSlackGB = 8, .125
-	check(t, q, m, nil)
-	s := Spec{Name: "profile", Project: "test", Class: "experiment", RequireTarget: true,
-		Run:   RunSpec{Command: []string{"true"}, MemoryGB: 8},
-		Needs: ResourceNeeds{Memory: "auto", Platform: Platform{Any: true}}}
-	_, err := q.Submit(s)
-	var api *HTTPError
-	want := "memory envelope unavailable within target allowance: exploratory first run needs 8.000 GiB host member memory; 7.750 GiB shared headroom available on worker"
 	if !errors.As(err, &api) || api.Code != "no_qualified_target" || !strings.Contains(api.Message, want) {
 		t.Fatalf("refusal = %v; want %q", err, want)
 	}

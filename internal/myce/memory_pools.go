@@ -318,8 +318,8 @@ func (q *Queue) poolCustodyConflicts(j *Job, m *Machine, obligation HostObligati
 	if obligation.Result.ID == j.ID || obligation.Call != nil {
 		return false
 	}
-	if obligation.Launch != nil && !obligation.Launch.Started {
-		return false // A preparation offer has no process or memory custody.
+	if obligation.Launch != nil && (!obligation.Launch.Started || obligation.Launch.Kind == "copy") {
+		return false // A preparation offer or background copy holds no execution pool.
 	}
 	pools := memoryPools(j)
 	if e := obligation.Engine; e != nil {
@@ -337,7 +337,9 @@ func (q *Queue) poolCustodyConflicts(j *Job, m *Machine, obligation HostObligati
 // checks real custody and waits for each selected release to be confirmed.
 func (q *Queue) planPoolCustody(j *Job, m *Machine, plan *placementPlan) bool {
 	for _, obligation := range q.hostObligations(hostID(m)) {
-		if !q.poolCustodyConflicts(j, m, obligation) {
+		// The ordinary planner handles preparation releases and the final
+		// admission gate still checks their custody.
+		if obligation.Preparation || !q.poolCustodyConflicts(j, m, obligation) {
 			continue
 		}
 		if e := obligation.Engine; e != nil {
@@ -503,6 +505,13 @@ func (q *Queue) requeueMemoryPressure(j *Job) {
 	j.Reason = fmt.Sprintf("memory_capacity: %.3f GiB measured under memory pressure, and the retry charge exceeds every eligible memory pool", largestLowerBound)
 }
 
+func memoryWithinAllowance(m *Machine, free, keep, held, pending float64) float64 {
+	if budget := m.HostMemoryBudgetGB; budget > 0 || m.HostMemoryBudgetMeasured {
+		return min(free, budget-max(0, held-pending)+keep)
+	}
+	return free
+}
+
 func checkMemoryPool(typical, available, keep, pending float64, known bool) error {
 	if known && typical <= available-keep-pending {
 		return nil
@@ -516,18 +525,23 @@ func checkMemoryPool(typical, available, keep, pending float64, known bool) erro
 
 func localPooledAdmission(w Worker, jobs []Job, next Job, models []ModelReport, preparationCores []int) error {
 	pools := memoryPools(&next)
+	residentModel := ""
+	if r := next.Spec.Resident; r != nil && r.Engine != nil {
+		residentModel = r.Engine.Model.Name
+	}
 	cores := next.Spec.Needs.cores()
 	for _, n := range preparationCores {
 		cores += n
 	}
-	var pending float64
+	var held, pending float64
 	for _, j := range jobs {
 		if j.ReleaseConfirmed {
 			continue
 		}
 		cores += j.Spec.Needs.cores()
 		owner := allocationMachine(&w.Machine, j.AllocatedDevices)
-		_, growth := pooledHostCharge(&j, owner, w.hostMemorySamples[jobKey(j)], w.Clock.Now(), localJobHostNeed(w, j))
+		charge, growth := pooledHostCharge(&j, owner, w.hostMemorySamples[jobKey(j)], w.Clock.Now(), localJobHostNeed(w, j))
+		held += charge
 		pending += growth
 		if !next.Spec.Needs.cpuOnly() && !j.Spec.Needs.cpuOnly() && (!sharesDevice(&next) || !sharesDevice(&j)) &&
 			slices.ContainsFunc(attemptCards(next, w.Machine), func(id string) bool { return slices.Contains(attemptCards(j, w.Machine), id) }) {
@@ -541,9 +555,10 @@ func localPooledAdmission(w Worker, jobs []Job, next Job, models []ModelReport, 
 		if model.State == "ready" || model.State == "loading" || model.State == "draining" {
 			cores++
 			if budget, ok := w.localModelBudget(model); ok {
-				pending += hostNeed(allocationMachine(&w.Machine, []string{model.Device}), budget.MemoryGB, budget.HostMemoryGB)
+				charge := hostNeed(allocationMachine(&w.Machine, []string{model.Device}), budget.MemoryGB, budget.HostMemoryGB)
+				held, pending = held+charge, pending+charge
 			}
-			if pools.RAM.Alone {
+			if pools.RAM.Alone && model.Name != residentModel {
 				return checkMemoryPool(pools.RAM.TypicalGB, 0, 0, pending, false)
 			}
 		}
@@ -555,7 +570,7 @@ func localPooledAdmission(w Worker, jobs []Job, next Job, models []ModelReport, 
 	if w.Machine.MaxJobs > 0 && len(jobs) >= w.Machine.MaxJobs {
 		return refuseAdmission("local_max_jobs", "jobs", float64(len(jobs)+1), float64(w.Machine.MaxJobs), false)
 	}
-	if err := w.checkJobRAMWithPending(context.Background(), next, pending); err != nil {
+	if err := w.checkJobRAMWithReservations(context.Background(), next, held, pending); err != nil {
 		return err
 	}
 	if pools.Card == nil {
@@ -570,7 +585,7 @@ func localPooledAdmission(w Worker, jobs []Job, next Job, models []ModelReport, 
 		}
 		for _, model := range models {
 			if model.Device == id && (model.State == "ready" || model.State == "loading" || model.State == "draining") {
-				if pools.Card.Alone {
+				if pools.Card.Alone && model.Name != residentModel {
 					return checkMemoryPool(pools.Card.TypicalGB, 0, 0, used, false)
 				}
 				if budget, ok := w.localModelBudget(model); ok {

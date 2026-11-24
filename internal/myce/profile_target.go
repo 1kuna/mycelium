@@ -140,11 +140,7 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 		}
 		return fmt.Sprintf("platform %s does not match required %s", formatTarget(target), strings.Join(required, " or "))
 	case "host memory":
-		base := n.HostMemoryGB
-		if m.UnifiedMemory && m.HostMemoryMeasured {
-			base += n.MemoryGB
-		}
-		return fmt.Sprintf("host memory need %g GiB (%g + %g slack) exceeds allowance %g GiB", hostNeed(m, n.MemoryGB, n.HostMemoryGB), base, m.MemoryCeilingSlackGB, m.FreeHostMemoryGB)
+		return fmt.Sprintf("host memory need %g GiB exceeds allowance %g GiB", hostNeed(m, n.MemoryGB, n.HostMemoryGB), m.FreeHostMemoryGB)
 	case "GPU memory":
 		if len(m.groupMembers) > 0 {
 			return fmt.Sprintf("GPU memory need %g GiB exceeds %g GiB across all %d cards of this host; one job runs on one host", n.MemoryGB, m.TotalMemoryGB, len(m.groupMembers))

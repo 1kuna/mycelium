@@ -37,7 +37,8 @@ func residentAssigned(t *testing.T, q *Queue, m Machine, s Spec) *Job {
 	j := submit(t, q, s)
 	r := check(t, q, m, nil)
 	if r.Job == nil || r.Job.ID != j.ID {
-		t.Fatalf("resident driver not assigned: %+v; job=%+v", r, job(t, q, j.ID))
+		got := job(t, q, j.ID)
+		t.Fatalf("resident driver not assigned: state=%s reason=%s; queue offer=%v", got.State, got.Reason, r.Job != nil)
 	}
 	return r.Job
 }
@@ -430,12 +431,12 @@ func TestResidentAutoCheckFitsAlongsideColdEngine(t *testing.T) {
 	}
 	drainAdmissionWait(t, q)
 	wait := job(t, q, queued.ID)
-	if !strings.Contains(wait.Reason, "24.000 GiB accelerator memory; 23.000 GiB available") {
+	if !strings.Contains(wait.Reason, "25.000 GiB accelerator memory; 23.000 GiB available") {
 		t.Fatalf("wrong wait reason: %s", wait.Reason)
 	}
 	if wait.AdmissionWait == nil || wait.AdmissionWait.Latest == nil || !slices.ContainsFunc(wait.AdmissionWait.Latest.Targets, func(target AdmissionWaitTarget) bool {
 		return target.AdmissionDecision != nil && target.AdmissionDecision.Predicate == predicateResidentDeviceMemory &&
-			target.RequiredDeviceGB == 24 && target.AvailableDeviceGB == 23
+			target.RequiredDeviceGB == 25 && target.AvailableDeviceGB == 23
 	}) {
 		t.Fatalf("missing device rejection and combined demand: %+v", wait.AdmissionWait)
 	}
@@ -451,7 +452,7 @@ func TestResidentAutoCheckFitsAlongsideColdEngine(t *testing.T) {
 	}
 	if ram.Hold == nil || ram.Hold.Kind != "native_qualification" ||
 		!strings.Contains(ram.Reason, ShortID(queued.ID)) ||
-		!strings.Contains(ram.Reason, "13.071 GiB available; 16.000 GiB for the engine and launch headroom") {
+		!strings.Contains(ram.Reason, "resident job needs 16.100 GiB host RAM; 13.071 GiB available") {
 		t.Fatalf("parent's RAM hold lost the check's admission reason: %+v (%s)", ram.Hold, ram.Reason)
 	}
 	host := hostID(&m)
@@ -484,11 +485,8 @@ func TestResidentAutoCheckFitsAlongsideColdEngine(t *testing.T) {
 	if run == nil || run.ID != queued.ID || run.Attempt != 1 {
 		t.Fatalf("cold resident check not assigned: %s", job(t, q, queued.ID).Reason)
 	}
-	if n := run.Spec.Needs; n.MemoryGB != 6 || n.HostMemoryGB <= 0 || n.HostMemoryGB+model.HostMemoryGB > m.HostAvailableMemoryGB {
-		t.Fatalf("probe did not leave space for its engine: %+v", n)
-	}
-	if sizing := run.MemoryEnvelope.SizingInputs; sizing == nil || sizing.ResidentEngineHostGB != model.HostMemoryGB {
-		t.Fatalf("probe did not retain the engine's host charge: %+v", sizing)
+	if p := run.Memory; p == nil || p.Card == nil || p.RAM.ChargeGB+model.HostMemoryGB > m.HostAvailableMemoryGB || p.Card.ChargeGB+model.MemoryGB > m.FreeMemoryGB {
+		t.Fatalf("probe did not leave space for its engine: %+v", p)
 	}
 	if slot := q.s.ModelSlots[targetSlotKey(&m, run.Spec.Resident.Engine.Model.Name)]; slot == nil || !slotReservesMemory(slot) {
 		t.Fatal("engine was not reserved with the check")
@@ -601,6 +599,7 @@ func TestResidentJobsRealCPUProcessAndAttemptBridge(t *testing.T) {
 	dependent := pieceConsumer(s, first.ID, "")
 	dependent.Resident = nil
 	dependent.Files = nil
+	dependent.Needs = cpuSpec(1, 1).Needs
 	consumer := submit(t, q, dependent)
 	if dependencyReady(consumer) {
 		t.Fatal("dependent ready before accepted artifact")
@@ -731,8 +730,8 @@ func TestResidentJobsLocalAliasBudgets(t *testing.T) {
 	}
 	w.Machine.HostMemoryBudgetGB = 14
 	next.Spec.Needs.MemoryGB = 33
-	if err := localAttemptAdmission(w, nil, next, reports); err == nil || !strings.Contains(err.Error(), "device_budget") {
-		t.Fatal("alias missing from card guard", err)
+	if err := localAttemptAdmission(w, nil, next, reports); err == nil || admissionDetail(err, next).Subcheck != memoryWaitReason {
+		t.Fatal("alias missing from unified pool guard", err)
 	}
 	encoded, _ := json.Marshal(reports)
 	var untrusted []ModelReport

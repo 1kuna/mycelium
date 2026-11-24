@@ -1264,9 +1264,7 @@ func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostL
 		}
 	}
 	held, pending := rt.hostChargesExcept(key)
-	if budget := rt.memoryMachine.HostMemoryBudgetGB; budget > 0 || rt.memoryMachine.HostMemoryBudgetMeasured {
-		free = min(free, budget-max(0, held-pending)+pools.KeepGB)
-	}
+	free = memoryWithinAllowance(&rt.memoryMachine, free, pools.KeepGB, held, pending)
 	return checkMemoryPool(pools.RAM.TypicalGB, free, pools.KeepGB, pending, known)
 }
 

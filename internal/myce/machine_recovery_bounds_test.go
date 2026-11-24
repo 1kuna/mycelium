@@ -52,7 +52,9 @@ func TestMachineWedgedKillFallsBackBeforeStartBy(t *testing.T) {
 			}
 			stopAt := *job(t, q, a.ID).StopAt
 			clock.Advance(stopAt.Sub(clock.Now()))
-			prod := submit(t, q, spec("production"))
+			production := spec("production")
+			production.Needs.HostMemoryGB = 1
+			prod := submit(t, q, production)
 			heartbeat(b)
 			if got := job(t, q, b.ID); got.State != "running" || got.PreemptionCount != 0 {
 				t.Fatal("quick kill no longer spares neighbor", got.State)

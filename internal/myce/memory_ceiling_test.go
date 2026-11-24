@@ -1077,8 +1077,12 @@ func TestRequireMemoryCeilingsStartupAndDeclarations(t *testing.T) {
 	defer s.close()
 	j := recoveryJob(t, []string{"sh", "-c", "exit 0"})
 	j.Spec.Needs.HostMemoryGB = 0
-	if _, err := startAfterFixtureInputs(t, w, s, j); err == nil || !strings.Contains(err.Error(), "host_memory_gb") {
-		t.Fatal("undeclared job started", err)
+	p, err := startAfterFixtureInputs(t, w, s, j)
+	if err != nil {
+		t.Fatal("undeclared batch could not use slice containment", err)
+	}
+	if result := d5Finish(t, p); !result.Success {
+		t.Fatal(result)
 	}
 	rt := modelRuntime{requireMemoryCeilings: true}
 	if err := rt.checkLoadMemory(context.Background(), &workerModel{model: Model{MemoryGB: 1}}); err == nil || !strings.Contains(err.Error(), "host_memory_gb") {

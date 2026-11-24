@@ -79,7 +79,7 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 		drain := maintenanceResume(j) && j.Spec.FanOut == nil
 		start := q.fleetStartReservation(j)
 
-		if !drain && start == nil {
+		if !drain && start == nil && (q.s.FleetUpgrade == nil || q.s.FleetUpgrade.State != "running" || jobClass(j.Spec) != "production") {
 			continue
 		}
 		for _, m := range scan.machines {
@@ -136,6 +136,8 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 				continue
 			}
 			choice.startProbe = probe
+		} else if !choice.drain {
+			continue // Ordinary production reservations use the pooled rule below.
 		}
 		previous := scan.hostBackfill[host]
 		if previous == nil || q.hostBackfillBefore(choice.job, previous.job, choice.machine, set) {

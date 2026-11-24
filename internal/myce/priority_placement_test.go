@@ -237,6 +237,7 @@ func TestPriorityPreemptionLeastCostUsefulRelease(t *testing.T) {
 				}
 			}
 			low := spec("experiment")
+			low.Needs.MemoryGB = 4
 			low.Needs.HostMemoryGB = 8
 			submit(t, q, low)
 			batch := check(t, q, m, nil).Job

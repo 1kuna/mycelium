@@ -153,6 +153,7 @@ func nativeStart(t *testing.T, spec Spec, platform string, catalogs ...Environme
 		handler.ServeHTTP(w, r)
 	}))
 	w := Worker{environmentCache: &EnvironmentCache{Root: t.TempDir(), Limit: 512 << 20, Clock: RealClock{}}, Clock: RealClock{}, StateDir: t.TempDir(), Machine: m, Client: Client{URL: server.URL, Token: "fleet-private-test-token"}, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
+	w.MemorySource = func(context.Context) (float64, error) { return m.FreeMemoryGB, nil }
 	// Synthetic lifecycle tests own their helper. Host listener discovery is
 	// exercised directly by TestNativeGroupForeignReadinessListener.
 	w.nativeListenerProbe = func(string, int) error { return nil }

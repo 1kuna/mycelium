@@ -115,7 +115,7 @@ func TestLastDurationIdentityFencesAndRestart(t *testing.T) {
 
 // Durations live on the kind of work's memory record without fragmenting it
 // by source bytes, and a duration-only update leaves memory evidence alone.
-func TestLastDurationSharesTheMemoryRecord(t *testing.T) {
+func TestLastDurationAndMemoryEvidenceSurviveSourceChanges(t *testing.T) {
 	q, clock, m, _, s := lastDurationFixture(t)
 	if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
 		t.Fatal(err)
@@ -123,6 +123,7 @@ func TestLastDurationSharesTheMemoryRecord(t *testing.T) {
 	s.Needs.Memory = "auto"
 	s.RequireTarget, s.ProfileMemory = true, strings.Repeat("c", 64)
 	s.AllowedMachines = []string{m.ID}
+	var memoryKey memoryEvidenceKey
 	for i, source := range []string{"a", "b"} {
 		path := filepath.Join(t.TempDir(), "source")
 		if err := os.WriteFile(path, []byte(source), 0600); err != nil {
@@ -137,6 +138,7 @@ func TestLastDurationSharesTheMemoryRecord(t *testing.T) {
 		}
 		s.Files = FileManifest{".myce-source.tar": ref}
 		j := startObservation(t, q, m, s)
+		memoryKey = pooledEvidenceKey(&j, q.s.Machines[m.ID])
 		clock.Advance(time.Duration(i+1) * time.Second)
 		r := result(&j, true)
 		peak := .1
@@ -152,8 +154,8 @@ func TestLastDurationSharesTheMemoryRecord(t *testing.T) {
 	var record WorkObservation
 	for id, record = range q.s.WorkObservations {
 	}
-	if record.MemorySamples != 2 || record.MemoryPeak == nil || *record.MemoryPeak.HostGB != .1 || record.LastSeconds != 2 {
-		t.Fatalf("record lost its peak or last duration: %+v", record)
+	if peaks := q.memoryEvidence.exact[memoryKey].Peaks; len(peaks) != 2 || peaks[0] != .1 || peaks[1] != .1 || record.LastSeconds != 2 {
+		t.Fatalf("lost peaks or last duration: %v, %g", peaks, record.LastSeconds)
 	}
 	// An attempt with no eligible memory sample adds only its duration, even
 	// to an invalidated record: identity, provenance and memory stay as they were.
@@ -163,7 +165,7 @@ func TestLastDurationSharesTheMemoryRecord(t *testing.T) {
 	clock.Advance(4 * time.Second)
 	finish(t, q, &j, true)
 	after := q.s.WorkObservations[id]
-	if after.LastSeconds != 4 || after.StaleReason != record.StaleReason || after.Job != record.Job || after.Samples != record.Samples || after.MemorySamples != 2 || after.MemoryPeak != record.MemoryPeak {
+	if after.LastSeconds != 4 || after.StaleReason != record.StaleReason || after.Job != record.Job || after.Samples != record.Samples || len(q.memoryEvidence.exact[memoryKey].Peaks) != 2 {
 		t.Fatalf("duration-only update changed memory evidence: before=%+v after=%+v", record, after)
 	}
 }

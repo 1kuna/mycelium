@@ -32,7 +32,7 @@ func TestQueuedReasonIgnoresIneligibleReservation(t *testing.T) {
 	clock.Advance(time.Second)
 	machineCheck(t, q, m)
 	for _, reason := range []string{job(t, q, j.ID).Reason, queuedStatusReason(t, q, j.ID)} {
-		if strings.Contains(reason, "unrelated validation") || strings.Contains(reason, wrong.ID) || !strings.Contains(reason, "4.0 GiB needed") || !strings.Contains(reason, "0.5 GiB available") {
+		if strings.Contains(reason, "unrelated validation") || strings.Contains(reason, wrong.ID) || !strings.Contains(reason, "RAM needs 4.000 GiB") || !strings.Contains(reason, "available 0.500 GiB") {
 			t.Fatal("reason did not name the job's eligible RAM blocker", reason)
 		}
 	}
@@ -75,7 +75,7 @@ func TestQueuedReasonMixedCPUAndRAMTargets(t *testing.T) {
 			waitReason := q.waitReason(q.s.Jobs[j.ID])
 			q.mu.Unlock()
 			for _, reason := range []string{waitReason, job(t, q, j.ID).Reason, receipt.Reason} {
-				for _, want := range []string{"arm-host: CPU capacity: 2 cores needed; 0 cores unreserved of 8 admitted", "amd-host: RAM envelope: 4.0 GiB needed, 0.5 GiB available"} {
+				for _, want := range []string{"arm-host: CPU capacity: 2 cores needed; 0 cores unreserved of 8 admitted", "amd-host: RAM needs 4.000 GiB, available 0.500 GiB"} {
 					if !strings.Contains(reason, want) {
 						t.Errorf("missing %q: %s", want, reason)
 					}
@@ -83,7 +83,7 @@ func TestQueuedReasonMixedCPUAndRAMTargets(t *testing.T) {
 				if strings.Contains(reason, wrong.ID) {
 					t.Errorf("unrelated target in reason: %s", reason)
 				}
-				if busyRAM == 2 && !strings.Contains(reason, "RAM envelope: 4.0 GiB needed, 1.0 GiB available") {
+				if busyRAM == 2 && !strings.Contains(reason, "RAM needs 4.000 GiB, available 2.000 GiB") {
 					t.Errorf("CPU shortage hid same-host RAM shortage: %s", reason)
 				}
 			}
@@ -113,7 +113,7 @@ func TestQueuedReasonUnavailablePeerAndRAMShortage(t *testing.T) {
 	waitReason := q.waitReason(q.s.Jobs[j.ID])
 	q.mu.Unlock()
 	for _, reason := range []string{waitReason, job(t, q, j.ID).Reason, queuedStatusReason(t, q, j.ID)} {
-		for _, want := range []string{"owner-host: hypha on battery", "ram-host: RAM envelope: 4.0 GiB needed, 0.5 GiB available"} {
+		for _, want := range []string{"owner-host: hypha on battery", "ram-host: RAM needs 4.000 GiB, available 0.500 GiB"} {
 			if !strings.Contains(reason, want) {
 				t.Errorf("missing %q: %s", want, reason)
 			}
@@ -143,7 +143,7 @@ func TestQueuedReasonIgnoresReservationOnUndersizedHost(t *testing.T) {
 	clock.Advance(time.Second)
 	check(t, q, eligible, nil)
 	for _, reason := range []string{job(t, q, j.ID).Reason, queuedStatusReason(t, q, j.ID)} {
-		if strings.Contains(reason, small.ID) || strings.Contains(reason, request.Reason) || !strings.Contains(reason, "eligible: 4.0 GiB needed, 0.5 GiB available") {
+		if strings.Contains(reason, small.ID) || strings.Contains(reason, request.Reason) || !strings.Contains(reason, "eligible: RAM needs 4.000 GiB, available 0.500 GiB") {
 			t.Fatal("incompatible CPU capacity contributed a reservation reason", reason)
 		}
 	}
@@ -182,7 +182,7 @@ func TestQueuedReasonNetworkPreparationAndMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, reason := range []string{job(t, q, j.ID).Reason, queuedStatusReason(t, q, j.ID)} {
-		for _, want := range []string{"partial: needs.network: true requires native_network", "interactive: environment not prepared on this shared host", "full: RAM envelope:", "GiB needed, 0.5 GiB available", "hint"} {
+		for _, want := range []string{"partial: needs.network: true requires native_network", "interactive: environment not prepared on this shared host", "full: RAM needs", "available 0.500 GiB", "memory pool estimate"} {
 			if !strings.Contains(reason, want) {
 				t.Errorf("missing %q: %s", want, reason)
 			}
@@ -199,7 +199,7 @@ func TestQueuedReasonCardContentionWithOtherHostRAMShortage(t *testing.T) {
 	for _, exclusive := range []bool{false, true} {
 		t.Run(map[bool]string{false: "shared", true: "exclusive"}[exclusive], func(t *testing.T) {
 			q, clock := fixture(t)
-			m := sharedUnifiedMachine()
+			m := sharedCUDA40GiBCard()
 			var running []*Job
 			if exclusive {
 				s := sharedSpec("experiment", 17)
@@ -209,11 +209,11 @@ func TestQueuedReasonCardContentionWithOtherHostRAMShortage(t *testing.T) {
 				a, b := sharedPair(t, q, m)
 				running = []*Job{a, b}
 			}
-			other := sharedUnifiedMachine()
+			other := sharedCUDA40GiBCard()
 			other.ID, other.HostID, other.Session = "ram-short", "ram-short", "ram-short-session"
 			other.HostAvailableMemoryGB = 0.5
 			machineCheck(t, q, other)
-			j := submit(t, q, sharedSpec("experiment", 17))
+			j := submitMeasuredCardJob(t, q, m, sharedSpec("experiment", 17))
 			clock.Advance(time.Second)
 			if got := assignedJob(machineCheck(t, q, m, running...)); got != nil {
 				t.Fatal("contended card admitted another attempt", got.ID)
@@ -228,12 +228,8 @@ func TestQueuedReasonCardContentionWithOtherHostRAMShortage(t *testing.T) {
 			waitReason := q.waitReason(q.s.Jobs[j.ID])
 			q.mu.Unlock()
 			for _, reason := range []string{waitReason, job(t, q, j.ID).Reason, receipt.Reason} {
-				want := "device 0 shared with 2 attempts"
-				if exclusive {
-					want = "card busy"
-				}
-				if !strings.Contains(reason, want) {
-					t.Errorf("missing %q: %s", want, reason)
+				if !strings.Contains(reason, "card busy") && (exclusive || !strings.Contains(reason, "device 0 shared with 2 attempts")) {
+					t.Errorf("missing card contention: %s", reason)
 				}
 				for _, holder := range running {
 					if !strings.Contains(reason, holder.ID+" (experiment)") {

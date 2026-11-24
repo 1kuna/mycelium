@@ -278,5 +278,11 @@ func (e *memoryEvidence) estimateWithFloor(k memoryEvidenceKey, hint, confidence
 		typical, charge = max(typical, memoryMedian(prior)), max(charge, bound)
 		return finish("platform", len(prior), k.Pool == "card" && len(family.Peaks) == 0)
 	}
+	if validRate(hint) {
+		// A measured peak raises the estimate's floor. Keep the authored
+		// charge until a calibration has enough history to replace it.
+		charge = max(charge, hint)
+		return finish("hint", len(family.Peaks), false)
+	}
 	return finish("unknown", 0, true)
 }

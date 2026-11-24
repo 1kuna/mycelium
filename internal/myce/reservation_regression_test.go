@@ -113,11 +113,8 @@ func TestDeviceReservationDrainingAdmitsCPU(t *testing.T) {
 		t.Fatal(err)
 	}
 	reservationState(t, q, "check", "draining")
-	// Preserve the existing GPU fixture; the newly arriving unknown CPU
-	// work needs a guard, as a worker would advertise after delegation.
-	m.MemoryEnforcement = cgroupMemoryEnforcement
-	s := cpuSpec(2, 0)
-	s.Needs.Memory = "auto"
+	// The CPU command has a known estimate and needs no reserved device.
+	s := cpuSpec(2, 1)
 	cpu := submit(t, q, s)
 	clock.Advance(time.Second)
 	run := assignedJob(machineCheck(t, q, m, existing))

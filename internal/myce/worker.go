@@ -1685,15 +1685,16 @@ func (w Worker) String() string {
 
 func (w Worker) checkJobRAM(ctx context.Context, j Job) error {
 	w.acceptMemoryOffer(&j)
-	return w.checkJobRAMWithPending(ctx, j, 0)
+	return w.checkJobRAMWithReservations(ctx, j, 0, 0)
 }
 
-func (w Worker) checkJobRAMWithPending(ctx context.Context, j Job, pending float64) error {
+func (w Worker) checkJobRAMWithReservations(ctx context.Context, j Job, held, pending float64) error {
 	pools := memoryPools(&j)
 	free, known := 0.0, w.hostRawMemorySource != nil || w.HostMemorySource != nil
 	if known {
 		_, raw, err := w.sampleHostMemory(ctx)
 		free, known = raw, err == nil && validMemoryValue(raw)
 	}
+	free = memoryWithinAllowance(&w.Machine, free, pools.KeepGB, held, pending)
 	return checkMemoryPool(pools.RAM.TypicalGB, free, pools.KeepGB, pending, known)
 }

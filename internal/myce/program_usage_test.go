@@ -90,15 +90,18 @@ printf useful-result > output
 	})
 	await(t, func() bool { return terminal(job(t, q, j.ID).State) })
 	completed := job(t, q, j.ID)
-	if completed.State != "succeeded" || completed.MeasuredNeeds == nil || completed.MeasuredNeeds.MemoryGB != 2 || completed.MeasuredNeeds.HostMemoryGB < .5 {
+	if completed.State != "succeeded" || completed.Memory == nil || completed.Memory.RAM.PeakGB < .5 {
 		t.Fatal("real runner did not measure", completed)
 	}
 	if len(completed.MemoryAttempts) != 1 || completed.MemoryAttempts[0].LearningReason != "eligible" {
 		t.Fatal("runner did not supply eligible memory telemetry", completed.MemoryAttempts)
 	}
-	learned := submit(t, q, s)
-	if learned.Spec.Needs.MemoryGB != 2 || learned.Spec.Needs.HostMemoryGB < .5 {
-		t.Fatal("next submission did not reuse measurements", learned.Spec.Needs)
+	q.mu.Lock()
+	key := pooledEvidenceKey(completed, q.s.Machines[completed.Machine])
+	peaks := q.memoryEvidence.exact[key].Peaks
+	q.mu.Unlock()
+	if len(peaks) != 1 || peaks[0] < .5 {
+		t.Fatal("worker measurement did not reach the evidence store", peaks)
 	}
 	data, err := os.ReadFile(filepath.Join(shared, completed.OutputFiles["output"]))
 	if err != nil || string(data) != "useful-result" {
@@ -178,8 +181,8 @@ printf useful-result > output
 	})
 	await(t, func() bool { return terminal(job(t, q, j.ID).State) })
 	completed := job(t, q, j.ID)
-	if completed.State != "succeeded" || completed.MeasuredNeeds == nil || completed.MeasuredNeeds.MemoryGB != 2 {
-		t.Fatalf("relative spool: state=%s reason=%s usage=%v", completed.State, completed.Reason, completed.MeasuredNeeds)
+	if completed.State != "succeeded" || completed.Memory == nil || completed.Memory.RAM.PeakGB <= 0 {
+		t.Fatalf("relative spool: state=%s reason=%s memory=%v", completed.State, completed.Reason, completed.Memory)
 	}
 	if len(completed.MemoryAttempts) != 1 || completed.MemoryAttempts[0].LearningReason != "eligible" {
 		t.Fatal("runner did not supply eligible memory telemetry", completed.MemoryAttempts)

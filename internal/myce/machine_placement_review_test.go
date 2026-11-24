@@ -80,8 +80,7 @@ func TestQCPreferredPlatformDeferral(t *testing.T) {
 
 func TestQCKillPhaseDoesNotBlockNeighborDevice(t *testing.T) {
 	q, clock := fixture(t)
-	s := spec("experiment")
-	s.Needs.GPU = &GPUSelection{Devices: []string{"0"}}
+	s := m3Spec("experiment", "0", 8, 1)
 	submit(t, q, s)
 	a := assignedJob(machineCheck(t, q, m3Machine()))
 	if a == nil {
@@ -91,8 +90,7 @@ func TestQCKillPhaseDoesNotBlockNeighborDevice(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock.Advance(StopGrace + time.Second)
-	n := spec("experiment")
-	n.Needs.GPU = &GPUSelection{Devices: []string{"1"}}
+	n := m3Spec("experiment", "1", 8, 1)
 	neighbor := submit(t, q, n)
 	for i := 0; i < 3; i++ {
 		r := machineCheck(t, q, m3Machine(), a)

@@ -106,6 +106,7 @@ func TestFleetUpgradeLiveTakeover(t *testing.T) {
 			q, c, workers := fleetFixture(t, "q", "a")
 			m := workers[0]
 			s := spec("production")
+			s.Needs.HostMemoryGB = 1
 			s.Resumable = false
 			run := fleetRun(t, q, m, s)
 			urgency := kind
