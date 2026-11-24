@@ -300,19 +300,22 @@ func TestEntryCoverageResourceFailuresKeepTypeEligible(t *testing.T) {
 		{name: "RSS guard", oom: true, cause: &RuntimeCause{Operation: "command", Class: rssLimitExceeded, RSSLimit: &RSSLimitEvidence{ObservedBytes: 3 << 30, LimitBytes: 2 << 30, Quality: "owned_session_rss"}}},
 		{name: "kernel OOM", oom: true, events: &MemoryEventCounts{Max: 43719, OOM: 1, OOMKill: 3, OOMGroupKill: 1}},
 		{name: "kernel kill at ceiling", oom: true, events: &MemoryEventCounts{Max: 1, OOMKill: 1}},
-		{name: "auto recovery", auto: true, oom: true, cause: &RuntimeCause{Operation: "command", Class: "resource_limit"}, events: &MemoryEventCounts{OOM: 1, OOMKill: 3}},
-		{name: "production declared ceiling", production: true, oom: true, events: &MemoryEventCounts{OOM: 1, OOMGroupKill: 1}},
+		{name: "uncapped pool pressure", auto: true, events: &MemoryEventCounts{OOMKill: 1}},
+		{name: "production explicit limit", production: true, oom: true, events: &MemoryEventCounts{OOM: 1, OOMGroupKill: 1}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, clock := fixture(t)
 			coverageStore(t, q, t.TempDir())
 			preferred, other := coverageMachines()
-			preferred.MemoryCeilingSlackGB = .125
 			preferred.MemoryEnforcement = cgroupMemoryEnforcement
 			check(t, q, preferred, nil)
 			check(t, q, other, nil)
 			s := coverageEntrySpec("limited", "recipe", "first")
 			s.Needs.MemoryGB, s.Needs.HostMemoryGB = 0, 2
+			limit := 2.125
+			if tc.oom {
+				s.MemoryLimitGB = &limit
+			}
 			if tc.auto {
 				s.Needs.Memory, s.Needs.HostMemoryGB = "auto", 0
 			}
@@ -349,9 +352,11 @@ func TestEntryCoverageResourceFailuresKeepTypeEligible(t *testing.T) {
 					t.Fatal("resource failure persisted skip", rec)
 				}
 			}
-			want := "failed"
+			want, wantCause := "failed", "resource_limit"
 			if tc.auto {
-				want = "queued"
+				want, wantCause = "queued", memoryPressureCause
+			} else if tc.cause != nil {
+				wantCause = tc.cause.Class
 			}
 			if got.State != want || got.Losses != 0 || got.InfrastructureRetries != 0 {
 				t.Fatalf("state=%s reason=%s losses=%d infra=%d", got.State, got.Reason, got.Losses, got.InfrastructureRetries)
@@ -360,21 +365,29 @@ func TestEntryCoverageResourceFailuresKeepTypeEligible(t *testing.T) {
 				t.Fatal(got.AttemptHistory)
 			}
 			h := got.AttemptHistory[0]
-			if h.OutOfMemory != tc.oom || h.ExecutionCause == nil || (h.ExecutionCause.Class != "resource_limit" && h.ExecutionCause.Class != rssLimitExceeded) || strings.Contains(h.Reason, "coverage") {
+			if h.OutOfMemory != tc.oom || h.Interrupted != tc.auto || h.ExecutionCause == nil || h.ExecutionCause.Class != wantCause || strings.Contains(h.Reason, "coverage") {
 				t.Fatalf("lost cause: %+v", h)
 			}
-			if len(got.MemoryAttempts) != 1 || got.MemoryAttempts[0].MemoryEnvelope.HostGB != run.MemoryEnvelope.HostGB || got.MemoryAttempts[0].MemoryPeak.Events != nil && *got.MemoryAttempts[0].MemoryPeak.Events != *tc.events {
+			if len(got.MemoryAttempts) != 1 || got.MemoryAttempts[0].MemoryEnvelope == nil || got.MemoryAttempts[0].MemoryPeak == nil {
+				t.Fatal("lost memory evidence", got.MemoryAttempts)
+			}
+			facts := got.MemoryAttempts[0]
+			if facts.MemoryEnvelope.HostGB != run.MemoryEnvelope.HostGB || facts.MemoryEnvelope.LimitHostGB != run.MemoryEnvelope.LimitHostGB {
+				t.Fatal("lost bound", facts.MemoryEnvelope)
+			}
+			events := facts.MemoryPeak.Events
+			if (events == nil) != (tc.events == nil) || events != nil && *events != *tc.events {
 				t.Fatal("lost bound/events", got.MemoryAttempts)
 			}
-			if tc.oom && !tc.auto && tc.name != "RSS guard" && !strings.Contains(h.Reason, "2.125 GiB memory ceiling") {
-				t.Fatal("lost limit", h.Reason)
+			if tc.oom && (run.Memory == nil || run.Memory.LimitGB != limit || h.Reason != "command exceeded explicit memory limit") {
+				t.Fatalf("lost explicit limit: %+v, %s", run.Memory, h.Reason)
 			}
 			nextSpec := s
 			nextSpec.SubmissionKey = "next"
 			next := submit(t, q, nextSpec)
 			if tc.auto {
 				retry := check(t, q, preferred, nil).Job
-				if retry == nil || retry.ID != queued.ID || retry.MemoryEnvelope.HostGB <= run.MemoryEnvelope.HostGB {
+				if retry == nil || retry.ID != queued.ID || retry.Memory == nil || retry.Memory.RAM.ChargeGB <= run.Memory.RAM.ChargeGB {
 					t.Fatal("memory recovery did not retain type/grow bound", retry)
 				}
 			} else if retry := check(t, q, preferred, nil).Job; retry == nil || retry.ID != next.ID {
