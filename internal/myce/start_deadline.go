@@ -94,7 +94,7 @@ func (q *Queue) startCapacityPaused(j *Job) bool {
 }
 
 func (q *Queue) startWaitingReason(j *Job, scans ...*placementScan) string {
-	if h := q.diskWait(j, ""); h != nil {
+	if h := q.diskWait(j, "", scans...); h != nil {
 		return h.Detail
 	}
 	machines := q.planningMachines(scans...)
@@ -149,13 +149,7 @@ func (q *Queue) maintainStartDeadlines() {
 		previous := q.memoryPlanning
 		q.memoryPlanning = newMemoryPlanningCache()
 		defer func() { q.memoryPlanning = previous }()
-		var scan *placementScan
-		for _, m := range q.s.Machines {
-			if workerUsesMemoryPools(m) {
-				scan = q.placementScan()
-				break
-			}
-		}
+		scan := q.placementScan()
 		status := map[*Job]capacityStatus{}
 		for _, j := range q.liveJobs() {
 			if j.State == "queued" && j.Spec.StartBy != nil && !absoluteStartBy(j) {
@@ -164,9 +158,6 @@ func (q *Queue) maintainStartDeadlines() {
 				// only an expired production budget needs this final expiry guard.
 				rearm := false
 				if ready && j.Spec.Priority == "production" && j.Spec.FanOut == nil && expired(j.Spec.StartBy, now) {
-					if scan == nil {
-						scan = q.placementScan()
-					}
 					if q.hostBackfillWaitingReason(j, scan) != "" {
 						waiting, ready = true, false
 						rearm = true

@@ -131,6 +131,26 @@ func BenchmarkCheckinCandidateCost(b *testing.B) {
 	benchmarkCheckinCandidateCost(b, q, workers)
 }
 
+func BenchmarkCheckinCandidateCostDeepPooledBacklog(b *testing.B) {
+	q, workers := candidateCostFixture(b)
+	if err := q.update(func() error {
+		for i := 110; i < 250; i++ {
+			job := *q.s.Jobs[fmt.Sprintf("queued-%03d", i%80)]
+			job.ID = fmt.Sprintf("queued-%03d", i)
+			q.putJob(job.ID, &job)
+		}
+		for i := range workers {
+			m := q.touchMachine(workers[i].ID)
+			m.Capabilities = append(m.Capabilities, pooledMemoryCapability, sampledMemoryCapability)
+			workers[i].Capabilities = m.Capabilities
+		}
+		return nil
+	}); err != nil {
+		b.Fatal(err)
+	}
+	benchmarkConcurrentCheckins(b, q, workers)
+}
+
 func BenchmarkCheckinCandidateCostIdle(b *testing.B) {
 	q, workers := candidateCostFixture(b)
 	if err := q.update(func() error {

@@ -54,6 +54,13 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 	if scan.hostBackfill != nil {
 		return scan.hostBackfill
 	}
+	if q.memoryPlanning == nil {
+		if scan.memory == nil {
+			scan.memory = newMemoryPlanningCache()
+		}
+		q.memoryPlanning = scan.memory
+		defer func() { q.memoryPlanning = nil }()
+	}
 	scan.hostBackfill = map[string]*hostBackfillDemand{}
 	demands := []*Job{}
 	for _, j := range q.liveJobs() {
