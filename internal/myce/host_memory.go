@@ -96,13 +96,13 @@ func (q *Queue) refreshHostMemory() {
 // card on the same physical host. Pins and failed unloads remain protected.
 func (q *Queue) hostReleases(m *Machine, gpu, host float64, priority string, identity ...Spec) ([]*Job, []*ModelSlot, bool) {
 	demand := priorityDemand(priority, identity)
-	return q.hostReleasesWithVictims(m, gpu, host, demand, nil, nil, false, func(j *Job) bool { return q.batchPreemptible(j, demand) })
+	return q.hostReleasesWithVictims(m, gpu, host, demand, nil, nil, false, nil, func(j *Job) bool { return q.batchPreemptible(j, demand) })
 }
 
 // hostReleasesWithVictims plans the releases that make room for a demand on
 // m's host: RAM through hostRoomAfter, cores through cpuAfterReleases. The
 // caller's already planned releases are credited the same way, once.
-func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Spec, releasedJobs map[*Job]bool, releasedSlots map[*ModelSlot]bool, releasePreparation bool, canStop func(*Job) bool) ([]*Job, []*ModelSlot, bool) {
+func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Spec, releasedJobs map[*Job]bool, releasedSlots map[*ModelSlot]bool, releasePreparation bool, pooledReclaim *placementPlan, canStop func(*Job) bool) ([]*Job, []*ModelSlot, bool) {
 	// A reduced allowance or growing holder may leave the host over budget.
 	// Its signed ledger debt must be repaid by releases, not used to disable
 	// the very release plan that can make higher-tier demand fit (MY-56).
@@ -148,7 +148,8 @@ func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Sp
 		return cores == 0 || cpuAllocationFits(&copy, cores)
 	}
 	// Room after the caller's releases; each candidate adds its own return.
-	base := m.FreeHostMemoryGB - m.hostReservationDebtGB
+	unreleasedRoom := m.FreeHostMemoryGB - m.hostReservationDebtGB
+	base := unreleasedRoom
 	for j := range releasedJobs {
 		base += q.jobRelease(m, j)
 	}
@@ -192,12 +193,6 @@ func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Sp
 			jobRAM[j] = q.jobRelease(m, j)
 		}
 	}
-	sort.Slice(jobs, func(i, j int) bool {
-		if q.comparePriority(jobs[i].Spec, jobs[j].Spec) != 0 {
-			return q.comparePriority(jobs[i].Spec, jobs[j].Spec) > 0
-		}
-		return jobs[i].ID < jobs[j].ID
-	})
 	for _, s := range q.s.ModelSlots {
 		owner := slotMachine(q.s.Machines[s.Machine], s)
 		if !releasedSlots[s] && slotReservesMemory(s) && owner != nil && hostID(owner) == hostID(m) {
@@ -217,11 +212,52 @@ func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Sp
 	// Exclude victims that free neither RAM nor cores, including build hand-back.
 	jobs = slices.DeleteFunc(jobs, func(j *Job) bool { return jobRAM[j] == 0 && freedCPU([]*Job{j}, nil) == 0 })
 	slots = slices.DeleteFunc(slots, func(s *ModelSlot) bool { return slotRAM[s] == 0 && freedCPU(nil, []*ModelSlot{s}) == 0 })
-	// Reject impossible demands without constructing a partial release plan.
 	fits := func(js []*Job, ss []*ModelSlot) bool { return ramAfter(js, ss) >= need && cpuOK(js, ss) }
+	if pooledReclaim != nil && room < need {
+		// The allowance can establish a reclaimable commitment even while
+		// unattributed unified use makes the physical release estimate too low.
+		// Keep every charge that would survive an eligible release, including
+		// production and retained custody. Admission still needs live room.
+		ledger := q.hostMemoryLedgers[m.ID]
+		if ledger == nil || !ledger.AvailableKnown || !cpuOK(jobs, slots) {
+			return nil, nil, false
+		}
+		reclaimable := ramAfter(jobs, slots) - unreleasedRoom
+		remaining := max(0, ledger.ReservedGB-reclaimable)
+		if allowance := q.poolAllowance(m); q.sharedHostRoom(m, allowance-remaining, remaining) < need {
+			return nil, nil, false
+		}
+		alreadyReleasing := len(releasedJobs)+len(releasedSlots) > 0
+		var chosenJobs []*Job
+		var chosenSlots []*ModelSlot
+		if !alreadyReleasing || !cpuOK(nil, nil) {
+			sort.Slice(jobs, func(i, j int) bool { return q.poolPressureBefore(jobs[i], jobs[j]) })
+			sort.SliceStable(slots, func(i, j int) bool { return q.comparePriority(q.slotSpec(slots[i]), q.slotSpec(slots[j])) > 0 })
+			for len(jobs)+len(slots) > 0 {
+				if len(slots) == 0 || len(jobs) > 0 && q.comparePriority(jobs[0].Spec, q.slotSpec(slots[0])) >= 0 {
+					chosenJobs, jobs = append(chosenJobs, jobs[0]), jobs[1:]
+				} else {
+					chosenSlots, slots = append(chosenSlots, slots[0]), slots[1:]
+				}
+				if (ramAfter(chosenJobs, chosenSlots) > room || alreadyReleasing) && cpuOK(chosenJobs, chosenSlots) {
+					break
+				}
+			}
+		}
+		pooledReclaim.poolReclaim = true
+		pooledReclaim.poolRecheck = !fits(chosenJobs, chosenSlots)
+		return chosenJobs, chosenSlots, alreadyReleasing || ramAfter(chosenJobs, chosenSlots) > room
+	}
+	// Ordinary work requires a release projection that covers every deficit.
 	if !fits(jobs, slots) {
 		return nil, nil, false
 	}
+	sort.Slice(jobs, func(i, j int) bool {
+		if tier := q.comparePriority(jobs[i].Spec, jobs[j].Spec); tier != 0 {
+			return tier > 0
+		}
+		return jobs[i].ID < jobs[j].ID
+	})
 	// This single-victim check plus greedy/reverse prune is a heuristic, not
 	// always optimal; #100 accepts this tradeoff to keep check-ins inexpensive.
 	ramCapacity := m.HostAvailableMemoryGB

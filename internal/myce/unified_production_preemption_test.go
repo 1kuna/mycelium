@@ -121,7 +121,7 @@ func TestUnifiedProductionReclaimsPooledMemory(t *testing.T) {
 		s.Needs.Memory = "auto"
 		queued := submit(t, q, s)
 		run := assignedJob(pull())
-		if run == nil || run.ID != queued.ID || math.Abs(run.Memory.RAM.ChargeGB-holder.charge) > .001 {
+		if run == nil || run.ID != queued.ID || run.Memory == nil || math.Abs(run.Memory.RAM.ChargeGB-holder.charge) > .001 {
 			t.Fatalf("holder %d not admitted with its charge: %v, %s", i, run, job(t, q, queued.ID).Reason)
 		}
 		if err := q.Started(result(run, true)); err != nil {
@@ -156,6 +156,16 @@ func TestUnifiedProductionReclaimsPooledMemory(t *testing.T) {
 		if stop := priorityStop(job(t, q, victimJob.ID)); stop == nil || stop.Demand != demand.ID {
 			t.Fatal("missing production preemption provenance", stop)
 		}
+		if victim == 1 {
+			// The reported room now fits even while this attempt keeps its
+			// reservation. The exact release must still precede admission.
+			m.HostAvailableMemoryGB += holders[victim].freed
+			m.MemoryObservation.UsedGB -= holders[victim].freed
+			clock.Advance(time.Second)
+			if got := assignedJob(pull()); got != nil || q.hostMemoryLedgers[m.ID].FreeGB < need {
+				t.Fatalf("production offered with release pending, or fixture lacked RAM: %v", got)
+			}
+		}
 		r := result(victimJob, false)
 		r.Interrupted = true
 		if err := q.Complete(r); err != nil {
@@ -165,12 +175,17 @@ func TestUnifiedProductionReclaimsPooledMemory(t *testing.T) {
 			t.Fatalf("holder %d did not requeue cleanly: %s (%s)", victim, j.State, j.Reason)
 		}
 		active[victim] = nil
-		m.HostAvailableMemoryGB += holders[victim].freed
-		m.MemoryObservation.UsedGB -= holders[victim].freed
+		if victim != 1 {
+			m.HostAvailableMemoryGB += holders[victim].freed
+			m.MemoryObservation.UsedGB -= holders[victim].freed
+		}
+		if job(t, q, active[2].ID).State != "running" {
+			t.Fatal("unneeded non-resumable co-tenant was stopped")
+		}
 	}
 	clock.Advance(time.Second)
 	run := assignedJob(pull())
-	if run == nil || run.ID != demand.ID || run.Attempt != 1 || math.Abs(run.Memory.RAM.ChargeGB-need) > .001 {
+	if run == nil || run.ID != demand.ID || run.Attempt != 1 || run.Memory == nil || math.Abs(run.Memory.RAM.ChargeGB-need) > .001 {
 		t.Fatalf("production did not start at its original charge: %v, %s", run, job(t, q, demand.ID).Reason)
 	}
 	if err := q.Started(result(run, true)); err != nil {
