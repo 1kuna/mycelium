@@ -12,8 +12,7 @@ import (
 )
 
 func TestProjectFileStoreClaimBindsResumeAcrossRestart(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	setQuotaPolicy(t, q, "owner", ProjectPolicy{MaxRetainedFileBytes: 6})
 	path, ref := policyInput(t, "data")
 	owner := WithFileStoreSubmission(context.Background(), Spec{Project: "owner"})
@@ -71,17 +70,14 @@ func TestProjectFileStoreClaimBindsResumeAcrossRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock.Advance(filePublicationGrace + time.Second)
-	if _, err := releaseApply(q, releasePlan(t, q, FileReleaseSelection{Project: "owner", Jobs: []string{j.ID}})); err != nil {
-		t.Fatal(err)
-	}
+	applyFixtureRelease(t, q, releasePlan(t, q, FileReleaseSelection{Project: "owner", Jobs: []string{j.ID}}))
 	if u := projectUsage(t, q, "owner"); u.RetainedBytes != 0 {
 		t.Fatal("settled claim prevented owner release", u)
 	}
 }
 
 func TestProjectFileStoreConcurrentClaimsAndReservedCapacity(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	q.files.limit = 12
 	setQuotaPolicy(t, q, "owner", ProjectPolicy{MaxRetainedFileBytes: 6})
 	setQuotaPolicy(t, q, "neighbor", ProjectPolicy{ReservedFileBytes: 8})
@@ -175,8 +171,7 @@ func TestProjectFileStoreConcurrentClaimsAndReservedCapacity(t *testing.T) {
 }
 
 func TestProjectFileStoreDeclaredOutputKeepsPublicationExemption(t *testing.T) {
-	q, _ := fixture(t)
-	c := retentionClient(t, q)
+	q, _, c := retentionFixture(t)
 	q.files.limit = 12
 	setQuotaPolicy(t, q, "neighbor", ProjectPolicy{ReservedFileBytes: 12})
 	setQuotaPolicy(t, q, "producer", ProjectPolicy{MaxRetainedFileBytes: 1})
@@ -203,8 +198,7 @@ func TestProjectFileStoreDeclaredOutputKeepsPublicationExemption(t *testing.T) {
 }
 
 func TestProjectFileStoreResumeUsesStoredLengthAndKeepsCustody(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	setQuotaPolicy(t, q, "small", ProjectPolicy{MaxRetainedFileBytes: 1})
 	_, ref := policyInput(t, "data")
 	owner, err := q.claimFileInput(context.Background(), Spec{Project: "owner"}, ref)
@@ -306,8 +300,7 @@ func TestProjectFileStoreOutputReservationAdmission(t *testing.T) {
 }
 
 func TestProjectFileStorePendingIdentityUsesOwnerReservation(t *testing.T) {
-	q, _ := fixture(t)
-	c := retentionClient(t, q)
+	q, _, c := retentionFixture(t)
 	q.deliveryRoot = q.root
 	q.files.limit = 12
 	setQuotaPolicy(t, q, "neighbor", ProjectPolicy{ReservedFileBytes: 8})
@@ -349,8 +342,7 @@ func TestProjectFileStoreRecoveryAndFailureDiagnosticsRemainPublishable(t *testi
 		}
 	})
 	t.Run("diagnostics", func(t *testing.T) {
-		q, _ := fixture(t)
-		c := retentionClient(t, q)
+		q, _, c := retentionFixture(t)
 		m := machine("worker", "fake")
 		check(t, q, m, nil)
 		s := spec("experiment")

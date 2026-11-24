@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -263,32 +264,7 @@ func (q *Queue) fileReleaseMetadata(selection FileReleaseSelection, includeRefer
 			releasing[id] = fileReleaseScope{checkpoints: selection.IncludeCheckpoints}
 		}
 	}
-	refs := fileReferenceView{}
-	if includeReferences {
-		note := func(ref FileRef, flags fileReferenceFlags, owner fileKeeper) {
-			if hashes[ref.SHA256] {
-				refs.note(ref, flags, owner, true)
-			}
-		}
-		q.visitDurableFileReferences(true, releasing, note)
-		q.visitFileInputClaimKeepers(func(claim FileInputClaim, owner fileKeeper) {
-			note(claim.File, fileKept|fileReferenced, owner)
-		})
-	} else {
-		// Keep the commit fence on the existing collector until the two views
-		// have been compared across the same snapshots.
-		expired, keep, _ := q.collectFileReferences(true, releasing, nil)
-		for hash := range hashes {
-			var flags fileReferenceFlags
-			if expired[hash] {
-				flags |= fileExpired
-			}
-			if keep[hash] {
-				flags |= fileKept
-			}
-			refs[hash] = fileDigestReferences{flags: flags}
-		}
-	}
+	refs := q.captureFileReferences(true, releasing, hashes, includeReferences)
 	for hash := range hashes {
 		if (FileRef{SHA256: hash}).validate() != nil {
 			return plan, fileReleaseInvalid("invalid retained content identity")
@@ -336,6 +312,10 @@ func (q *Queue) fileReleasePlan(ctx context.Context, selection FileReleaseSelect
 	}
 	if store == nil {
 		return fileReleaseSnapshot{}, fileReleaseInvalid("queue file store is not configured")
+	}
+	// An unavailable directory cannot establish that selected blobs are absent.
+	if st, err := os.Stat(filepath.Join(store.root, "blobs")); err != nil || !st.IsDir() {
+		return fileReleaseSnapshot{}, fileReleaseInvalid("cannot read stored release content metadata")
 	}
 	jobs := fileReleaseDigest(plan.Jobs)
 	// Preserve presence and size for every selected identity. Collection

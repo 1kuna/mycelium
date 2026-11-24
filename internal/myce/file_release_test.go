@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -52,6 +53,13 @@ func releasePlan(t *testing.T, q *Queue, s FileReleaseSelection) FileReleasePlan
 func releaseApply(q *Queue, p FileReleasePlan) (FileReleaseResult, error) {
 	return q.ApplyFileRelease(context.Background(), FileReleaseApply{Selection: p.Selection, PlanID: p.ID, AcceptExpiry: true, CollectionCandidates: p.CollectionCandidates})
 }
+func applyFixtureRelease(t *testing.T, q *Queue, p FileReleasePlan) {
+	t.Helper()
+	if _, err := releaseApply(q, p); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func releaseCode(t *testing.T, err error, code string) {
 	t.Helper()
 	var he *HTTPError
@@ -61,8 +69,7 @@ func releaseCode(t *testing.T, err error, code string) {
 }
 
 func TestFileReleasePlanReclaimReplayAndKeyedAnswer(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	j, s, ref := releaseTerminal(t, q, c, "unique")
 	if err := q.update(func() error { q.markBundleUpload(ref.SHA256); return nil }); err != nil {
 		t.Fatal(err)
@@ -147,8 +154,7 @@ func TestFileReleasePlanReclaimReplayAndKeyedAnswer(t *testing.T) {
 }
 
 func TestFileReleaseSharedReferencesAndWholeSelection(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	a, _, ref := releaseTerminal(t, q, c, "shared")
 	b, _, _ := releaseTerminal(t, q, c, "shared")
 	if err := q.update(func() error { q.markBundleUpload(ref.SHA256); return nil }); err != nil {
@@ -171,12 +177,8 @@ func TestFileReleaseSharedReferencesAndWholeSelection(t *testing.T) {
 	if p.ReclaimableBytes != 0 || p.Blobs[0].References[0].Project != "other" {
 		t.Fatal(p)
 	}
-	if _, err := releaseApply(q, p); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.reclaimPublishedFiles(); err != nil {
-		t.Fatal(err)
-	}
+	applyFixtureRelease(t, q, p)
+	collectFixtureBlobs(t, q)
 	if _, err := os.Stat(q.files.blob(ref)); err != nil {
 		t.Fatal("other project's bytes deleted", err)
 	}
@@ -186,8 +188,7 @@ func TestFileReleaseSharedReferencesAndWholeSelection(t *testing.T) {
 }
 
 func TestFileReleaseBundleWithoutAutomaticRetention(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	if err := q.ConfigureFileRetention(0); err != nil {
 		t.Fatal(err)
 	}
@@ -199,12 +200,8 @@ func TestFileReleaseBundleWithoutAutomaticRetention(t *testing.T) {
 	if !p.Blobs[0].PublicationProtected || p.Blobs[0].BundleProtected || p.ReclaimableBytes != 0 {
 		t.Fatal("bundle publication grace not separated from retention", p)
 	}
-	if _, err := releaseApply(q, p); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.reclaimPublishedFiles(); err != nil {
-		t.Fatal(err)
-	}
+	applyFixtureRelease(t, q, p)
+	collectFixtureBlobs(t, q)
 	if _, err := os.Stat(q.files.blob(ref)); err != nil {
 		t.Fatal("bundle lost during publication grace", err)
 	}
@@ -213,9 +210,7 @@ func TestFileReleaseBundleWithoutAutomaticRetention(t *testing.T) {
 	if p.ReclaimableBytes != ref.SizeBytes {
 		t.Fatal("explicit release still needs an automatic retention window", p)
 	}
-	if err := q.reclaimPublishedFiles(); err != nil {
-		t.Fatal(err)
-	}
+	collectFixtureBlobs(t, q)
 	if _, err := os.Stat(q.files.blob(ref)); !os.IsNotExist(err) {
 		t.Fatal("released bundle retained", err)
 	}
@@ -224,8 +219,7 @@ func TestFileReleaseBundleWithoutAutomaticRetention(t *testing.T) {
 func TestFileReleaseProtectedCustodyAndDelivery(t *testing.T) {
 	for _, kind := range []string{"live", "current_custody", "old_copy", "host_release", "pending_delivery", "missing_receipt", "invalid_receipt"} {
 		t.Run(kind, func(t *testing.T) {
-			q, clock := fixture(t)
-			c := retentionClient(t, q)
+			q, clock, c := retentionFixture(t)
 			j, _, ref := releaseTerminal(t, q, c, kind)
 			if err := q.update(func() error {
 				q.markBundleUpload(ref.SHA256)
@@ -281,12 +275,8 @@ func TestFileReleaseVerifiedDelivery(t *testing.T) {
 	if len(p.Jobs[0].Blockers) > 0 || p.Jobs[0].DeliveryVerifiedAt == nil || p.ReclaimableBytes != r.OutputRefs["out.txt"].SizeBytes {
 		t.Fatal(p)
 	}
-	if _, err := releaseApply(q, p); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.reclaimPublishedFiles(); err != nil {
-		t.Fatal(err)
-	}
+	applyFixtureRelease(t, q, p)
+	collectFixtureBlobs(t, q)
 	// Verify the supported destination receipt/content still exists after release.
 	root, err := os.OpenRoot(q.deliveryRoot)
 	if err != nil {
@@ -301,8 +291,7 @@ func TestFileReleaseVerifiedDelivery(t *testing.T) {
 }
 
 func TestFileReleaseStalePlanAndPublicationGrace(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	j, _, ref := releaseTerminal(t, q, c, "stale")
 	if err := q.update(func() error { q.markBundleUpload(ref.SHA256); return nil }); err != nil {
 		t.Fatal(err)
@@ -351,8 +340,7 @@ func TestFileReleaseStalePlanAndPublicationGrace(t *testing.T) {
 }
 
 func TestFileReleaseLosingLastReferenceWidensPlan(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	j, _, _ := releaseTerminal(t, q, c, "shared")
 	keeper, _, _ := releaseTerminal(t, q, c, "shared")
 	clock.Advance(filePublicationGrace + time.Second)
@@ -360,9 +348,7 @@ func TestFileReleaseLosingLastReferenceWidensPlan(t *testing.T) {
 	if p.Blobs[0].CollectionEligible {
 		t.Fatal("keeper was omitted", p)
 	}
-	if _, err := releaseApply(q, releasePlan(t, q, releaseSelection(keeper))); err != nil {
-		t.Fatal(err)
-	}
+	applyFixtureRelease(t, q, releasePlan(t, q, releaseSelection(keeper)))
 	current := releasePlan(t, q, p.Selection)
 	if !current.Blobs[0].CollectionEligible || current.ReclaimableBytes == 0 {
 		t.Fatal("removing the last keeper did not widen the plan", current)
@@ -375,8 +361,7 @@ func TestFileReleaseLosingLastReferenceWidensPlan(t *testing.T) {
 }
 
 func TestFileReleaseSharedPublicationKeepsReviewedPlan(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	a, _, empty := releaseTerminal(t, q, c, "")
 	b, _, shared := releaseTerminal(t, q, c, "shared")
 	other := spec("experiment")
@@ -407,16 +392,12 @@ func TestFileReleaseSharedPublicationKeepsReviewedPlan(t *testing.T) {
 	if refreshed.ID != p.ID || refreshed.ReclaimableBytes != 0 {
 		t.Fatal("republishing shared content changed the reviewed plan", refreshed)
 	}
-	if _, err := releaseApply(q, p); err != nil {
-		t.Fatal(err)
-	}
+	applyFixtureRelease(t, q, p)
 	if !job(t, q, a.ID).FilesExpired || !job(t, q, b.ID).FilesExpired || job(t, q, kept.ID).FilesExpired {
 		t.Fatal("apply did not expire precisely the selected jobs")
 	}
 	clock.Advance(filePublicationGrace + time.Second)
-	if err := q.reclaimPublishedFiles(); err != nil {
-		t.Fatal(err)
-	}
+	collectFixtureBlobs(t, q)
 	for _, ref := range []FileRef{empty, shared} {
 		if _, err := os.Stat(q.files.blob(ref)); err != nil {
 			t.Fatal("shared content was not preserved", err)
@@ -425,8 +406,7 @@ func TestFileReleaseSharedPublicationKeepsReviewedPlan(t *testing.T) {
 }
 
 func TestFileReleaseRegistryCheckpointAndBundleProtection(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	j, _, ref := releaseTerminal(t, q, c, "protected-assets")
 	if err := q.update(func() error {
 		q.markBundleUpload(ref.SHA256)
@@ -455,12 +435,8 @@ func TestFileReleaseRegistryCheckpointAndBundleProtection(t *testing.T) {
 	if p.ReclaimableBytes != 0 {
 		t.Fatal(p)
 	}
-	if _, err := releaseApply(q, p); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.reclaimPublishedFiles(); err != nil {
-		t.Fatal(err)
-	}
+	applyFixtureRelease(t, q, p)
+	collectFixtureBlobs(t, q)
 	if _, err := os.Stat(q.files.blob(ref)); err != nil {
 		t.Fatal(err)
 	}
@@ -470,8 +446,7 @@ func TestFileReleaseRegistryCheckpointAndBundleProtection(t *testing.T) {
 // left publication grace between plan and apply, which changed the plan ID, and
 // the HTTP writer dropped the typed file_release_stale refusal.
 func TestFileReleaseAPIGraceAgingAndTypedRefusals(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	j, _, _ := releaseTerminal(t, q, c, "aging")
 	call := func(path string, in, out any) error { return c.Call(context.Background(), "POST", path, in, out) }
 	var plan FileReleasePlan
@@ -509,8 +484,7 @@ func TestFileReleaseAPIGraceAgingAndTypedRefusals(t *testing.T) {
 }
 
 func TestFileReleaseAPIPlanRefusalNamesFailedCheck(t *testing.T) {
-	q, _ := fixture(t)
-	c := retentionClient(t, q)
+	q, _, c := retentionFixture(t)
 	a, _, _ := releaseTerminal(t, q, c, "valid")
 	b, _, ref := releaseTerminal(t, q, c, "unreadable")
 	plan := func(selection FileReleaseSelection) (FileReleasePlan, error) {
@@ -559,23 +533,44 @@ func TestFileReleaseAPIPlanRefusalNamesFailedCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	refusal(selection, "stored release content is not a regular file")
+	blobs := filepath.Dir(path)
+	if err := os.Rename(blobs, blobs+".unavailable"); err != nil {
+		t.Fatal(err)
+	}
+	refusal(selection, "cannot read stored release content metadata")
 }
 
 func TestFileReleaseReferenceChangeDuringCommit(t *testing.T) {
-	for _, moreProtection := range []bool{true, false} {
-		t.Run(fmt.Sprintf("adds_protection=%t", moreProtection), func(t *testing.T) {
-			q, clock := fixture(t)
-			c := retentionClient(t, q)
+	for _, change := range []string{"add job", "expire job", "add claim", "resolve custody", "republish"} {
+		t.Run(change, func(t *testing.T) {
+			ctx := context.Background()
+			q, clock, c := retentionFixture(t)
 			j, _, ref := releaseTerminal(t, q, c, "concurrent")
+			widensScope := change == "expire job" || change == "resolve custody"
 			var keeper *Job
-			if !moreProtection {
+			if widensScope {
 				keeper, _, _ = releaseTerminal(t, q, c, "concurrent")
+				if change == "resolve custody" {
+					if err := q.update(func() error {
+						j := q.touchJob(keeper.ID)
+						j.Attempt, j.FilesExpired = 1, true
+						enrollFileReclamation(j)
+						return nil
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
 			clock.Advance(filePublicationGrace + time.Second)
 			p := releasePlan(t, q, releaseSelection(j))
+			if p.Blobs[0].CollectionEligible == widensScope {
+				t.Fatal("fixture began with the wrong collection scope", p)
+			}
 			// Hold apply after plan inspection and before the commit lock.
 			drainAdmissionWait(t, q)
 			entered, unblock := make(chan struct{}), make(chan struct{})
+			resume := sync.OnceFunc(func() { close(unblock) })
+			defer resume()
 			var calls atomic.Int32
 			q.checkpointProbe = func() bool {
 				if calls.Add(1) == 1 {
@@ -589,25 +584,37 @@ func TestFileReleaseReferenceChangeDuringCommit(t *testing.T) {
 			select {
 			case <-entered:
 			case <-time.After(testWaitTimeout):
-				close(unblock)
 				t.Fatal("apply did not reach commit")
 			}
-			if moreProtection {
+			var err error
+			switch change {
+			case "add job":
 				other := spec("experiment")
 				other.Project = "other"
 				other.Files = FileManifest{"shared": ref}
 				submit(t, q, other)
-			} else if err := q.update(func() error {
-				q.acceptFileExpiry(q.touchJob(keeper.ID), "fixture", "")
-				return nil
-			}); err != nil {
-				close(unblock)
+			case "add claim":
+				_, err = q.claimFileInput(ctx, Spec{Project: "other"}, ref)
+			case "republish":
+				err = c.HasFile(ctx, ref)
+			default:
+				err = q.update(func() error {
+					k := q.touchJob(keeper.ID)
+					if change == "expire job" {
+						q.acceptFileExpiry(k, "fixture", "")
+					} else {
+						k.ReleaseConfirmed = true
+					}
+					return nil
+				})
+			}
+			if err != nil {
 				t.Fatal(err)
 			}
-			close(unblock)
+			resume()
 			select {
-			case err := <-done:
-				if !moreProtection {
+			case err = <-done:
+				if widensScope {
 					releaseCode(t, err, "file_release_stale")
 				} else if err != nil {
 					t.Fatal(err)
@@ -615,22 +622,21 @@ func TestFileReleaseReferenceChangeDuringCommit(t *testing.T) {
 			case <-time.After(testWaitTimeout):
 				t.Fatal("apply stalled")
 			}
-			if job(t, q, j.ID).FilesExpired != moreProtection {
+			if job(t, q, j.ID).FilesExpired == widensScope {
 				t.Fatal("apply expired the wrong job scope")
 			}
-			if err := q.reclaimPublishedFiles(); err != nil {
+			if err = q.reclaimPublishedFiles(); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := os.Stat(q.files.blob(ref)); err != nil {
-				t.Fatal("the keeper lost the stored content", err)
+			if _, err = os.Stat(q.files.blob(ref)); err != nil {
+				t.Fatal("the keeper or publication grace lost the stored content", err)
 			}
 		})
 	}
 }
 
 func TestFileReleaseWholeGroupAndUnsuccessfulSelection(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	a, _, ref := releaseTerminal(t, q, c, "group")
 	b, _, _ := releaseTerminal(t, q, c, "group")
 	unselected, _, kept := releaseTerminal(t, q, c, "incomplete")
@@ -646,12 +652,8 @@ func TestFileReleaseWholeGroupAndUnsuccessfulSelection(t *testing.T) {
 	if p.ReclaimableBytes != ref.SizeBytes {
 		t.Fatal(p)
 	}
-	if _, err := releaseApply(q, p); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.reclaimPublishedFiles(); err != nil {
-		t.Fatal(err)
-	}
+	applyFixtureRelease(t, q, p)
+	collectFixtureBlobs(t, q)
 	if _, err := os.Stat(q.files.blob(ref)); !os.IsNotExist(err) {
 		t.Fatal("group not reclaimed", err)
 	}
@@ -666,8 +668,7 @@ func TestFileReleaseWholeGroupAndUnsuccessfulSelection(t *testing.T) {
 func TestFileReleaseProtectsExpiredCustodyAndRecoveredResults(t *testing.T) {
 	for _, kind := range []string{"expired_custody", "recovered_result", "recent_bundle", "refreshed_bundle"} {
 		t.Run(kind, func(t *testing.T) {
-			q, clock := fixture(t)
-			c := retentionClient(t, q)
+			q, clock, c := retentionFixture(t)
 			selected, _, ref := releaseTerminal(t, q, c, kind)
 			other, _, _ := releaseTerminal(t, q, c, kind)
 			if err := q.update(func() error {
@@ -702,12 +703,8 @@ func TestFileReleaseProtectsExpiredCustodyAndRecoveredResults(t *testing.T) {
 			if p.ReclaimableBytes != 0 {
 				t.Fatal("protected class counted as reclaimable", p)
 			}
-			if _, err := releaseApply(q, p); err != nil {
-				t.Fatal(err)
-			}
-			if err := q.reclaimPublishedFiles(); err != nil {
-				t.Fatal(err)
-			}
+			applyFixtureRelease(t, q, p)
+			collectFixtureBlobs(t, q)
 			if _, err := os.Stat(q.files.blob(ref)); err != nil {
 				t.Fatal("protected class removed", err)
 			}
@@ -717,9 +714,7 @@ func TestFileReleaseProtectsExpiredCustodyAndRecoveredResults(t *testing.T) {
 				if p.ReclaimableBytes != ref.SizeBytes || p.Blobs[0].BundleProtected {
 					t.Fatal("released bundle retained past publication grace", p)
 				}
-				if err := q.reclaimPublishedFiles(); err != nil {
-					t.Fatal(err)
-				}
+				collectFixtureBlobs(t, q)
 				if _, err := os.Stat(q.files.blob(ref)); !os.IsNotExist(err) {
 					t.Fatal("released bundle not reclaimed after grace", err)
 				}
@@ -729,8 +724,7 @@ func TestFileReleaseProtectsExpiredCustodyAndRecoveredResults(t *testing.T) {
 }
 
 func TestFileReleaseChangedCustodyInvalidatesPlan(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	j, _, _ := releaseTerminal(t, q, c, "custody-fence")
 	clock.Advance(filePublicationGrace + time.Second)
 	p := releasePlan(t, q, releaseSelection(j))
@@ -745,8 +739,7 @@ func TestFileReleaseChangedCustodyInvalidatesPlan(t *testing.T) {
 }
 
 func TestFileReleaseOverlappingGroupsRetainReplay(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	a, _, _ := releaseTerminal(t, q, c, "overlap-a")
 	b, _, _ := releaseTerminal(t, q, c, "overlap-b")
 	clock.Advance(filePublicationGrace + time.Second)
@@ -775,20 +768,15 @@ func TestFileReleaseOverlappingGroupsRetainReplay(t *testing.T) {
 }
 
 func TestFileReleaseReintroducedContentAccounting(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	j, _, ref := releaseTerminal(t, q, c, "reintroduced")
 	clock.Advance(filePublicationGrace + time.Second)
 	first := releasePlan(t, q, releaseSelection(j))
 	if first.ReclaimableBytes != ref.SizeBytes {
 		t.Fatal("initial plan omitted reclaimable bytes", first)
 	}
-	if _, err := releaseApply(q, first); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.reclaimPublishedFiles(); err != nil {
-		t.Fatal(err)
-	}
+	applyFixtureRelease(t, q, first)
+	collectFixtureBlobs(t, q)
 	if _, err := os.Stat(q.files.blob(ref)); !os.IsNotExist(err) {
 		t.Fatal("first collection did not remove content", err)
 	}
@@ -797,13 +785,9 @@ func TestFileReleaseReintroducedContentAccounting(t *testing.T) {
 	retentionUpload(t, c, "reintroduced")
 	clock.Advance(filePublicationGrace + time.Second)
 	second := releasePlan(t, q, releaseSelection(j))
-	if _, err := releaseApply(q, second); err != nil {
-		t.Fatal(err)
-	}
+	applyFixtureRelease(t, q, second)
 	for range 2 {
-		if err := q.reclaimPublishedFiles(); err != nil {
-			t.Fatal(err)
-		}
+		collectFixtureBlobs(t, q)
 	}
 	var reclaimed int64
 	if _, err := os.Stat(q.files.blob(ref)); os.IsNotExist(err) {
@@ -820,8 +804,7 @@ func TestFileReleaseReintroducedContentAccounting(t *testing.T) {
 }
 
 func TestFileReleaseReplayRequiresExactCheckpointSelection(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	_, ref := retentionJobInput(t, c, "replayed-checkpoint")
 	j, _, _ := releaseTerminal(t, q, c, "ordinary-release")
 	if err := q.update(func() error {
@@ -856,9 +839,7 @@ func TestFileReleaseReplayRequiresExactCheckpointSelection(t *testing.T) {
 	_, err = releaseApply(q, ordinary)
 	releaseCode(t, err, "file_release_stale") // An older receipt has no stored selection.
 	withCheckpoint := releasePlan(t, q, changed.Selection)
-	if _, err := releaseApply(q, withCheckpoint); err != nil {
-		t.Fatal(err)
-	}
+	applyFixtureRelease(t, q, withCheckpoint)
 	clock.Advance(time.Second)
 	if _, err := releaseApply(q, withCheckpoint); err != nil {
 		t.Fatal("exact checkpoint selection could not recover its receipt", err)

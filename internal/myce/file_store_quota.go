@@ -202,6 +202,20 @@ func fileStoreQuotaReason(project string, p ProjectPolicy, retained, added uint6
 	return fmt.Sprintf("project %s queue file-store quota: %s (including inputs and declared outputs); non-production submissions are refused until usage drops. Write large outputs to your project's own storage inside the job and return small receipts; release collected results with `myce file release plan --project %s JOB... > PLAN.json` then `myce file release apply --accept-expiry PLAN.json`; the 24h allowance frees as additions age out", project, over, project)
 }
 
+// q.mu held. The per-project quota and reserved capacity use the same
+// keeping facts. Historical additions retain their separate rolling window.
+func (q *Queue) captureProjectFileLedger(project string, jobs map[string]*Job) *projectFileLedger {
+	var facts projectFileFacts
+	q.visitDurableFileReferences(false, nil, func(ref FileRef, flags fileReferenceFlags, owner fileKeeper) {
+		if flags&fileKept != 0 && owner.Project == project {
+			facts.retain(ref, owner.FileKeepingReference)
+		}
+	}, jobs)
+	q.noteProjectFileAdditions(&facts, jobs)
+	q.noteInputClaimFacts(&facts, project)
+	return facts.ledgers()[project]
+}
+
 // q.mu held. Default off: projects without limits and production work skip
 // the metadata walk. Completed results are never refused here; a project that
 // overshot is refused at its next non-production submission instead.
@@ -219,12 +233,7 @@ func (q *Queue) projectFileQuotaRefusal(project string, incoming FileManifest, d
 		return nil
 	}
 	// Walk only this project's jobs: cost follows the project, not the queue.
-	jobs := q.projectFileJobs(project)
-	var facts projectFileFacts
-	q.collectFileReferences(false, nil, facts.retain, jobs)
-	q.noteProjectFileAdditions(&facts, jobs)
-	q.noteInputClaimFacts(&facts, project)
-	l := facts.ledgers()[project]
+	l := q.captureProjectFileLedger(project, q.projectFileJobs(project))
 	if l == nil {
 		l = &projectFileLedger{}
 	}
