@@ -71,6 +71,7 @@ func reconcileCustodianStartup(ctx context.Context, dir, id string, fence func(c
 	if j.ID == "" || !validCustodianID(j.ID) || j.Attempt <= 0 || j.Session == "" || j.Machine == "" {
 		return errors.New("invalid custodian assignment")
 	}
+	a := attemptRecordFor(j, j.Machine)
 	paths, err := filepath.Glob(filepath.Join(dir, "state-attempt-*.json"))
 	if err != nil {
 		return err
@@ -92,14 +93,14 @@ func reconcileCustodianStartup(ctx context.Context, dir, id string, fence func(c
 			continue
 		}
 		matches++
-		if s.Job == nil || jobKey(*s.Job) != jobKey(*j) || s.Job.Machine != j.Machine || s.Job.Session != j.Session || s.Session != j.Session || !custodianUnstarted(s) {
+		if !a.ownsState(s) || !custodianUnstarted(s) {
 			return errors.New("saved assignment has mismatched or execution custody")
 		}
 	}
 	if matches != 1 {
 		return errors.New("exactly one saved custodian assignment required")
 	}
-	if !custodianUnstarted(req.State) || req.State.Custodian != "" {
+	if !req.unstartedFor(id, a) {
 		return errors.New("request retains execution custody")
 	}
 	// Lstat deliberately rejects even a dangling symlink or corrupt observation.
@@ -133,8 +134,4 @@ func reconcileCustodianStartup(ctx context.Context, dir, id string, fence func(c
 		return err
 	}
 	return RecordCustodianStartupFailure(dir, id)
-}
-
-func custodianUnstarted(s workerState) bool {
-	return s.PID == 0 && s.Birth == "" && s.CustodyID == "" && !s.LaunchPending && !s.InputWriterPending && len(s.Groups) == 0 && s.Preparation == "" && s.Cgroup == "" && s.Result == nil
 }

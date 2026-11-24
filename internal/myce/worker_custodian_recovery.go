@@ -24,7 +24,11 @@ func (w Worker) recoverUnstartedCustodian(parent *workerStore) error {
 		return err
 	}
 	j := parent.state.Job
-	if v.Protocol != custodianProtocol || v.ID != id || v.Started || v.Finished || v.PID <= 0 || v.Birth == "" || v.State.Job == nil || jobKey(*v.State.Job) != jobKey(*j) || v.State.Job.Machine != j.Machine || v.State.Session != j.Session || !custodianUnstarted(v.State) || !custodianUnstarted(parent.state) {
+	if j == nil {
+		return errors.New("initialized custodian has no saved assignment")
+	}
+	a := attemptRecordFor(j, j.Machine)
+	if !v.belongsTo(id, a) || !a.ownsState(parent.state) || v.Started || v.Finished || v.PID <= 0 || v.Birth == "" || !custodianUnstarted(v.State) || !custodianUnstarted(parent.state) {
 		return errors.New("initialized custodian has uncertain execution custody")
 	}
 	birth, err := processBirth(v.PID)
@@ -35,7 +39,7 @@ func (w Worker) recoverUnstartedCustodian(parent *workerStore) error {
 	if err := readCustodianJSON(dir, custodianName(id, "request"), &req); err != nil {
 		return err
 	}
-	if req.Protocol != custodianProtocol || req.ID != id || req.Machine.ID != j.Machine || req.State.Job == nil || jobKey(*req.State.Job) != jobKey(*j) || req.State.Job.Machine != j.Machine || req.State.Session != j.Session || req.State.Custodian != "" || !custodianUnstarted(req.State) || !validCustodianID(req.State.Identity) || req.State.Identity != v.State.Identity || req.State.Identity != parent.state.Identity {
+	if !req.unstartedFor(id, a) || !validCustodianID(req.State.Identity) || req.State.Identity != v.State.Identity || req.State.Identity != parent.state.Identity {
 		return errors.New("initialized custodian request identity unconfirmed")
 	}
 	for _, path := range []string{
