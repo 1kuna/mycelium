@@ -74,7 +74,7 @@ func run(args []string) error {
 	return runWithProbe(args, probe)
 }
 
-const topLevelUsage = "usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|init|run|profile|submit|spec|policy|parity|status|efficiency|logs|ledger|wait|result|cancel|pause|resume|job|resolve-native|resolve-custodian-startup|dev|version|release|skill|file|extension|env|portability|detect|service|model|resident|telemetry|gpu-telemetry-client|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\n       myce job resize [flags] JOB_ID...\nRun myce COMMAND --help for command options."
+const topLevelUsage = "usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|init|run|profile|submit|spec|policy|parity|status|efficiency|logs|ledger|wait|result|cancel|pause|resume|resolve-native|resolve-custodian-startup|dev|version|release|skill|file|extension|env|portability|detect|service|model|resident|telemetry|gpu-telemetry-client|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options."
 
 func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if len(args) > 0 && args[0] == "_inspect-custodian-handles" {
@@ -90,11 +90,12 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		return myce.CommandExec(args[1:])
 	}
 
+	const usage = topLevelUsage + "\n       myce job resize [flags] JOB_ID..."
 	if len(args) == 0 {
-		return errors.New(topLevelUsage)
+		return errors.New(usage)
 	}
 	if args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintln(os.Stdout, topLevelUsage)
+		fmt.Fprintln(os.Stdout, usage)
 		return nil
 	}
 	if args[0] == "dev" && len(args) > 1 && args[1] == "clock" {
@@ -248,7 +249,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	switch args[0] {
 	case "dev", "queue", "join", "submit", "usage", "status", "efficiency", "cancel", "leave", "ledger", "logs":
 	default:
-		return &exitError{2, fmt.Errorf("unknown command %q\n%s", args[0], topLevelUsage)}
+		return &exitError{2, fmt.Errorf("unknown command %q\n%s", args[0], usage)}
 	}
 	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	serviceConfigPath := f.String("service-config", "", "saved installed service configuration")

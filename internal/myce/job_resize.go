@@ -42,7 +42,7 @@ func (q *Queue) ResizeJobs(ctx context.Context, req ResizeJobsRequest) (ResizeJo
 			}
 			j := q.s.Jobs[id]
 			if j == nil {
-				return &HTTPError{Status: 404, Code: "job_not_found", Message: fmt.Sprintf("no batch job with ID %q", id)}
+				return &HTTPError{Status: 404, Code: "job_unknown", Message: fmt.Sprintf("no batch job with ID %q", id)}
 			}
 			if j.Spec.Project != req.Project {
 				return &HTTPError{Status: 403, Code: "job_project_mismatch", Message: fmt.Sprintf("job %s belongs to another project", id)}
