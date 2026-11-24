@@ -736,6 +736,7 @@ func TestModelSnapshotPinCleanupPrecedesAttemptRetirement(t *testing.T) {
 	w.control = &processControl{}
 	w.Clock = &fakeClock{now: time.Unix(1000, 0)}
 	j := harnessJob(t, "pin-cleanup", "", "true")
+	j.Machine, j.Session = w.Machine.ID, w.Machine.Session
 	root := &workerStore{dir: t.TempDir()}
 	s, err := newAttemptStore(root, j)
 	if err != nil {
@@ -761,7 +762,7 @@ func TestModelSnapshotPinCleanupPrecedesAttemptRetirement(t *testing.T) {
 	if err := os.WriteFile(block, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	s.state.Result = &Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: true}
+	s.state.Result = &Result{Machine: j.Machine, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: true}
 	if err := s.save(); err != nil {
 		t.Fatal(err)
 	}
@@ -770,7 +771,10 @@ func TestModelSnapshotPinCleanupPrecedesAttemptRetirement(t *testing.T) {
 	defer cancel()
 	go a.run(ctx)
 	await(t, func() bool {
-		_, d, _, _ := a.snapshot()
+		_, d, finished, err := a.snapshot()
+		if finished || err != nil {
+			t.Fatalf("actor exited before retrying the cache pin: %v", err)
+		}
 		return strings.Contains(d.FileTransferError, "cache pin cleanup pending")
 	})
 	data, err := os.ReadFile(filepath.Join(s.dir, s.stateName))
