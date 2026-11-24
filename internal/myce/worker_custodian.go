@@ -80,7 +80,7 @@ type custodianControl struct {
 }
 
 func attemptControl(dir, id string, j Job) (custodianControl, bool) {
-	expected := custodianControl{ID: id, Execution: runExecution(&j), Session: j.Session}
+	expected := custodianControl{ID: id, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session}
 	var saved custodianControl
 	if readCustodianJSON(dir, custodianName(id, "control"), &saved) == nil && saved.ID == id && saved.Execution == expected.Execution && saved.Session == j.Session {
 		return saved, true

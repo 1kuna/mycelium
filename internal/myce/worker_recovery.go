@@ -287,12 +287,22 @@ func custodianUnstarted(s workerState) bool {
 
 // Results from a different execution must never be adopted from a spool file.
 func (s *workerStore) matchesResult(r Result, machine string) bool {
-	a := attemptRecordFor(s.state.Job, machine)
+	a := s.savedResultRecord(machine)
 	return s.state.Session == a.key.session && a.ownsResult(&r)
 }
 
-func (s *workerStore) recoverResult(machine string) error {
+func (s *workerStore) savedResultRecord(machine string) attemptRecord {
 	a := attemptRecordFor(s.state.Job, machine)
+	// Retained native reconciliation records may carry the session only on
+	// the spool. When both fields are present they must agree.
+	if a.key.session == "" {
+		a.key.session = s.state.Session
+	}
+	return a
+}
+
+func (s *workerStore) recoverResult(machine string) error {
+	a := s.savedResultRecord(machine)
 	if s.state.Job == nil || s.state.Session != a.key.session {
 		return errors.New("mismatched saved worker assignment")
 	}
