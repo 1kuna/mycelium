@@ -34,9 +34,9 @@ func TestMemoryEvidenceRepairRetainsNativeLimits(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := cpuSpec(1, 0)
 			peak := &AttemptMemoryPeak{HostGB: &tc.peak}
-			state := "succeeded"
+			outcomeState := "succeeded"
 			if tc.oom {
-				state = "failed"
+				outcomeState = "failed"
 			}
 			if tc.envelope != nil {
 				peak.Events = &MemoryEventCounts{Max: 1}
@@ -45,7 +45,7 @@ func TestMemoryEvidenceRepairRetainsNativeLimits(t *testing.T) {
 				StopCause: tc.stop, Memory: &MemoryPools{RAM: memoryPoolEstimate{ChargeGB: tc.charge}}}},
 				MemoryAttempts: []AttemptMemoryFacts{{Attempt: 1, Machine: m.ID, Session: m.Session,
 					MemoryPeak: peak, MemoryEnvelope: tc.envelope}},
-				AttemptHistory: []AttemptOutcome{{Attempt: 1, Machine: m.ID, Session: m.Session, State: state, OutOfMemory: tc.oom}}}
+				AttemptHistory: []AttemptOutcome{{Attempt: 1, Machine: m.ID, Session: m.Session, State: outcomeState, OutOfMemory: tc.oom}}}
 			key := pooledEvidenceKey(j, &m)
 			p := WorkObservation{Key: ObservationKey{Work: profileMemoryIdentity(j), Target: machineTarget(&m), Concurrency: 1, BatchSize: 1},
 				MemoryFamily: key.Family, MemoryConfiguration: memoryConfiguration(spec.Needs, spec.Args, spec.Program),
