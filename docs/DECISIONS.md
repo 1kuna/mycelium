@@ -73,6 +73,7 @@ The [approved design](design-proposal.md) is the product spec. Current maintaine
 - When production needs a machine's memory, CPU or device, Mycelium pauses lower-priority work there or moves it to another machine, so production does not wait on co-tenants. Other work still uses that capacity until production needs it (MY-50). Resumable work is paused by checkpoint and requeue. When production needs the memory, Mycelium may stop non-resumable lower-tier work and requeue it from scratch. The consumer skill tells agents to save resumable progress and explains the restart risk. (MY-56)
 - Typed memory figures are estimates. Mycelium learns from runs and adjusts automatically. Memory can end a run at an explicit opt-in limit, a card's capacity or the worker slice's ceiling. ([#1972](https://github.com/1kuna/mycelium/issues/1972))
 - Within one project and priority tier, work whose preceding stages are complete goes ahead of that project's new root work. ([#1824](https://github.com/1kuna/mycelium/issues/1824))
+- 2026-11-24, maintainer direction, relayed verbatim by the paying production consumer's orchestrator and received by the Mycelium orchestrator: “mycelium should keep trying to maximize speed and concurrency. we have tons of machines this stuff can run on.” [#2034](https://github.com/1kuna/mycelium/issues/2034)
 - Production approval names what the work needs or is compatible with (for example Mac, CUDA, Arm, x86), never a specific machine. MY-19's output check stays and attaches to that kind of machine. (MY-51)
 
 <details><summary>Sources</summary>

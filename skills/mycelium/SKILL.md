@@ -170,11 +170,20 @@ durability is required. Status comes from the running worker.
 ## Pause, resume and cancel
 
 Pause your own queued job with `myce pause JOB_ID --reason TEXT` and resume it
-with `myce resume JOB_ID`. Add `--until RFC3339` for automatic resume. For a
-running job, use `myce pause JOB_ID --yield --project NAME --reason TEXT`.
+with `myce resume JOB_ID`. Add `--until RFC3339` for automatic resume. A generated
+start window is suspended during the pause, including for children paused by
+their parent. The full window starts again on resume or when any outstanding
+dependency becomes ready. The job keeps its ID and submission key. A caller's
+absolute `start_by` still applies during the pause. For a running job, use
+`myce pause JOB_ID --yield --project NAME --reason TEXT`.
 Wait for the attempt's exact release and `paused` state before resuming.
 Non-resumable yield requires `--confirm-restart`. See
 [pausing](references/waiting.md#reservations-and-pausing) for API fencing.
+
+Before relying on a frozen start window for a batch pause, check that the live
+queue's `queue_capabilities` list contains `paused_start_window_frozen`. Read it
+from `myce status --json` or `GET /api/status`. Treat an absent field or entry as
+unsupported.
 
 `myce cancel --wait JOB_ID` waits for exclusion and release. A timeout before
 acknowledgement leaves the outcome uncertain. A pending release at the deadline

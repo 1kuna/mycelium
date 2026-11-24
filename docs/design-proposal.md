@@ -309,6 +309,11 @@ the deadline minus original submission time. Job GET exposes the declaration in
 (nanoseconds), including before startup. Experiments omit the fields and have no
 start deadline. Loss recovery retains that original effective length.
 
+A queued pause or a parent-owned pause suspends the generated start deadline.
+The full relative window starts at resume, or at dependency readiness if the
+job is still blocked on its producer. Explicit absolute `start_by` remains in
+force during a pause. The job retains its ID and submission key.
+
 A typed `device_fault_last_healthy` hold pauses the remaining relative startup
 or recovery budget. Recovery and subsequent capacity waits retain that saved
 amount, including across restart; caller-owned absolute

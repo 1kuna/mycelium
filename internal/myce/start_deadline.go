@@ -33,6 +33,9 @@ func productionStartWindow(s Spec) time.Duration {
 // Keep the durable original length separate from the advancing recovery cutoff.
 // An absolute caller deadline always wins over a relative declaration.
 func initializeStartDeadline(j *Job, since time.Time) {
+	if relativeStartPaused(j) {
+		return
+	}
 	if j.Spec.ExtensionCheck != nil && j.Spec.ExtensionCheck.Timeout != "" {
 		// Reuse the startup fence without promoting qualification to production.
 		// One hour bounds unavailable-route/preparation waits at the existing
@@ -66,7 +69,14 @@ func absoluteStartBy(j *Job) bool {
 	return j.Spec.StartBy != nil && (j.StartByExplicit == nil || *j.StartByExplicit)
 }
 
+func relativeStartPaused(j *Job) bool {
+	return j.State == "paused" && !absoluteStartBy(j)
+}
+
 func (q *Queue) startupPending(j *Job) bool {
+	if relativeStartPaused(j) {
+		return false
+	}
 	if j.Spec.FanOut != nil && j.FanOut != nil {
 		// A logical parent holds no launch slot. Its relative window belongs
 		// to each physical child from assignment, including the first wave.
@@ -135,7 +145,7 @@ func (q *Queue) startWaitingReason(j *Job, scans ...*placementScan) string {
 func (q *Queue) maintainStartDeadlines() {
 	now := q.clock.Now()
 	for _, j := range q.liveJobs() {
-		if j.Spec.Priority == "production" && !terminal(j.State) && (j.Spec.StartBy != nil || dependencyReady(j)) {
+		if j.Spec.Priority == "production" && !terminal(j.State) && !relativeStartPaused(j) && (j.Spec.StartBy != nil || dependencyReady(j)) {
 			if j.Spec.StartBy == nil || j.StartWindow == 0 {
 				q.touchJob(j.ID)
 				initializeStartDeadline(j, j.Queued)

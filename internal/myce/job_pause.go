@@ -107,6 +107,9 @@ func (q *Queue) pauseJob(j *Job, pause JobPause) {
 	q.closeAdmissionWait(j, "paused")
 	j.State, j.Pause, j.Reason = "paused", &pause, pause.Reason
 	j.PauseRevision++
+	if relativeStartPaused(j) {
+		j.Spec.StartBy = nil
+	}
 	// Offers are revocable authority, not work. Replan from queued demand on the
 	// next check-in, including cold extensions whose offers have no Demand ID.
 	for id, p := range q.s.PreparationPlans {
@@ -119,6 +122,20 @@ func (q *Queue) resumeJob(j *Job) {
 	q.touchJob(j.ID)
 	j.State, j.Pause, j.Reason = "queued", nil, ""
 	j.PauseRevision++
+	if !absoluteStartBy(j) {
+		// Clear any pre-pause cutoff or saved capacity budget. Dependency
+		// binding starts the new window if the producer is still pending.
+		if j.StartByExplicit == nil {
+			explicit := false
+			j.StartByExplicit = &explicit
+		}
+		j.Spec.StartBy = nil
+		j.StartCapacityBudget = nil
+		j.DeviceFaultStartWait = nil
+		if dependencyReady(j) {
+			initializeStartDeadline(j, q.clock.Now())
+		}
+	}
 }
 func (q *Queue) maintainJobPause(parent *Job) {
 	if terminal(parent.State) && parent.YieldPause != nil {

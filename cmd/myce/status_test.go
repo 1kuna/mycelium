@@ -1,14 +1,66 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
-	"mycelium/internal/myce"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"mycelium/internal/myce"
 )
+
+func TestStatusJSONQueueCapabilities(t *testing.T) {
+	root := t.TempDir()
+	q, err := myce.Open(filepath.Join(root, "queue.db"), root, myce.RealClock{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { q.Close() })
+	current := httptest.NewServer(myce.API{Queue: q, Token: "test-only"}.Handler())
+	defer current.Close()
+	older := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("sections") != "" {
+			fmt.Fprint(w, `{"machines":[],"summary":{}}`)
+			return
+		}
+		fmt.Fprint(w, `{"hyphas":[]}`)
+	}))
+	defer older.Close()
+	for _, tc := range []struct {
+		name, queue string
+		flags       []string
+		advertises  bool
+	}{
+		{name: "compact", queue: current.URL, advertises: true},
+		{name: "sections", queue: current.URL, flags: []string{"--sections", "machines"}, advertises: true},
+		{name: "idle", queue: current.URL, flags: []string{"--sections", "idle"}, advertises: true},
+		{name: "full", queue: current.URL, flags: []string{"--history"}, advertises: true},
+		{name: "legacy compact", queue: older.URL},
+		{name: "legacy snapshot projection", queue: older.URL, flags: []string{"--sections", "machines"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{"status", "--json", "--queue", tc.queue, "--token", "test-only"}, tc.flags...)
+			output, _, err := captureUsageOutput(t, args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var status struct {
+				QueueCapabilities []string `json:"queue_capabilities"`
+			}
+			if err := json.Unmarshal([]byte(output), &status); err != nil {
+				t.Fatal(err)
+			}
+			if slices.Contains(status.QueueCapabilities, "paused_start_window_frozen") != tc.advertises {
+				t.Fatalf("queue_capabilities = %v, want paused_start_window_frozen present = %t", status.QueueCapabilities, tc.advertises)
+			}
+		})
+	}
+}
 
 func TestStatusFullIDsAndOneBasedAttempts(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
