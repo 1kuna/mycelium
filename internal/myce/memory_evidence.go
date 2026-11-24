@@ -161,7 +161,7 @@ func loadMemoryEvidence(db *sql.DB, s state) (*memoryEvidence, error) {
 	if err := evidence.persist(tx); err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(`INSERT INTO memory_evidence(kind,key,data) VALUES ('projection','v1','true'), ('projection','v2','true')`); err != nil {
+	if _, err := tx.Exec(`INSERT INTO memory_evidence(kind,key,data) VALUES ('projection','v1','true'), ('projection','v2','true'), ('projection','v3','true')`); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {

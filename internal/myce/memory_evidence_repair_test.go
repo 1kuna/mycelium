@@ -20,20 +20,32 @@ func TestMemoryEvidenceRepairRetainsNativeLimits(t *testing.T) {
 		charge      float64
 		knownWorker bool
 		want        float64
+		envelope    *JobMemoryEnvelope
 	}{
-		{"same peak OOM", prior, true, "", 0, true, prior},
-		{"smaller OOM", smaller, true, "", 0, true, smaller},
-		{"pressure stop", smaller, false, memoryPressureCause, 4, true, smaller},
-		{"bystander stop", smaller, false, memoryPressureCause, 6, true, 0},
-		{"unresolved OOM", smaller, true, "", 0, false, prior},
+		{"same peak OOM", prior, true, "", 0, true, prior, nil},
+		{"smaller OOM", smaller, true, "", 0, true, smaller, nil},
+		{"pressure stop", smaller, false, memoryPressureCause, 4, true, smaller, nil},
+		{"bystander stop", smaller, false, memoryPressureCause, 6, true, 0, nil},
+		{"unresolved OOM", smaller, true, "", 0, false, prior, nil},
+		{"pooled max event", smaller, false, "", 0, true, smaller, &JobMemoryEnvelope{Basis: pooledMemoryCapability}},
+		{"legacy explicit max event", smaller, false, "", 0, true, smaller, &JobMemoryEnvelope{
+			Basis: "learned", Enforcement: cgroupMemoryEnforcement, LimitHostGB: smaller}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := cpuSpec(1, 0)
+			peak := &AttemptMemoryPeak{HostGB: &tc.peak}
+			outcomeState := "succeeded"
+			if tc.oom {
+				outcomeState = "failed"
+			}
+			if tc.envelope != nil {
+				peak.Events = &MemoryEventCounts{Max: 1}
+			}
 			j := &Job{ID: "job", Spec: spec, Attempt: 2, Copies: []Copy{{Attempt: 1, Machine: m.ID, Session: m.Session,
 				StopCause: tc.stop, Memory: &MemoryPools{RAM: memoryPoolEstimate{ChargeGB: tc.charge}}}},
 				MemoryAttempts: []AttemptMemoryFacts{{Attempt: 1, Machine: m.ID, Session: m.Session,
-					MemoryPeak: &AttemptMemoryPeak{HostGB: &tc.peak}}},
-				AttemptHistory: []AttemptOutcome{{Attempt: 1, Machine: m.ID, Session: m.Session, OutOfMemory: tc.oom}}}
+					MemoryPeak: peak, MemoryEnvelope: tc.envelope}},
+				AttemptHistory: []AttemptOutcome{{Attempt: 1, Machine: m.ID, Session: m.Session, State: outcomeState, OutOfMemory: tc.oom}}}
 			key := pooledEvidenceKey(j, &m)
 			p := WorkObservation{Key: ObservationKey{Work: profileMemoryIdentity(j), Target: machineTarget(&m), Concurrency: 1, BatchSize: 1},
 				MemoryFamily: key.Family, MemoryConfiguration: memoryConfiguration(spec.Needs, spec.Args, spec.Program),
@@ -102,13 +114,27 @@ func TestMemoryEvidenceRepairSeparationOnQueueOpen(t *testing.T) {
 	limit.MemoryFamily, diagnostic.MemoryFamily, ambiguous.MemoryFamily = "real-oom", "host-only", "counter-unavailable"
 	oomPeak, unknownPeak := 6.0, 8.0
 	limit.MemoryPeak = &AttemptMemoryPeak{HostGB: &oomPeak, Events: &MemoryEventCounts{OOM: 1}}
-	diagnostic.MemoryEscalation, ambiguous.MemoryEscalation = nil, nil
+	limit.MemoryEscalation, diagnostic.MemoryEscalation, ambiguous.MemoryEscalation = nil, nil, nil
 	ambiguous.MemoryPeak = &AttemptMemoryPeak{HostGB: &unknownPeak, Constrained: true}
 	legacy := map[string]WorkObservation{"separation": point, "real-oom": limit, "host-only": diagnostic, "counter-unavailable": ambiguous}
+	// Older runs hit an automatically generated ceiling on total cgroup
+	// usage, including file cache. Some still completed with projected RAM
+	// and device peaks greater than the imported floors.
+	machineCheck(t, q, m)
+	oldRAM, oldCard, ceiling, zero := 9.360404968261719, 10.122013092041016, 10.704219818115234, 0.0
+	old := &Job{ID: "legacy-success", Spec: spec, State: "succeeded", Attempt: 1, Machine: m.ID, Session: m.Session,
+		AllocatedDevices: []string{"0"},
+		MemoryAttempts: []AttemptMemoryFacts{{Attempt: 1, Machine: m.ID, Session: m.Session,
+			MemoryEnvelope: &JobMemoryEnvelope{Basis: "learned", Enforcement: cgroupMemoryEnforcement, HostGB: ceiling},
+			MemoryPeak: &AttemptMemoryPeak{CombinedHostGB: &oldRAM, DeviceGB: &oldCard, CgroupGB: &ceiling,
+				SwapGB: &zero, Events: &MemoryEventCounts{Max: 1320}, Constrained: true}}},
+		AttemptHistory: []AttemptOutcome{{Attempt: 1, Machine: m.ID, Session: m.Session, State: "succeeded"}},
+	}
 	if err := q.update(func() error {
 		for id, p := range legacy {
 			q.putWorkObservation(id, p)
 		}
+		q.putJob(old.ID, old)
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -157,7 +183,8 @@ func TestMemoryEvidenceRepairSeparationOnQueueOpen(t *testing.T) {
 	if err := e.persist(tx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(`DELETE FROM memory_evidence WHERE kind='projection' AND key='v2'`); err != nil {
+	// v2 already ran and retained the imported floors as verified.
+	if _, err := tx.Exec(`DELETE FROM memory_evidence WHERE kind='projection' AND key='v3'`); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -176,7 +203,9 @@ func TestMemoryEvidenceRepairSeparationOnQueueOpen(t *testing.T) {
 			!reflect.DeepEqual(got.ratios, e.ratios) || !reflect.DeepEqual(got.first, e.first) || !slices.Equal(got.feedback, e.feedback) {
 			t.Fatal("repair rewrote clean history or calibration")
 		}
-		for family, lower := range map[string]float64{"real-oom": 6, "host-only": 0, "counter-unavailable": 8} {
+		// The v2 upgrade only revisits floors supported by the old automatic
+		// ceilings. Unrelated floors may have lost their corroborating history.
+		for family, lower := range map[string]float64{"real-oom": 6, "host-only": 7.754799, "counter-unavailable": 8} {
 			k := key
 			k.Family = family
 			if got.exact[k].Lower != lower {

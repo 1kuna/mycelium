@@ -3,7 +3,6 @@ package myce
 import (
 	"cmp"
 	"database/sql"
-	"errors"
 	"log"
 	"maps"
 	"slices"
@@ -11,6 +10,10 @@ import (
 
 type importedMemoryBounds struct {
 	invalid, verified, ambiguous float64
+}
+
+type retainedMemoryBounds struct {
+	verified, automatic float64
 }
 
 // The v1 importer discarded provenance when it took the exact maximum. Use
@@ -63,8 +66,8 @@ func legacyHostOnlyDiagnostic(p *AttemptMemoryPeak) bool {
 // Retained outcomes and measurements are joined by attempt, machine and
 // session. A retried attempt may no longer have a reconstructable exact key.
 // In that case protect possible matching floors in its work family.
-func retainedMemoryLimits(s state, candidates map[memoryEvidenceKey]importedMemoryBounds) (map[memoryEvidenceKey]float64, map[string]bool) {
-	limits, uncertain := make(map[memoryEvidenceKey]float64), make(map[string]bool)
+func retainedMemoryLimits(s state, candidates map[memoryEvidenceKey]importedMemoryBounds) (map[memoryEvidenceKey]retainedMemoryBounds, map[string]bool) {
+	limits, uncertain := make(map[memoryEvidenceKey]retainedMemoryBounds), make(map[string]bool)
 	if len(candidates) == 0 {
 		return limits, uncertain
 	}
@@ -98,11 +101,13 @@ func retainedMemoryLimits(s state, candidates map[memoryEvidenceKey]importedMemo
 			assignment := retainedMemoryAssignment(j, facts)
 			limited := legacyWorkloadLimited(peak)
 			pressure := assignment.StopCause == memoryPressureCause
+			automatic := false
 			for _, outcome := range j.AttemptHistory {
 				if outcome.Attempt == facts.Attempt && outcome.Machine == facts.Machine && outcome.Session == facts.Session {
 					limited = limited || outcome.OutOfMemory
 					pressure = pressure || outcome.Reason == memoryPressureCause ||
 						outcome.ExecutionCause != nil && outcome.ExecutionCause.Class == memoryPressureCause
+					automatic = outcome.State == "succeeded" && !outcome.OutOfMemory && !pressure && legacyAutomaticCeilingOnly(j, facts)
 					break
 				}
 			}
@@ -111,6 +116,9 @@ func retainedMemoryLimits(s state, candidates map[memoryEvidenceKey]importedMemo
 			}
 			key, known := retainedMemoryEvidenceKey(j, s.Machines[facts.Machine], assignment)
 			if !known || !possible[key.Family] {
+				if automatic {
+					continue
+				}
 				for family := range possible {
 					uncertain[family] = true
 				}
@@ -129,11 +137,32 @@ func retainedMemoryLimits(s state, candidates map[memoryEvidenceKey]importedMemo
 						continue // The pooled learner ignored this bystander stop.
 					}
 				}
-				limits[point.Key] = max(limits[point.Key], point.Peak)
+				bounds := limits[point.Key]
+				if automatic {
+					bounds.automatic = max(bounds.automatic, point.Peak)
+				} else {
+					bounds.verified = max(bounds.verified, point.Peak)
+				}
+				limits[point.Key] = bounds
 			}
 		}
 	}
 	return limits, uncertain
+}
+
+// Before pooled admission, an automatic ceiling could reclaim file cache
+// and increment memory.events:max on a successful run. That does not
+// corroborate a workload limit in the footprint-based estimator.
+func legacyAutomaticCeilingOnly(j *Job, facts AttemptMemoryFacts) bool {
+	envelope, peak := facts.MemoryEnvelope, facts.MemoryPeak
+	if j.Spec.MemoryLimitGB != nil || envelope == nil || envelope.LimitHostGB != 0 ||
+		envelope.Enforcement != cgroupMemoryEnforcement ||
+		(envelope.Basis != "learned" && envelope.Basis != "exploratory") {
+		return false
+	}
+	events := peak.Events
+	return events != nil && events.Max > 0 && *events == (MemoryEventCounts{Max: events.Max}) &&
+		memoryValue(peak.SwapGB) == 0 && (peak.Pressure == nil || peak.Pressure.CgroupSwapOutPages == 0)
 }
 
 func retainedMemoryAssignment(j *Job, facts AttemptMemoryFacts) Copy {
@@ -178,9 +207,11 @@ func retainedMemoryEvidenceKey(j *Job, m *Machine, assignment Copy) (memoryEvide
 }
 
 func repairMemoryEvidence(db *sql.DB, e *memoryEvidence, s state) (*memoryEvidence, error) {
-	var marker int
-	err := db.QueryRow(`SELECT 1 FROM memory_evidence WHERE kind='projection' AND key='v2'`).Scan(&marker)
-	if !errors.Is(err, sql.ErrNoRows) {
+	var repairedV2, repairedV3 bool
+	err := db.QueryRow(`SELECT
+		EXISTS(SELECT 1 FROM memory_evidence WHERE kind='projection' AND key='v2'),
+		EXISTS(SELECT 1 FROM memory_evidence WHERE kind='projection' AND key='v3')`).Scan(&repairedV2, &repairedV3)
+	if err != nil || repairedV3 {
 		return e, err
 	}
 	bounds := importedMemoryFloors(s.WorkObservations)
@@ -199,7 +230,13 @@ func repairMemoryEvidence(db *sql.DB, e *memoryEvidence, s state) (*memoryEviden
 		}
 		report.examined++
 		b, candidate := bounds[key], candidates[key].invalid > 0
-		verified := max(b.verified, limits[key])
+		limit := limits[key]
+		// On an already repaired store, require evidence of the v2 mistake
+		// at this floor. Previously verified history may since have expired.
+		if repairedV2 && limit.automatic < series.Lower {
+			continue
+		}
+		verified := max(b.verified, limit.verified)
 		if verified >= series.Lower {
 			continue
 		}
@@ -224,7 +261,7 @@ func repairMemoryEvidence(db *sql.DB, e *memoryEvidence, s state) (*memoryEviden
 	if err := e.persist(tx); err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(`INSERT INTO memory_evidence(kind,key,data) VALUES ('projection','v2','true')`); err != nil {
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO memory_evidence(kind,key,data) VALUES ('projection','v2','true'), ('projection','v3','true')`); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
