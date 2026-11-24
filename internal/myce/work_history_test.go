@@ -237,40 +237,23 @@ func TestWorkObservationResolvedMemoryIdentity(t *testing.T) {
 	}
 }
 
-func TestWorkObservationLargerExplicitMemoryAfterOOM(t *testing.T) {
+func TestWorkObservationRetainsAcceptedTimingAfterOOM(t *testing.T) {
 	q, clock, m, s := observationFixture(t)
-	s.SizeHint.HostMemoryGB = .2
-	small := startObservation(t, q, m, s)
-	if small.Spec.Needs.HostMemoryGB != .2 {
-		t.Fatalf("wrong small reservation: %+v", small.Spec.Needs)
-	}
+	accepted := startObservation(t, q, m, s)
+	clock.Advance(2 * time.Second)
+	finish(t, q, &accepted, true)
+	key := q.s.Jobs[accepted.ID].Timing.Key
+	failed := startObservation(t, q, m, s)
 	clock.Advance(time.Second)
-	r := result(&small, false)
+	r := result(&failed, false)
 	r.OutOfMemory = true
+	peak := .2
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak}
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
-	forbidden := false
-	for _, point := range q.s.WorkObservations {
-		forbidden = forbidden || point.Forbidden
-	}
-	if !forbidden {
-		t.Fatal("OOM did not forbid undersized timing configuration")
-	}
-	if err := q.Cancel(small.ID); err != nil {
-		t.Fatal(err)
-	}
-	s.SizeHint.HostMemoryGB = 1
-	larger := startObservation(t, q, m, s)
-	if larger.Spec.Needs.HostMemoryGB != 1 {
-		t.Fatalf("wrong larger reservation: %+v", larger.Spec.Needs)
-	}
-	clock.Advance(2 * time.Second)
-	finish(t, q, &larger, true)
-	third := startObservation(t, q, m, s)
-	timing := q.s.Jobs[third.ID].Timing
-	if timing.LastAcceptedSeconds == nil || *timing.LastAcceptedSeconds != 2 {
-		t.Fatalf("larger successful reservation lost its last duration after OOM: %+v", timing)
+	if elapsed, ok := q.lastAcceptedSeconds(key); !ok || elapsed != 2 {
+		t.Fatalf("OOM invalidated an earlier accepted duration: %g (valid=%t)", elapsed, ok)
 	}
 }
 

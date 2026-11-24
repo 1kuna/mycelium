@@ -414,8 +414,8 @@ func TestPreDeployModelCopyFaults(t *testing.T) {
 	syncModel(urgent, false)
 	waitChannel("production copy gate", entered)
 	assertPartial(urgent)
-	s := spec("production")
-	s.Needs.MemoryGB = 1
+	s := cpuSpec(1, 1)
+	s.Priority = "production"
 	s.AllowedMachines = []string{w.Machine.ID}
 	s.Run.Command = []string{"sh", "-c", `echo START; while [ ! -f "$FINISH" ]; do sleep 0.01; done; echo FINISHED`}
 	s.Run.Env = map[string]string{"FINISH": finish}

@@ -728,15 +728,15 @@ func TestCombinedReclamationTierAndPinEligibility(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			s := spec("experiment")
+			s := bigSpec("experiment", 8)
 			s.Resumable = tc.resumable
-			submit(t, q, s)
+			submitMeasuredCardJob(t, q, m, s)
 			r := check(t, q, m, nil).Job
 			if r == nil {
 				t.Fatal("no experiment")
 			}
-			p := spec(tc.priority)
-			p.Needs.MemoryGB = 16
+			p := bigSpec(tc.priority, 16)
+			p.Name = "combined-release-demand"
 			submit(t, q, p)
 			slot := q.s.ModelSlots[slotKey(m.ID, "test")]
 			if (slot.State == "draining") != tc.stop || (q.s.Jobs[r.ID].State == "stopping") != tc.stop {
@@ -773,9 +773,7 @@ func TestBatchReclamationStopsLeastWork(t *testing.T) {
 					}
 				}
 			}
-			p := spec("production")
-			p.Needs.MemoryGB = need
-			submit(t, q, p)
+			submitMeasuredCardJob(t, q, m, bigSpec("production", need))
 			want := "idle"
 			if need == 16 {
 				want = "large"

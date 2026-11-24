@@ -536,6 +536,8 @@ func TestWorkerNativeHandshakeCancellation(t *testing.T) {
 	entered := make(chan struct{})
 	calls := 0
 	w := Worker{Machine: m, Clock: clock, StateDir: newTestStateRoot(t), Client: Client{URL: "http://queue.invalid", Token: "test"}}
+	w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
+	w.MemorySource = func(context.Context) (float64, error) { return 8, nil }
 	w.Client.HTTP = &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path == "/api/workers/launch" {
 			calls++

@@ -519,7 +519,9 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 		defer cancel()
 		finished, err := c.Wait(ctx, j.ID)
 		if err != nil {
-			t.Fatalf("%s: %v", kind, err)
+			var current Job
+			_ = call("GET", "/api/jobs/"+j.ID, nil, &current)
+			t.Fatalf("%s: %v (attempt=%d hold=%+v cause=%v)", kind, err, current.Attempt, current.Hold, current.ExecutionCause)
 		}
 		if finished.State != "succeeded" {
 			var logs []Log

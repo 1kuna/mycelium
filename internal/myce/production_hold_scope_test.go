@@ -36,19 +36,19 @@ func TestProductionPriorityClaimsOnlyTheGPU(t *testing.T) {
 	if x != nil {
 		t.Fatal("assigned work before submission", x.ID)
 	}
-	submit(t, q, spec("experiment"))
+	submit(t, q, bigSpec("experiment", 8))
 	x = assignedJob(machineCheck(t, q, m))
 	if x == nil || !slices.Equal(x.AllocatedDevices, []string{"0"}) {
 		t.Fatal("GPU experiment did not start on the GPU", x)
 	}
-	prod := submit(t, q, spec("production"))
+	prod := submit(t, q, bigSpec("production", 8))
 	if r := machineCheck(t, q, m, x); !stopped(r, x.ID) || assignedJob(r) != nil {
 		t.Fatalf("production must preempt the GPU experiment and wait for its release: %+v", r.Attempts)
 	}
 	// Production is still waiting for the GPU's exact release.
 	c.Advance(time.Minute)
 	cpu := submit(t, q, cpuSpec(1, 1))
-	gpu := submit(t, q, spec("experiment"))
+	gpu := submit(t, q, bigSpec("experiment", 8))
 	a := assignedJob(machineCheck(t, q, m, x))
 	if a == nil || a.ID != cpu.ID || len(a.AllocatedDevices) != 0 {
 		t.Fatalf("CPU-only work not admitted beside waiting production: %+v (production: %s)", a, job(t, q, prod.ID).Reason)
@@ -76,12 +76,12 @@ func TestProductionPriorityClaimsOnlyTheGPU(t *testing.T) {
 func TestProductionHoldScopeOnMachineWorker(t *testing.T) {
 	t.Parallel()
 	q, c, m := holdMachine(t)
-	first := submit(t, q, spec("production"))
+	first := submit(t, q, bigSpec("production", 8))
 	p1 := assignedJob(machineCheck(t, q, m))
 	if p1 == nil || p1.ID != first.ID || !slices.Equal(p1.AllocatedDevices, []string{"0"}) {
 		t.Fatal("production did not start on card 0", p1)
 	}
-	submit(t, q, spec("experiment"))
+	submit(t, q, bigSpec("experiment", 8))
 	submit(t, q, cpuSpec(1, 1))
 	a := assignedJob(machineCheck(t, q, m, p1))
 	if a == nil {
@@ -99,7 +99,7 @@ func TestProductionHoldScopeOnMachineWorker(t *testing.T) {
 		t.Fatal("experiments not on the sibling card and the CPU", x.AllocatedDevices, cpu.AllocatedDevices)
 	}
 
-	second := submit(t, q, spec("production"))
+	second := submit(t, q, bigSpec("production", 8))
 	r := machineCheck(t, q, m, p1, x, cpu)
 	if !stopped(r, x.ID) || stopped(r, cpu.ID) || stopped(r, p1.ID) || assignedJob(r) != nil {
 		t.Fatalf("production must reclaim exactly card 1: %+v", r.Attempts)
@@ -198,12 +198,12 @@ func TestWholeMachineHoldRefusedOrConverted(t *testing.T) {
 	}
 
 	m := m3Machine()
-	submit(t, q, spec("production"))
+	submit(t, q, bigSpec("production", 8))
 	p := assignedJob(machineCheck(t, q, m))
 	if p == nil {
 		t.Fatal("production did not start after restart")
 	}
-	submit(t, q, spec("experiment"))
+	submit(t, q, bigSpec("experiment", 8))
 	x := assignedJob(machineCheck(t, q, m, p))
 	if x == nil || slices.Equal(p.AllocatedDevices, x.AllocatedDevices) {
 		t.Fatal("device scope not applied after restart", x)

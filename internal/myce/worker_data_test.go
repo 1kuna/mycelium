@@ -44,6 +44,8 @@ func ephemeralFixture(t *testing.T) (*Queue, *fakeClock, Worker, *workerStore) {
 	api := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	t.Cleanup(api.Close)
 	w := Worker{StateDir: newTestStateRoot(t), Machine: m, Clock: c, Client: Client{URL: api.URL, Token: "test"}, ephemeralProbe: func() error { return nil }}
+	w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
+	w.MemorySource = func(context.Context) (float64, error) { return 8, nil }
 	root := &workerStore{dir: w.StateDir, state: workerState{Session: m.Session}}
 	if err := root.save(); err != nil {
 		t.Fatal(err)

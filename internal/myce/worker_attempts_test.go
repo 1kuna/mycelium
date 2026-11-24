@@ -511,7 +511,9 @@ func TestAttemptReleasesWhenRAMDropsBeforeEntrypoint(t *testing.T) {
 	release()
 	await(t, func() bool { return h.completed("ram-drop") })
 	r := h.result("ram-drop")
-	if r.Success || r.ReleasePending || r.ExecutionCause == nil || r.ExecutionCause.Operation != "launch" || r.ExecutionCause.Class != "resource_limit" || !strings.Contains(r.Error, "host RAM need 22 GiB, available 21.9 GiB") {
+	cause := r.ExecutionCause
+	if r.Success || r.ReleasePending || cause == nil || cause.Operation != "launch" || cause.Class != "resource_limit" ||
+		cause.Admission == nil || cause.Admission.Subcheck != memoryWaitReason || cause.Admission.Required != 22 || cause.Admission.Available == nil || *cause.Admission.Available != 21.9 {
 		t.Fatalf("RAM refusal must release with its admission diagnostic: %+v", r)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {

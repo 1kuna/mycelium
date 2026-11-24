@@ -243,7 +243,9 @@ func TestUnifiedOSRecheckedBeforeCommandAndModelLoad(t *testing.T) {
 	q, clock := fixture(t)
 	j := submit(t, q, spec("production"))
 	j.Attempt = 1
-	w := Worker{Clock: clock, StateDir: newTestStateRoot(t), Machine: machine("unified", "fake"), MemorySource: source, MemoryMeasured: true}
+	m := machine("unified", "fake")
+	m.UnifiedMemory = true
+	w := Worker{Clock: clock, StateDir: newTestStateRoot(t), Machine: m, HostMemorySource: source, MemoryMeasured: true}
 	store, err := w.openStore()
 	if err != nil {
 		t.Fatal(err)

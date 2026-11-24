@@ -213,6 +213,7 @@ func nativePortHandoff(t *testing.T, collisions int) Result {
 		}
 	}()
 	w := Worker{Clock: clock, StateDir: stateDir, Machine: m, Client: nativeFixtureClient(handler), HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
+	w.MemorySource = func(context.Context) (float64, error) { return 8, nil }
 	// Listener discovery is a host probe (lsof on Darwin). Model ownership from
 	// the listeners this fixture stole; direct ownership tests cover the probe.
 	w.nativeListenerProbe = func(port string, _ int) error {

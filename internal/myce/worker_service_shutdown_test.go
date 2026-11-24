@@ -295,7 +295,7 @@ func TestWorkerServiceShutdownRequeuesNative(t *testing.T) {
 			defer server.Close()
 			w := Worker{EnvironmentLimit: 1 << 20, StateDir: t.TempDir(), Clock: clock, Interval: time.Millisecond,
 				Machine: machine("service", "fake"), Client: Client{URL: server.URL, Token: "test"},
-				ServiceConfig: &ServiceConfig{Role: "worker"}, memoryCeilings: fakeCeilings(t)}
+				ServiceConfig: &ServiceConfig{Role: "worker"}, memoryCeilings: fakeCeilings(t), devEnvironmentSizing: true}
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
 			go func() { done <- w.Run(ctx) }()
