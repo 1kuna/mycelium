@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -152,6 +153,83 @@ func TestJobPauseExpiryStaleResumeAndCancel(t *testing.T) {
 	_, err = q.ResumeJob(j.ID, second.PauseRevision)
 	pauseError(t, err, "job_pause_revision_conflict")
 }
+
+func TestJobPauseRestartsProductionStartWindow(t *testing.T) {
+	const window = 600 * time.Second
+	for _, dependent := range []bool{false, true} {
+		name := "queued"
+		if dependent {
+			name = "producer completes during pause"
+		}
+		t.Run(name, func(t *testing.T) {
+			q, clock, m, s := fanOutFixture(t, 1)
+			s.FanOut = nil
+			s.Outputs = map[string]string{"out": "results"}
+			var producer *Job
+			if dependent {
+				upstream := submit(t, q, s)
+				producer = check(t, q, m, nil).Job
+				if producer == nil || producer.ID != upstream.ID {
+					t.Fatal("producer was not assigned", producer)
+				}
+				s = pieceConsumer(s, upstream.ID, "")
+			}
+			s.Priority, s.StartWindow, s.SubmissionKey = "production", "600s", "paused-production"
+			original := submit(t, q, s)
+			paused := pauseForTest(t, q, original.ID, nil)
+			clock.Advance(time.Minute)
+			if producer != nil {
+				finish(t, q, producer, true)
+			}
+			clock.Advance(29 * time.Minute)
+			if got := check(t, q, m, nil).Job; got != nil {
+				t.Fatal("assigned paused work", got.ID)
+			}
+			if held := job(t, q, original.ID); held.State != "paused" || !dependencyReady(held) || held.Spec.SubmissionKey != s.SubmissionKey || held.Spec.StartBy != nil {
+				t.Fatal("pause did not suspend the ready job's cutoff", held.State, held.Reason, held.Spec.StartBy)
+			}
+			resumed, err := q.ResumeJob(original.ID, paused.PauseRevision)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resumed.ID != original.ID || resumed.Spec.SubmissionKey != s.SubmissionKey || resumed.Spec.StartBy == nil || !resumed.Spec.StartBy.Equal(clock.Now().Add(window)) {
+				t.Fatal("resume lost identity or did not grant a fresh window", resumed)
+			}
+			if replay := submit(t, q, s); replay.ID != original.ID {
+				t.Fatal("submission key no longer resolves to the original job", replay.ID)
+			}
+			clock.Advance(window - time.Second)
+			run := check(t, q, m, nil).Job
+			if run == nil || run.ID != original.ID || run.Spec.SubmissionKey != s.SubmissionKey {
+				t.Fatal("resumed job was not assigned", run)
+			}
+			if err := q.Started(result(run, true)); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestJobPausePreservesAbsoluteStartDeadline(t *testing.T) {
+	q, clock := fixture(t)
+	s := spec("production")
+	deadline := clock.Now().Add(10 * time.Minute)
+	s.StartBy, s.SubmissionKey = &deadline, "absolute-start"
+	original := submit(t, q, s)
+	paused := pauseForTest(t, q, original.ID, nil)
+	if paused.Spec.StartBy == nil || !paused.Spec.StartBy.Equal(deadline) {
+		t.Fatal("pause changed the explicit deadline", paused.Spec.StartBy)
+	}
+	clock.Advance(10 * time.Minute)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if got := job(t, q, original.ID); got.State != "failed" || !strings.Contains(got.Reason, "production start deadline exceeded") || got.Spec.SubmissionKey != s.SubmissionKey {
+		t.Fatal("caller deadline did not expire the paused job", got.State, got.Reason)
+	}
+	_, err := q.ResumeJob(original.ID, paused.PauseRevision)
+	pauseError(t, err, "job_pause_revision_conflict")
+}
 func TestJobPauseColdPreparation(t *testing.T) {
 	e := compositionExtension(t, false)
 	q, w := prepareTestWorker(t, e)
@@ -182,6 +260,7 @@ func TestJobPauseColdPreparation(t *testing.T) {
 }
 func TestJobPauseFanOut(t *testing.T) {
 	q, clock, m, s := fanOutFixture(t, 3)
+	s.Priority, s.StartWindow, s.SubmissionKey = "production", "600s", "paused-fan-out"
 	parent := submit(t, q, s)
 	run := check(t, q, m, nil).Job
 	if run == nil {
@@ -205,7 +284,7 @@ func TestJobPauseFanOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	child := job(t, q, run.ID)
-	if child.State != "paused" || child.Pause.Parent != parent.ID {
+	if child.State != "paused" || child.Pause.Parent != parent.ID || child.Spec.StartBy != nil {
 		t.Fatal("requeued child escaped parent", child)
 	}
 	if err := q.Complete(r); !errors.Is(err, ErrStale) {
@@ -215,14 +294,23 @@ func TestJobPauseFanOut(t *testing.T) {
 		t.Fatal("late attempt escaped pause", reply)
 	}
 	q = reopenCancellationQueue(t, q, clock)
+	clock.Advance(30 * time.Minute)
 	if got := check(t, q, m, nil).Job; got != nil {
 		t.Fatal("paused parent dispatched child", got)
 	}
-	if _, err := q.ResumeJob(parent.ID, paused.PauseRevision); err != nil {
+	resumed, err := q.ResumeJob(parent.ID, paused.PauseRevision)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got := check(t, q, m, nil).Job; got == nil {
-		t.Fatal("resumed parent did not dispatch")
+	if resumed.ID != parent.ID || resumed.Spec.SubmissionKey != s.SubmissionKey {
+		t.Fatal("resume changed fan-out parent identity", resumed)
+	}
+	child = job(t, q, run.ID)
+	if child.State != "queued" || child.Spec.StartBy == nil || !child.Spec.StartBy.Equal(clock.Now().Add(600*time.Second)) {
+		t.Fatal("parent resume did not restart the child's window", child)
+	}
+	if got := check(t, q, m, nil).Job; got == nil || got.ID != run.ID || got.Attempt != run.Attempt+1 {
+		t.Fatal("resumed parent did not retry its child", got)
 	}
 }
 
