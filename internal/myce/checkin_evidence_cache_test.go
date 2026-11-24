@@ -142,9 +142,10 @@ func TestCheckinPlanningOutcomeEquivalence(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := fmt.Sprintf("%x", sha256.Sum256(data))
-			// The memory-admission update changed the wait text. All job
-			// fields other than Reason and all six picks matched the baseline.
-			want := map[bool]string{true: "a77a8cc52a630c2f00d1dfabbaf7c11d289cddf7dfa2b9358edf717d0cae2455", false: "1f3f31449c10635095740cb22b84d6a989ed61924d88218b05cb4931e26afb79"}[occupied]
+			// The unoccupied case includes the cold accelerator diagnostic
+			// with its positive RAM bootstrap floor. Keep every job and pick
+			// in the snapshot.
+			want := map[bool]string{true: "a77a8cc52a630c2f00d1dfabbaf7c11d289cddf7dfa2b9358edf717d0cae2455", false: "1da036d216cf72d0a910369c59db1ef4a1c26b25fb77a32652b76ccc5a9ebb3f"}[occupied]
 			t.Logf("occupied=%v jobs=%d picks=%d digest=%s", occupied, len(jobs), len(picks), got)
 			if got != want {
 				t.Logf("planning records: %s", data)

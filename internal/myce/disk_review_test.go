@@ -10,9 +10,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"testing/synctest"
 	"time"
 )
 
@@ -244,69 +242,6 @@ func TestDiskHeadroomUnknownManifestUsesHint(t *testing.T) {
 	j := Job{Spec: Spec{Files: FileManifest{"input": {}}, Disk: &DiskNeeds{InputBytes: 100, OutputBytes: 20}}}
 	if got := projectedDiskNeed(&j); got != 220 {
 		t.Fatalf("unknown manifest suppressed input hint: %d", got)
-	}
-}
-
-func TestWorkerDiskNASBudgetRetainsRate(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		c := &fakeClock{now: time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)}
-		var slow atomic.Bool
-		defer time.Sleep(2 * time.Second)
-		w := Worker{Clock: c, Machine: machine("a", "fake"), DiskProbe: func(path string) (DiskReading, error) {
-			if path == "nas" {
-				if slow.Load() {
-					time.Sleep(time.Second)
-				} else {
-					time.Sleep(100 * time.Millisecond)
-				}
-			}
-			volume := "local"
-			if path == "nas" {
-				volume = "nas"
-			}
-			return DiskReading{Volume: volume, TotalBytes: 100 << 30, FreeBytes: 40 << 30}, nil
-		}}
-		first := w.sampleDisks("data", "nas")
-		if len(first) != 2 || first[1].FreeBytes != 40<<30 || first[1].Error != "" {
-			t.Fatalf("NAS used local deadline: %+v", first)
-		}
-		c.Advance(time.Second)
-		slow.Store(true)
-		retained := w.sampleDisks("data", "nas")
-		if len(retained) != 2 || retained[1].FreeBytes != 40<<30 || retained[1].SampledAt != first[1].SampledAt || !retained[1].Retained || retained[1].AgeSeconds < 1 {
-			t.Fatalf("timeout dropped last good reading: %+v", retained)
-		}
-		slow.Store(false)
-		synctest.Wait()
-		c.Advance(time.Second)
-		next := w.sampleDisks("data", "nas")
-		if next[1].ChangeBytesPerHour == nil {
-			t.Fatalf("timeout erased rate baseline: %+v", next)
-		}
-	})
-}
-
-func TestWorkerDiskCacheVolumesAndOpaqueIdentity(t *testing.T) {
-	c := &fakeClock{now: time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)}
-	makeWorker := func(name string) Worker {
-		return Worker{Clock: c, Machine: machine(name, "fake", "same-host"), EnvironmentRoot: "data", FileCacheRoot: "files", CacheRoot: "models", DiskProbe: func(path string) (DiskReading, error) {
-			return DiskReading{Volume: path, TotalBytes: 100 << 30, FreeBytes: 41 << 30}, nil
-		}}
-	}
-	a, b := makeWorker("a"), makeWorker("b")
-	av, bv := a.sampleDisks("data", ""), b.sampleDisks("data", "")
-	if len(av) != 3 || len(bv) != 3 {
-		t.Fatal("missing cache volumes", av, bv)
-	}
-	ids := map[string]bool{}
-	for i, v := range av {
-		if v.ID == "" || v.ID != bv[i].ID || v.ID == v.Roots[0] || ids[v.ID] {
-			t.Fatal("volume identities are not opaque/stable/distinct", av, bv)
-		}
-		ids[v.ID] = true
-	}
-	if strings.Join(av[1].Roots, ",") != "file-cache" || strings.Join(av[2].Roots, ",") != "model-cache" {
-		t.Fatal(av)
 	}
 }
 

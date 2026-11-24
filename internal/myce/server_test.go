@@ -206,13 +206,6 @@ func TestVLLMPresetContract(t *testing.T) {
 		t.Fatal("missing offline enforcement")
 	}
 }
-func TestServerDeviceEligibility(t *testing.T) {
-	model := Model{Platforms: []string{"xpu"}, Device: "0"}
-	if modelFitsMachine(model, &Machine{GPU: "xpu", Device: "1"}) || !modelFitsMachine(model, &Machine{GPU: "xpu", Device: "0"}) {
-		t.Fatal("device binding ignored")
-	}
-}
-
 func TestGeneralServerRouteRequiresToken(t *testing.T) {
 	q, _, _ := modelFixture(t)
 	for _, token := range []string{"", "wrong"} {

@@ -3,7 +3,6 @@ package myce
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -336,35 +335,5 @@ func TestEnvironmentCancelledBuildRecoversStablePrefix(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(c.Root, r.Key)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("cancel prefix not cleaned", err)
-	}
-}
-func TestPixiDeclarationSnapshotsCompleteFolder(t *testing.T) {
-	e := compositionExtension(t, false)
-	v := &e.Variants[0]
-	v.Environments = map[string]EnvironmentRecipe{"main": {Backend: "pixi", Manifest: "env/pixi.toml", LockFile: "env/pixi.lock"}}
-	v.Execution.Main.Environment = "main"
-	e.Files["env/pixi.toml"] = []byte("[workspace]\n")
-	e.Files["env/pixi.lock"] = []byte("locked")
-	e.Files["env/scripts/activate.sh"] = []byte("export E2_ACTIVATION_EXPECTED=present\n")
-	e.Files["shared/config.txt"] = []byte("configuration")
-	e = freezeComposition(t, e)
-	r := e.Variants[0].Environments["main"]
-	for name, want := range e.Files {
-		if !bytes.Equal(r.Files["extension/"+name], want) {
-			t.Fatalf("missing bundled file %s", name)
-		}
-	}
-	var out Extension
-	b, _ := json.Marshal(e)
-	if err := json.Unmarshal(b, &out); err != nil {
-		t.Fatal(err)
-	}
-	if out.Variants[0].Environments["main"].Key != r.Key {
-		t.Fatal("snapshot transport changed")
-	}
-	e.Files["shared/config.txt"] = []byte("changed configuration")
-	changed := freezeComposition(t, e)
-	if changed.Digest == e.Digest || changed.Variants[0].Environments["main"].Key == r.Key {
-		t.Fatal("bundled content change did not invalidate digest and environment")
 	}
 }

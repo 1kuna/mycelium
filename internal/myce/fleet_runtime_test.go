@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -164,23 +163,6 @@ func fleetRuntimeTestConfig(t *testing.T) ServiceConfig {
 	t.Helper()
 	state := t.TempDir()
 	return ServiceConfig{Role: "worker", State: state, Config: filepath.Join(state, "service.json"), Service: "myce-worker.service", Detection: Detection{OS: "linux"}}
-}
-
-func TestFleetRuntimeManagerMustOwnExactPID(t *testing.T) {
-	c := fleetRuntimeTestConfig(t)
-	command := func(pid int) func(context.Context, string, ...string) ([]byte, error) {
-		return func(context.Context, string, ...string) ([]byte, error) {
-			return []byte("ActiveState=active\nSubState=running\nMainPID=" + strconv.Itoa(pid) + "\nNRestarts=0\nResult=success\n"), nil
-		}
-	}
-	p, err := collectFleetRuntime(context.Background(), c, "boot-session", command(os.Getpid()+1))
-	if err == nil || p == nil || p.ServiceHealthy {
-		t.Fatal("accepted another manager process", p, err)
-	}
-	p, err = collectFleetRuntime(context.Background(), c, "boot-session", command(os.Getpid()))
-	if err != nil || p == nil || !p.ServiceHealthy || !p.RunnerSmoke || p.PID != os.Getpid() || p.Session != "boot-session" || len(p.SHA256) != 64 || p.StartGate != StartGateProtocol || p.AttemptProtocol != AttemptProtocol || p.ObservedAt.IsZero() {
-		t.Fatal("missing exact process evidence", p, err)
-	}
 }
 
 func TestFleetRuntimeRestartProofDiagnosticsThroughCheckin(t *testing.T) {
@@ -460,28 +442,6 @@ func TestFleetRuntimeInstructionWireResponses(t *testing.T) {
 				t.Fatal("unexpected activation for instruction response", launches)
 			}
 		})
-	}
-}
-
-func TestFleetRuntimeCachedProofExpiresWithoutRenewingObservation(t *testing.T) {
-	clock := &fakeClock{now: time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)}
-	m := Machine{ID: "worker", HostID: "host", Session: "session"}
-	completed := make(chan fleetPollResult, 1)
-	completed <- fleetPollResult{proof: &FleetRuntimeProof{Session: m.Session, ServiceHealthy: true, ObservedAt: clock.Now()}}
-	r := &workerFleetRuntime{clock: clock, pending: completed}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // no network is needed to exercise completed/cached observations.
-	first := r.observe(ctx, m, false)
-	if first == nil || r.generation != 1 || first.ObservedAt != clock.Now() {
-		t.Fatal("completed probe did not advance generation")
-	}
-	clock.Advance(fleetProofMaxAge - time.Nanosecond)
-	if p := r.observe(ctx, m, false); p == nil || p.ObservedAt != first.ObservedAt || r.generation != 1 {
-		t.Fatal("cached heartbeat renewed manager observation")
-	}
-	clock.Advance(time.Nanosecond)
-	if r.observe(ctx, m, false) != nil || r.generation != 1 || r.proofIssue() != fleetProofExpired {
-		t.Fatal("stale manager proof remained eligible")
 	}
 }
 

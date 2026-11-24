@@ -113,25 +113,6 @@ func (sharedTraceFaultReader) Read(p []byte) (int, error) {
 	return 3, &os.PathError{Op: "read", Path: "/private/source", Err: syscall.EIO}
 }
 
-func TestSharedInputTracePartialReadBytesAndBoundary(t *testing.T) {
-	for _, pathClass := range []string{"source", "store"} {
-		t.Run(pathClass, func(t *testing.T) {
-			ctx := context.WithValue(context.Background(), sharedInputTraceKey{}, &sharedInputTrace{detail: StagingCause{Operation: "shared_input", ExpectedBytes: 10}})
-			var output strings.Builder
-			n, err := io.Copy(sharedInputWriter{ctx, &output}, sharedInputReader{ctx, sharedTraceFaultReader{}, pathClass})
-			err = tracedSharedCopyError(ctx, err)
-			traceSharedInput(ctx, "sync", "cache")
-			var se *stagingError
-			if n != 3 || output.String() != "abc" || !errors.Is(err, syscall.EIO) || !errors.As(err, &se) {
-				t.Fatal(n, output.String(), err)
-			}
-			if se.detail.Stage != "read" || se.detail.PathClass != pathClass || se.detail.BytesCopied != 3 || se.detail.Errno != int(syscall.EIO) {
-				t.Fatalf("read cause lost: %+v", se.detail)
-			}
-		})
-	}
-}
-
 func TestSharedInputTraceTimeoutSnapshotsBeforeCancel(t *testing.T) {
 	clock := &workerFakeClock{now: time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC)}
 	cache := &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: clock}}

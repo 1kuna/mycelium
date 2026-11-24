@@ -103,12 +103,18 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 					block("reservation", why)
 				}
 			}
+			hostFailure := hostFitFailure(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB)
 			if len(blocked) == 0 {
 				if why := q.cardWaitingReason(candidate, m); why != "" {
 					block("capacity", why)
 				} else if pooledMemory(candidate) {
 					if why := q.poolCustodyWaitingReason(candidate, m); why != "" {
-						block("capacity", why)
+						kind := "capacity"
+						if candidate.Spec.Needs.cpuOnly() && hostFailure != "" {
+							// CPU RAM custody and a live RAM shortage describe the same wait.
+							kind = memoryWaitReason
+						}
+						block(kind, why)
 					} else if need := candidate.Spec.Needs.MemoryGB; memoryPools(candidate).Card != nil && need > m.FreeMemoryGB {
 						block(memoryWaitReason, fmt.Sprintf("card needs %.3f GiB, available %.3f GiB (device %s)", need, m.FreeMemoryGB, m.Device))
 					}
@@ -132,7 +138,7 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 			if m.Disabled != "" || m.Gone || m.Leaving || m.Recovering || availabilityBlocked(m) {
 				block("host_unavailable", HyphaAvailability(m))
 			}
-			if why := hostFitFailure(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB); why != "" {
+			if hostFailure != "" {
 				n := candidate.Spec.Needs
 				available := "unknown"
 				if m.HostMemoryMeasured && m.HostMemoryError == "" {
@@ -146,8 +152,8 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 				if candidate.MemoryEnvelope != nil {
 					detail += " (" + candidate.MemoryEnvelope.Origin() + ")"
 				}
-				if why != "host memory" {
-					detail += "; " + why
+				if hostFailure != "host memory" {
+					detail += "; " + hostFailure
 				}
 				block(memoryWaitReason, detail)
 			}

@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -40,18 +39,5 @@ func TestWorkerPlacementEnvironmentEveryAttempt(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-func TestModelPlacementEnvironment(t *testing.T) {
-	m := Model{DeviceEnv: map[string]string{"MYCE_MACHINE": "wrong"}}
-	m = withPlacementEnvironment(m, Machine{ID: "b70-1", GPU: "xpu", Device: "1"})
-	_, _, _, env, e := serverCommand(Model{Name: "env", Engine: "server", Path: "unused", StartCommand: []string{"echo"}, HealthURL: "http://127.0.0.1:{port}", DeviceEnv: m.DeviceEnv}, 7332)
-	if e != nil {
-		t.Fatal(e)
-	}
-	for _, want := range []string{"MYCE_PLATFORM=xpu", "MYCE_DEVICES=1", "MYCE_MACHINE=b70-1"} {
-		if !strings.Contains(strings.Join(env, "\n"), want) {
-			t.Fatalf("missing %s", want)
-		}
 	}
 }

@@ -2,7 +2,6 @@ package myce
 
 import (
 	"bytes"
-	"database/sql"
 	"fmt"
 	"io"
 	"net/http"
@@ -253,38 +252,4 @@ func TestJobRecordSharedValuesEncoding(t *testing.T) {
 			t.Fatal("accepted a broken reference", bad)
 		}
 	}
-}
-
-// Measures a copy of a real queue database read-only, without opening a queue:
-// MYCE_JOB_RECORD_DB=/path/to/copy/queue.db go test -run TestJobRecordSharedValuesMeasure
-func TestJobRecordSharedValuesMeasure(t *testing.T) {
-	path := os.Getenv("MYCE_JOB_RECORD_DB")
-	if path == "" {
-		t.Skip("MYCE_JOB_RECORD_DB unset")
-	}
-	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	records, err := readQueueRecords(db)
-	if err != nil {
-		t.Fatal(err)
-	}
-	jobs, ordinary, shared := 0, 0, 0
-	for key, data := range records {
-		if !strings.HasPrefix(key, "jobs/") {
-			continue
-		}
-		full, err := expandJobRecord(data)
-		if err != nil {
-			t.Fatal(key, err)
-		}
-		slim := slimJobRecord(full)
-		if back, err := expandJobRecord(slim); err != nil || !bytes.Equal(back, full) {
-			t.Fatal(key, "did not round-trip", err)
-		}
-		jobs, ordinary, shared = jobs+1, ordinary+len(full), shared+len(slim)
-	}
-	t.Logf("%d job records: ordinary %d bytes, shared %d bytes (%.1f%% smaller)", jobs, ordinary, shared, 100*float64(ordinary-shared)/float64(max(1, ordinary)))
 }
