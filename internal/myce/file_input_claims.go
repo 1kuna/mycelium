@@ -229,6 +229,15 @@ func (q *Queue) inputClaimContext(ctx context.Context, ref FileRef, allocate boo
 	return context.WithValue(ctx, fileStoreSubmissionKey{}, Spec{Project: claim.Project, Class: claim.Class}), nil
 }
 
+// q.mu held.
+func (q *Queue) visitFileInputClaimKeepers(visit func(FileInputClaim, fileKeeper)) {
+	for _, claim := range q.s.FileInputClaims {
+		if claim.SettledAt.IsZero() {
+			visit(claim, fileKeeper{FileKeepingReference: FileKeepingReference{Kind: "input_claim", Name: claim.ID, Project: claim.Project}})
+		}
+	}
+}
+
 func (q *Queue) noteInputClaimFacts(f *projectFileFacts, project string) {
 	for _, claim := range q.s.FileInputClaims {
 		if project != "" && claim.Project != project {

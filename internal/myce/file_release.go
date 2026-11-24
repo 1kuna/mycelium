@@ -263,25 +263,48 @@ func (q *Queue) fileReleaseMetadata(selection FileReleaseSelection, includeRefer
 			releasing[id] = fileReleaseScope{checkpoints: selection.IncludeCheckpoints}
 		}
 	}
-	refs := map[string][]FileKeepingReference{}
-	var report func(FileRef, FileKeepingReference)
+	refs := fileReferenceView{}
 	if includeReferences {
-		report = func(file FileRef, ref FileKeepingReference) {
-			if hashes[file.SHA256] {
-				refs[file.SHA256] = append(refs[file.SHA256], ref)
+		note := func(ref FileRef, flags fileReferenceFlags, owner fileKeeper) {
+			if hashes[ref.SHA256] {
+				refs.note(ref, flags, owner, true)
 			}
 		}
+		q.visitDurableFileReferences(true, releasing, note)
+		q.visitFileInputClaimKeepers(func(claim FileInputClaim, owner fileKeeper) {
+			note(claim.File, fileKept|fileReferenced, owner)
+		})
+	} else {
+		// Keep the commit fence on the existing collector until the two views
+		// have been compared across the same snapshots.
+		expired, keep, _ := q.collectFileReferences(true, releasing, nil)
+		for hash := range hashes {
+			var flags fileReferenceFlags
+			if expired[hash] {
+				flags |= fileExpired
+			}
+			if keep[hash] {
+				flags |= fileKept
+			}
+			refs[hash] = fileDigestReferences{flags: flags}
+		}
 	}
-	pending, keep, _ := q.collectFileReferences(true, releasing, report)
 	for hash := range hashes {
 		if (FileRef{SHA256: hash}).validate() != nil {
 			return plan, fileReleaseInvalid("invalid retained content identity")
 		}
-		r := refs[hash]
-		slices.SortFunc(r, func(a, b FileKeepingReference) int { return compareReleaseJSON(a, b) })
-		r = slices.Compact(r) // Job and keyed answer may alias the same reference.
+		entry := refs[hash]
+		var keepers []FileKeepingReference
+		for owner := range entry.keepers {
+			keepers = append(keepers, owner.FileKeepingReference)
+		}
+		slices.SortFunc(keepers, func(a, b FileKeepingReference) int { return compareReleaseJSON(a, b) })
+		keepers = slices.Compact(keepers)
 		at, marked := q.s.BundleUploads[hash]
-		plan.Blobs = append(plan.Blobs, FileReleaseBlob{SHA256: hash, CollectionEligible: pending[hash] && !keep[hash], References: r, BundleTracked: marked, BundleProtected: marked && !pending[hash] && at.After(q.clock.Now().Add(-q.fileRetention))})
+		plan.Blobs = append(plan.Blobs, FileReleaseBlob{
+			SHA256: hash, CollectionEligible: entry.collectionEligible(), References: keepers,
+			BundleTracked: marked, BundleProtected: marked && entry.flags&fileExpired == 0 && at.After(q.clock.Now().Add(-q.fileRetention)),
+		})
 	}
 	slices.SortFunc(plan.Blobs, func(a, b FileReleaseBlob) int { return compareReleaseJSON(a.SHA256, b.SHA256) })
 	return plan, nil
