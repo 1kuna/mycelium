@@ -1219,6 +1219,24 @@ The role (MY-45) selects how host RAM capacity is measured; see
 [host roles](reference/host-capacity.md#host-ram-admission-and-ceilings). It
 defaults to `node`, applies while the host stays enabled, and keeps any drain.
 
+### Set a queued job's host RAM charge and limit
+
+```sh
+myce job resize --project NAME --host-memory-gb 11 --by REQUESTER --reason 'measured host RAM use' JOB_ID...
+```
+
+Use full job IDs and the owning project. The value in GiB becomes both the
+scheduling charge and the hard limit for subsequent attempts. Placement still
+requires the charge to fit alongside existing reservations within both the host
+allowance and live room. IDs, submission keys, priority and dependencies are
+preserved. Submitting the original spec again with its key adopts the resized job.
+
+All IDs are checked and updated in one transaction. An assigned, active or
+unreleased attempt returns `job_resize_attempt_live` with its job ID and the
+batch is refused. The job ledger records the old and new values, reason and
+operator-asserted requester. Use the same installed authority as host maintenance.
+Resize already materialized fan-out pieces by their queued child IDs.
+
 ### Exclude components with a selector
 
 ```sh

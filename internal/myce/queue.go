@@ -1371,6 +1371,9 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	q.s.Front++
 	j.Front = q.s.Front
 	restoreCPUFallback(j)
+	if j.HostMemoryOverrideGB > 0 {
+		j.Spec.Needs.HostMemoryGB = j.HostMemoryOverrideGB
+	}
 	j.State = "queued"
 	if maintenance {
 		now := q.clock.Now()

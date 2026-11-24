@@ -108,6 +108,7 @@ func generatedJobSchema(t *testing.T) []byte {
 	job["wall_time"].(map[string]any)["description"] = "Execution allowance, distinct from runtime estimates. Expiry/remaining appear after Started; elapsed grace or terminal state does not prove release."
 	delete(job, "ledger_entries") // Persistence only; the supported read surface is paginated.
 	delete(defs, "JobLedgerEntry")
+	delete(defs, "JobResizeAudit")
 	job["ledger"].(map[string]any)["description"] = "Retained ledger summary: complete is historical coverage, high_water is the last durable sequence. GET /api/jobs/ID/ledger enumerates immutable entries to a fixed high_water. Older incomplete history is explicit; no diagnostic cap applies."
 	job["advanced"].(map[string]any)["description"] = "Read-only MY-54 view: the advanced settings this job changed from their defaults; absent when all keep their defaults. Never persisted. Disk, size, resume, failure-evidence and requirement-reason payloads keep their own fields."
 	job["cpu_fallback_from"].(map[string]any)["description"] = "Authored GPU needs kept while an attempt of opted-in work (advanced.allow_cpu_fallback) runs on a CPU target; spec.needs then shows the CPU reservation. A requeue restores them."

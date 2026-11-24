@@ -599,6 +599,7 @@ type Job struct {
 	MemoryAttempts            []AttemptMemoryFacts         `json:"memory_attempts,omitempty"`
 	MemoryAttemptsDropped     int                          `json:"memory_attempts_dropped,omitempty"`
 	MemoryFallback            *SizeHint                    `json:"memory_fallback,omitempty"`
+	HostMemoryOverrideGB      float64                      `json:"host_memory_override_gb,omitempty"`
 	MemoryOOMFloor            *SizeHint                    `json:"memory_oom_floor,omitempty"`
 	MemoryCensoredOOMGrowthGB *float64                     `json:"memory_censored_oom_growth_gb,omitempty"`
 	DeviceMemoryFloorGB       float64                      `json:"device_memory_floor_gb,omitempty"`

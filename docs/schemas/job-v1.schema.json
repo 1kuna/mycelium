@@ -3737,6 +3737,10 @@
           "$ref": "#/$defs/AttemptHostMemoryCharge",
           "x-contract": "diagnostic"
         },
+        "host_memory_override_gb": {
+          "type": "number",
+          "x-contract": "diagnostic"
+        },
         "id": {
           "minLength": 1,
           "type": "string",

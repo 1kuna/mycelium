@@ -398,6 +398,14 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		j, err := a.Queue.FencedResume(r.Context(), r.PathValue("id"), request)
 		respondOperation(w, j, err, "job_resume_invalid")
 	})
+	mux.HandleFunc("POST /api/jobs/resize", func(w http.ResponseWriter, r *http.Request) {
+		var request ResizeJobsRequest
+		if !decode(w, r, &request) {
+			return
+		}
+		receipt, err := a.Queue.ResizeJobs(r.Context(), request)
+		respondOperation(w, receipt, err, "job_resize_failed")
+	})
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
 		ack, err := a.Queue.CancelJob(r.PathValue("id"), r.Context())
 		respondOperation(w, ack, err, "job_cancel_invalid")

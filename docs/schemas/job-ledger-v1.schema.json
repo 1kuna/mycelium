@@ -23,6 +23,9 @@
     },
     "JobLedgerEntry": {
       "properties": {
+        "resize": {
+          "$ref": "#/$defs/JobResizeAudit"
+        },
         "placement": {
           "$ref": "#/$defs/PlacementDecision"
         },
@@ -129,6 +132,28 @@
         "next",
         "has_more",
         "entries"
+      ]
+    },
+    "JobResizeAudit": {
+      "properties": {
+        "requested_by": {
+          "type": "string"
+        },
+        "old_host_memory_gb": {
+          "type": "number"
+        },
+        "new_host_memory_gb": {
+          "type": "number"
+        },
+        "old_limit_gb": {
+          "type": "number"
+        }
+      },
+      "type": "object",
+      "required": [
+        "requested_by",
+        "old_host_memory_gb",
+        "new_host_memory_gb"
       ]
     },
     "ObservationKey": {
