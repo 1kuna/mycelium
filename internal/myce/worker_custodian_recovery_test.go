@@ -77,7 +77,7 @@ func TestCustodianInitializedPrelaunchRecovery(t *testing.T) {
 }
 
 func TestCustodianInitializedRecoveryRetainsUncertainCustody(t *testing.T) {
-	for _, kind := range []string{"live", "lock", "started", "snapshot-custody", "parent-custody", "wrong-session", "wrong-request", "state", "gate", "work", "intent", "manager", "corrupt"} {
+	for _, kind := range []string{"live", "lock", "started", "snapshot-custody", "parent-custody", "wrong-session", "wrong-parent-session", "wrong-machine", "wrong-protocol", "wrong-request", "writer", "state", "gate", "work", "intent", "manager", "corrupt"} {
 		t.Run(kind, func(t *testing.T) {
 			j := Job{ID: ID(), Attempt: 1, Machine: "worker", Session: "session"}
 			s, v := deadCustodianFixture(t, &j)
@@ -101,6 +101,16 @@ func TestCustodianInitializedRecoveryRetainsUncertainCustody(t *testing.T) {
 				s.state.Preparation = "pending-builder"
 			case "wrong-session":
 				v.State.Session = "other"
+			case "wrong-parent-session":
+				s.state.Session = "other"
+			case "wrong-machine":
+				assignment := *v.State.Job
+				assignment.Machine = "other"
+				v.State.Job = &assignment
+			case "wrong-protocol":
+				v.Protocol++
+			case "writer":
+				v.State.InputWriterPending = true
 			case "wrong-request":
 				if err := saveWorkerJSON(dir, custodianName(id, "request"), custodianRequest{ID: ID()}); err != nil {
 					t.Fatal(err)
@@ -130,7 +140,7 @@ func TestCustodianInitializedRecoveryRetainsUncertainCustody(t *testing.T) {
 				}
 			}
 			before, _ := os.ReadFile(path)
-			if err := w.recoverUnstartedCustodian(s); err == nil {
+			if p, err := w.recoverAttempt(s); err == nil || p != nil {
 				t.Fatal("uncertain custody released")
 			}
 			after, _ := os.ReadFile(path)

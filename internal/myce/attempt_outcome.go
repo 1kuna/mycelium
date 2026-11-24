@@ -142,7 +142,7 @@ func (s *workerStore) startFailureAt(j Job, kind string, cause error, at time.Ti
 	// contrast, is written before any process can start and is never inferred
 	// from an absent Started report. Persist this positive refusal proof with
 	// the facts so release-only replay carries it too.
-	prelaunch := kind == launchRefused && s.state.CustodyID == "" && s.state.PID == 0 && !s.state.LaunchPending && len(s.state.Groups) == 0 && s.state.Preparation == "" && s.state.Cgroup == ""
+	prelaunch := kind == launchRefused && !s.state.hasProcessCustody()
 	fact := infrastructureFact{Kind: kind, At: at, Predicate: launchFailurePredicate(kind, cause), Admission: admissionDetail(cause, j), PrelaunchRefused: prelaunch}
 	if prelaunch && fact.Predicate == "launch_authorization" {
 		fact.LaunchRefusal = launchRefusalBoundary(cause)

@@ -233,9 +233,41 @@ func decodeWorkerState(data []byte, state *workerState) error {
 	return nil
 }
 
+// attemptRecord interprets the existing spool for one assignment. The machine
+// is supplied by the caller for direct workers and by the assignment for a
+// detached owner. Mutable reports and process IDs are never part of the key.
+type attemptRecord struct {
+	key     attemptKey
+	machine string
+}
+
+func attemptRecordFor(j *Job, machine string) attemptRecord {
+	if j == nil {
+		return attemptRecord{}
+	}
+	return attemptRecord{key: jobKey(*j), machine: machine}
+}
+
+func (a attemptRecord) ownsState(s workerState) bool {
+	return a.key.job != "" && s.Job != nil && jobKey(*s.Job) == a.key && s.Job.Machine == a.machine && s.Session == a.key.session
+}
+
+func (a attemptRecord) ownsResult(r *Result) bool {
+	return a.key.job != "" && r != nil && r.ID == a.key.job && r.Attempt == a.key.attempt && r.Session == a.key.session && r.Machine == a.machine
+}
+
+func (s workerState) hasProcessCustody() bool {
+	return s.PID != 0 || s.Birth != "" || s.CustodyID != "" || s.LaunchPending || len(s.Groups) > 0 || s.Preparation != "" || s.Cgroup != ""
+}
+
+func custodianUnstarted(s workerState) bool {
+	return !s.hasProcessCustody() && !s.InputWriterPending && s.Result == nil
+}
+
 // Results from a different execution must never be adopted from a spool file.
 func (s *workerStore) matchesResult(r Result, machine string) bool {
-	return s.state.Job != nil && r.ID == s.state.Job.ID && r.Attempt == s.state.Job.Attempt && r.Machine == machine && r.Session == s.state.Session
+	a := attemptRecordFor(s.state.Job, machine)
+	return s.state.Session == a.key.session && a.ownsResult(&r)
 }
 
 func (s *workerStore) recoverResult(machine string) error {
@@ -551,9 +583,7 @@ func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) error 
 }
 
 func (s *workerStore) inputWriterOnly() bool {
-	return s.state.InputWriterPending && s.state.Job != nil &&
-		s.state.CustodyID == "" && s.state.PID == 0 && !s.state.LaunchPending &&
-		len(s.state.Groups) == 0 && s.state.Preparation == "" && s.state.Cgroup == ""
+	return s.state.InputWriterPending && s.state.Job != nil && !s.state.hasProcessCustody()
 }
 
 // A preparation helper has an explicit outstanding release obligation. Unlike

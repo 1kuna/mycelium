@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDarwinCustodianRetainsStartupDiagnosticsAfterCleanup(t *testing.T) {
@@ -14,17 +15,18 @@ func TestDarwinCustodianRetainsStartupDiagnosticsAfterCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	job := &Job{ID: ID(), Attempt: 3, Machine: "worker", Session: ID()}
-	execution := Execution{ID: job.ID, Attempt: job.Attempt}
-	req := custodianRequest{Protocol: custodianProtocol, ID: id, Machine: Machine{ID: job.Machine}, State: workerState{Job: job, Session: job.Session}}
+	q, clock := fixture(t)
+	submit(t, q, spec("experiment"))
+	j := check(t, q, machine("worker", "fake"), nil).Job
+	if err := q.Cancel(j.ID); err != nil {
+		t.Fatal(err)
+	}
+	execution := Execution{ID: j.ID, Attempt: j.Attempt}
+	req := custodianRequest{Protocol: custodianProtocol, ID: id, Machine: Machine{ID: j.Machine}, State: workerState{Job: j, Session: j.Session}}
 	if err := saveWorkerJSON(dir, custodianName(id, "request"), req); err != nil {
 		t.Fatal(err)
 	}
 	if err := RecordCustodianStartupFailure(spool, id); err != nil {
-		t.Fatal(err)
-	}
-	var snapshot custodianSnapshot
-	if err := readCustodianJSON(dir, custodianName(id, "snapshot"), &snapshot); err != nil {
 		t.Fatal(err)
 	}
 	// The refusal can be visible while launchd still reports the process. The
@@ -59,7 +61,31 @@ esac
 	if err := launchAttemptCustodian(t.Context(), ServiceConfig{Binary: "/fixture/myce"}, dir, id, execution); err != nil {
 		t.Fatal(err)
 	}
-	cleanupCustodian(dir, id, *snapshot.State.Result)
+	parent := req.State
+	parent.Custodian = id
+	p, err := (Worker{Clock: clock}).recoverAttempt(&workerStore{dir: spool, state: parent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.custodian.detach()
+	select {
+	case f := <-p.done:
+		r := f.result
+		if f.err != nil || p.started() || r.Execution != execution || r.Machine != j.Machine || r.Session != j.Session || r.ReleasePending ||
+			r.ExecutionEvidence == nil || r.ExecutionEvidence.Main != executionNotStarted || r.ExecutionCause == nil ||
+			r.ExecutionCause.LaunchRefusal != custodianStartupFailed {
+			t.Fatalf("wrong pre-Started exit: %+v %v", r, f.err)
+		}
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		cleanupCustodian(dir, id, r)
+	case <-time.After(testWaitTimeout):
+		t.Fatal("startup refusal did not replay")
+	}
+	if got := job(t, q, j.ID); got.State != "cancelled" || !got.ReleaseConfirmed || got.CommandStarted != nil && *got.CommandStarted {
+		t.Fatalf("pre-Started attempt did not release: %+v", got)
+	}
 	name := custodianName(id, "startup")
 	var got custodianStartupDiagnostic
 	if err := readCustodianJSON(dir, name, &got); err != nil {

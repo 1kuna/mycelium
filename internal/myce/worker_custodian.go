@@ -44,6 +44,11 @@ type custodianRequest struct {
 	AccountingRoots []string    `json:"accounting_roots,omitempty"`
 }
 
+func (r custodianRequest) unstartedFor(id string, a attemptRecord) bool {
+	return r.Protocol == custodianProtocol && r.ID == id && r.Machine.ID == a.machine && a.ownsState(r.State) &&
+		r.State.Custodian == "" && custodianUnstarted(r.State)
+}
+
 type custodianSnapshot struct {
 	Protocol       int                `json:"protocol"`
 	ID             string             `json:"id"`
@@ -58,6 +63,10 @@ type custodianSnapshot struct {
 	Resources      *AttemptResources  `json:"resources,omitempty"`
 	MemoryAt       time.Time          `json:"memory_at,omitempty"`
 	DeviceMemoryAt time.Time          `json:"device_memory_at,omitempty"`
+}
+
+func (v custodianSnapshot) belongsTo(id string, a attemptRecord) bool {
+	return v.Protocol == custodianProtocol && v.ID == id && a.ownsState(v.State)
 }
 
 type custodianControl struct {
@@ -103,18 +112,15 @@ func RecordCustodianStartupFailure(spool, id string) error {
 		return errors.New("invalid detached attempt identity")
 	}
 	dir := custodianDir(spool)
-	if _, err := os.Stat(filepath.Join(dir, custodianName(id, "snapshot"))); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(filepath.Join(dir, custodianName(id, "snapshot"))); !errors.Is(err, os.ErrNotExist) {
 		return errors.New("detached startup is not proven unstarted")
 	}
 	var req custodianRequest
 	if err := readCustodianJSON(dir, custodianName(id, "request"), &req); err != nil {
 		return err
 	}
-	if req.Protocol != custodianProtocol || req.ID != id || req.State.Job == nil || req.State.Session != req.State.Job.Session || req.Machine.ID != req.State.Job.Machine {
-		return errors.New("custodian request identity mismatch")
-	}
-	if req.State.PID != 0 || req.State.CustodyID != "" || req.State.LaunchPending || len(req.State.Groups) != 0 || req.State.Preparation != "" || req.State.Cgroup != "" || req.State.Custodian != "" {
-		return errors.New("detached request retains prior execution custody")
+	if !req.unstartedFor(id, attemptRecordFor(req.State.Job, req.Machine.ID)) {
+		return errors.New("custodian request identity or prelaunch custody unconfirmed")
 	}
 	j := *req.State.Job
 	s := &workerStore{dir: spool, state: req.State}
@@ -231,7 +237,7 @@ func persistUnadoptedCustodianStop(s *workerStore, j Job, d AttemptDirective, no
 
 func (w Worker) adoptCustodian(s *workerStore) (*process, error) {
 	id := s.state.Custodian
-	if !validCustodianID(id) || s.state.Job == nil {
+	if !validCustodianID(id) || s.state.Job == nil || !attemptRecordFor(s.state.Job, s.state.Job.Machine).ownsState(s.state) {
 		return nil, errors.New("invalid detached attempt custody")
 	}
 	g := &attemptCustodian{dir: custodianDir(s.dir), id: id}
@@ -287,53 +293,48 @@ func (g *attemptCustodian) read(j Job) error {
 	if err := readCustodianJSON(g.dir, custodianName(g.id, "snapshot"), &v); err != nil {
 		return err
 	}
-	if v.Protocol != custodianProtocol || v.ID != g.id || v.State.Job == nil || jobKey(*v.State.Job) != jobKey(j) || v.State.Session != j.Session {
+	if v.Finished {
+		return g.acceptFinished(v, j)
+	}
+	if !v.belongsTo(g.id, attemptRecordFor(&j, j.Machine)) {
 		return errors.New("detached attempt identity mismatch")
 	}
-	if v.Finished {
-		r := v.State.Result
-		if r == nil || r.ID != j.ID || r.Attempt != j.Attempt || r.Session != j.Session || r.Machine != j.Machine {
-			return errors.New("detached result identity mismatch")
+	birth, err := processBirth(v.PID)
+	if err != nil || birth == "" || birth != v.Birth {
+		// Completion is committed before exit. The read may have raced
+		// that atomic rename; require the exact finished result on reread.
+		var final custodianSnapshot
+		if readCustodianJSON(g.dir, custodianName(g.id, "snapshot"), &final) == nil && final.Finished {
+			return g.acceptFinished(final, j)
 		}
-	} else {
-		birth, err := processBirth(v.PID)
-		if err != nil || birth == "" || birth != v.Birth {
-			// Completion is committed before exit. The read may have raced
-			// that atomic rename; require the exact finished result on reread.
-			var final custodianSnapshot
-			if readCustodianJSON(g.dir, custodianName(g.id, "snapshot"), &final) == nil && final.Finished {
-				return g.acceptFinished(final, j)
-			}
-			return errors.New("detached custodian process birth unconfirmed")
-		}
-		g.mu.Lock()
-		previous := g.last
-		g.mu.Unlock()
-		if previous.PID != v.PID || previous.Birth != v.Birth || previous.Cgroup != v.Cgroup {
-			if err := verifyCustodianIsolation(g.id, v.PID, v.Cgroup); err != nil {
-				return err
-			}
+		return errors.New("detached custodian process birth unconfirmed")
+	}
+	previous := g.snapshot()
+	if previous.PID != v.PID || previous.Birth != v.Birth || previous.Cgroup != v.Cgroup {
+		if err := verifyCustodianIsolation(g.id, v.PID, v.Cgroup); err != nil {
+			return err
 		}
 	}
-	g.mu.Lock()
-	if v.Memory != nil {
-		v.Memory.sampledAt, v.Memory.deviceSampledAt = v.MemoryAt, v.DeviceMemoryAt
-	}
-	g.last = v
-	g.observed = true
-	g.mu.Unlock()
+	g.observe(v)
 	return nil
 }
 
 func (g *attemptCustodian) acceptFinished(v custodianSnapshot, j Job) error {
-	r := v.State.Result
-	if v.Protocol != custodianProtocol || v.ID != g.id || v.State.Job == nil || jobKey(*v.State.Job) != jobKey(j) || v.State.Session != j.Session || r == nil || r.ID != j.ID || r.Attempt != j.Attempt || r.Session != j.Session || r.Machine != j.Machine {
+	a := attemptRecordFor(&j, j.Machine)
+	if !v.Finished || !v.belongsTo(g.id, a) || !a.ownsResult(v.State.Result) {
 		return errors.New("detached result identity mismatch")
+	}
+	g.observe(v)
+	return nil
+}
+
+func (g *attemptCustodian) observe(v custodianSnapshot) {
+	if v.Memory != nil {
+		v.Memory.sampledAt, v.Memory.deviceSampledAt = v.MemoryAt, v.DeviceMemoryAt
 	}
 	g.mu.Lock()
 	g.last, g.observed = v, true
 	g.mu.Unlock()
-	return nil
 }
 
 func custodianInterval(interval time.Duration) time.Duration {
@@ -491,7 +492,7 @@ func (w Worker) runCustodian(stop context.Context) error {
 	if err := readCustodianJSON(dir, custodianName(id, "request"), &req); err != nil {
 		return err
 	}
-	if req.Protocol != custodianProtocol || req.ID != id || req.State.Job == nil || req.Machine.ID != w.Machine.ID || req.State.Job.Machine != w.Machine.ID || req.State.Session != req.State.Job.Session || req.State.Custodian != "" || !custodianUnstarted(req.State) {
+	if !req.unstartedFor(id, attemptRecordFor(req.State.Job, w.Machine.ID)) {
 		return errors.New("custodian request identity mismatch")
 	}
 	w.Machine = req.Machine
