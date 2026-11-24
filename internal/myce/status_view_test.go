@@ -218,7 +218,7 @@ func TestStatusViewDisabledAndResourceConstraints(t *testing.T) {
 		{"maintenance", func(m *Machine) {}, "planned host maintenance"},
 		{"offline", func(m *Machine) { m.Gone = true }, "offline"},
 		{"leaving", func(m *Machine) { m.Leaving = true }, "leaving; no new work"},
-		{"memory", func(m *Machine) { m.TotalMemoryGB = 4; m.FreeMemoryGB = 4 }, "8.0 GiB free accelerator memory"},
+		{"memory", func(m *Machine) { m.TotalMemoryGB = 4; m.FreeMemoryGB = 4 }, "card needs 8.000 GiB (typical 8.000 GiB); card allowance 4.000 GiB"},
 		{"platform", func(m *Machine) { m.GPU = "metal" }, "NVIDIA (CUDA)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -270,8 +270,10 @@ func TestStatusViewFloorFreeAutoMemory(t *testing.T) {
 	target.FreeHostMemoryGB = 1
 	probe := *q.s.Jobs[j.ID]
 	body = q.noFitDetail(&probe, false)
-	if !strings.Contains(body, "exclusive access to a card") || !strings.Contains(body, "exclusive access to the RAM pool") || strings.Contains(body, "0.0 GiB") {
-		t.Errorf("unknown estimates did not explain exclusive access: %s", body)
+	if !strings.Contains(body, "exclusive access to a card with no memory estimate") ||
+		!strings.Contains(body, "at least 64 KiB host RAM to start while its estimate is unknown") ||
+		strings.Contains(body, "exclusive access to the RAM pool") || strings.Contains(body, "0.0 GiB") {
+		t.Errorf("unknown estimates did not explain exclusive card access and shared bootstrap RAM: %s", body)
 	}
 	stored := q.s.Jobs[j.ID]
 	if stored.MemoryEnvelope != nil || stored.Spec.Needs.MemoryGB != 0 || stored.Spec.Needs.HostMemoryGB != 0 {
