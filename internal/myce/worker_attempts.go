@@ -526,6 +526,10 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					discarded = err == nil
 				} else if resultReady {
 					err = w.Client.Call(ioCtx, "POST", "/api/workers/complete", s.state.Result, nil)
+					if err == nil {
+						// Acknowledging the pending report leaves cleanup owed.
+						err = errWorkerReleasePending
+					}
 				}
 			} else {
 				err = w.replayWithProgress(ioCtx, s, func() {
@@ -536,7 +540,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					publicationPace = ClientPace{}
 				})
 			}
-			if !stopWithoutPublication && err == nil && (a.job.storedFileResults() || resultReady && scarceYieldStop(s.state.Result.PriorityStop)) {
+			if err == nil && (!stopWithoutPublication || !resultReady) && (a.job.storedFileResults() || resultReady && scarceYieldStop(s.state.Result.PriorityStop)) {
 				w.storageObserver = s.storageObserver
 				if resultReady {
 					if canRelease && !releaseSent {
