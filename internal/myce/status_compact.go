@@ -198,6 +198,10 @@ func compactStatusJob(j *Job) Job {
 	if j.Spec.Resident != nil {
 		resident = &ResidentBinding{Model: j.Spec.Resident.Model}
 	}
+	reason := j.Reason
+	if j.State == "queued" && reason != "" && j.SpecProjection == nil {
+		reason = statusWaitingText(j, reason)
+	}
 	return Job{ID: j.ID, State: j.State, Attempt: j.Attempt, Machine: j.Machine, Session: j.Session, CommandStarted: &started,
 		Copies: compactStatusCopies(j.Copies),
 		Spec: Spec{Resident: resident, Workload: j.Spec.Workload, QualityTolerance: j.Spec.QualityTolerance, ExtensionCheck: compactStatusCheck(j.Spec.ExtensionCheck), Logs: j.Spec.Logs, AuthoringOrigin: j.Spec.Origin(), AllowedMachines: j.Spec.AllowedMachines, ExcludedMachines: j.Spec.ExcludedMachines, Name: j.Spec.Name, Project: j.Spec.Project, SubmissionKey: j.Spec.SubmissionKey, Class: j.Spec.Class, Priority: j.Spec.Priority,
@@ -205,7 +209,7 @@ func compactStatusJob(j *Job) Job {
 			Program: compactStatusProgram(j.Spec.Program), Kind: j.Spec.Kind, WallTime: j.Spec.WallTime},
 		Queued: j.Queued, AssignedAt: j.AssignedAt, StartedAt: j.StartedAt, FinishedAt: j.FinishedAt,
 		WaitingSince: j.WaitingSince, Starts: j.Starts, AdmissionRequeues: j.AdmissionRequeues, Losses: j.Losses, PreemptionCount: j.PreemptionCount,
-		AllocatedDevices: j.AllocatedDevices, Hold: j.Hold, Finding: j.Finding, DeviceFaultStartWait: j.DeviceFaultStartWait, StartCapacityWaiting: j.StartCapacityWaiting, Delivery: j.Delivery, Reason: j.Reason, DiagnosticCode: j.DiagnosticCode, Pause: j.Pause, CancelledAt: j.CancelledAt,
+		AllocatedDevices: j.AllocatedDevices, Hold: j.Hold, Finding: j.Finding, DeviceFaultStartWait: j.DeviceFaultStartWait, StartCapacityWaiting: j.StartCapacityWaiting, Delivery: j.Delivery, Reason: reason, DiagnosticCode: j.DiagnosticCode, Pause: j.Pause, CancelledAt: j.CancelledAt,
 		ReleaseConfirmed: j.ReleaseConfirmed, LastStopOutcome: j.LastStopOutcome, StopAt: j.StopAt,
 		PriorityPolicy: j.PriorityPolicy, QueueOrder: j.QueueOrder, ApplicationProgress: j.ApplicationProgress,
 		ExecutionCause: j.ExecutionCause, CleanupCause: j.CleanupCause,
@@ -271,13 +275,11 @@ func compactStatusMachine(m *Machine) Machine {
 	c.EnvironmentBuildSeconds, c.EnvironmentBytes, c.ModelCopySeconds = nil, nil, nil
 	c.Environments, c.CachedModels, c.Models = nil, nil, nil
 	c.ModelApprovalStates = nil
-	c.CapabilityProfile = compactStatusProfile(c.CapabilityProfile)
 	c.Devices = slices.Clone(c.Devices)
 	for i := range c.Devices {
 		d := &c.Devices[i]
 		d.FaultEvidence = nil
 		d.ExtensionReports, d.Models, d.Releases, d.Attempts = nil, nil, nil, nil
-		d.CapabilityProfile = compactStatusProfile(d.CapabilityProfile)
 	}
 	if c.HostHealth != nil {
 		h := *c.HostHealth
@@ -304,12 +306,50 @@ func compactStatusCall(c *ModelCall) *Job {
 	return j
 }
 
-func compactStatusProfile(profile *CapabilityProfile) *CapabilityProfile {
-	if profile == nil {
-		return nil
+// compactInputs takes only the immutable records used to describe current
+// work and custody. Planning catalogs and retained observations are loaded
+// by detail reads, independently of the compact request budget.
+func (g *readGeneration) compactInputs(ctx context.Context) (state, error) {
+	allocation := projectionAllocation(ctx)
+	load := func(key string, record *readRecord) (any, error) {
+		if allocation != nil && !record.decoded.Load() {
+			group, _, _ := strings.Cut(key, "/")
+			if err := chargeReadRecord(allocation, group, record); err != nil {
+				return nil, err
+			}
+		}
+		return record.decode(key)
 	}
-	p := *profile
-	return &p
+	value, err := load("state", readGet(g.root, "state"))
+	if err != nil {
+		return state{}, err
+	}
+	s := *value.(*state)
+	s.Jobs = make(map[string]*Job)
+	s.Submissions = make(map[string]*submissionRecord)
+	readWalk(g.root, true, func(key string, record *readRecord) {
+		if err != nil {
+			return
+		}
+		if err = ctx.Err(); err != nil {
+			return
+		}
+		group, id, _ := strings.Cut(key, "/")
+		var value any
+		value, err = load(key, record)
+		if err != nil {
+			return
+		}
+		switch group {
+		case "jobs":
+			s.Jobs[id] = value.(*Job)
+		case "submissions":
+			// Removed jobs may still hold custody through keyed answers.
+			s.Submissions[id] = value.(*submissionRecord)
+		}
+	})
+	resolveReadSubmissionJobs(&s)
+	return s, err
 }
 
 // A summary reads live work, not the full-history materialization or

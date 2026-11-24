@@ -555,17 +555,14 @@ func (q *Queue) unpublishedRecords() bool {
 // Concurrent readers share that assembly and the unchanged records' decoders.
 // It never shares a mutable diagnostic planner or a projected response.
 type readGeneration struct {
-	root       *readNode
-	once       sync.Once
-	liveOnce   sync.Once
-	liveState  state
-	liveErr    error
-	memoryOnce sync.Once
-	memory     map[string]*externalMemoryRing
-	memoryErr  error
-	state      state
-	records    *queueRecords
-	err        error
+	root      *readNode
+	once      sync.Once
+	liveOnce  sync.Once
+	liveState state
+	liveErr   error
+	state     state
+	records   *queueRecords
+	err       error
 }
 
 // controlState reads the committed state without decoding the appended claim
@@ -818,35 +815,6 @@ func (g *readGeneration) nativeCheckInputs(ctx context.Context, s state) (state,
 // The compact status view: live inputs plus per-host external memory rings,
 // which maintenance diagnostics read. Both are bounded by fleet size and
 // current work, not retained history.
-func (g *readGeneration) statusInputs(ctx context.Context) (state, error) {
-	s, err := g.liveInputs(ctx)
-	if err != nil {
-		return state{}, err
-	}
-	if err := g.chargeDecodeGroup(ctx, "external_memory"); err != nil {
-		return state{}, err
-	}
-	g.memoryOnce.Do(func() {
-		g.memory = map[string]*externalMemoryRing{}
-		readWalkPrefix(g.root, "external_memory/", func(key string, record *readRecord) {
-			if g.memoryErr != nil {
-				return
-			}
-			value, err := record.decode(key)
-			if err != nil {
-				g.memoryErr = err
-				return
-			}
-			g.memory[strings.TrimPrefix(key, "external_memory/")] = value.(*externalMemoryRing)
-		})
-	})
-	if g.memoryErr != nil {
-		return state{}, g.memoryErr
-	}
-	s.ExternalMemory = g.memory
-	return s, ctx.Err()
-}
-
 // job decodes one committed job record, charging only that record.
 func (g *readGeneration) job(ctx context.Context, id string) (*Job, error) {
 	record := readGet(g.root, "jobs/"+id)
@@ -1003,7 +971,7 @@ func (capture *committedReadCapture) statusContactInputs(q *Queue, at time.Time)
 // statusQueue materializes only what the compact status view reads.
 func (capture *committedReadCapture) statusQueue(ctx context.Context, readAt time.Time, live *Queue) (*Queue, error) {
 	return capture.detachedQueue(ctx, readAt, live, func(g *readGeneration) (state, *queueRecords, error) {
-		s, err := g.statusInputs(ctx)
+		s, err := g.compactInputs(ctx)
 		if err != nil {
 			return state{}, nil, err
 		}
@@ -1191,24 +1159,6 @@ func (g *readGeneration) chargeDecode(ctx context.Context, live bool, selected s
 	} else {
 		readWalk(g.root, false, charge)
 	}
-	if failure != nil {
-		return failure
-	}
-	return ctx.Err()
-}
-
-// chargeDecodeGroup charges the cold decode of one record group only.
-func (g *readGeneration) chargeDecodeGroup(ctx context.Context, group string) error {
-	allocation := projectionAllocation(ctx)
-	if allocation == nil {
-		return ctx.Err()
-	}
-	var failure error
-	readWalkPrefix(g.root, group+"/", func(_ string, r *readRecord) {
-		if failure == nil && !r.decoded.Load() {
-			failure = chargeReadRecord(allocation, group, r)
-		}
-	})
 	if failure != nil {
 		return failure
 	}

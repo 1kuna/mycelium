@@ -165,10 +165,24 @@ func TestStatusCompactRetainedEvidence(t *testing.T) {
 	// immutable retained generation just to omit it again at encoding time.
 	q, c := fixture(t)
 	j := submit(t, q, spec("experiment"))
+	const workKey = "work_observations/cold-status-curve"
+	if err := q.update(func() error {
+		q.touchCatalog(workKey)
+		q.s.WorkObservations = map[string]WorkObservation{
+			"cold-status-curve": {Job: j.ID, RecordedAt: c.Now(), Samples: 3},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	before := q.readGeneration
+	record := readGet(before.root, workKey)
+	if record == nil || record.decoded.Load() {
+		t.Fatal("fixture must publish a cold diagnostic record")
+	}
 	_ = readStatusOptions(t, q, "")
-	if before.state.Jobs != nil {
-		t.Fatal("default materialized full retained generation")
+	if before.state.Jobs != nil || before.liveState.Jobs != nil || record.decoded.Load() {
+		t.Fatal("default materialized retained jobs or diagnostic planning inputs")
 	}
 	q.statusCache.data = ""
 	if err := q.update(func() error {
