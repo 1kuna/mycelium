@@ -20,6 +20,15 @@ import (
 // helpers must never stop the owning suite's observer. Exact executable custody
 // excludes installed observers and other concurrently running suites.
 func stopCLIObserverFixtures(root string) error {
+	if runtime.GOOS == "linux" {
+		// The worker can expose TMPDIR through a short symlink, but /proc/PID/exe
+		// reports the resolved executable. Compare against the same spelling.
+		resolved, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			return fmt.Errorf("resolve observer fixture root: %w", err)
+		}
+		root = resolved
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 	defer cancel()
 	type identity struct{ executable, birth string }
@@ -109,15 +118,6 @@ func stopCLIObserverFixtures(root string) error {
 	return nil
 }
 
-func observerProcessState(ctx context.Context, pid int) (string, error) {
-	state, err := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "stat=").Output()
-	var exited *exec.ExitError
-	if errors.As(err, &exited) && exited.ExitCode() == 1 && len(state) == 0 && len(exited.Stderr) == 0 {
-		return "", nil
-	}
-	return strings.TrimSpace(string(state)), err
-}
-
 // Registration retirement and an unlocked observer.lock happen before the
 // final status/supervisor writes. Only process exit permits fixture removal.
 func waitCLIObserverFixture(t *testing.T, ctx context.Context, registry string) {
@@ -159,12 +159,16 @@ func waitCLIObserverFixture(t *testing.T, ctx context.Context, registry string) 
 			return false
 		}
 		for pid := range seen {
-			state, err := observerProcessState(ctx, pid)
-			states[pid] = state
+			state, err := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "stat=").Output()
+			states[pid] = strings.TrimSpace(string(state))
 			if err != nil {
+				var exited *exec.ExitError
+				if errors.As(err, &exited) && exited.ExitCode() == 1 && len(state) == 0 && len(exited.Stderr) == 0 {
+					continue
+				}
 				t.Fatal(err)
 			}
-			if state != "" && !strings.HasPrefix(state, "Z") {
+			if status := strings.TrimSpace(string(state)); status != "" && !strings.HasPrefix(status, "Z") {
 				return false
 			}
 		}
