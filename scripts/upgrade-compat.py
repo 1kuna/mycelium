@@ -24,6 +24,7 @@ PREVIOUS = "7f10215c8bcdcb2a97c7be45c7f1fd041ccd1bc3"
 OLD_VERSION = "v3.1.0-rc.20261114.s076r6.19"
 VERSION = "v3.1.0-rc.20261115.s076r6.20"
 FIXTURE = REPO / "scripts/testdata/upgrade_compat_test.go.txt"
+FIXTURE_SUPPORT = "queue_state_fixture_test.go"
 # Top-level source the build needs; `skills` is the consumer skill embedded in
 # cmd/myce since #1474. Releases without it simply have no such directory.
 SOURCE = ("go.mod", "go.sum", "internal", "cmd", "skills")
@@ -124,7 +125,8 @@ def binaries(source, identity, version, scratch, fixture=FIXTURE, build_cli=True
             else:
                 shutil.copy2(src, tree / name)
     for path in (tree / "internal/myce").glob("*_test.go"):
-        path.unlink()
+        if path.name != FIXTURE_SUPPORT:
+            path.unlink()
     shutil.copy2(fixture, tree / "internal/myce/upgrade_compat_test.go")
     flags = f"-X mycelium/internal/myce.BuildVersion={version} -X mycelium/internal/myce.BuildCommit={identity}"
     command(["go", "test", "-c", "-race", "-vet=off", "-ldflags", flags,
@@ -147,7 +149,7 @@ def candidate_identity(source):
     for name in ("internal", "cmd", "skills"):
         files.extend(sorted((source / name).rglob("*")))
     for path in files:
-        if path.is_file() and not path.name.endswith("_test.go"):
+        if path.is_file() and (not path.name.endswith("_test.go") or path.name == FIXTURE_SUPPORT):
             digest.update(str(path.relative_to(source)).encode())
             digest.update(path.read_bytes())
     return digest.hexdigest()
