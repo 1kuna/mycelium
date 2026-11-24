@@ -761,16 +761,19 @@ func TestModelSnapshotPinCleanupPrecedesAttemptRetirement(t *testing.T) {
 	if err := os.WriteFile(block, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	s.state.Result = &Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: true}
+	s.state.Result = &Result{Machine: w.Machine.ID, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: true}
 	if err := s.save(); err != nil {
 		t.Fatal(err)
 	}
 	a := &attemptSupervisor{store: s, job: j, worker: w, connected: true, wake: make(chan struct{}, 1), done: make(chan struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	go a.run(ctx)
+	defer func() { cancel(); <-a.done }()
 	await(t, func() bool {
-		_, d, _, _ := a.snapshot()
+		_, d, finished, err := a.snapshot()
+		if finished {
+			t.Fatalf("attempt finished before cache pin cleanup: %v", err)
+		}
 		return strings.Contains(d.FileTransferError, "cache pin cleanup pending")
 	})
 	data, err := os.ReadFile(filepath.Join(s.dir, s.stateName))
@@ -788,6 +791,9 @@ func TestModelSnapshotPinCleanupPrecedesAttemptRetirement(t *testing.T) {
 	case <-a.done:
 	case <-time.After(testWaitTimeout):
 		t.Fatal("unpin did not retry")
+	}
+	if _, _, _, err := a.snapshot(); err != nil {
+		t.Fatal("attempt failed after unpin", err)
 	}
 	data, err = os.ReadFile(filepath.Join(s.dir, s.stateName))
 	if err != nil {

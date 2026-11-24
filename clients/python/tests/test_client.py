@@ -798,9 +798,13 @@ entries:
                                          check=False, myce=myce)
             self.assertEqual((unchecked.exit_code, unchecked.files), (7, {}))
 
+            # Noninteractive launchers can inherit SIGINT ignored. Model a
+            # foreground Python caller while exercising the real signal.
+            previous_int = signal.signal(signal.SIGINT, signal.default_int_handler)
+            self.addCleanup(signal.signal, signal.SIGINT, previous_int)
             for signum in (signal.SIGTERM, signal.SIGINT):
                 with self.subTest(signal=signum):
-                    previous = signal.getsignal(signal.SIGTERM)
+                    previous = signal.getsignal(signum)
                     def interrupted_wait(job_id, **kwargs):
                         os.kill(os.getpid(), signum)
                         self.fail("signal did not interrupt wait")
@@ -814,7 +818,7 @@ entries:
                     self.assertIn(detached.job_id, str(detached))
                     self.assertIn("same key=", str(detached))
                     self.assertIn("myce cancel", str(detached))
-                    self.assertEqual(signal.getsignal(signal.SIGTERM), previous)
+                    self.assertEqual(signal.getsignal(signum), previous)
                     job = client.get(detached.job_id)
                     self.assertIn(job["state"], ("queued", "running"))
                     self.assertIsNone(job.get("cancelled_at"))

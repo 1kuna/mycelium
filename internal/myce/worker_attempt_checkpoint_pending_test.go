@@ -43,30 +43,27 @@ func TestAttemptPendingCheckpointScanDoesNotFenceHost(t *testing.T) {
 			t.Fatal("scan did not exceed heartbeat wait", err)
 		}
 		ctx, cancel := context.WithCancel(context.Background())
-		s.state.Result = &Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
+		s.state.Result = &Result{Machine: w.Machine.ID, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 		a := &attemptSupervisor{store: s, job: j, worker: w, wake: make(chan struct{}, 1), done: make(chan struct{})}
 		go a.run(ctx)
 		defer func() { cancel(); <-a.done }()
 		// Keep the finalizing actor disconnected; no command or queue is
 		// needed to reproduce this diagnostic.
-		for {
-			report, diagnostic, _, _ := a.snapshot()
-			if report.ID == j.ID {
-				if diagnostic.CheckpointUnavailable {
-					t.Fatal("pending attempt scan marked the entire host unavailable")
-				}
-				break
-			}
-			time.Sleep(time.Millisecond)
+		synctest.Wait()
+		report, diagnostic, finished, err := a.snapshot()
+		if err != nil || finished || report.ID != j.ID {
+			t.Fatalf("finalizing attempt did not report: %+v, finished=%t, err=%v", report, finished, err)
+		}
+		if diagnostic.CheckpointUnavailable {
+			t.Fatal("pending attempt scan marked the entire host unavailable")
 		}
 		// A completed scan error remains a real availability failure.
 		release <- errors.New("checkpoint read failed")
-		for {
-			_, diagnostic, _, _ := a.snapshot()
-			if diagnostic.CheckpointUnavailable {
-				break
-			}
-			time.Sleep(time.Millisecond)
+		synctest.Wait()
+		time.Sleep(w.Interval)
+		synctest.Wait()
+		if _, diagnostic, _, err := a.snapshot(); err != nil || !diagnostic.CheckpointUnavailable {
+			t.Fatalf("completed checkpoint scan error did not report unavailability: %v", err)
 		}
 	})
 }

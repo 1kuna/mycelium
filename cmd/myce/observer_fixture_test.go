@@ -109,6 +109,15 @@ func stopCLIObserverFixtures(root string) error {
 	return nil
 }
 
+func observerProcessState(ctx context.Context, pid int) (string, error) {
+	state, err := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "stat=").Output()
+	var exited *exec.ExitError
+	if errors.As(err, &exited) && exited.ExitCode() == 1 && len(state) == 0 && len(exited.Stderr) == 0 {
+		return "", nil
+	}
+	return strings.TrimSpace(string(state)), err
+}
+
 // Registration retirement and an unlocked observer.lock happen before the
 // final status/supervisor writes. Only process exit permits fixture removal.
 func waitCLIObserverFixture(t *testing.T, ctx context.Context, registry string) {
@@ -150,16 +159,12 @@ func waitCLIObserverFixture(t *testing.T, ctx context.Context, registry string) 
 			return false
 		}
 		for pid := range seen {
-			state, err := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "stat=").Output()
-			states[pid] = strings.TrimSpace(string(state))
+			state, err := observerProcessState(ctx, pid)
+			states[pid] = state
 			if err != nil {
-				var exited *exec.ExitError
-				if errors.As(err, &exited) && exited.ExitCode() == 1 && len(state) == 0 && len(exited.Stderr) == 0 {
-					continue
-				}
 				t.Fatal(err)
 			}
-			if status := strings.TrimSpace(string(state)); status != "" && !strings.HasPrefix(status, "Z") {
+			if state != "" && !strings.HasPrefix(state, "Z") {
 				return false
 			}
 		}
