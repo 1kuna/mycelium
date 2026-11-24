@@ -93,8 +93,15 @@ sys.exit(r.route(json.loads(sys.argv[2]), ['-P42', '-s11']))
     def test_native_journal_metadata_contains_no_payload_fields(self):
         with patch.object(router.socket, 'socket') as socket, patch.object(router.time, 'time_ns', return_value=123000):
             router.suppression_evidence(42, '11', self.group, 'attempt-' + self.identity)
-        message = socket.return_value.__enter__.return_value.send.call_args.args[0].decode()
-        fields = dict(line.split('=', 1) for line in message.splitlines())
+        socket.assert_called_once_with(router.socket.AF_UNIX, router.socket.SOCK_DGRAM)
+        sink = socket.return_value.__enter__.return_value
+        sink.connect.assert_called_once_with('/run/systemd/journal/socket')
+        sink.send.assert_called_once()
+        message = sink.send.call_args.args[0].decode()
+        # journald only parses newline-terminated fields in a native datagram.
+        lines, unterminated = message.rsplit('\n', 1)
+        self.assertEqual(unterminated, '')
+        fields = dict(line.split('=', 1) for line in lines.split('\n'))
         self.assertEqual(fields, {'SYSLOG_IDENTIFIER': 'myce-core-router', 'MESSAGE': 'Ephemeral core discarded unread',
                                  'COREDUMP_PID': '42', 'COREDUMP_SIGNAL': '11', 'COREDUMP_TIMESTAMP': '123',
                                  'COREDUMP_CGROUP': self.group, 'MYCE_ATTEMPT': 'attempt-' + self.identity,
