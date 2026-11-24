@@ -492,18 +492,31 @@ def downgrade(previous, candidate, scratch, tools):
         config_path = Path(config)
         saved_bytes = config_path.read_bytes()
         saved = json.loads(saved_bytes)
-        # This synthetic install has a unit file but no registered manager
-        # unit. Exercise the old CLI's saved-config path without systemd.
-        unit = Path(saved["service"])
-        if not unit.resolve().is_relative_to(install_root.resolve()):
-            raise RuntimeError("fixture service escaped its install root")
-        with tempfile.TemporaryDirectory(prefix="inactive-unit-", dir=install_root) as tmp:
-            inactive = Path(tmp) / unit.name
-            unit.rename(inactive)
-            try:
-                command(install_command, env=env, timeout=30)
-            finally:
-                inactive.rename(unit)
+        # The generated unit belongs to a synthetic manager. Give the
+        # previous CLI the same inactive service view for plan and preflight.
+        manager_dir = install_root / "fixture-manager"
+        manager_dir.mkdir()
+        systemctl = manager_dir / "systemctl"
+        systemctl.write_text(r'''#!/bin/sh
+case "$*" in
+    "--user show $UPGRADE_FIXTURE_UNIT")
+        printf 'FragmentPath=%s\nActiveState=inactive\nSlice=%s\nOOMScoreAdjust=0\n' \
+            "$UPGRADE_FIXTURE_SERVICE" "$UPGRADE_FIXTURE_SLICE"
+        ;;
+    "--user show "*" --property=UnitFileState --value"|"--user show "*" --property=DropInPaths --value") ;;
+    "--user is-active --quiet "*) exit 3 ;;
+    *) exit 1 ;;
+esac
+''')
+        launchctl = manager_dir / "launchctl"
+        launchctl.write_text('#!/bin/sh\n[ "$1" = print ] && exit 113\nexit 1\n')
+        for manager in (systemctl, launchctl):
+            manager.chmod(0o700)
+        service = Path(saved["service"])
+        env.update(PATH=str(manager_dir) + os.pathsep + env["PATH"],
+                   UPGRADE_FIXTURE_SERVICE=str(service), UPGRADE_FIXTURE_UNIT=service.name,
+                   UPGRADE_FIXTURE_SLICE=saved.get("slice") or "myce.slice")
+        command(install_command, env=env, timeout=30)
         restored = json.loads(config_path.read_bytes())
         for field in ("environment_cache_bytes", "file_retention", "log_retention"):
             assert restored[field] == saved[field], f"downgrade changed {field}"
