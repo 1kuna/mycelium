@@ -79,6 +79,23 @@ type custodianControl struct {
 	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
 }
 
+func attemptControl(dir, id string, key attemptKey) (custodianControl, bool) {
+	expected := custodianControl{ID: id, Execution: Execution{ID: key.job, Attempt: key.attempt}, Session: key.session}
+	var saved custodianControl
+	if readCustodianJSON(dir, custodianName(id, "control"), &saved) == nil && saved.ID == id && saved.Execution == expected.Execution && saved.Session == key.session {
+		return saved, true
+	}
+	return expected, false
+}
+
+func (c *custodianControl) requestStop(deadline time.Time, kill, userCancel bool, priority *PriorityPreemption) {
+	if c.StopAt == nil || deadline.Before(*c.StopAt) {
+		c.StopAt = &deadline
+	}
+	c.Kill, c.UserCancel = c.Kill || kill, c.UserCancel || userCancel
+	c.PriorityStop = priority
+}
+
 type attemptCustodian struct {
 	dir, id      string
 	mu           sync.Mutex
@@ -219,25 +236,20 @@ func persistUnadoptedCustodianStop(s *workerStore, j Job, d AttemptDirective, no
 	if !d.Stop || s.state.Custodian == "" {
 		return nil
 	}
-	id := s.state.Custodian
-	control := custodianControl{ID: id, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session}
-	var previous custodianControl
-	if readCustodianJSON(custodianDir(s.dir), custodianName(id, "control"), &previous) == nil && previous.ID == id && previous.Execution == control.Execution && previous.Session == j.Session {
-		control = previous
-	}
+	dir, id := custodianDir(s.dir), s.state.Custodian
+	control, _ := attemptControl(dir, id, jobKey(j))
 	deadline := now.Add(time.Duration(max(0, d.GraceSeconds) * float64(time.Second)))
-	if control.StopAt == nil || deadline.Before(*control.StopAt) {
-		control.StopAt = &deadline
-	}
-	control.Kill = control.Kill || d.Kill
-	control.UserCancel = control.UserCancel || d.UserCancel
-	control.PriorityStop = d.PriorityStop
-	return saveWorkerJSON(custodianDir(s.dir), custodianName(id, "control"), control)
+	control.requestStop(deadline, d.Kill, d.UserCancel, d.PriorityStop)
+	return saveWorkerJSON(dir, custodianName(id, "control"), control)
 }
 
 func (w Worker) adoptCustodian(s *workerStore) (*process, error) {
 	id := s.state.Custodian
-	if !validCustodianID(id) || s.state.Job == nil || !attemptRecordFor(s.state.Job, s.state.Job.Machine).ownsState(s.state) {
+	if !validCustodianID(id) || s.state.Job == nil {
+		return nil, errors.New("invalid detached attempt custody")
+	}
+	a := attemptRecordFor(s.state.Job, s.state.Job.Machine)
+	if !a.ownsState(s.state) {
 		return nil, errors.New("invalid detached attempt custody")
 	}
 	g := &attemptCustodian{dir: custodianDir(s.dir), id: id}
@@ -249,14 +261,25 @@ func (w Worker) adoptCustodian(s *workerStore) (*process, error) {
 			return nil, fmt.Errorf("detached attempt recovery unconfirmed; custody retained: %w", err)
 		}
 	}
+	if s.state.Result != nil {
+		v := g.snapshot()
+		if !v.Finished || !a.ownsResult(s.state.Result) || v.State.Identity != s.state.Identity {
+			return nil, errors.New("saved publication conflicts with detached custody")
+		}
+		// The parent owns delivery once it records the exact exit. Its saved
+		// offsets and publication result are newer than the helper snapshot.
+		// Upgrading a pending release still requires the durable cleanup receipt.
+		if v.State.Result.ReleasePending && !s.state.Result.ReleasePending {
+			r, err := s.resultReceipt(a)
+			if err != nil || !a.readyToRelease(r, false) {
+				return nil, fmt.Errorf("detached cleanup receipt unconfirmed: %w", errors.Join(errWorkerReleasePending, err))
+			}
+		}
+		return nil, nil
+	}
 	g.updateStore(s)
 	p := &process{job: *s.state.Job, custodian: g, done: make(chan workerFinish, 1), savePriorityStop: s.priorityStopRecorder()}
-	g.control = custodianControl{ID: id, Execution: Execution{ID: p.job.ID, Attempt: p.job.Attempt}, Session: p.job.Session}
-	var control custodianControl
-	if readCustodianJSON(g.dir, custodianName(id, "control"), &control) == nil && control.ID == id && control.Execution == g.control.Execution && control.Session == g.control.Session {
-		g.control = control
-		g.controlSaved = true
-	}
+	g.control, g.controlSaved = attemptControl(g.dir, id, jobKey(p.job))
 	// Use the same proxy after launch and restart. Reading a result always checks
 	// its original attempt/session; a live PID is never inferred from its number.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -402,13 +425,7 @@ func (g *attemptCustodian) stopLocked(p *process, now time.Time, grace time.Dura
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	previous := g.control
-	deadline := now.Add(grace)
-	if g.control.StopAt == nil || deadline.Before(*g.control.StopAt) {
-		g.control.StopAt = &deadline
-	}
-	g.control.Kill = g.control.Kill || kill
-	g.control.UserCancel = g.control.UserCancel || p.userCancel
-	g.control.PriorityStop = p.priorityStop
+	g.control.requestStop(now.Add(grace), kill, p.userCancel, p.priorityStop)
 	// Failed persistence retains stop intent for the next control-loop retry.
 	if g.controlSaved && reflect.DeepEqual(previous, g.control) {
 		return
@@ -611,15 +628,14 @@ func (w Worker) runCustodian(stop context.Context) error {
 	var mu sync.Mutex
 	var running *process
 	controlDone := make(chan struct{})
+	key := jobKey(*req.State.Job) // Preparation can update the job while control watches.
 	go func() {
 		defer close(controlDone)
 		tick := time.NewTicker(10 * time.Millisecond) // Existing process-control cadence.
 		defer tick.Stop()
 		for {
-			var c custodianControl
-			e := readCustodianJSON(dir, custodianName(id, "control"), &c)
-			valid := e == nil && c.ID == id && c.Execution.ID == req.State.Job.ID && c.Execution.Attempt == req.State.Job.Attempt && c.Session == req.State.Session
-			if valid && c.StopAt != nil || stop.Err() != nil {
+			c, _ := attemptControl(dir, id, key)
+			if c.StopAt != nil || stop.Err() != nil {
 				cancelPreparation()
 			}
 			mu.Lock()
@@ -627,7 +643,7 @@ func (w Worker) runCustodian(stop context.Context) error {
 			mu.Unlock()
 			if p != nil {
 				now := w.Clock.Now()
-				if valid && c.StopAt != nil && p.recordPriorityStop(nil, c.PriorityStop) == nil {
+				if c.StopAt != nil && p.recordPriorityStop(nil, c.PriorityStop) == nil {
 					p.stopDirective(now, max(0, c.StopAt.Sub(now)), c.Kill, c.UserCancel)
 				}
 				if stop.Err() != nil {

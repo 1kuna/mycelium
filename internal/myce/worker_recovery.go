@@ -256,6 +256,27 @@ func (a attemptRecord) ownsResult(r *Result) bool {
 	return a.key.job != "" && r != nil && r.ID == a.key.job && r.Attempt == a.key.attempt && r.Session == a.key.session && r.Machine == a.machine
 }
 
+func (a attemptRecord) readyToRelease(r *Result, processOwned bool) bool {
+	return !processOwned && a.ownsResult(r) && !r.ReleasePending
+}
+
+// The command receipt is read before the spool on recovery. Commit release
+// there first so a restart cannot replace confirmed cleanup with old evidence.
+func (s *workerStore) recordLocalRelease(a attemptRecord) error {
+	if !a.ownsResult(s.state.Result) {
+		return errors.New("cannot release a mismatched attempt result")
+	}
+	r := operatorOutcome(*s.state.Result, s.state.OperatorStopped)
+	r.ReleasePending = false
+	if s.state.Identity != "" {
+		if err := saveWorkerJSON(s.dir, s.state.Identity+".result.json", r); err != nil {
+			return err
+		}
+	}
+	s.state.Result, s.state.PID, s.state.InputWriterPending = &r, 0, false
+	return nil
+}
+
 func (s workerState) hasProcessCustody() bool {
 	return s.PID != 0 || s.Birth != "" || s.CustodyID != "" || s.LaunchPending || len(s.Groups) > 0 || s.Preparation != "" || s.Cgroup != ""
 }
@@ -266,33 +287,54 @@ func custodianUnstarted(s workerState) bool {
 
 // Results from a different execution must never be adopted from a spool file.
 func (s *workerStore) matchesResult(r Result, machine string) bool {
-	a := attemptRecordFor(s.state.Job, machine)
+	a := s.savedResultRecord(machine)
 	return s.state.Session == a.key.session && a.ownsResult(&r)
 }
 
+func (s *workerStore) savedResultRecord(machine string) attemptRecord {
+	a := attemptRecordFor(s.state.Job, machine)
+	// Retained native reconciliation records may carry the session only on
+	// the spool. When both fields are present they must agree.
+	if a.key.session == "" {
+		a.key.session = s.state.Session
+	}
+	return a
+}
+
 func (s *workerStore) recoverResult(machine string) error {
+	a := s.savedResultRecord(machine)
+	if s.state.Job == nil || s.state.Session != a.key.session {
+		return errors.New("mismatched saved worker assignment")
+	}
 	if s.state.Result != nil && !s.matchesResult(*s.state.Result, machine) {
 		return errors.New("mismatched saved worker result")
 	}
+	r, err := s.resultReceipt(a)
+	if r != nil {
+		s.state.Result = r
+	}
+	return err
+}
+
+func (s *workerStore) resultReceipt(a attemptRecord) (*Result, error) {
 	if s.state.Identity == "" {
-		return nil
+		return nil, nil
 	}
 	var r Result
 	data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".result.json"))
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err = decodeWorkerJSON(data, &r); err != nil {
-		return err
+		return nil, err
 	}
-	if !s.matchesResult(r, machine) {
-		return errors.New("mismatched recovered worker result")
+	if !a.ownsResult(&r) {
+		return nil, errors.New("mismatched recovered worker result")
 	}
-	s.state.Result = &r
-	return nil
+	return &r, nil
 }
 
 // Event delivery must persist intent without racing the attempt actor's state.
