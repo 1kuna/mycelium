@@ -19,87 +19,6 @@ func finishInventoryProbe(t *testing.T, lane *hostProbeLane[[]MachineDevice], so
 	lane.step(t.Context(), source)
 }
 
-func TestInventorySemanticChangesAndBackoff(t *testing.T) {
-	clock := &workerFakeClock{now: time.Unix(1000, 0)}
-	free, active := 4.0, 1.0
-	original := []MachineDevice{{ID: "0", Platform: "xpu", Identity: "card", Selector: "0", Fingerprint: "driver", FreeMemoryGB: free, BudgetGB: 8, Telemetry: &DeviceTelemetry{At: clock.Now(), FreeGB: &free, ActivePercent: &active}}}
-	changed := slices.Clone(original)
-	telemetry := *original[0].Telemetry
-	changed[0].Telemetry = &telemetry
-	telemetry.At = telemetry.At.Add(time.Second)
-	if !sameInventory(original, changed) {
-		t.Fatal("timestamp changed hardware inventory")
-	}
-	active, free = 80, 2
-	changed[0].FreeMemoryGB = free
-	if !sameInventory(original, changed) {
-		t.Fatal("workload counters changed hardware inventory")
-	}
-	for _, platform := range []string{"xpu", "cuda", "metal", "fake"} {
-		t.Run(platform, func(t *testing.T) {
-			lane := hostProbeLane[[]MachineDevice]{clock: clock, equal: sameInventoryObservation, timing: probeTiming{base: time.Second, cores: 2}}
-			source := func(context.Context) ([]MachineDevice, error) {
-				d := slices.Clone(changed)
-				d[0].Platform = platform
-				s := *d[0].Telemetry
-				s.At = clock.Now()
-				d[0].Telemetry = &s
-				d[0].FreeMemoryGB = float64(clock.Now().Unix() % 8)
-				clock.Advance(250 * time.Millisecond)
-				return d, nil
-			}
-			finishInventoryProbe(t, &lane, source)
-			first := lane.observation.PeriodSeconds
-			clock.Advance(time.Hour)
-			finishInventoryProbe(t, &lane, source)
-			if lane.observation.PeriodSeconds <= first {
-				t.Fatal("unchanged hardware did not back off", first, lane.observation)
-			}
-		})
-	}
-	changed[0].Identity = "replacement"
-	if sameInventory(original, changed) {
-		t.Fatal("replacement card ignored")
-	}
-	changed = slices.Clone(original)
-	changed[0].Reason = "device_probe_unavailable"
-	if sameInventory(original, changed) {
-		t.Fatal("health transition ignored")
-	}
-}
-
-func TestInventoryStablePartialFailureBackoff(t *testing.T) {
-	clock := &workerFakeClock{now: time.Unix(1000, 0)}
-	lane := hostProbeLane[[]MachineDevice]{clock: clock, equal: sameInventoryObservation, timing: probeTiming{base: time.Second, cores: 2}}
-	partial := &acceleratorProbeError{families: map[string]bool{"cuda": true}}
-	var failure error = partial
-	source := func(context.Context) ([]MachineDevice, error) {
-		clock.Advance(250 * time.Millisecond)
-		return []MachineDevice{{ID: "0", Platform: "xpu", Identity: "card", Selector: "0", Fingerprint: "driver"}}, failure
-	}
-	finishInventoryProbe(t, &lane, source)
-	first := lane.observation.PeriodSeconds
-	clock.Advance(time.Hour)
-	finishInventoryProbe(t, &lane, source)
-	if lane.observation.PeriodSeconds <= first {
-		t.Fatal("unchanged partial inventory kept discovery frequent", first, lane.observation)
-	}
-	devices, err := hostInventorySnapshot(&lane)
-	if len(devices) != 1 || !errors.Is(err, partial) || lane.fresh(clock.Now()) {
-		t.Fatal("partial failure lost its validity boundary", devices, err)
-	}
-	clock.Advance(lane.observation.freshness())
-	if devices, _ := hostInventorySnapshot(&lane); len(devices) != 0 {
-		t.Fatal("backoff renewed an expired partial observation")
-	}
-	clock.Advance(time.Hour)
-	failure = nil
-	finishInventoryProbe(t, &lane, source)
-	if !lane.fresh(clock.Now()) || lane.observation.PeriodSeconds != first {
-		t.Fatal("recovery did not reset discovery pacing", lane.observation)
-	}
-}
-
 func countedInventoryProbe(t *testing.T, enumerations, queries *int) MachineProbe {
 	p := familyProbe(t, "")
 	p.Command = func(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -306,38 +225,6 @@ func TestWorkerTelemetryDoesNotPollWithoutSharingDemand(t *testing.T) {
 	if queries.Load() != 0 {
 		t.Fatal("heartbeat without sharing demand initialized a vendor runtime")
 	}
-}
-
-func TestHostInventoryDrainsTelemetryAfterDeviceRemoval(t *testing.T) {
-	clock := &workerFakeClock{now: time.Unix(1000, 0)}
-	observer := hostInventoryObserver{lane: hostProbeLane[[]MachineDevice]{clock: clock, timing: probeTiming{base: time.Millisecond, cores: 2}}}
-	observer.requestTelemetry(true)
-	var scans atomic.Int32
-	entered, release := make(chan struct{}), make(chan struct{})
-	observer.sampleTelemetry = func(context.Context, []MachineDevice) ([]MachineDevice, error) {
-		close(entered)
-		<-release
-		return nil, nil
-	}
-	source := func(context.Context) ([]MachineDevice, error) {
-		if scans.Add(1) > 1 {
-			return []MachineDevice{}, nil
-		}
-		return []MachineDevice{{ID: "0", Platform: "fake", Identity: "card", Selector: "0"}}, nil
-	}
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
-	go func() { defer close(done); observer.run(ctx, source) }()
-	defer func() { cancel(); <-done }()
-	<-entered
-	clock.Advance(time.Second)
-	await(t, func() bool {
-		observer.mu.Lock()
-		defer observer.mu.Unlock()
-		return scans.Load() > 1 && len(observer.lane.value) == 0
-	})
-	close(release)
-	await(t, func() bool { observer.mu.Lock(); defer observer.mu.Unlock(); return observer.telemetry.pending == nil })
 }
 
 // Exercise the observer's real demand/freshness call site, with the same

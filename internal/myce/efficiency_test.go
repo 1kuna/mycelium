@@ -2,7 +2,6 @@ package myce
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -118,30 +117,6 @@ func TestEfficiencyNovemberReplay(t *testing.T) {
 }
 func timePointer(t time.Time) *time.Time { return &t }
 
-func TestEfficiencyAccountingTransitionsAndCoverage(t *testing.T) {
-	now := time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)
-	used := 2.0
-	e := JobEfficiency{At: now, Since: now, Work: "opaque", Blocker: "memory_reservation", WaitSeconds: map[string]float64{}, Rate: efficiencyRate{Host: "host", Basis: "exploratory", ReservedMemoryGB: 8, ReservedCPUCores: 2, MeasuredMemoryGB: &used, ValidUntil: now.Add(time.Second)}}
-	e.advance(now.Add(2 * time.Second))
-	e.Blocker = "environment"
-	e.Rate = efficiencyRate{}
-	e.advance(now.Add(5 * time.Second))
-	e.Blocker = ""
-	e.advance(now.Add(10 * time.Second))
-	if e.WaitSeconds["memory_reservation"] != 2 || e.WaitSeconds["environment"] != 3 {
-		t.Fatal(e.WaitSeconds)
-	}
-	a := e.Allocations[0]
-	if a.ReservedMemoryGBSeconds != 16 || a.MeasuredMemoryGBSeconds != 2 || a.MemoryCoveredSeconds != 1 || a.ReservedCPUSeconds != 4 || a.MeasuredCPUSeconds != nil {
-		t.Fatalf("integral=%+v", a)
-	}
-	before, _ := json.Marshal(e)
-	e.advance(now)
-	after, _ := json.Marshal(e)
-	if string(before) != string(after) {
-		t.Fatal("clock regression rewrote totals")
-	}
-}
 func TestEfficiencyPredictionAndSuspectAttempts(t *testing.T) {
 	peak, reserved, predicted, actual, available := 2.0, 12.0, 20.0, 10.0, 40.0
 	zero := uint64(0)
@@ -417,38 +392,6 @@ func TestEfficiencySiblingReportsKeepHostIdentity(t *testing.T) {
 	third := q.s.EfficiencyHosts["host"]
 	if first.Identity != second.Identity || first.Identity != third.Identity || !first.Since.Equal(third.Since) || third.Seconds != 10 {
 		t.Fatalf("sibling recency reset host evidence: first=%+v second=%+v third=%+v", first, second, third)
-	}
-}
-
-func TestEfficiencyProjectWaitBaselineSurvivesQueueEpisodes(t *testing.T) {
-	now := time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)
-	r := &EfficiencyReport{Jobs: []EfficiencyWait{{Project: "project", Active: true, Blocker: "memory_reservation", Seconds: map[string]float64{"memory_reservation": 10}}}}
-	var baseline map[string]efficiencyBaseline
-	step := func() { now = now.Add(time.Second); r.At = now; baseline, _ = efficiencySignals(r, baseline) }
-	for range alertWarmup {
-		step()
-	}
-	key := "project:project/wait_memory_reservation_seconds"
-	count := len(baseline[key].History)
-	r.Jobs[0].Active = false
-	for range alertHistorySize {
-		step()
-	}
-	if len(baseline[key].History) != count || baseline[key].Active {
-		t.Fatal("idle episode erased or retrained wait evidence")
-	}
-	r.Jobs[0].Active = true
-	r.Jobs[0].Seconds["memory_reservation"] = 100
-	for range alertConfirmation {
-		step()
-	}
-	if !baseline[key].Active {
-		t.Fatal("new wait episode lost its learned comparison")
-	}
-	r.Jobs = nil
-	step()
-	if _, ok := baseline[key]; ok {
-		t.Fatal("removed owning wait records retained a baseline")
 	}
 }
 

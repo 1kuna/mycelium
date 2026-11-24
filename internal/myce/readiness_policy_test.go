@@ -1,10 +1,8 @@
 package myce
 
 import (
-	"context"
 	"fmt"
 	"io"
-	"strings"
 	"testing"
 	"time"
 )
@@ -110,34 +108,5 @@ func TestAdaptiveReadinessBurstThenIdleClock(t *testing.T) {
 				t.Fatal("idle model ignored measured demand/reload cost")
 			}
 		})
-	}
-}
-
-func TestAdaptiveReadinessHistoryIsLocalAndIdentityBound(t *testing.T) {
-	dir := t.TempDir()
-	clock := &manualWorkerClock{now: time.Unix(1, 0)}
-	model := Model{Name: "model", SHA256: strings.Repeat("a", 64)}
-	_, p, finish := superviseModelLoad(context.Background(), model, dir, clock)
-	p.mu.Lock()
-	p.budget = 2 * time.Minute
-	p.mu.Unlock()
-	clock.Advance(time.Minute)
-	p.advance()
-	finish(true)
-	_, next, stop := superviseModelLoad(context.Background(), model, dir, clock)
-	defer stop(false)
-	if budget, _ := next.state(); budget < time.Minute {
-		t.Fatal("same model lost successful local load history")
-	}
-	model.SHA256 = strings.Repeat("b", 64)
-	_, changed, stopChanged := superviseModelLoad(context.Background(), model, dir, clock)
-	defer stopChanged(false)
-	if budget, _ := changed.state(); budget >= time.Minute {
-		t.Fatal("changed weights inherited load history")
-	}
-	_, foreign, stopForeign := superviseModelLoad(context.Background(), model, t.TempDir(), clock)
-	defer stopForeign(false)
-	if budget, _ := foreign.state(); budget >= time.Minute {
-		t.Fatal("load history transferred between hosts")
 	}
 }

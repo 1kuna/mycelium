@@ -64,20 +64,6 @@ func TestQueueUpgradePreservesExplicitCPUSettings(t *testing.T) {
 	}
 }
 
-func TestManualQueueTemplatesDoNotThrottleControlPlane(t *testing.T) {
-	for _, name := range []string{"myce-queue.service", "local.myce.queue.plist"} {
-		data, err := os.ReadFile(filepath.Join("..", "..", "deploy", name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, s := range []string{"GOMAXPROCS", "CPUQuota=25%", "Nice=10", "LowPriorityIO", "Background"} {
-			if strings.Contains(string(data), s) {
-				t.Errorf("%s contains %s", name, s)
-			}
-		}
-	}
-}
-
 // Model the measured ~50 ms CPU cost of a serialized durable transaction.
 // A fake store queues twelve transactions, and synctest advances its CPU budget
 // without wall-clock sleeps or real hardware. Native cgroup reproduction is

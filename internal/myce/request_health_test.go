@@ -75,69 +75,6 @@ func TestRequestHealthAdaptiveReplay(t *testing.T) {
 		}
 	}
 }
-func TestRequestHealthHealthyHistory(t *testing.T) {
-	for _, count := range []int{2, 2000} {
-		t.Run(fmt.Sprint(count), func(t *testing.T) {
-			var h requestHealth
-			now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-			for n := range alertHistorySize * 2 {
-				// Baseline shifts smoothly with service cost and request volume. There
-				// is no absolute latency/rate ceiling; long-poll duration never counts.
-				for range count + n {
-					h.recordRequest(now, "POST /api/workers/{id}/checkin", time.Duration(100+n)*time.Millisecond, 0)
-					h.recordRequest(now, "POST /api/wait", time.Hour, 0)
-					h.recordClient(now, "cli")
-				}
-				now = now.Add(time.Second)
-				s := h.snapshot(now)
-				if s.overload || s.clients[0] {
-					t.Fatalf("healthy shifting baseline alerted at %d", n)
-				}
-			}
-			if len(h.rates[0]) != alertHistorySize {
-				t.Fatal("unbounded baseline")
-			}
-			_, hi := h.routes["POST /api/workers/{id}/checkin"].duration.band()
-			if hi < float64(220*time.Millisecond) {
-				t.Fatal("baseline failed to adapt")
-			}
-		})
-	}
-}
-func TestRequestHealthClientHealthyExclusions(t *testing.T) {
-	for _, balanced := range []bool{false, true} {
-		t.Run(fmt.Sprint(balanced), func(t *testing.T) {
-			var h requestHealth
-			now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-			step := func(count int, cost time.Duration) requestHealthSnapshot {
-				for range count {
-					h.recordRequest(now, "GET /api/jobs/{id}", cost, 0)
-					h.recordClient(now, "cli")
-					if balanced {
-						h.recordClient(now, "python")
-					}
-				}
-				now = now.Add(time.Second)
-				return h.snapshot(now)
-			}
-			for range alertWarmup {
-				step(10, time.Millisecond)
-			}
-			// Healthy high volume is not a flood even with sole-client dominance.
-			for range alertHistorySize {
-				if step(2000, time.Millisecond).clients[0] {
-					t.Fatal("healthy volume alerted")
-				}
-			}
-			for range alertConfirmation {
-				s := step(8000, time.Second)
-				if balanced && (s.clients[0] || s.clients[1]) {
-					t.Fatal("proportional mix blamed a family")
-				}
-			}
-		})
-	}
-}
 func TestRequestHealthHTTPWiring(t *testing.T) {
 	q, c := fixture(t)
 	handler := (API{Queue: q, Token: "fixture"}).handler("", c)

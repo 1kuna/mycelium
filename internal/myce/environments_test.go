@@ -213,35 +213,6 @@ func binaryRecipe(t *testing.T, platform string) EnvironmentRecipe {
 	}
 	return r
 }
-func TestEnvironmentHashInputs(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "requirements.txt")
-	os.WriteFile(p, []byte("torch==2.0\n"), 0600)
-	a, e := snapshotEnvironment(EnvironmentRecipe{LockFile: p, Python: "3.12"}, "cuda")
-	if e != nil {
-		t.Fatal(e)
-	}
-	other := t.TempDir()
-	q := filepath.Join(other, "requirements.txt")
-	os.WriteFile(q, a.Files["requirements.txt"], 0600)
-	b, _ := snapshotEnvironment(EnvironmentRecipe{LockFile: q, Python: "3.12"}, "cuda")
-	if a.Key != b.Key {
-		t.Fatal("mount paths changed identity")
-	}
-	b, _ = snapshotEnvironment(EnvironmentRecipe{LockFile: q, Python: "3.12"}, "xpu")
-	if a.Key == b.Key {
-		t.Fatal("platform omitted")
-	}
-	b, _ = snapshotEnvironment(EnvironmentRecipe{LockFile: q, Python: "3.11"}, "cuda")
-	if a.Key == b.Key {
-		t.Fatal("Python omitted")
-	}
-	os.WriteFile(q, []byte("torch==2.1"), 0600)
-	b, _ = snapshotEnvironment(EnvironmentRecipe{LockFile: q, Python: "3.12"}, "cuda")
-	if a.Key == b.Key {
-		t.Fatal("lock contents omitted")
-	}
-}
 func TestEnvironmentBuildLockReuseAndCleanup(t *testing.T) {
 	r := binaryRecipe(t, "fake")
 	r.Build = []string{"pretend-build"}

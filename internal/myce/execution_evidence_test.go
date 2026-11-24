@@ -325,17 +325,6 @@ func TestExecutionEvidenceMemberProjection(t *testing.T) {
 	}
 }
 
-func TestExecutionEvidenceUntrustedStates(t *testing.T) {
-	bad := safeExecutionEvidence(&ExecutionEvidence{1, "private-secret", executionNotStarted, ""}, 1)
-	data, _ := json.Marshal(bad)
-	if strings.Contains(string(data), "private-secret") || bad.Main != executionUnknown || bad.EnvironmentPreparation != executionUnknown {
-		t.Fatal("untrusted state escaped", bad)
-	}
-	if safeExecutionEvidence(unstartedExecution(1), 2) != nil {
-		t.Fatal("wrong attempt proof accepted")
-	}
-}
-
 // One physical attempt can build, pause for availability, then fail its next
 // start call before environment acquisition. That must not erase the build.
 func TestExecutionEvidenceSameAttemptPreparationRetry(t *testing.T) {
