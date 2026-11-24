@@ -206,7 +206,7 @@ func (q *Queue) addPoolBackfillHeads(scan *placementScan, demands []*Job, live m
 			continue
 		}
 		capacity := q.qualificationCapacity(m)
-		capacity.FreeHostMemoryGB = q.poolAllowance(m)
+		capacity.FreeHostMemoryGB = q.sharedHostRoom(&capacity, q.poolAllowance(m), 0)
 		for _, j := range demands {
 			if !q.placementAllowed(j, m) || !q.preemptionPlacementAllows(j, m) || q.preemptionReleasesPending(j) || !q.checkpointReady(j, m) || q.environmentFailureBlocked(j, m) {
 				continue
@@ -248,7 +248,8 @@ func (q *Queue) poolBackfillFits(j *Job, m *Machine, head *hostBackfillDemand) b
 	if pool.Alone {
 		return false
 	}
-	budget := q.poolAllowance(m) - pool.ChargeGB
+	capacity := *m
+	budget := q.sharedHostRoom(&capacity, q.poolAllowance(m), 0) - pool.ChargeGB
 	ledger := q.hostMemoryLedgers[m.ID]
 	if ledger == nil {
 		return false

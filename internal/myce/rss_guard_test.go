@@ -80,6 +80,8 @@ func testRSSGuardStopsAttempt(t *testing.T, native bool) {
 	defer store.close()
 	j := recoveryJob(t, []string{"sleep", "60"})
 	j.Spec.Needs = ResourceNeeds{CPUCores: 1, HostMemoryGB: 1, Platform: Platform{Required: []string{"cpu"}}}
+	limit := 1.0
+	j.Spec.MemoryLimitGB = &limit
 	if native {
 		j.Spec.Run.MemoryGB = 0.5
 	}

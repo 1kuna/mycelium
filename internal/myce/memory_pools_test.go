@@ -386,3 +386,18 @@ func TestMemoryPoolMixedFleetKeepsRunningEnvelope(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMemoryPoolOverrunWithoutShortage(t *testing.T) {
+	q, _ := fixture(t)
+	m := sharedUnifiedMachine()
+	j := submit(t, q, sharedSpec("experiment", 17))
+	run := assignedJob(machineCheck(t, q, m))
+	if run == nil || run.ID != j.ID {
+		t.Fatal("single tenant not assigned")
+	}
+	if err := q.Started(result(run, false)); err != nil {
+		t.Fatal(err)
+	}
+	growthCheck(t, q, m, []*Job{run}, []float64{50}, 0)
+	requireState(t, q, run.ID, "running")
+}

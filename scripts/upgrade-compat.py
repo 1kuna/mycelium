@@ -276,7 +276,8 @@ def run(args):
             ("candidate queue + candidate worker", lambda: pairing("same-source suffix", candidate[0], candidate[0], scratch / "same", tools, large=True)),
             ("candidate queue + previous worker", lambda: pairing("previous worker", candidate[0], previous[0], scratch / "old-worker", tools)),
             ("previous queue + candidate worker", lambda: pairing("previous queue", previous[0], candidate[0], scratch / "previous-queue", tools, allow_additive_retry=True)),
-            ("previous worker completes current work", lambda: first_work(candidate[0], previous[0], scratch / "previous-work", tools)),
+            # Workers upgrade first. Previous workers can check in for custody,
+            # and the queue refuses to give them fresh assignments.
             ("current worker completes previous work", lambda: first_work(previous[0], candidate[0], scratch / "current-work", tools, allow_additive_retry=True)),
             ("saved config downgrade", lambda: downgrade(previous, candidate, scratch, tools)),
             ("worker + current/previous queue restarts", lambda: inventory_restarts(candidate, previous, scratch, tools)),

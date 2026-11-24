@@ -706,3 +706,20 @@ func submitMeasuredCardJob(t *testing.T, q *Queue, m Machine, spec Spec) *Job {
 	}
 	return submit(t, q, spec)
 }
+
+func growthCheck(t *testing.T, q *Queue, m Machine, runs []*Job, used []float64, age float64) Reply {
+	t.Helper()
+	c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol}
+	for i, j := range runs {
+		r := AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Started: true}
+		if i < len(used) {
+			r.CurrentHostMemory = &CurrentHostMemory{DeviceGB: &used[i], DeviceAgeSeconds: age}
+		}
+		c.Attempts = append(c.Attempts, r)
+	}
+	r, err := q.Checkin(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}

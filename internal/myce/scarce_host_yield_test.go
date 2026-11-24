@@ -171,7 +171,7 @@ func TestScarceHostYieldAdvisoryDoesNotMaskMemoryRelease(t *testing.T) {
 	if blocked.YieldPlan == nil || len(blocked.YieldPlan.Victims) != 0 {
 		t.Fatal("expected yield advice without a relocation", blocked.YieldPlan)
 	}
-	if blocked.Hold == nil || blocked.Hold.Kind != "host_memory_headroom" {
+	if blocked.Hold == nil || blocked.Hold.Kind != memoryWaitReason {
 		t.Errorf("current RAM blocker hidden: %+v", blocked.Hold)
 	}
 	if next := assignedJob(machineCheck(t, q, m, running)); next != nil {
