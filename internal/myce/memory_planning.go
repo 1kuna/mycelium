@@ -9,6 +9,11 @@ type memoryPlanningCache struct {
 	storageFamilies map[string][]StorageObservation
 	storagePrograms map[string]bool
 	hostObligations map[string][]HostObligation
+	startTargets    []*Machine
+	startHosts      map[*Job][]string
+	productionGaps  map[productionGapKey]string
+	leaseGaps       map[productionGapKey]productionLeaseGap
+	pooledSizes     map[pooledSizeKey]pooledCandidateSize
 }
 
 type memoryComponentKey struct {

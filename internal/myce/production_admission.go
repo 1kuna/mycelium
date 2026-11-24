@@ -72,6 +72,17 @@ func productionBackoffInterval(j *Job, m *Machine) time.Duration {
 	return interval
 }
 
+type productionGapKey struct {
+	host string
+	tier int
+}
+
+type productionLeaseGap struct {
+	reason  string
+	checked time.Time
+	expires time.Time
+}
+
 // #1299: lower-tier jobs preempted for a production stage were re-placed on the
 // same host in the seconds before the pipeline's next stage was placed, then
 // evicted again, churning memory while that stage prepared. A queued job that
@@ -85,8 +96,38 @@ func (q *Queue) productionGapReason(j *Job, m *Machine, host string) string {
 	if !preempted || b.LastAt.IsZero() || j.State != "queued" {
 		return ""
 	}
+	key := productionGapKey{host: host, tier: q.priorityMatch(j.Spec).Index}
+	if reason := q.pendingProductionGap(key); reason != "" {
+		return reason
+	}
+	if len(q.s.ProductionLeases) == 0 || !q.clock.Now().Before(b.LastAt.Add(productionBackoffInterval(j, m))) {
+		return ""
+	}
+	return q.pendingProductionLeaseGap(key)
+}
+
+func (q *Queue) pendingProductionGap(key productionGapKey) string {
+	// Only non-production candidates reach this query. With the same host
+	// and policy tier they see the same queued or preparing production work.
+	cache := q.memoryPlanning
+	if cache == nil {
+		return q.findPendingProductionGap(key)
+	}
+	if reason, ok := cache.productionGaps[key]; ok {
+		return reason
+	}
+	reason := q.findPendingProductionGap(key)
+	if cache.productionGaps == nil {
+		cache.productionGaps = map[productionGapKey]string{}
+	}
+	cache.productionGaps[key] = reason
+	return reason
+}
+
+func (q *Queue) findPendingProductionGap(key productionGapKey) string {
+	host := key.host
 	for _, d := range q.liveJobs() {
-		if d == j || d.Spec.Priority != "production" || cancelled(d) || !dependencyReady(d) || q.comparePriority(j.Spec, d.Spec) <= 0 {
+		if d.Spec.Priority != "production" || cancelled(d) || !dependencyReady(d) || key.tier <= q.priorityMatch(d.Spec).Index {
 			continue
 		}
 		// Assignment must not reopen the capacity this demand just paid to
@@ -106,17 +147,37 @@ func (q *Queue) productionGapReason(j *Job, m *Machine, host string) string {
 			return fmt.Sprintf("host %s: production stage %s pending after preemption; placing elsewhere", host, d.ID)
 		}
 	}
-	if !q.clock.Now().Before(b.LastAt.Add(productionBackoffInterval(j, m))) {
-		return ""
+	return ""
+}
+
+func (q *Queue) pendingProductionLeaseGap(key productionGapKey) string {
+	now := q.clock.Now()
+	cache := q.memoryPlanning
+	if cache == nil {
+		return q.findPendingProductionLeaseGap(key, now).reason
 	}
-	for _, l := range q.openProductionLeases() {
+	// Even during an immutable pass, a lease can expire. Recheck its cutoff
+	// before reusing a match, and recompute if the clock moved backward.
+	if gap, ok := cache.leaseGaps[key]; ok && !now.Before(gap.checked) && (gap.reason == "" || now.Before(gap.expires)) {
+		return gap.reason
+	}
+	gap := q.findPendingProductionLeaseGap(key, now)
+	if cache.leaseGaps == nil {
+		cache.leaseGaps = map[productionGapKey]productionLeaseGap{}
+	}
+	cache.leaseGaps[key] = gap
+	return gap.reason
+}
+
+func (q *Queue) findPendingProductionLeaseGap(key productionGapKey, now time.Time) productionLeaseGap {
+	for _, l := range q.openProductionLeasesAt(now) {
 		for _, stage := range l.stageJobs() {
-			if q.comparePriority(j.Spec, stage.Spec) > 0 && slices.Contains(q.startEligibleHosts(stage), host) {
-				return fmt.Sprintf("host %s: production lease %s pending after preemption; placing elsewhere", host, l.Key)
+			if key.tier > q.priorityMatch(stage.Spec).Index && slices.Contains(q.startEligibleHosts(stage), key.host) {
+				return productionLeaseGap{reason: fmt.Sprintf("host %s: production lease %s pending after preemption; placing elsewhere", key.host, l.Key), checked: now, expires: l.ExpiresAt}
 			}
 		}
 	}
-	return ""
+	return productionLeaseGap{checked: now}
 }
 
 // productionAdmissionHold is the per-target production admission check. The

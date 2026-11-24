@@ -138,7 +138,38 @@ func pooledEvidenceKeyForExtension(j *Job, m *Machine, extension *Extension) mem
 	return memoryEvidenceKey{Platform: memoryPlatform(target, m.UnifiedMemory), Pool: "ram", Family: memoryFamily(&identity), Exact: memoryEvidenceExact(key, configuration)}
 }
 
-func (q *Queue) pooledMemoryCandidate(j *Job, m *Machine) *Job {
+type pooledSizeKey struct {
+	job    *Job
+	target *Machine
+}
+
+type pooledCandidateSize struct {
+	pools   MemoryPools
+	card    memoryPoolEstimate
+	cardGB  float64
+	hasCard bool
+}
+
+func (q *Queue) pooledSize(j *Job, m *Machine) pooledCandidateSize {
+	cache := q.memoryPlanning
+	// Only the stored job is the same input each time. Lowered extensions
+	// and hypothetical jobs may have different needs under the same ID.
+	if cache == nil || q.s.Jobs[j.ID] != j {
+		return q.resolvePooledSize(j, m)
+	}
+	key := pooledSizeKey{job: j, target: m}
+	if size, ok := cache.pooledSizes[key]; ok {
+		return size
+	}
+	size := q.resolvePooledSize(j, m)
+	if cache.pooledSizes == nil {
+		cache.pooledSizes = map[pooledSizeKey]pooledCandidateSize{}
+	}
+	cache.pooledSizes[key] = size
+	return size
+}
+
+func (q *Queue) resolvePooledSize(j *Job, m *Machine) pooledCandidateSize {
 	n := j.Spec.Needs
 	key := pooledEvidenceKey(j, m)
 	hostHint, deviceHint := n.HostMemoryGB, n.MemoryGB
@@ -146,9 +177,6 @@ func (q *Queue) pooledMemoryCandidate(j *Job, m *Machine) *Job {
 	deviceHint = max(deviceHint, j.Spec.SizeHint.MemoryGB)
 	if !n.cpuOnly() && m.UnifiedMemory {
 		hostHint += deviceHint
-	}
-	if j.MemoryFallback == nil {
-		j.MemoryFallback = &SizeHint{HostMemoryGB: n.HostMemoryGB, MemoryGB: n.MemoryGB}
 	}
 	evidence := q.memoryEvidence
 	if evidence == nil {
@@ -180,17 +208,28 @@ func (q *Queue) pooledMemoryCandidate(j *Job, m *Machine) *Job {
 		pools.RAM.ChargeGB = min(pools.RAM.ChargeGB, pools.LimitGB)
 	}
 	fitPoolCharge(&pools.RAM, q.poolAllowance(m), evidence.exact[key].Lower)
-	n.MemoryGB = 0
+	size := pooledCandidateSize{pools: pools}
 	if !n.cpuOnly() && !m.UnifiedMemory {
 		key.Pool = "card"
 		count := max(1, len(m.groupMembers))
 		card := evidence.estimate(key, deviceHint/float64(count), confidence)
 		fitPoolCharge(&card, m.TotalMemoryGB/float64(count), evidence.exact[key].Lower)
-		pools.Card, n.MemoryGB = &card, card.ChargeGB*float64(count)
+		size.card, size.cardGB, size.hasCard = card, card.ChargeGB*float64(count), true
+	}
+	return size
+}
+
+func (q *Queue) applyPooledSize(j *Job, m *Machine, size pooledCandidateSize) *Job {
+	n, pools := j.Spec.Needs, size.pools
+	if j.MemoryFallback == nil {
+		j.MemoryFallback = &SizeHint{HostMemoryGB: n.HostMemoryGB, MemoryGB: n.MemoryGB}
+	}
+	if size.hasCard {
+		pools.Card = &size.card
 	}
 	// The adjacent planner carries a positive scalar RAM declaration. Pool
 	// accounting and the worker's cgroup use the resolved contract above.
-	n.HostMemoryGB = max(pools.RAM.ChargeGB, minimumHostMemoryGB)
+	n.HostMemoryGB, n.MemoryGB = max(pools.RAM.ChargeGB, minimumHostMemoryGB), size.cardGB
 	j.Memory, j.Spec.Needs = &pools, n
 	j.MemoryEnvelope = &JobMemoryEnvelope{Machine: m.ID, Device: m.Device, Basis: pooledMemoryCapability,
 		Source: "memory pool estimate", HostGB: pools.RAM.ChargeGB, DeviceGB: n.MemoryGB, LimitHostGB: pools.LimitGB}

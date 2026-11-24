@@ -168,6 +168,13 @@ func (q *Queue) maintainStartDeadlines() {
 		}
 		return status
 	}()
+	anyDisabled := false
+	for _, h := range q.s.HostMaintenance {
+		if h.Mode == "disabled" {
+			anyDisabled = true
+			break
+		}
+	}
 	for _, j := range q.liveJobs() {
 		faultWaiting := q.maintainDeviceFaultStartWait(j)
 		if status, ok := capacity[j]; ok && !faultWaiting {
@@ -187,7 +194,7 @@ func (q *Queue) maintainStartDeadlines() {
 		// relative timeout exemption for logical fan-out capacity waits.
 		pending := q.startupPending(j)
 		firstWave := j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next == 0
-		disabled := (pending || firstWave) && j.Spec.Priority == "production" && j.Spec.StartBy != nil && !cancelled(j) && dependencyReady(j) && j.State == "queued" && j.Attempt == 0 && q.allStartHostsDisabled(j)
+		disabled := anyDisabled && (pending || firstWave) && j.Spec.Priority == "production" && j.Spec.StartBy != nil && !cancelled(j) && dependencyReady(j) && j.State == "queued" && j.Attempt == 0 && q.allStartHostsDisabled(j)
 		executionExpired := false
 		if check := j.Spec.ExtensionCheck; check != nil && check.Timeout != "" && j.StartedAt != nil && !terminal(j.State) && !cancelled(j) {
 			timeout, _ := time.ParseDuration(check.Timeout) // validated at submission
@@ -302,6 +309,22 @@ func (q *Queue) allStartHostsDisabled(j *Job) bool {
 // startEligibleHosts lists the physical hosts whose policy and capacity could
 // start j, independent of maintenance mode and temporary availability.
 func (q *Queue) startEligibleHosts(j *Job) []string {
+	cache := q.memoryPlanning
+	if cache == nil || q.s.Jobs[j.ID] != j {
+		return q.findStartEligibleHosts(j)
+	}
+	if hosts, ok := cache.startHosts[j]; ok {
+		return hosts
+	}
+	hosts := q.findStartEligibleHosts(j)
+	if cache.startHosts == nil {
+		cache.startHosts = map[*Job][]string{}
+	}
+	cache.startHosts[j] = hosts
+	return hosts
+}
+
+func (q *Queue) findStartEligibleHosts(j *Job) []string {
 	if model, ok := q.model(j.Spec.Needs.Model); ok && j.Spec.Needs.MemoryGB == 0 {
 		copy := cloneJob(j)
 		copy.Spec.Needs.MemoryGB = model.MemoryGB
@@ -309,18 +332,15 @@ func (q *Queue) startEligibleHosts(j *Job) []string {
 		j = &copy
 	}
 	var hosts []string
-	for _, m := range q.plannerMachines() {
+	for _, m := range q.startEligibilityTargets() {
 		if !q.projectAllows(j.Spec.Project, m.ID) || !j.Spec.allowsMachine(m.ID) || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU) {
 			continue
 		}
-		capacity := *m
-		capacity.Gone, capacity.Leaving, capacity.CheckpointUnavailable = false, false, false
-		capacity.MemoryError = ""
 		memory := m.TotalMemoryGB
 		if memory == 0 {
 			memory = j.Spec.Needs.MemoryGB
 		}
-		if !fitsWithoutHostMemory(j, &capacity, memory) {
+		if !fitsWithoutHostMemory(j, m, memory) {
 			continue
 		}
 		if host := hostID(m); !slices.Contains(hosts, host) {
@@ -328,6 +348,24 @@ func (q *Queue) startEligibleHosts(j *Job) []string {
 		}
 	}
 	return hosts
+}
+
+func (q *Queue) startEligibilityTargets() []*Machine {
+	cache := q.memoryPlanning
+	if cache != nil && cache.startTargets != nil {
+		return cache.startTargets
+	}
+	targets := q.plannerMachines()
+	for i, m := range targets {
+		capacity := *m
+		capacity.Gone, capacity.Leaving, capacity.CheckpointUnavailable = false, false, false
+		capacity.MemoryError = ""
+		targets[i] = &capacity
+	}
+	if cache != nil {
+		cache.startTargets = targets
+	}
+	return targets
 }
 
 // startPlacementRejection names the failed start-fence predicate, or "". The

@@ -337,14 +337,14 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 		return j
 	}
 	copy := *j
-	return q.memoryCandidateOwned(&copy, m)
+	return q.applyPooledSize(&copy, m, q.pooledSize(j, m))
 }
 
 // The caller owns this candidate. Resolve against its original needs and only
 // install the result after all evidence reads, avoiding another full Job copy.
 
 func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
-	return q.pooledMemoryCandidate(j, m)
+	return q.applyPooledSize(j, m, q.resolvePooledSize(j, m))
 }
 
 func memoryConfiguration(needs ResourceNeeds, args []string, program *Program) string {

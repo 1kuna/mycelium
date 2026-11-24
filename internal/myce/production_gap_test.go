@@ -35,14 +35,22 @@ func TestPreemptedWorkSkipsHostBetweenProductionStages(t *testing.T) {
 				s := spec("production")
 				s.Name, s.AllowedMachines = "stage", []string{"a"}
 				submit(t, q, s)
-			} else if _, err := q.OpenProductionLease(ProductionLeaseRequest{Project: "test", Key: "pipeline", TTL: "2h"}); err != nil {
+			} else if _, err := q.OpenProductionLease(ProductionLeaseRequest{Project: "test", Key: "pipeline", TTL: "30s"}); err != nil {
 				t.Fatal(err)
 			}
 			reason := func(m Machine) string {
 				t.Helper()
 				var out string
 				if err := q.update(func() error {
-					out = holdDetail(q.productionAdmissionHold(q.s.Jobs[lj.ID], q.s.Machines[m.ID]))
+					j, target := q.s.Jobs[lj.ID], q.s.Machines[m.ID]
+					out = holdDetail(q.productionAdmissionHold(j, target))
+					q.memoryPlanning = newMemoryPlanningCache()
+					defer func() { q.memoryPlanning = nil }()
+					for range 2 {
+						if got := holdDetail(q.productionAdmissionHold(j, target)); got != out {
+							t.Fatalf("cached gap %q differs from %q", got, out)
+						}
+					}
 					return nil
 				}); err != nil {
 					t.Fatal(err)
@@ -72,7 +80,21 @@ func TestPreemptedWorkSkipsHostBetweenProductionStages(t *testing.T) {
 				// This stage has no release plan; the assigned-attempt claim is
 				// covered below with actual capacity preemption.
 			} else {
-				clock.Advance(ProductionStartTimeout + time.Second)
+				if err := q.update(func() error {
+					q.memoryPlanning = newMemoryPlanningCache()
+					defer func() { q.memoryPlanning = nil }()
+					j, target := q.s.Jobs[lj.ID], q.s.Machines[a.ID]
+					if got := holdDetail(q.productionAdmissionHold(j, target)); !strings.Contains(got, "production lease pipeline pending") {
+						t.Fatalf("active lease did not protect the host: %q", got)
+					}
+					clock.Advance(30 * time.Second)
+					if got := holdDetail(q.productionAdmissionHold(j, target)); got != "" {
+						t.Fatalf("expired lease kept the host fenced during the same pass: %q", got)
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if got := reason(a); got != "" {
 				t.Fatalf("hold outlived the pending production work: %q", got)

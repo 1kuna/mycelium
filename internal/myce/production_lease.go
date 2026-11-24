@@ -103,7 +103,10 @@ func (q *Queue) ProductionLeases(requestContexts ...context.Context) []Productio
 }
 
 func (q *Queue) openProductionLeases() []ProductionLease {
-	now := q.clock.Now()
+	return q.openProductionLeasesAt(q.clock.Now())
+}
+
+func (q *Queue) openProductionLeasesAt(now time.Time) []ProductionLease {
 	out := []ProductionLease{}
 	for _, l := range q.s.ProductionLeases {
 		if now.Before(l.ExpiresAt) {

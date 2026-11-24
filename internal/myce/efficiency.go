@@ -571,6 +571,13 @@ func (q *Queue) strandedDemand(j *Job) []StrandedDemand {
 	policies := q.s.Policies
 	q.s.Policies = maps.Clone(policies)
 	if policy, ok := policies[j.Spec.Project]; ok {
+		if len(policy.AllowedMachines) > 0 {
+			// The relaxed policy can change which production jobs protect this
+			// host. Keep these decisions out of the live-policy planning cache.
+			previous := q.memoryPlanning
+			q.memoryPlanning = newMemoryPlanningCache()
+			defer func() { q.memoryPlanning = previous }()
+		}
 		policy.AllowedMachines = nil
 		q.s.Policies[j.Spec.Project] = policy
 	}
