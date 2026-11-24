@@ -234,10 +234,17 @@ func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Sp
 			sort.Slice(jobs, func(i, j int) bool { return q.poolPressureBefore(jobs[i], jobs[j]) })
 			sort.SliceStable(slots, func(i, j int) bool { return q.comparePriority(q.slotSpec(slots[i]), q.slotSpec(slots[j])) > 0 })
 			for len(jobs)+len(slots) > 0 {
+				coresFit := cpuOK(chosenJobs, chosenSlots)
 				if len(slots) == 0 || len(jobs) > 0 && q.comparePriority(jobs[0].Spec, q.slotSpec(slots[0])) >= 0 {
-					chosenJobs, jobs = append(chosenJobs, jobs[0]), jobs[1:]
+					if jobRAM[jobs[0]] > 0 || !coresFit {
+						chosenJobs = append(chosenJobs, jobs[0])
+					}
+					jobs = jobs[1:]
 				} else {
-					chosenSlots, slots = append(chosenSlots, slots[0]), slots[1:]
+					if slotRAM[slots[0]] > 0 || !coresFit {
+						chosenSlots = append(chosenSlots, slots[0])
+					}
+					slots = slots[1:]
 				}
 				if (ramAfter(chosenJobs, chosenSlots) > room || alreadyReleasing) && cpuOK(chosenJobs, chosenSlots) {
 					break

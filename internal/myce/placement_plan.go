@@ -263,7 +263,7 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool, 
 	projected := q.cpuAfterReleases(m, p.jobs, p.slots, p.preparationCores)
 	var pooledReclaim *placementPlan
 	unifiedHost := m.UnifiedMemory || m.CapabilityProfile != nil && m.CapabilityProfile.MemoryLayout == "unified"
-	if batch && pooledMemory(j) && unifiedHost && jobClass(j.Spec) == "production" {
+	if batch && pooledMemory(j) && workerUsesMemoryPools(m) && unifiedHost && jobClass(j.Spec) == "production" {
 		pooledReclaim = p
 	} else if jobClass(j.Spec) == "production" {
 		projected.hostReservationDebtGB -= q.unifiedReleaseDebtCredit(m, p.jobs)
