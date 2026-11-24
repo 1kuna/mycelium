@@ -115,22 +115,19 @@ func (q *Queue) captureProjectFileHoldings(ctx context.Context, project string) 
 	}
 	age := q.filePublicationAge(at)
 	snapshot.refs = fileReferenceView{}
-	keep := func(file FileRef, flags fileReferenceFlags, owner fileKeeper) {
+	q.visitFileReferences(true, nil, func(file FileRef, flags fileReferenceFlags, owner fileKeeper) {
 		if flags&fileKept == 0 || file.SHA256 == "" {
 			return
+		}
+		if owner.Project == project && owner.Kind == "input_claim" {
+			claim := q.s.FileInputClaims[owner.Name]
+			claims[owner.Name] = claimSnapshot{claim, q.inputClaimNeedsLegacyCustody(claim)}
 		}
 		if owner.Project != project {
 			// Only the kinds of other holders are visible to this project.
 			owner = fileKeeper{FileKeepingReference: FileKeepingReference{Kind: owner.Kind}}
 		}
 		snapshot.refs.note(file, flags, owner, true)
-	}
-	q.visitDurableFileReferences(true, nil, keep)
-	q.visitFileInputClaimKeepers(func(claim FileInputClaim, owner fileKeeper) {
-		keep(claim.File, fileKept, owner)
-		if owner.Project == project && claim.File.SHA256 != "" {
-			claims[claim.ID] = claimSnapshot{claim, q.inputClaimNeedsLegacyCustody(claim)}
-		}
 	})
 	unlock()
 

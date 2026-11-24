@@ -79,8 +79,7 @@ func assertQuotaRefusal(t *testing.T, err error, want ...string) {
 }
 
 func TestProjectFileStoreUsageDeduplicatesDigests(t *testing.T) {
-	q, _ := fixture(t)
-	c := retentionClient(t, q)
+	q, _, c := retentionFixture(t)
 	quotaResult(t, q, c, "owner", "experiment", "shared!")
 	quotaResult(t, q, c, "owner", "experiment", "shared!")
 	quotaResult(t, q, c, "owner", "experiment", "unique")
@@ -95,8 +94,7 @@ func TestProjectFileStoreUsageDeduplicatesDigests(t *testing.T) {
 }
 
 func TestProjectFileStoreQuotaRefusesUntilRelease(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	setQuotaPolicy(t, q, "owner", ProjectPolicy{MaxRetainedFileBytes: 10})
 	first := quotaResult(t, q, c, "owner", "experiment", "abcdef")
 	assertQuotaRefusal(t, submitDeclaring(q, "owner", "experiment", 5), "retained=11", "max_retained_file_bytes=10", "myce file release plan --project owner", "own storage")
@@ -121,9 +119,7 @@ func TestProjectFileStoreQuotaRefusesUntilRelease(t *testing.T) {
 	}
 	clock.Advance(filePublicationGrace + time.Second)
 	selection := FileReleaseSelection{Project: "owner", Jobs: []string{first.ID, second.ID}}
-	if _, err := releaseApply(q, releasePlan(t, q, selection)); err != nil {
-		t.Fatal(err)
-	}
+	applyFixtureRelease(t, q, releasePlan(t, q, selection))
 	if u := projectUsage(t, q, "owner"); u.RetainedBytes != 0 || u.Refusal != "" {
 		t.Fatalf("release did not drop retained usage: %+v", u)
 	}
@@ -133,15 +129,12 @@ func TestProjectFileStoreQuotaRefusesUntilRelease(t *testing.T) {
 }
 
 func TestProjectFileStoreDailyQuotaRollingWindow(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	setQuotaPolicy(t, q, "owner", ProjectPolicy{MaxAddedFileBytes24h: 10})
 	j := quotaResult(t, q, c, "owner", "experiment", "abcdefgh")
 	clock.Advance(filePublicationGrace + time.Second)
 	// Releasing results frees retained bytes but does not refund the allowance.
-	if _, err := releaseApply(q, releasePlan(t, q, FileReleaseSelection{Project: "owner", Jobs: []string{j.ID}})); err != nil {
-		t.Fatal(err)
-	}
+	applyFixtureRelease(t, q, releasePlan(t, q, FileReleaseSelection{Project: "owner", Jobs: []string{j.ID}}))
 	assertQuotaRefusal(t, submitDeclaring(q, "owner", "experiment", 3), "added in the last 24h=11", "max_added_file_bytes_24h=10")
 	clock.Advance(fileStoreQuotaWindow - filePublicationGrace - 2*time.Second)
 	assertQuotaRefusal(t, submitDeclaring(q, "owner", "experiment", 3), "added in the last 24h=11")
@@ -155,8 +148,7 @@ func TestProjectFileStoreDailyQuotaRollingWindow(t *testing.T) {
 // upload, at preflight and upload creation, and submit keeps the agent's reason.
 // Production passes; unnamed writes cannot bypass configured input quotas.
 func TestProjectFileStoreQuotaRefusesInputUploads(t *testing.T) {
-	q, _ := fixture(t)
-	c := retentionClient(t, q)
+	q, _, c := retentionFixture(t)
 	setQuotaPolicy(t, q, "owner", ProjectPolicy{MaxRetainedFileBytes: 10})
 	quotaResult(t, q, c, "owner", "experiment", "abcdefgh")
 	path := filepath.Join(t.TempDir(), "next")
@@ -191,8 +183,7 @@ func TestProjectFileStoreQuotaRefusesInputUploads(t *testing.T) {
 // An older CLI's get/set round-trip cannot carry the limit fields; it must not
 // clear them. A current CLI marks its request, so its file can clear a limit.
 func TestPolicySetFromOlderClientKeepsFileStoreLimits(t *testing.T) {
-	q, _ := fixture(t)
-	c := retentionClient(t, q)
+	q, _, c := retentionFixture(t)
 	setQuotaPolicy(t, q, "owner", ProjectPolicy{MaxRetainedFileBytes: 10, MaxAddedFileBytes24h: 20, FileRetention: "72h"})
 	put := func(path string) {
 		t.Helper()

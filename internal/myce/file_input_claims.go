@@ -500,13 +500,9 @@ func (q *Queue) projectFileReservationRefusal(ctx context.Context, status FileSt
 			continue
 		}
 		jobs := q.projectFileJobs(project)
-		var facts projectFileFacts
-		q.collectFileReferences(false, nil, facts.retain, jobs)
-		q.noteProjectFileAdditions(&facts, jobs)
-		q.noteInputClaimFacts(&facts, project)
 		covered := map[string]uint64{}
 		used := uint64(0)
-		if l := facts.ledgers()[project]; l != nil {
+		if l := q.captureProjectFileLedger(project, jobs); l != nil {
 			for hash, size := range l.retained {
 				if p, ok := payloads[hash]; ok {
 					covered[hash] = min(size, p.length)

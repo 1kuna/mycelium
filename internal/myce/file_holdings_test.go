@@ -16,8 +16,7 @@ import (
 
 func TestProjectFileHoldingsClaimReleaseEligibility(t *testing.T) {
 	ctx := context.Background()
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	const idleWindow, grace = time.Hour, 2 * time.Hour
 	if err := q.ConfigureFileRetention(idleWindow); err != nil {
 		t.Fatal(err)
@@ -123,8 +122,7 @@ func TestProjectFileHoldingsClaimReleaseEligibility(t *testing.T) {
 
 func TestProjectFileHoldingsClaimActivityAndCustodyUnavailable(t *testing.T) {
 	ctx := context.Background()
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	claim, _ := claimedCapacityPartial(t, q, c, "partial-claim", jobInputUploadPurpose)
 	clock.Advance(max(testFileRetention, filePublicationGrace))
 	req := FileInputClaimRelease{Project: "owner", ClaimID: claim.ID, AcceptExpiry: true}
@@ -186,8 +184,7 @@ func testFileOwnershipCollectorAgreement(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			q, clock := fixture(t)
-			c := retentionClient(t, q)
+			q, clock, c := retentionFixture(t)
 			selected, _, ref := releaseTerminal(t, q, c, "shared-payload")
 			if tc.keeper == "input_claim" {
 				if _, err := q.claimFileInput(ctx, Spec{Project: "foreign"}, ref); err != nil {
@@ -269,12 +266,19 @@ func testFileOwnershipCollectorAgreement(t *testing.T) {
 			if p.ReclaimableBytes != wantBytes {
 				t.Fatal("wrong planned reclaimable bytes", p)
 			}
-			if _, err := releaseApply(q, p); err != nil {
-				t.Fatal(err)
-			}
+			applyFixtureRelease(t, q, p)
 			q.mu.RLock()
-			expired, keep, _ := q.fileReferences(true)
+			expired, keep, referenced := q.collectFileReferences(true, nil, nil)
+			view := q.captureFileReferences(true, nil, nil, false)
 			q.mu.RUnlock()
+			if len(view) != len(referenced) {
+				t.Fatal("reference view and collector disagree on the digest inventory", len(view), len(referenced))
+			}
+			for hash, entry := range view {
+				if !referenced[hash] || (entry.flags&fileExpired != 0) != expired[hash] || (entry.flags&fileKept != 0) != keep[hash] {
+					t.Fatal("reference view and collector disagree on the digest state", hash, entry.flags)
+				}
+			}
 			if legacy := expired[ref.SHA256] && !keep[ref.SHA256]; legacy != p.Blobs[0].CollectionEligible {
 				t.Fatalf("planned scope and current collector disagree: plan=%+v expired=%t keep=%t", p.Blobs[0], expired[ref.SHA256], keep[ref.SHA256])
 			}
@@ -297,8 +301,7 @@ func testFileOwnershipCollectorAgreement(t *testing.T) {
 
 func testProjectFileHoldingTotals(t *testing.T) {
 	ctx := context.Background()
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	j, _, shared := releaseTerminal(t, q, c, "shared")
 	spec := spec("experiment")
 	spec.Project = "foreign"
@@ -306,9 +309,7 @@ func testProjectFileHoldingTotals(t *testing.T) {
 	other := submit(t, q, spec)
 	_, imported := retentionUpload(t, c, "untracked-import")
 	pendingJob, _, pending := releaseTerminal(t, q, c, "pending-collection")
-	if _, err := releaseApply(q, releasePlan(t, q, releaseSelection(pendingJob))); err != nil {
-		t.Fatal(err)
-	}
+	applyFixtureRelease(t, q, releasePlan(t, q, releaseSelection(pendingJob)))
 	_, want := policyInput(t, "declared-only")
 	claim, err := q.claimFileInput(ctx, Spec{Project: "owner"}, want)
 	if err != nil {
@@ -360,15 +361,12 @@ func testProjectFileHoldingTotals(t *testing.T) {
 
 func TestProjectFileHoldingsPrunedReplayDoesNotKeepReleasedInputs(t *testing.T) {
 	ctx := context.Background()
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	if err := q.ConfigureLogRetention(0); err != nil {
 		t.Fatal(err)
 	}
 	j, s, ref := releaseTerminal(t, q, c, "released-before-history-prune")
-	if _, err := releaseApply(q, releasePlan(t, q, releaseSelection(j))); err != nil {
-		t.Fatal(err)
-	}
+	applyFixtureRelease(t, q, releasePlan(t, q, releaseSelection(j)))
 	// Prune before collecting, so the job must transfer its pending hash.
 	clock.Advance(jobRecordRetention + time.Second)
 	if err := q.pruneJobHistory(); err != nil {
@@ -407,9 +405,7 @@ func TestProjectFileHoldingsPrunedReplayDoesNotKeepReleasedInputs(t *testing.T) 
 	if len(status.Projects) != 0 || status.PendingCollectionBytes != uint64(ref.SizeBytes) || status.ReclaimableBytes != uint64(ref.SizeBytes) {
 		t.Fatalf("pruned replay stranded pending collection: %+v", status)
 	}
-	if err := q.reclaimPublishedFiles(); err != nil {
-		t.Fatal(err)
-	}
+	collectFixtureBlobs(t, q)
 	if _, err := os.Stat(q.files.blob(ref)); !os.IsNotExist(err) {
 		t.Fatal("retired hash was not collected", err)
 	}
@@ -417,8 +413,7 @@ func TestProjectFileHoldingsPrunedReplayDoesNotKeepReleasedInputs(t *testing.T) 
 
 func TestFileReleaseLegacyCheckpointRequiresExplicitPlan(t *testing.T) {
 	ctx := context.Background()
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	_, ref := retentionJobInput(t, c, "checkpoint-kept-after-release")
 	j, _, _ := releaseTerminal(t, q, c, "job-with-checkpoint")
 	if err := q.update(func() error {
@@ -430,9 +425,7 @@ func TestFileReleaseLegacyCheckpointRequiresExplicitPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock.Advance(filePublicationGrace + time.Second)
-	if _, err := releaseApply(q, releasePlan(t, q, releaseSelection(j))); err != nil {
-		t.Fatal(err)
-	}
+	applyFixtureRelease(t, q, releasePlan(t, q, releaseSelection(j)))
 	report, err := q.ProjectFileHoldings(ctx, "owner")
 	if err != nil || report.RetainedBytes != uint64(ref.SizeBytes) ||
 		report.ByKind["checkpoint"].FileCount != 1 || report.ByKind["resume_checkpoint"].FileCount != 1 {
@@ -447,16 +440,12 @@ func TestFileReleaseLegacyCheckpointRequiresExplicitPlan(t *testing.T) {
 	if before := job(t, q, j.ID).FileReclamation; before == nil || before.LegacyCheckpointsExpired {
 		t.Fatal("read-only planning altered expiry", before)
 	}
-	if _, err := releaseApply(q, plan); err != nil {
-		t.Fatal(err)
-	}
+	applyFixtureRelease(t, q, plan)
 	report, err = q.ProjectFileHoldings(ctx, "owner")
 	if err != nil || report.RetainedBytes != 0 {
 		t.Fatal("accepted expiry kept checkpoint attribution", report, err)
 	}
-	if err := q.reclaimPublishedFiles(); err != nil {
-		t.Fatal(err)
-	}
+	collectFixtureBlobs(t, q)
 	if _, err := os.Stat(q.files.blob(ref)); !os.IsNotExist(err) {
 		t.Fatal("checkpoint was not collected", err)
 	}
@@ -467,8 +456,7 @@ func TestFileReleaseLegacyCheckpointRequiresExplicitPlan(t *testing.T) {
 
 func TestFileReleaseInputClaimPreservesOtherCustodyAndRollingQuota(t *testing.T) {
 	ctx := context.Background()
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	if err := q.ConfigureFileRetention(time.Hour); err != nil {
 		t.Fatal(err)
 	}
@@ -513,17 +501,14 @@ func TestFileReleaseInputClaimPreservesOtherCustodyAndRollingQuota(t *testing.T)
 	_, err = q.inputClaimContext(context.WithValue(owner, fileInputClaimKey{}, claim.ID), ref, false)
 	releaseCode(t, err, "file_input_claim_required")
 	clock.Advance(DefaultFileRetention + time.Second)
-	if err := q.reclaimPublishedFiles(); err != nil {
-		t.Fatal(err)
-	}
+	collectFixtureBlobs(t, q)
 	if _, err := os.Stat(q.files.blob(ref)); err != nil {
 		t.Fatal("another project still needs the blob", err)
 	}
 }
 
 func TestFileReleaseLegacyPartialClaimKeepsCollectionAuthority(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	claim, ctx := claimedCapacityPartial(t, q, c, "legacy-interrupted-input", jobInputUploadPurpose)
 	imported, _ := claimedCapacityPartial(t, q, c, "legacy-interrupted-import", "")
 	if err := q.update(func() error { delete(q.s.JobInputUploads, claim.File.SHA256); return nil }); err != nil {
@@ -550,8 +535,7 @@ func TestFileReleaseLegacyPartialClaimKeepsCollectionAuthority(t *testing.T) {
 }
 
 func TestFileReleaseInputClaimProtectsUploadAndSubmitGaps(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	path, ref := policyInput(t, strings.Repeat("a", fileUploadChunkSize+1))
 	q.files.limit = ref.SizeBytes * 2
 	ctx := WithFileStoreSubmission(context.Background(), Spec{Project: "owner"})

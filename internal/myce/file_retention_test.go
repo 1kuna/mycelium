@@ -118,8 +118,7 @@ func TestFileRetentionRollbackTimestampFences(t *testing.T) {
 func TestFileRetentionBundleProjectWindowAndReferenceFence(t *testing.T) {
 	for _, reuse := range []string{"none", "queued", "running", "retained_project", "publication"} {
 		t.Run(reuse, func(t *testing.T) {
-			q, clock := fixture(t)
-			c := retentionClient(t, q)
+			q, clock, c := retentionFixture(t)
 			if err := q.ConfigureFileRetention(DefaultFileRetention); err != nil {
 				t.Fatal(err)
 			}
@@ -385,6 +384,19 @@ func TestFileRetentionSubmissionFence(t *testing.T) {
 	}
 }
 
+func retentionFixture(t *testing.T) (*Queue, *fakeClock, Client) {
+	t.Helper()
+	q, clock := fixture(t)
+	return q, clock, retentionClient(t, q)
+}
+
+func collectFixtureBlobs(t *testing.T, q *Queue) {
+	t.Helper()
+	if err := q.reclaimPublishedFiles(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func retentionClient(t *testing.T, q *Queue) Client {
 	t.Helper()
 	if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
@@ -422,8 +434,7 @@ func retentionUploadFile(t *testing.T, upload func(context.Context, string, File
 }
 
 func TestFileRetentionOrphanUploads(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	_, orphan := retentionJobInput(t, c, "uploaded but never submitted")
 	_, bundle := retentionUpload(t, c, "unclaimed bundle")
 	if err := q.update(func() error { q.markBundleUpload(bundle.SHA256); return nil }); err != nil {
@@ -465,8 +476,7 @@ func TestFileRetentionOrphanUploads(t *testing.T) {
 }
 
 func TestFileRetentionUnmarkedImports(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	_, model := retentionUpload(t, c, "operator imported model weights")
 	_, operator := retentionUpload(t, c, "operator file put without any job")
 	catalog := q.models
@@ -490,8 +500,7 @@ func TestFileRetentionUnmarkedImports(t *testing.T) {
 }
 
 func TestFileRetentionOrphanPublicationGrace(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	if err := q.ConfigureFileRetention(time.Hour); err != nil {
 		t.Fatal(err)
 	}
@@ -513,8 +522,7 @@ func TestFileRetentionOrphanPublicationGrace(t *testing.T) {
 }
 
 func TestFileRetentionOrphanReferences(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	refs := map[string]FileRef{}
 	files := func(name string) FileManifest {
 		_, ref := retentionJobInput(t, c, name)
@@ -566,8 +574,7 @@ func TestFileRetentionOrphanReferences(t *testing.T) {
 }
 
 func TestFileRetentionOrphanBatch(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	for i := 0; i < fileReclaimBatch+1; i++ {
 		retentionJobInput(t, c, fmt.Sprint("orphan-", i))
 	}
@@ -584,8 +591,7 @@ func TestFileRetentionOrphanBatch(t *testing.T) {
 }
 
 func TestFileRetentionUploadPurposeDedup(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	modelPath, model := retentionUpload(t, c, "imported model reused by a job")
 	if err := c.UploadJobInput(context.Background(), modelPath, model); err != nil {
 		t.Fatal(err)
@@ -609,8 +615,7 @@ func TestFileRetentionUploadPurposeDedup(t *testing.T) {
 }
 
 func TestFileRetentionDuplicateUploadReadOnly(t *testing.T) {
-	q, _ := fixture(t)
-	c := retentionClient(t, q)
+	q, _, c := retentionFixture(t)
 	importPath, imported := retentionUpload(t, c, "duplicate checkpoint bytes")
 	inputPath, input := retentionJobInput(t, c, "duplicate marked input")
 	handler := API{Queue: q, Token: "test"}.Handler()
@@ -648,8 +653,7 @@ func TestFileRetentionDuplicateUploadReadOnly(t *testing.T) {
 func TestFileRetentionCatalogReleasesMarker(t *testing.T) {
 	for _, catalog := range []string{"model", "environment"} {
 		t.Run(catalog, func(t *testing.T) {
-			q, _ := fixture(t)
-			c := retentionClient(t, q)
+			q, _, c := retentionFixture(t)
 			_, ref := retentionJobInput(t, c, "marked catalog asset")
 			var err error
 			if catalog == "model" {
@@ -679,8 +683,7 @@ func TestFileRetentionCatalogReleasesMarker(t *testing.T) {
 }
 
 func TestFileRetentionMarkedUploadRestart(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	_, orphan := retentionJobInput(t, c, "durably marked abandoned job input")
 	_, model := retentionUpload(t, c, "model imported before queue restart")
 	if published := q.s.JobInputUploads[orphan.SHA256]; !published.Equal(clock.Now()) {
@@ -789,8 +792,7 @@ func TestFileRetentionPublicationGrace(t *testing.T) {
 	for _, reuse := range []string{"publish", "head"} {
 		for _, reference := range []string{"submit", "complete"} {
 			t.Run(reuse+"/"+reference, func(t *testing.T) {
-				q, clock := fixture(t)
-				c := retentionClient(t, q)
+				q, clock, c := retentionFixture(t)
 				path, a := retentionUpload(t, c, "reusable terminal content")
 				s := spec("experiment")
 				s.Files = FileManifest{"input": a}
@@ -858,8 +860,7 @@ func TestFileRetentionPublicationGrace(t *testing.T) {
 }
 
 func TestFileRetentionRetriesRemovalFailure(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	_, a := retentionUpload(t, c, "temporarily unavailable")
 	_, b := retentionUpload(t, c, "collect despite other failure")
 	s := spec("experiment")
@@ -912,8 +913,7 @@ func TestFileRetentionRetriesRemovalFailure(t *testing.T) {
 }
 
 func TestFileRetentionProgressAndBatch(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	s := spec("experiment")
 	s.SubmissionKey = "reclamation-batch"
 	s.Files = FileManifest{}
@@ -972,8 +972,7 @@ func TestFileRetentionProgressAndBatch(t *testing.T) {
 }
 
 func TestFileRetentionDeferredDiagnostic(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
+	q, clock, c := retentionFixture(t)
 	_, a := retentionUpload(t, c, "deferred publication")
 	s := spec("experiment")
 	s.Files = FileManifest{"input": a}

@@ -283,12 +283,16 @@ func (q *Queue) reindexProjectFileDeadlines(previous map[string]ProjectPolicy) {
 	}
 	changed := map[string]bool{}
 	for name, p := range q.s.Policies {
-		changed[name] = previous[name].FileRetention != p.FileRetention
+		if previous[name].FileRetention != p.FileRetention {
+			changed[name] = true
+		}
 	}
 	for name, p := range previous {
-		changed[name] = changed[name] || q.s.Policies[name].FileRetention != p.FileRetention
+		if q.s.Policies[name].FileRetention != p.FileRetention {
+			changed[name] = true
+		}
 	}
-	if !slices.Contains(slices.Collect(maps.Values(changed)), true) {
+	if len(changed) == 0 {
 		return
 	}
 	for id, j := range q.s.Jobs {
@@ -347,13 +351,6 @@ func enrollLegacyCheckpointReclamation(j *Job) {
 	j.FileReclamation = &FileReclamation{Pending: pending, LegacyCheckpointsExpired: true}
 }
 
-// q.mu must be held. Only expired terminal inputs/results are candidates.
-// Everything else with explicit custody is a keeping reference. In particular,
-// checkpoint generations and catalog snapshots survive terminal file expiry.
-func (q *Queue) fileReferences(pendingOnly bool, subset ...map[string]*Job) (expired, keep, referenced map[string]bool) {
-	return q.collectFileReferences(pendingOnly, nil, nil, subset...)
-}
-
 func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]fileReleaseScope, report func(FileRef, FileKeepingReference), subset ...map[string]*Job) (expired, keep, referenced map[string]bool) {
 	expired, keep, referenced = q.collectDurableFileReferences(pendingOnly, releasing, report, subset...)
 	q.visitFileInputClaimKeepers(func(claim FileInputClaim, owner fileKeeper) {
@@ -407,6 +404,27 @@ func (v fileReferenceView) note(ref FileRef, flags fileReferenceFlags, owner fil
 
 func (r fileDigestReferences) collectionEligible() bool {
 	return r.flags&(fileExpired|fileKept) == fileExpired
+}
+
+// q.mu held. Claims protect published blobs without granting durable
+// custody over interrupted uploads or retiring their cleanup markers.
+func (q *Queue) visitFileReferences(pendingOnly bool, releasing map[string]fileReleaseScope, note func(FileRef, fileReferenceFlags, fileKeeper)) {
+	q.visitDurableFileReferences(pendingOnly, releasing, note)
+	q.visitFileInputClaimKeepers(func(claim FileInputClaim, owner fileKeeper) {
+		note(claim.File, fileKept|fileReferenced, owner)
+	})
+}
+
+// q.mu held. With no filter the collector needs only the retention flags;
+// a selected release also captures the keeper identities for its preview.
+func (q *Queue) captureFileReferences(pendingOnly bool, releasing map[string]fileReleaseScope, hashes map[string]bool, keepers bool) fileReferenceView {
+	view := make(fileReferenceView, len(hashes))
+	q.visitFileReferences(pendingOnly, releasing, func(ref FileRef, flags fileReferenceFlags, owner fileKeeper) {
+		if hashes == nil || hashes[ref.SHA256] {
+			view.note(ref, flags, owner, keepers)
+		}
+	})
+	return view
 }
 
 // A claim protects a published blob but does not retire a cleanup marker or
@@ -496,75 +514,71 @@ func (q *Queue) visitDurableFileReferences(pendingOnly bool, releasing map[strin
 			j = &planned
 		}
 		owner = fileKeeper{FileKeepingReference: FileKeepingReference{JobID: j.ID, Project: j.Spec.Project}}
-		filesExpired := j.FilesExpired
-		protected := parkedStorageCustody(j) || (deliveryPending(j) || checkpointMirrorsPending(j))
-		if terminal(j.State) && filesExpired {
+		deliveryProtected := parkedStorageCustody(j) || deliveryPending(j) || checkpointMirrorsPending(j)
+		protected := deliveryProtected
+		if terminal(j.State) && j.FilesExpired {
 			if custody == nil {
 				custody = q.cancellationObservation()
 			}
 			protected = protected || custody.jobReleasePending(j)
 		}
-		// Retained identities, including expired answers and completed
-		// reclamations, must never be mistaken for pre-submit orphans.
-		add(fileReferenced, j.Spec.Files)
-		add(fileReferenced, sharedStoredFiles(j.Spec))
-		add(fileReferenced, j.OutputRefs)
+		expired := terminal(j.State) && j.FilesExpired && !protected
 		if j.LocalOutputs != nil {
-			// Local custody can pin an existing shared identity, but never grants
-			// authority to collect an unrelated import with matching content.
-			add(fileReferenced, j.LocalOutputs.Files)
-			if !terminal(j.State) || !filesExpired || protected {
+			// Local custody can pin an existing shared identity but only an
+			// ordinary expiry can authorize collection of the queue copy.
+			if expired {
+				add(fileReferenced, j.LocalOutputs.Files)
+			} else {
 				keepFiles("worker_local_custody", j.LocalOutputs.Files)
 			}
 		}
-		// Recoveries have their own immutable retention deadline. They can be
-		// attached after the original job's ordinary files have already expired.
+		// Recoveries have their own retention deadline, even after the
+		// original job's ordinary files have expired.
 		for _, r := range j.RecoveredResults {
-			add(fileReferenced, r.Files)
 			if r.ExpiresAt.IsZero() || q.clock.Now().Before(r.ExpiresAt) {
 				keepFiles("recovered_result", r.Files)
 			} else {
-				add(fileExpired, r.Files)
+				add(fileReferenced|fileExpired, r.Files)
 			}
 		}
 		if !terminal(j.State) {
 			keepFiles("pending_output", j.PendingOutputRefs)
 		}
-		if parkedStorageCustody(j) || (deliveryPending(j) || checkpointMirrorsPending(j)) || j.Spec.localFirst() && attemptReleasePending(j) {
+		if deliveryProtected || j.Spec.localFirst() && attemptReleasePending(j) {
 			keepFiles("pending_delivery", j.OutputRefs)
 		}
-		for _, a := range j.AttemptHistory {
-			if a.Diagnostics != nil {
-				add(fileReferenced, a.Diagnostics.Files)
-				if j.Spec.OutputDestination != nil && j.FinishedAt != nil && (q.fileRetention == 0 || q.clock.Now().Before(j.FinishedAt.Add(q.fileRetention))) {
+		if j.Spec.OutputDestination != nil && j.FinishedAt != nil && (q.fileRetention == 0 || q.clock.Now().Before(j.FinishedAt.Add(q.fileRetention))) {
+			for _, a := range j.AttemptHistory {
+				if a.Diagnostics != nil {
 					keepFiles("retained_attempt_diagnostics", a.Diagnostics.Files)
 				}
 			}
 		}
 		if j.FileReclamation != nil {
+			flags := fileReferenced
+			if expired {
+				flags |= fileExpired
+			}
 			for _, hash := range j.FileReclamation.Pending {
-				note(FileRef{SHA256: hash}, fileReferenced, fileKeeper{})
+				note(FileRef{SHA256: hash}, flags, fileKeeper{})
 			}
 		}
-		if j.FanOut != nil {
-			for _, result := range j.FanOut.Results {
-				add(fileReferenced, result.OutputRefs)
-				if !terminal(j.State) || !filesExpired || protected {
-					keepFiles("fan_out_result", result.OutputRefs)
+		if expired {
+			visitJobFileManifests(j, func(kind string, files FileManifest) {
+				// Retained identities must never become pre-submit orphans.
+				// Pending enrollment owns checkpoint and dependency expiry.
+				var flags fileReferenceFlags
+				switch kind {
+				case "input", "shared_input", "result", "diagnostic", "fan_out_result":
+					flags = fileReferenced
 				}
-			}
-		}
-		if terminal(j.State) && filesExpired && !protected {
-			if !pendingOnly {
-				for _, files := range jobFileManifests(j) {
-					add(fileExpired, files)
+				if !pendingOnly {
+					flags |= fileExpired
 				}
-			}
-			if j.FileReclamation != nil {
-				for _, hash := range j.FileReclamation.Pending {
-					note(FileRef{SHA256: hash}, fileExpired, fileKeeper{})
+				if flags != 0 {
+					add(flags, files)
 				}
-			}
+			})
 		} else {
 			visitJobFileManifests(j, keepFiles)
 		}
@@ -653,8 +667,13 @@ func (q *Queue) expiredBlob(hash string, requestContexts ...context.Context) boo
 	requestCtx := requestContext(requestContexts)
 	unlockRequest := requestReadLock(requestCtx, &q.mu)
 	defer unlockRequest()
-	expired, keep, _ := q.fileReferences(false)
-	return expired[hash] && !keep[hash]
+	var refs fileDigestReferences
+	q.visitFileReferences(false, nil, func(ref FileRef, flags fileReferenceFlags, _ fileKeeper) {
+		if ref.SHA256 == hash {
+			refs.flags |= flags
+		}
+	})
+	return refs.collectionEligible()
 }
 
 // Tick snapshots candidates, then fences reference publication and rechecks
@@ -688,41 +707,41 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 
 	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
 	store := q.files
-	expired, keep, referenced := q.fileReferences(true)
+	if store == nil {
+		requestUnlock1()
+		return 0, nil
+	}
+	refs := q.captureFileReferences(true, nil, nil, false)
+	revision := q.fileReferenceRevision
+	age := q.filePublicationAge(q.clock.Now())
+	claimCutoff := age.now.Add(-q.s.PublicationHorizon)
+	markers, bundles := q.jobUploadMarkers(), maps.Clone(q.s.BundleUploads)
+	requestUnlock1()
+
+	orphanCutoff := age.now.Add(-age.retention)
 	type candidate struct {
 		hash           string
 		orphan, bundle bool
 	}
-	items := make([]candidate, 0, len(expired))
-	for hash := range expired {
-		if (FileRef{SHA256: hash}).validate() == nil && !keep[hash] {
+	var items []candidate
+	for hash, ref := range refs {
+		if ref.collectionEligible() && (FileRef{SHA256: hash}).validate() == nil {
 			items = append(items, candidate{hash: hash})
 		}
 	}
-	revision := q.fileReferenceRevision
-	age := q.filePublicationAge(q.clock.Now())
-	claimCutoff := age.now.Add(-q.s.PublicationHorizon)
-	orphanCutoff := age.now.Add(-q.fileRetention)
 	orphans := map[string]time.Time{}
-	bundles := map[string]time.Time{}
-	markers := q.jobUploadMarkers()
 	for hash, published := range markers {
-		if q.fileRetention > 0 && !published.IsZero() && !published.After(orphanCutoff) && !referenced[hash] {
+		if age.retention > 0 && !published.IsZero() && !published.After(orphanCutoff) && refs[hash].flags&fileReferenced == 0 {
 			orphans[hash] = published
 			items = append(items, candidate{hash: hash, orphan: true})
 		}
 	}
-	for hash, published := range q.s.BundleUploads {
-		bundles[hash] = published
-		if q.fileRetention > 0 && !published.After(orphanCutoff) && !referenced[hash] {
+	for hash, published := range bundles {
+		if age.retention > 0 && !published.After(orphanCutoff) && refs[hash].flags&fileReferenced == 0 {
 			items = append(items, candidate{hash: hash, bundle: true})
 		}
 	}
-	batch := fileCollectionBatch(len(referenced) + len(markers) + len(q.s.BundleUploads))
-	requestUnlock1()
-	if store == nil {
-		return 0, nil
-	}
+	batch := fileCollectionBatch(len(refs) + len(markers) + len(bundles))
 	gone := map[string]bool{}
 	deferred, yielded := false, false
 	var reclaimedBlobs uint64
@@ -743,26 +762,28 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 		// Every queue transaction and catalog change advances this fence. Reuse
 		// the reference snapshot only while it still describes current custody.
 		if revision != q.fileReferenceRevision {
-			expired, keep, referenced = q.fileReferences(true)
+			refs = q.captureFileReferences(true, nil, nil, false)
 			revision = q.fileReferenceRevision
 			age = q.filePublicationAge(q.clock.Now())
 		}
 		for i, c := range batch {
-			remove := q.files == store && expired[c.hash] && !keep[c.hash]
+			ref := refs[c.hash]
+			expired, referenced := ref.flags&fileExpired != 0, ref.flags&fileReferenced != 0
+			remove := q.files == store && ref.collectionEligible()
 			if c.orphan {
 				published, marked := q.jobUploadMarker(c.hash)
-				remove = q.files == store && marked && published.Equal(orphans[c.hash]) && !referenced[c.hash]
+				remove = q.files == store && marked && published.Equal(orphans[c.hash]) && !referenced
 			}
 			if c.bundle {
 				published, marked := q.s.BundleUploads[c.hash]
-				remove = q.files == store && marked && published.Equal(bundles[c.hash]) && !referenced[c.hash]
+				remove = q.files == store && marked && published.Equal(bundles[c.hash]) && !referenced
 			}
 			bundleTime, trackedBundle := q.s.BundleUploads[c.hash]
 			// An expired/released job owns reclamation of its bundle bytes.
 			// Other custody still wins above; refreshed publication keeps its
 			// ordinary grace below. Only unclaimed bundles need the orphan window.
-			remove = remove && (!trackedBundle || expired[c.hash] || !bundleTime.After(orphanCutoff))
-			decisions[i] = decision{remove: remove, marked: c.orphan || trackedBundle, expired: expired[c.hash]}
+			remove = remove && (!trackedBundle || expired || !bundleTime.After(orphanCutoff))
+			decisions[i] = decision{remove: remove, marked: c.orphan || trackedBundle, expired: expired}
 		}
 		requestUnlock2()
 		// The fence stays held from the recheck through every unlink below, so
@@ -846,28 +867,12 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 				delete(q.s.BundleUploads, hash)
 			}
 		}
+		removed := func(hash string) bool { return gone[hash] }
 		mark := func(j *Job) {
-			if j == nil || j.FileReclamation == nil {
-				return
+			if j != nil && j.FileReclamation != nil && slices.ContainsFunc(j.FileReclamation.Pending, removed) {
+				q.touchJob(j.ID)
+				j.FileReclamation.Pending = slices.DeleteFunc(j.FileReclamation.Pending, removed)
 			}
-			intersects := false
-			for _, hash := range j.FileReclamation.Pending {
-				if gone[hash] {
-					intersects = true
-					break
-				}
-			}
-			if !intersects {
-				return
-			}
-			q.touchJob(j.ID)
-			pending := j.FileReclamation.Pending[:0]
-			for _, hash := range j.FileReclamation.Pending {
-				if !gone[hash] {
-					pending = append(pending, hash)
-				}
-			}
-			j.FileReclamation.Pending = pending
 		}
 		for _, j := range q.s.Jobs {
 			mark(j)
