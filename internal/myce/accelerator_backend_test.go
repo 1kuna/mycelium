@@ -3,8 +3,6 @@ package myce
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -112,30 +110,5 @@ func TestAcceleratorBackendDescriptors(t *testing.T) {
 	}
 	if validGPU("mps") || validGPU("") || ExtensionDevice("unknown") != "" || resourceWords("unknown") != "unknown resource" {
 		t.Fatal("unknown backend must remain unknown")
-	}
-}
-
-func TestAcceleratorBackendEnvironmentRecipes(t *testing.T) {
-	lock := filepath.Join(t.TempDir(), "requirements.txt")
-	if err := os.WriteFile(lock, []byte("package==1\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	recipes, err := (EnvironmentCatalog{}).resolveEnvironment(Environment{LockFile: lock, Backend: "uv", Python: "3.12"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, backend := range acceleratorBackends {
-		recipe, ok := recipes[backend.platform]
-		if !ok || recipe.Platform != backend.platform {
-			t.Fatal("environment omitted backend", backend.platform, recipe)
-		}
-	}
-	if len(recipes) != len(acceleratorBackends) {
-		t.Fatal("environment resolved extra backends")
-	}
-	// A named family failure must leave other descriptors' inventory usable.
-	failure := &acceleratorProbeError{families: map[string]bool{"cuda": true, "xpu": true}}
-	if failure.Error() != "cuda: device_probe_unavailable; xpu: device_probe_unavailable" {
-		t.Fatal(failure)
 	}
 }

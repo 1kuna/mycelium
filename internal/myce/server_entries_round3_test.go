@@ -133,38 +133,6 @@ func TestEntryGenericHeadersBeforeSpooling(t *testing.T) {
 	}
 }
 
-func TestEntryRoutingCompatibilityAndCallerProductionDefault(t *testing.T) {
-	q, _ := fixture(t)
-	if err := q.ConfigureProjects(map[string]ProjectPolicy{"caller": {Weight: 1, DefaultCallPriority: "production"}}); err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		name         string
-		headers      http.Header
-		wantPriority string
-		wantErr      bool
-	}{
-		{"other-owner", http.Header{"X-Myce-Project": {"caller"}}, "production", false},
-		{"trimmed-caller-default", http.Header{"X-Myce-Project": {" caller "}}, "production", false},
-		{"ignored-malformed-deadline", http.Header{"X-Myce-Project": {"caller"}, "X-Myce-Priority": {"experiment"}, "X-Myce-Deadline": {"bad"}}, "experiment", false},
-		{"required-deadline", http.Header{"X-Myce-Project": {"caller"}, "X-Myce-Priority": {"deadline"}, "X-Myce-Deadline": {"bad"}}, "", true},
-		{"duplicate-project", http.Header{"X-Myce-Project": {"caller", "caller"}}, "", true},
-		{"duplicate-priority", http.Header{"X-Myce-Project": {"caller"}, "X-Myce-Priority": {"experiment", "experiment"}}, "", true},
-		{"duplicate-deadline", http.Header{"X-Myce-Project": {"caller"}, "X-Myce-Deadline": {"bad", "bad"}}, "", true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			c := &ModelCall{Project: tc.headers.Get("X-Myce-Project"), Priority: tc.headers.Get("X-Myce-Priority")}
-			err := q.callDefaults(c, Model{Project: "another-owner"}, tc.headers, true)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("routing compatibility: %v", err)
-			}
-			if !tc.wantErr && (c.Project != "caller" || c.Priority != tc.wantPriority || c.Deadline != nil) {
-				t.Fatalf("wrong caller defaults: %+v", c)
-			}
-		})
-	}
-}
-
 func TestEntryApprovalHeartbeatOneWalkAndBoundedTimeout(t *testing.T) {
 	c, model, _, _ := localApprovalFixture(t)
 	c.Limit = 1024

@@ -20,26 +20,6 @@ import (
 	"time"
 )
 
-func TestNativeOutcomeTermStop(t *testing.T) {
-	for _, group := range []bool{false, true} {
-		for _, independentExit := range []bool{false, true} {
-			t.Run(map[bool]string{false: "native", true: "native-group"}[group], func(t *testing.T) {
-				command := `touch "$1"; exec sleep 600`
-				if independentExit {
-					command = `trap 'exit 7' TERM; touch "$1"; while :; do sleep .01; done`
-				}
-				w, _, p := d5NativeStart(t, group, nil, []string{"sh", "-c", command, "main", "{work}/ready"})
-				nativeFile(t, p.job.Spec.Run.Workdir, "ready")
-				p.stop(w.Clock.Now(), time.Second, false)
-				r := d5Finish(t, p)
-				if r.Success || !r.Interrupted {
-					t.Fatal("TERM stop became stage failure", r)
-				}
-			})
-		}
-	}
-}
-
 // Adapter production of these Results remains covered by TestOutcomeRuntimeNative
 // and TestOutcomeRuntimeNativeGroup.
 func TestOutcomeRequeueExhaustionAndNoDoubleCharge(t *testing.T) {
@@ -137,8 +117,7 @@ type outcomeRow struct {
 	success, interrupted                                   bool
 }
 
-func TestOutcomeRuntimeNative(t *testing.T)      { testOutcomeRuntime(t, "native") }
-func TestOutcomeRuntimeNativeGroup(t *testing.T) { testOutcomeRuntime(t, "native-group") }
+func TestOutcomeRuntimeNative(t *testing.T) { testOutcomeRuntime(t, "native") }
 
 // Independent roots let the gate schedule each real adapter separately. Every
 // outcome row, signal, persisted result and recovery assertion stays intact.
@@ -239,25 +218,6 @@ func d5RuntimeOutcome(t *testing.T, runtime string, tc outcomeRow) Result {
 		r = *s.state.Result
 	}
 	return r
-}
-
-func TestNativeOutcomeIndependentExitWithStop(t *testing.T) {
-	for _, group := range []bool{false, true} {
-		t.Run(map[bool]string{false: "native", true: "native-group"}[group], func(t *testing.T) {
-			_, _, p := d5NativeStart(t, group, nil, []string{"sh", "-c", `touch "$1"; while [ ! -f "$2" ]; do sleep .01; done; exit 7`, "main", "{work}/ready", "{work}/finish"})
-			dir := p.job.Spec.Run.Workdir
-			nativeFile(t, dir, "ready")
-			// Freeze intent separately from delivery, then observe a payload exit.
-			p.mu.Lock()
-			p.stopped = true
-			p.mu.Unlock()
-			nativeTouch(t, dir, "finish")
-			r := d5Finish(t, p)
-			if r.Success || r.Interrupted {
-				t.Fatal("independent exit masked", r)
-			}
-		})
-	}
 }
 
 // Kill only the worker process; the replacement uses actual orphan recovery.

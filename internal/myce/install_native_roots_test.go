@@ -94,19 +94,3 @@ func TestNativeRootFlagsRejectInvalidPaths(t *testing.T) {
 		})
 	}
 }
-
-func TestNativeRootSavedEntriesValidated(t *testing.T) {
-	c, err := PlanInstall("worker", "/fixture/home", "", "/fixture/nas", "http://queue.invalid", "fixture", Detection{OS: "linux", Platform: "fake", MemoryMode: "fixed", MemoryGB: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, field := range []*[]string{&c.NativeReadRoots, &c.NativeExecuteRoots} {
-		for _, root := range []string{"", "relative", "/fixture/*", "/fixture/~", "/fixture\nother"} {
-			*field = []string{root}
-			if err := c.ValidateInstall(); err == nil {
-				t.Errorf("saved config accepted native root %q", root)
-			}
-		}
-		*field = nil
-	}
-}

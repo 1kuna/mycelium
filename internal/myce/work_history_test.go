@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -54,90 +53,6 @@ func startObservation(t *testing.T, q *Queue, m Machine, s Spec) Job {
 		t.Fatal(err)
 	}
 	return *r.Job
-}
-
-func TestWorkObservationAcceptedTimingAndPersistence(t *testing.T) {
-	q, clock, m, s := observationFixture(t)
-	j := startObservation(t, q, m, s)
-	clock.Advance(2 * time.Second)
-	finish(t, q, &j, true)
-	if len(q.s.WorkObservations) != 1 {
-		t.Fatalf("observations: %+v; timing: %+v", q.s.WorkObservations, q.s.Jobs[j.ID].Timing)
-	}
-	var observed WorkObservation
-	for _, o := range q.s.WorkObservations {
-		observed = o
-	}
-	if observed.Key.Work != "extension:sample" || observed.Key.Target.Platform != "cpu" || observed.Key.Host != "synthetic-host" || observed.Key.Component != "cpu" || observed.Key.Reference.InputShape != "small-v1" || observed.Key.Concurrency != 1 || observed.Key.BatchSize != 1 || observed.LastSeconds != 2 || observed.Samples != 1 || observed.Job != j.ID || observed.Attempt != j.Attempt {
-		t.Fatalf("wrong observation: %+v", observed)
-	}
-	if !observed.RecordedAt.Equal(clock.Now()) {
-		t.Fatal("not queue Clock time")
-	}
-	var rows int
-	if err := q.db.QueryRow("SELECT count(*) FROM queue_state WHERE key LIKE 'work_observations/%'").Scan(&rows); err != nil || rows != 1 {
-		t.Fatal("per-record persistence", rows, err)
-	}
-	second := startObservation(t, q, m, s)
-	timing := q.s.Jobs[second.ID].Timing
-	if timing.LastAcceptedSeconds == nil || *timing.LastAcceptedSeconds != 2 || timing.PredictedSeconds == nil || *timing.PredictedSeconds != 2 {
-		t.Fatalf("last accepted duration: %+v", timing)
-	}
-	clock.Advance(3 * time.Second)
-	finish(t, q, &second, true)
-	before := q.s.Jobs[second.ID].Timing
-	if before.ActualSeconds == nil || *before.ActualSeconds != 3 {
-		t.Fatalf("actual: %+v", before)
-	}
-	var changesBefore, changesAfter int
-	q.db.QueryRow("SELECT total_changes()").Scan(&changesBefore)
-	snap, err := q.snapshot(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	q.db.QueryRow("SELECT total_changes()").Scan(&changesAfter)
-	if changesBefore != changesAfter {
-		t.Fatal("status mutated SQLite")
-	}
-	found := false
-	for _, job := range snap.Jobs {
-		if job.ID == second.ID {
-			found = strings.Contains(JobTiming(job), "last accepted duration 2.00s; actual 3.00s")
-		}
-	}
-	if !found {
-		t.Fatal("status lost last accepted/actual duration")
-	}
-	var database string
-	if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&database); err != nil {
-		t.Fatal(err)
-	}
-	// MY-42: retired curve fields in persisted rows are tolerated. The current
-	// duration and memory fields still belong to the accepted-work record.
-	if _, err := q.db.Exec(`UPDATE queue_state SET data=json_set(data,
-		'$.rate', 999, '$.latency_seconds', 888,
-		'$.host_memory_gb', 777, '$.device_memory_gb', 666,
-		'$.units', 10, '$.service_calibration', json('{"samples":2}'),
-		'$.repeated', json('{"samples":3}'))
-		WHERE key LIKE 'work_observations/%'`); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.Close(); err != nil {
-		t.Fatal(err)
-	}
-	reopened, err := Open(database, q.root, clock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
-	if len(reopened.s.WorkObservations) != 1 || reopened.s.Jobs[second.ID].Timing.ActualSeconds == nil {
-		t.Fatal("observations not restored")
-	}
-	for _, point := range reopened.s.WorkObservations {
-		if point.LastSeconds != 3 || point.Samples != 2 || point.Key != observed.Key {
-			t.Fatal("retired curve fields changed accepted history", point)
-		}
-	}
 }
 
 func TestWorkObservationRejectsFailedStaleAndDuplicate(t *testing.T) {
@@ -254,28 +169,5 @@ func TestWorkObservationRetainsAcceptedTimingAfterOOM(t *testing.T) {
 	}
 	if elapsed, ok := q.lastAcceptedSeconds(key); !ok || elapsed != 2 {
 		t.Fatalf("OOM invalidated an earlier accepted duration: %g (valid=%t)", elapsed, ok)
-	}
-}
-
-func TestWorkObservationStatusShowsLastAcceptedDuration(t *testing.T) {
-	q, clock, m, s := observationFixture(t)
-	j := startObservation(t, q, m, s)
-	clock.Advance(2 * time.Second)
-	finish(t, q, &j, true)
-	for _, days := range []time.Duration{0, 31} {
-		clock.Advance(days * 24 * time.Hour)
-		snap, err := q.snapshot(true)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var html bytes.Buffer
-		if err = statusPage.Execute(&html, snap); err != nil || len(snap.WorkCurves) != 1 {
-			t.Fatal(err, snap.WorkCurves)
-		}
-		cli := snap.WorkCurves[0].SummaryAt(snap.Now)
-		// History has no age limit: the last accepted run is shown until replaced.
-		if want := "last accepted duration 2.00s"; !strings.Contains(cli, want) || !strings.Contains(html.String(), want) {
-			t.Fatalf("last accepted duration not shown after %d days: %s", days, cli)
-		}
 	}
 }

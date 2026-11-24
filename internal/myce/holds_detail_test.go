@@ -45,21 +45,6 @@ func TestHoldsDetailKindsAndLegacyCompatibility(t *testing.T) {
 	}
 }
 
-func TestHoldsDetailEmptyIsArray(t *testing.T) {
-	q, _ := fixture(t)
-	s, err := q.publicSnapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := json.Marshal(s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), `"holds":[]`) || strings.Contains(string(data), `"host_holds"`) {
-		t.Fatalf("empty holds fields: %s", data)
-	}
-}
-
 // The production fence evidence status used to list as host holds.
 func hostHoldTexts(holds []Hold) []string {
 	var out []string

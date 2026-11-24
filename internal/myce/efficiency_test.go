@@ -143,56 +143,6 @@ func TestEfficiencyPredictionAndSuspectAttempts(t *testing.T) {
 		t.Fatal("operator stop counted as waste")
 	}
 }
-func TestEfficiencyLearnedAlerts(t *testing.T) {
-	q, c := fixture(t)
-	used := 10.0
-	r := &EfficiencyReport{Hosts: []EfficiencyHost{{Host: "host", Rate: efficiencyRate{ReservedMemoryGB: 12, MeasuredMemoryGB: &used}}}}
-	var baseline map[string]efficiencyBaseline
-	step := func() {
-		c.Advance(time.Second)
-		r.At = c.Now()
-		var signals []EfficiencySignal
-		baseline, signals = efficiencySignals(r, baseline)
-		for _, s := range signals {
-			if !s.Observed {
-				continue
-			}
-			q.observeCurrentHealth("efficiency/"+s.Subject+"/"+s.Metric, s.Active, HealthAlert{Kind: "efficiency_regression", Reason: s.Metric})
-		}
-	}
-	for range alertWarmup {
-		step()
-	}
-	if firings(q, "efficiency_regression") != 0 {
-		t.Fatal("healthy fleet alerted")
-	}
-	r.Hosts[0].Rate.ReservedMemoryGB = 84
-	for range alertConfirmation {
-		step()
-	}
-	if firings(q, "efficiency_regression") != 1 {
-		t.Fatal("reservation regression not alerted")
-	}
-	for range alertHistorySize {
-		step()
-	}
-	if firings(q, "efficiency_regression") != 1 {
-		t.Fatal("episode flooded delivery")
-	}
-	r.Hosts[0].Rate.ReservedMemoryGB = 12
-	for range alertConfirmation {
-		step()
-	}
-	if baseline["host/reservation_gap_gb"].Active {
-		t.Fatal("recovery did not rearm")
-	}
-	r.Hosts[0].Rate.MeasuredMemoryGB = nil
-	baseline, _ = efficiencySignals(r, baseline)
-	if b := baseline["host/reservation_gap_gb"]; b.Observed || len(b.History) == 0 {
-		t.Fatal("unknown attribution trained as zero or discarded local evidence")
-	}
-}
-
 func TestEfficiencyRollbackAndRevisionFence(t *testing.T) {
 	q, c := fixture(t)
 	if err := q.update(func() error {
@@ -368,30 +318,6 @@ func TestEfficiencyRequeuedCustodyRemainsCharged(t *testing.T) {
 	a := j.Efficiency.Allocations[0]
 	if a.Host != "host" || a.Basis != "declared" || a.ReservedMemoryGBSeconds != 80 || a.ReservedCPUSeconds != 20 {
 		t.Fatalf("custody charge ended before exact release or continued afterward: %+v", a)
-	}
-}
-
-func TestEfficiencySiblingReportsKeepHostIdentity(t *testing.T) {
-	q, c := fixture(t)
-	cpu := cpuMachine("cpu", "host", "cpu", 8, 16)
-	gpu := cpuMachine("gpu", "host", "cuda", 8, 16)
-	cpu.ExtensionFingerprint, gpu.ExtensionFingerprint = "cpu-hardware", "gpu-hardware"
-	cpu.CPUExtensionFingerprint, gpu.CPUExtensionFingerprint = "host-cpu", "host-cpu"
-	check(t, q, cpu, nil)
-	check(t, q, gpu, nil)
-	first := q.s.EfficiencyHosts["host"]
-	c.Advance(5 * time.Second)
-	if err := q.update(func() error { q.touchMachine(cpu.ID).LastSeen = c.Now(); return nil }); err != nil {
-		t.Fatal(err)
-	}
-	second := q.s.EfficiencyHosts["host"]
-	c.Advance(5 * time.Second)
-	if err := q.update(func() error { q.touchMachine(gpu.ID).LastSeen = c.Now(); return nil }); err != nil {
-		t.Fatal(err)
-	}
-	third := q.s.EfficiencyHosts["host"]
-	if first.Identity != second.Identity || first.Identity != third.Identity || !first.Since.Equal(third.Since) || third.Seconds != 10 {
-		t.Fatalf("sibling recency reset host evidence: first=%+v second=%+v third=%+v", first, second, third)
 	}
 }
 

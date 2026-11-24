@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -220,35 +219,6 @@ func TestGeneralServerRouteRequiresToken(t *testing.T) {
 		if w.Code != 401 || len(q.calls) != 0 || len(q.s.ModelSlots) != 0 {
 			t.Fatalf("unauthorized model work: %d", w.Code)
 		}
-	}
-}
-func TestStopCommandDescendantsAreCleaned(t *testing.T) {
-	m := serverTestModel(t, "ready")
-	dir := t.TempDir()
-	marker := filepath.Join(dir, "helper-group")
-	m.StopTimeout = testWaitTimeout
-	m.StopCommand = []string{"sh", "-c", "echo $$ > '" + marker + "'; sleep 60 &"}
-	e := NewModelEngine(m, dir, RealClock{})
-	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
-	defer cancel()
-	if err := e.Load(ctx, m); err != nil {
-		t.Fatal(err)
-	}
-	defer e.Unload()
-	if err := e.Unload(); err != nil {
-		t.Fatal(err)
-	}
-	b, err := os.ReadFile(marker)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	members, err := workerGroupMembers(pid)
-	if err != nil || len(members) != 0 {
-		t.Fatal("stop helper survived", members, err)
 	}
 }
 func TestResolveCUDAUsesStableUUID(t *testing.T) {

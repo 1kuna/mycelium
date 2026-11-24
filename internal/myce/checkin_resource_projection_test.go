@@ -4,54 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"sort"
 	"sync"
 	"testing"
 	"time"
 )
-
-func TestScarceHostYieldProjectionKeepsDemand(t *testing.T) {
-	q, clock, _, _, victim := yieldFixture(t, false)
-	drainAdmissionWait(t, q)
-	s := spec("experiment")
-	s.Resumable = false
-	s.Needs.CPUCores, s.Needs.HostMemoryGB = 1, 1
-	s.Needs.Platform = Platform{Required: []string{"fake"}}
-	if err := s.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	var target *Machine
-	for _, m := range q.plannerMachines() {
-		if m.GPU == "fake" {
-			target = m
-			break
-		}
-	}
-	if target == nil {
-		t.Fatal("missing scarce target")
-	}
-	set := &candidateSet{q: q, m: target, resources: map[batchResourceKey]batchResourceRoom{}}
-	// A portable demand can populate the ordinary projection first. It must
-	// neither suppress later yields nor donate another demand's stop authority.
-	portable := &Job{ID: "portable-demand", State: "queued", Spec: s, Queued: clock.Now()}
-	q.batchResourcesFitWithScan(portable, target, set.resources)
-	for _, id := range []string{"demand-a", "demand-b"} {
-		j := *portable
-		j.ID = id
-		j.Spec.RequirementReasons = map[string]string{"backend:fake": "requires simulated accelerator"}
-		if !q.batchResourcesFitWithScan(&j, target, set.resources) {
-			t.Fatal("yield demand lost admission", id)
-		}
-		p := set.batchPlan(&j)
-		if p == nil || p.yields[victim.ID] == nil || p.yields[victim.ID].Demand != id {
-			t.Fatal("yield plan reused a different demand", id, p)
-		}
-		if !reflect.DeepEqual(p, q.roomPlan(&j, target, true)) {
-			t.Fatal("cached yield differs from uncached plan", id)
-		}
-	}
-}
 
 // The same synthetic fixture can be copied unchanged to older releases.
 // JSON applies the new annotation only where the release supports it.

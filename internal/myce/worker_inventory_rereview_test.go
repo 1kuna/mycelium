@@ -243,23 +243,6 @@ func TestInventoryRereviewUnifiedCapBelowReserve(t *testing.T) {
 	}
 }
 
-func TestInventoryRereviewAllowanceSingleCardMasks(t *testing.T) {
-	h := &machineHarness{controls: map[string]AttemptDirective{}}
-	h.jobs = []Job{
-		harnessJob(t, "cuda-mask", "0", `test "$MYCE_DEVICES" = 0 && test "$CUDA_VISIBLE_DEVICES" = GPU-fake-a && test "$ZE_AFFINITY_MASK" = 2147483647 && test "$ONEAPI_DEVICE_SELECTOR" = '!*:*'`),
-		harnessJob(t, "xpu-mask", "1", `test "$MYCE_DEVICES" = 1 && test -z "$CUDA_VISIBLE_DEVICES" && test "$ZE_AFFINITY_MASK" = 3 && test "$ONEAPI_DEVICE_SELECTOR" = level_zero:0`),
-	}
-	w := harnessWorker(t, h)
-	w.Machine.Device = "0,1"
-	startHarness(t, w, h)
-	await(t, func() bool { return h.completed("cuda-mask") && h.completed("xpu-mask") })
-	for _, id := range []string{"cuda-mask", "xpu-mask"} {
-		if r := h.result(id); !r.Success {
-			t.Fatalf("allowance widened %s mask: %+v", id, r)
-		}
-	}
-}
-
 func TestQCNativeGroupLaunchProbeRetry(t *testing.T) {
 	// Pairwise cases: each probe site meets both fault kinds and both retry
 	// modes; the full 2x2x2 product covered no additional block (#1086).

@@ -59,20 +59,6 @@ func setParityKinds(t *testing.T, q *Queue, project, work string, kinds ...strin
 	}
 }
 
-func clearParityHosts(t *testing.T, q *Queue, project string) {
-	t.Helper()
-	if err := q.update(func() error {
-		q.migrateParityKinds()
-		store := q.s.ParityKinds.clone()
-		delete(store.Projects, project)
-		q.s.ParityKinds = store
-		q.mirrorProjectParity()
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // parityFixture: two hosts of one kind and a third of another kind (a
 // different CPU architecture), all qualified for kind:sample. The project has
 // no approvals yet.

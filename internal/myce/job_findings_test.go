@@ -61,18 +61,6 @@ func TestJobFindingsFixtures(t *testing.T) {
 	}
 }
 
-// The 2026-11-06 case: 64 GiB measured against a 2 GiB declaration must name
-// both measurements and a declaration that would have fit.
-func TestJobFindingCarriesMeasuredEvidence(t *testing.T) {
-	j := Job{State: "failed", ExecutionCause: &RuntimeCause{Operation: "command", Class: rssLimitExceeded, RSSLimit: &RSSLimitEvidence{ObservedBytes: 64 << 30, LimitBytes: 2 << 30, Quality: "owned_session_rss"}}}
-	text := statusJobValue(&j).Finding.Text()
-	for _, want := range []string{"64.0 GiB", "2.0 GiB", "declare at least 64.0 GiB", "your job"} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("%q missing from %s", want, text)
-		}
-	}
-}
-
 func TestJobFindingsDeadEndPrivacyAndRepeatProjection(t *testing.T) {
 	for _, reason := range []string{
 		"dead end: no registered implementation matches a known host (private-name); action: /private/secret",

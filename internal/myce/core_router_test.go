@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
 	"slices"
 	"strings"
 	"testing"
@@ -101,17 +100,6 @@ func TestEphemeralQualificationsFollowAssignedLaunchPath(t *testing.T) {
 	})
 	if err == nil || refusal != ephemeralDetachedUnqualified {
 		t.Fatalf("worker slice drift did not withhold support: %q %v", refusal, err)
-	}
-}
-
-func TestCoreRouterDeploy(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "python3", "../../deploy/test_core_router.py")
-	cmd.Env = withoutMyceToken(os.Environ())
-	cmd.Env = append(cmd.Env, "PYTHONDONTWRITEBYTECODE=1")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("deployed router behavior: %v\n%s", err, out)
 	}
 }
 

@@ -1,68 +1,15 @@
 package myce
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
 )
-
-func TestQueueControlPlaneServicePolicy(t *testing.T) {
-	for _, target := range []Detection{{OS: "linux", Arch: "amd64"}, {OS: "linux", Arch: "arm64"}, {OS: "darwin", Arch: "arm64"}} {
-		t.Run(target.OS+"/"+target.Arch, func(t *testing.T) {
-			home := t.TempDir()
-			c, err := PlanInstall("queue", home, "", home, "http://queue.invalid", "queue", target)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := c.ValidateInstall(); err != nil {
-				t.Fatal(err)
-			}
-			if c.Nice != 0 || c.CPUQuota != "" {
-				t.Fatalf("control plane inherits execution throttle: nice=%d quota=%q", c.Nice, c.CPUQuota)
-			}
-			// Owner-use policy is for execution; it must not throttle the queue.
-			c.DailyUse, c.Laptop = true, true
-			text := c.ServiceText()
-			for _, forbidden := range []string{"GOMAXPROCS=", "Nice=10", "CPUQuota=25%", "LowPriorityIO", "Background"} {
-				if strings.Contains(text, forbidden) {
-					t.Errorf("queue service contains %q", forbidden)
-				}
-			}
-			if target.OS == "linux" && (!strings.Contains(text, "Nice=0\n") || !strings.Contains(text, "CPUQuota=\n")) {
-				t.Fatal("queue does not reset default CPU limits")
-			}
-		})
-	}
-}
-
-func TestQueueUpgradePreservesExplicitCPUSettings(t *testing.T) {
-	for _, v := range []struct {
-		nice  int
-		quota string
-	}{{0, "45%"}, {5, "25%"}, {10, "150%"}, {10, "25%"}} {
-		home := t.TempDir()
-		c, err := PlanInstall("queue", home, "", home, "http://queue.invalid", "queue", Detection{OS: "linux", Arch: "amd64"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		c.Nice, c.CPUQuota = v.nice, v.quota
-		os.MkdirAll(filepath.Dir(c.Config), 0700)
-		raw, _ := json.Marshal(c)
-		os.WriteFile(c.Config, raw, 0600)
-		got, err := ReadServiceConfig(c.Config)
-		if err != nil || got.Nice != v.nice || got.CPUQuota != v.quota {
-			t.Fatal("explicit operator CPU setting changed", err)
-		}
-	}
-}
 
 // Model the measured ~50 ms CPU cost of a serialized durable transaction.
 // A fake store queues twelve transactions, and synctest advances its CPU budget

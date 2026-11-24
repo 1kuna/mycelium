@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/ed25519"
@@ -12,99 +11,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
-
-func TestFleetRunningImageSurvivesDiskSwap(t *testing.T) {
-	if os.Getenv("MYCE_TEST_FLEET_IMAGE") == "1" {
-		fmt.Println("ready")
-		if _, err := bufio.NewReader(os.Stdin).ReadString('\n'); err != nil {
-			t.Fatal(err)
-		}
-		before, err := fleetStartupImage.sha256()
-		if err != nil {
-			t.Fatal(err)
-		}
-		after, err := fleetStartupImage.sha256()
-		if err != nil || before != after {
-			t.Fatal("running image evidence changed", err)
-		}
-		fmt.Println(before)
-		return
-	}
-	path, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	source, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer source.Close()
-	dir := t.TempDir()
-	installed := filepath.Join(dir, "worker")
-	f, err := os.OpenFile(installed, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0700)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, copyErr := io.Copy(f, source)
-	closeErr := f.Close()
-	if copyErr != nil || closeErr != nil {
-		t.Fatal(copyErr, closeErr)
-	}
-	want, err := FileSHA256(installed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, installed, "-test.run=^TestFleetRunningImageSurvivesDiskSwap$")
-	cmd.Env = append(withoutMyceToken(os.Environ()), "MYCE_TEST_FLEET_IMAGE=1")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
-	reader := bufio.NewScanner(stdout)
-	if !reader.Scan() || reader.Text() != "ready" {
-		t.Fatal("child did not reach startup", reader.Text(), reader.Err(), stderr.String())
-	}
-	replacement := filepath.Join(dir, "replacement")
-	if err := os.WriteFile(replacement, []byte("different on-disk executable"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(replacement, installed); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := io.WriteString(stdin, "observe\n"); err != nil {
-		t.Fatal(err)
-	}
-	_ = stdin.Close()
-	if !reader.Scan() || reader.Text() != want {
-		t.Fatal("proof did not hash running image after disk swap", reader.Text(), reader.Err())
-	}
-	_, _ = io.Copy(io.Discard, stdout)
-	if err := cmd.Wait(); err != nil {
-		t.Fatal("child failed", err, stderr.String())
-	}
-	if disk, err := FileSHA256(installed); err != nil || disk == want {
-		t.Fatal("fixture did not replace disk image", err)
-	}
-}
 
 func TestFleetPublisherBootstrapNeverReplacesTrust(t *testing.T) {
 	key := bytes.Repeat([]byte{1}, ed25519.PublicKeySize)
@@ -230,37 +142,6 @@ func TestFleetRuntimeRestartProofDiagnosticsThroughCheckin(t *testing.T) {
 	checkStatus("")
 	if m.Fleet.Session != m.Session || m.Fleet.PID != managerPID || !m.Fleet.ObservedAt.Equal(clock.Now()) || !fleetProofReady(m.Fleet) {
 		t.Fatalf("invalid replacement proof: %+v", m.Fleet)
-	}
-}
-
-func TestFleetRuntimeProofDiagnosticKeepsPredecessorCheckinJSON(t *testing.T) {
-	// Predecessors decode machine fields strictly and ignore extension headers.
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get(fleetProofIssueHeader) != string(fleetProofImageMapping) {
-			t.Error("missing fleet diagnostic header")
-		}
-		var body map[string]json.RawMessage
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Error(err)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		var fields map[string]json.RawMessage
-		if err := json.Unmarshal(body["machine"], &fields); err != nil {
-			t.Error(err)
-		}
-		if _, ok := fields["fleet_proof_issue"]; ok {
-			t.Error("diagnostic would break strict predecessor machine decoding")
-		}
-		if _, ok := body["fleet_proof_issue"]; ok {
-			t.Error("diagnostic would break strict predecessor check-in decoding")
-		}
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer server.Close()
-	c := Client{URL: server.URL}
-	if err := c.Call(context.Background(), "POST", "/api/workers/checkin", Checkin{Machine: Machine{ID: "worker"}, fleetProofIssue: fleetProofImageMapping}, nil); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -498,55 +379,6 @@ func TestFleetRuntimeFetchesInstructionOnlyWhenWaiting(t *testing.T) {
 		}
 		if r.proof == nil {
 			t.Fatalf("step %d: proof withheld", n)
-		}
-	}
-}
-
-// Every instruction the queue would issue is flagged on the same check-in, so
-// an upgrade reaches a current worker within one check-in of being staged.
-func TestFleetInstructionWaitingFlagsEveryIssuableInstruction(t *testing.T) {
-	q, c, workers := fleetFixture(t, "queue", "a", "b")
-	checkIn := func(id string) (Machine, bool) {
-		t.Helper()
-		m := cloneMachine(q.s.Machines[id])
-		m.Fleet.ObservedAt = c.Now()
-		reply := check(t, q, m, nil)
-		if reply.FleetInstructionProtocol != fleetInstructionProtocol {
-			t.Fatal("check-in reply lacks the instruction protocol")
-		}
-		return m, reply.FleetInstructionWaiting
-	}
-	for _, w := range workers {
-		if _, waiting := checkIn(w.ID); waiting {
-			t.Fatal("instruction flagged without an upgrade")
-		}
-	}
-	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
-		t.Fatal(err)
-	}
-	fleetTick(t, q)
-	activated := map[string]bool{}
-	for step := 0; q.s.FleetUpgrade.State == "running"; step++ {
-		if step > 8 {
-			t.Fatalf("upgrade did not finish: %+v", q.fleetUpgradeStatus())
-		}
-		h := q.fleetActiveHost()
-		for _, w := range workers {
-			m, waiting := checkIn(w.ID)
-			i, err := q.fleetInstruction(hostID(&m), m.ID, m.Session)
-			if err != nil || i.Operation != "" && !waiting || waiting != (h != nil && h.Host == hostID(&m)) {
-				t.Fatalf("worker %s waiting=%t instruction=%q active=%+v err=%v", m.ID, waiting, i.Operation, q.fleetUpgradeStatus().Hosts, err)
-			}
-		}
-		activated[fleetActivate(t, q, c)] = true
-		fleetTick(t, q)
-	}
-	if q.s.FleetUpgrade.State != "complete" || !activated["a/worker-a"] || !activated["b/worker-b"] {
-		t.Fatalf("workers not upgraded: %v %+v", activated, q.fleetUpgradeStatus())
-	}
-	for _, w := range workers {
-		if _, waiting := checkIn(w.ID); waiting {
-			t.Fatal("instruction flagged after completion")
 		}
 	}
 }

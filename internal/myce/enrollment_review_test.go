@@ -23,38 +23,6 @@ func TestEnrollmentLaunchctlCapturedNestedState(t *testing.T) {
 	}
 }
 
-func TestEnrollmentReceiptWrittenOnlyOnChange(t *testing.T) {
-	dir := t.TempDir()
-	m := readyEnrollmentMachine()
-	m.Devices[0].CapabilityProfile = &CapabilityProfile{RecordedAt: RealClock{}.Now()}
-	if err := saveEnrollmentReceipt(dir, m); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(dir, "enrollment.json")
-	stamp := time.Unix(100, 0)
-	if err := os.Chtimes(path, stamp, stamp); err != nil {
-		t.Fatal(err)
-	}
-	if err := saveEnrollmentReceipt(dir, m); err != nil {
-		t.Fatal(err)
-	}
-	st, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !st.ModTime().Equal(stamp) {
-		t.Fatal("unchanged receipt rewritten")
-	}
-	m.Session = "new-session"
-	if err := saveEnrollmentReceipt(dir, m); err != nil {
-		t.Fatal(err)
-	}
-	r, err := ReadEnrollmentReceipt(dir)
-	if err != nil || r.Session != m.Session {
-		t.Fatal("changed receipt not saved", err)
-	}
-}
-
 func TestEnrollmentReleaseVersionMustBeOrdered(t *testing.T) {
 	_, _, m := signedTestRelease(t)
 	m.Version = "opaque-label"

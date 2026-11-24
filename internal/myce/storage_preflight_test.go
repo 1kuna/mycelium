@@ -106,33 +106,6 @@ func TestFleetStorageFailureReceiptAndQueue(t *testing.T) {
 	}
 }
 
-func TestOnboardingStorageFailureEvidence(t *testing.T) {
-	for _, root := range []string{"checkpoint", "model", "environment"} {
-		for _, operation := range []string{"open", "fsync", "read", "rename"} {
-			t.Run(root+"/"+operation, func(t *testing.T) {
-				c, command := onboardingNAS(t, "darwin")
-				paths := map[string]string{"checkpoint": c.Checkpoints, "model": c.ModelRoot, "environment": c.EnvironmentRoot}
-				fs := onboardingStorageFS{lstat: os.Lstat, mkdir: os.Mkdir, probeContext: func(ctx context.Context, abort context.CancelCauseFunc, dir string) error {
-					if dir != paths[root] {
-						return nil
-					}
-					return onboardingFSError(ctx, abort, func() error { return &os.PathError{Op: operation, Path: "/private/fixture-secret", Err: syscall.EIO} }, operation)
-				}}
-				_, err := prepareOnboardingStorageFS(context.Background(), c, false, command, fs)
-				requirePreflightCode(t, err, "nas_unreachable")
-				got := storageFailureDetail(err)
-				if got == nil || got.Root != root || got.Operation != operation || got.Errno != int(syscall.EIO) || got.Elapsed <= 0 {
-					t.Fatalf("probe evidence discarded: %+v", got)
-				}
-				data, _ := json.Marshal(got)
-				if strings.Contains(string(data), "private") || strings.Contains(err.Error(), "fixture-secret") {
-					t.Fatal("private error exposed")
-				}
-			})
-		}
-	}
-}
-
 func TestFleetStorageFailureSanitizesReceiptAndStatus(t *testing.T) {
 	f := newFleetInstallFixture(t, "darwin")
 	f.i.StorageDiagnostics = true

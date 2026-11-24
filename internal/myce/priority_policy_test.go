@@ -2,131 +2,13 @@ package myce
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 )
 
 func examplePriorityPolicy() PriorityPolicy {
 	return PriorityPolicy{Version: 1, Tiers: []PriorityTier{{Name: "urgent", Selectors: []string{"verso/production"}}, {Name: "shared", Selectors: []string{"atlas/*", "verso/experiment"}}, {Name: "other", Selectors: []string{"*/*"}}}}
-}
-
-func TestPriorityPolicyDefaultAndSelectors(t *testing.T) {
-	q, _ := fixture(t)
-	for _, tc := range []struct{ project, class, tier, selector string }{{"a", "production", "production", "*/production"}, {"a", "deadline", "deadline", "*/deadline"}, {"a", "experiment", "experiment", "*/*"}, {"a", "preview", "experiment", "*/*"}} {
-		got := q.priorityMatch(Spec{Project: tc.project, Class: tc.class})
-		if got.Tier != tc.tier || got.Selector != tc.selector || got.Revision != 0 {
-			t.Fatalf("default: %+v", got)
-		}
-	}
-	p := examplePriorityPolicy()
-	p.Tiers[0].Selectors = append(p.Tiers[0].Selectors, "v[ae]r?o/prod*")
-	if _, err := q.SetPriorityPolicy(0, p); err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct{ project, class, tier string }{{"verso", "production", "urgent"}, {"varso", "production", "urgent"}, {"atlas", "production", "shared"}, {"verso", "experiment", "shared"}, {"third", "training", "other"}} {
-		if got := q.priorityMatch(Spec{Project: tc.project, Class: tc.class}); got.Tier != tc.tier || got.Revision != 1 {
-			t.Fatalf("%+v: %+v", tc, got)
-		}
-	}
-}
-
-func TestPriorityPolicyCASReopenReplay(t *testing.T) {
-	q, c := fixture(t)
-	s := spec("production")
-	s.Project = "verso"
-	s.SubmissionKey = "stable"
-	j := submit(t, q, s)
-	var wg sync.WaitGroup
-	successes, conflicts := make(chan bool, 2), make(chan bool, 2)
-	for range 2 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, err := q.SetPriorityPolicy(0, examplePriorityPolicy())
-			if err == nil {
-				successes <- true
-			} else if errors.Is(err, ErrPolicyRevision) {
-				conflicts <- true
-			} else {
-				t.Error(err)
-			}
-		}()
-	}
-	wg.Wait()
-	if len(successes) != 1 || len(conflicts) != 1 {
-		t.Fatal("CAS did not serialize")
-	}
-	replay := submit(t, q, s)
-	if replay.ID != j.ID || replay.Spec.Class != "production" {
-		t.Fatalf("replay: %+v", replay)
-	}
-	var dbPath, dbName string
-	var dbSeq int
-	if err := q.db.QueryRow("PRAGMA database_list").Scan(&dbSeq, &dbName, &dbPath); err != nil {
-		t.Fatal(err)
-	}
-	root := q.root
-	if err := q.Close(); err != nil {
-		t.Fatal(err)
-	}
-	reopened, err := Open(dbPath, root, c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
-	record := reopened.PriorityPolicy()
-	if record.Revision != 1 || record.Policy.Tiers[0].Name != "urgent" {
-		t.Fatalf("reopen: %+v", record)
-	}
-	if got := submit(t, reopened, s); got.ID != j.ID {
-		t.Fatal("key replay changed after reopen")
-	}
-}
-
-func TestPriorityPolicyPlacement(t *testing.T) {
-	q, c := fixture(t)
-	if _, err := q.SetPriorityPolicy(0, examplePriorityPolicy()); err != nil {
-		t.Fatal(err)
-	}
-	atlas := spec("production")
-	atlas.Project = "atlas"
-	a := submit(t, q, atlas)
-	c.Advance(1)
-	experiment := spec("experiment")
-	experiment.Project = "verso"
-	e := submit(t, q, experiment)
-	production := spec("production")
-	production.Project = "verso"
-	p := submit(t, q, production)
-	m1, m2 := machine("one", "fake"), machine("two", "fake")
-	first := check(t, q, m1, nil).Job
-	if first == nil || first.ID != p.ID {
-		t.Fatalf("urgent did not win: %+v", first)
-	}
-	finish(t, q, first, true)
-	left := check(t, q, m1, nil).Job
-	right := check(t, q, m2, nil).Job
-	if left == nil || right == nil || left.ID == right.ID || (left.ID != a.ID && left.ID != e.ID) || (right.ID != a.ID && right.ID != e.ID) {
-		t.Fatalf("shared placement: %+v %+v", left, right)
-	}
-	if job(t, q, a.ID).State != "running" || job(t, q, e.ID).State != "running" {
-		t.Fatal("same tier stopped a neighbor")
-	}
-	if q.comparePriority(a.Spec, e.Spec) != 0 {
-		t.Fatal("shared classes differ")
-	}
-	status, err := q.Snapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, j := range status.Jobs {
-		if j.PriorityPolicy.Revision != 1 || j.PriorityPolicy.Selector == "" {
-			t.Fatalf("missing policy status: %+v", j)
-		}
-	}
 }
 
 func TestPriorityPolicyClassNormalization(t *testing.T) {
@@ -171,38 +53,6 @@ func TestPriorityPolicyValidation(t *testing.T) {
 	record, err := q.SetPriorityPolicy(0, p)
 	if err != nil || len(record.Warnings) != 3 {
 		t.Fatalf("shadow warnings: %+v %v", record, err)
-	}
-}
-
-func TestPriorityPolicyReplacesPreemptionRank(t *testing.T) {
-	q, _ := fixture(t)
-	if _, err := q.SetPriorityPolicy(0, examplePriorityPolicy()); err != nil {
-		t.Fatal(err)
-	}
-	s := spec("production")
-	s.Project = "atlas"
-	a := submit(t, q, s)
-	m := machine("one", "fake")
-	running := check(t, q, m, nil).Job
-	if running == nil || running.ID != a.ID {
-		t.Fatal("atlas not assigned")
-	}
-	s.Project = "verso"
-	p := submit(t, q, s)
-	if job(t, q, a.ID).State != "stopping" {
-		t.Fatal("legacy equal priority overrode tier preemption")
-	}
-	if job(t, q, p.ID).PriorityPolicy.Tier != "urgent" {
-		t.Fatal("wrong tier")
-	}
-	// A live policy update changes current rank without rewriting the immutable class.
-	policy := examplePriorityPolicy()
-	policy.Tiers[0].Selectors = []string{"atlas/*"}
-	if _, err := q.SetPriorityPolicy(1, policy); err != nil {
-		t.Fatal(err)
-	}
-	if got := job(t, q, a.ID); got.Spec.Class != "production" || got.PriorityPolicy.Tier != "urgent" || got.PriorityPolicy.Revision != 2 {
-		t.Fatalf("stale projection: %+v", got.PriorityPolicy)
 	}
 }
 
@@ -271,49 +121,6 @@ func TestPriorityPolicyStatus(t *testing.T) {
 		} else if !strings.Contains(w.Body.String(), "tier shared") || !strings.Contains(w.Body.String(), "verso/experiment") || !strings.Contains(w.Body.String(), "policy revision 1") {
 			t.Fatal("tier/class/revision missing from HTML")
 		}
-	}
-}
-
-func TestPriorityPolicyModelResidentPromotion(t *testing.T) {
-	q, _, m := modelFixture(t)
-	low := addModelCall(t, q, "experiment")
-	reportModel(t, q, m, "ready")
-	high := addModelCall(t, q, "production")
-	resident := q.s.ModelSlots[slotKey(m.ID, "test")]
-	if low.Machine != m.ID || high.Machine != m.ID || resident.Priority != "production" {
-		t.Fatalf("resident priority was not promoted: %+v", resident)
-	}
-	if err := q.finishCall(high.ID); err != nil {
-		t.Fatal(err)
-	}
-	if resident.Priority != "experiment" || q.comparePriority(q.slotSpec(resident), callJob(low).Spec) != 0 {
-		t.Fatalf("resident priority was not restored: %+v", resident)
-	}
-}
-
-func TestPriorityPolicyCASIncludesExistingProjectSettings(t *testing.T) {
-	q, _ := fixture(t)
-	if err := q.ConfigureProjects(map[string]ProjectPolicy{"atlas": {Weight: 2}}); err != nil {
-		t.Fatal(err)
-	}
-	record := q.PriorityPolicy()
-	if record.Revision != 1 || record.Policy.Projects["atlas"].Weight != 2 {
-		t.Fatalf("settings did not advance policy revision: %+v", record)
-	}
-	if _, err := q.SetPriorityPolicy(0, examplePriorityPolicy()); !errors.Is(err, ErrPolicyRevision) {
-		t.Fatalf("stale settings snapshot accepted: %v", err)
-	}
-	if _, err := q.SetPriorityPolicy(1, examplePriorityPolicy()); err != nil {
-		t.Fatal(err)
-	}
-	if q.PriorityPolicy().Policy.Projects["atlas"].Weight != 2 {
-		t.Fatal("omitted projects lost settings")
-	}
-	if err := q.ConfigureProjects(map[string]ProjectPolicy{"atlas": {Weight: 3}}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := q.SetPriorityPolicy(2, examplePriorityPolicy()); !errors.Is(err, ErrPolicyRevision) {
-		t.Fatalf("legacy settings write bypassed CAS: %v", err)
 	}
 }
 

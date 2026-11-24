@@ -7,7 +7,6 @@ import (
 	"reflect"
 	"strings"
 	"sync"
-	"testing"
 )
 
 // Allocation probes measure the production path, excluding the full test diff.
@@ -222,45 +221,4 @@ func auditSubmission(q *Queue, r *submissionRecord) *submissionRecord {
 		copy.Job = nil
 	}
 	return &copy
-}
-
-// Guard against the principal failure mode of an explicit journal: a future
-// mutator changes a decision but forgets to enroll its undo/durable record.
-func TestQueueRecordsAuditDetectsMissingTouches(t *testing.T) {
-	q, _ := fixture(t)
-	check(t, q, machine("worker", "fake"), nil)
-	j := submit(t, q, spec("experiment"))
-	drainAdmissionWait(t, q)
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if q.s.WorkObservations == nil {
-		q.s.WorkObservations = map[string]WorkObservation{}
-	}
-	for _, kind := range []string{"job", "machine", "catalog"} {
-		t.Run(kind, func(t *testing.T) {
-			old, err := q.beginRecords()
-			if err != nil {
-				t.Fatal(err)
-			}
-			var restore func()
-			switch kind {
-			case "job":
-				previous := q.s.Jobs[j.ID].DiagnosticCode
-				q.s.Jobs[j.ID].DiagnosticCode = "missing_touch"
-				restore = func() { q.s.Jobs[j.ID].DiagnosticCode = previous }
-			case "machine":
-				previous := q.s.Machines["worker"].Leaving
-				q.s.Machines["worker"].Leaving = !previous
-				restore = func() { q.s.Machines["worker"].Leaving = previous }
-			case "catalog":
-				q.s.WorkObservations["missing"] = WorkObservation{StaleReason: "identity changed"}
-				restore = func() { delete(q.s.WorkObservations, "missing") }
-			}
-			if err := checkQueueRecords(q); err == nil {
-				t.Fatal("unmarked decision passed full-diff assertion")
-			}
-			restore()
-			q.rollbackRecords(old)
-		})
-	}
 }

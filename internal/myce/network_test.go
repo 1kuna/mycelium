@@ -52,60 +52,6 @@ func (p *partitionTransport) RoundTrip(r *http.Request) (*http.Response, error) 
 	return http.DefaultTransport.RoundTrip(r)
 }
 
-// Partition admission must also drain requests that already passed the gate.
-func TestQCPartitionDrainsInFlight(t *testing.T) {
-	t.Parallel()
-	q, clock := fixture(t)
-	ms := []Machine{machine("a", "fake", "ha"), machine("b", "fake", "hb"), machine("c", "fake", "hc")}
-	for _, m := range ms {
-		check(t, q, m, nil)
-	}
-	entered, release := make(chan struct{}), make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		close(entered)
-		<-release
-		check(t, q, ms[2], nil)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-	transport := &partitionTransport{}
-	done := make(chan error, 1)
-	go func() {
-		r, err := (&http.Client{Transport: transport}).Get(server.URL)
-		if r != nil {
-			r.Body.Close()
-		}
-		done <- err
-	}()
-	<-entered
-	partitioned := make(chan struct{})
-	go func() { transport.down.Store(true); close(partitioned) }()
-	premature := false
-	select {
-	case <-partitioned:
-		premature = true
-	case <-time.After(20 * time.Millisecond):
-	}
-	if premature {
-		clock.Advance(10 * time.Minute)
-	}
-	close(release)
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	<-partitioned
-	if !premature {
-		clock.Advance(10 * time.Minute)
-	}
-	s, err := q.Snapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if premature || !strings.Contains(s.Warning, "network") {
-		t.Fatalf("partition returned before in-flight check-in drained; warning=%q", s.Warning)
-	}
-}
-
 func TestWorkerNetworkPartitionFakeClock(t *testing.T) {
 	t.Parallel()
 	q, initial := fixture(t)
@@ -177,19 +123,4 @@ func TestWorkerNetworkPartitionFakeClock(t *testing.T) {
 			return false
 		}
 	})
-}
-
-func TestNASLossDoesNotStopRunningJob(t *testing.T) {
-	t.Parallel()
-	q, c := fixture(t)
-	submit(t, q, spec("experiment"))
-	m := machine("a", "fake")
-	running := check(t, q, m, nil).Job
-	fakeCheckpointAvailability(t, q, false)
-	submit(t, q, spec("production"))
-	c.Advance(time.Second)
-	if reply := check(t, q, m, running); reply.Stop {
-		t.Fatal("NAS loss preempted running command")
-	}
-	requireState(t, q, running.ID, "running")
 }

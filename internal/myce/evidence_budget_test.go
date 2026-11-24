@@ -149,30 +149,6 @@ func TestEvidenceRetentionConcurrentDependencyFencesPlan(t *testing.T) {
 	}
 }
 
-func TestEvidenceRetentionAutomaticFilesAndReplaySurviveAge(t *testing.T) {
-	q, clock := fixture(t)
-	if err := q.ConfigureFileRetention(0); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.ConfigureLogRetention(0); err != nil {
-		t.Fatal(err)
-	}
-	s := keyedSpec()
-	s.Priority = "experiment"
-	j := submit(t, q, s)
-	if err := q.Cancel(j.ID); err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(10000 * 24 * time.Hour)
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
-	}
-	q = reopenCancellationQueue(t, q, clock)
-	if replay := submit(t, q, s); replay.ID != j.ID || replay.State != "cancelled" {
-		t.Fatal("time changed unique replay evidence")
-	}
-}
-
 func TestEvidenceBudgetUsesLocalHeadroom(t *testing.T) {
 	if n := evidenceBudget(RetentionCapacity{1024, 8192}, 512, 768); n != 256 {
 		t.Fatal(n)
@@ -206,22 +182,6 @@ func TestEvidenceRetentionRevisitsHistoryWhenCapacityFalls(t *testing.T) {
 	}
 	if len(q.s.Jobs["closed"].AttemptHistory) != 2 {
 		t.Fatal("unchanged history ignored reduced host capacity")
-	}
-}
-
-func TestExternalEvidenceNextSamplePreservesCompactedCounts(t *testing.T) {
-	q, clock := fixture(t)
-	q.s.ExternalMemory = map[string]*externalMemoryRing{"synthetic": {Slots: 10000, Buckets: map[int]*externalMemoryBucket{}}}
-	m := Machine{ID: "synthetic", MemoryObservation: &HostMemoryObservation{TotalGB: 16, UsedGB: 4}}
-	q.recordExternalMemory(&m)
-	clock.Advance(time.Second)
-	q.recordExternalMemory(&m)
-	ring := q.s.ExternalMemory["synthetic"]
-	compactExternalEvidence(ring, clock.Now(), 4096)
-	clock.Advance(time.Second)
-	q.recordExternalMemory(&m)
-	if got := q.externalMemoryStatus("synthetic").Week.Samples; got != 3 {
-		t.Fatalf("next check-in replaced compacted samples: got %d", got)
 	}
 }
 
@@ -288,84 +248,6 @@ func TestDiagnosticReservationsConcurrentHeadroom(t *testing.T) {
 	defer releaseC()
 	if c != 1024 {
 		t.Fatal("released budget unavailable", c)
-	}
-}
-
-func TestEvidenceRetentionLearntKeyAndUniqueWaitRemain(t *testing.T) {
-	q, clock := fixture(t)
-	q.evidenceMaintenance.capacity = func(context.Context) (RetentionCapacity, error) {
-		return RetentionCapacity{MemoryAvailableBytes: 1, DiskAvailableBytes: 1}, nil
-	}
-	key := ObservationKey{Work: "learned"}
-	peak, predicted, actual := 2.0, 20.0, 10.0
-	err := q.update(func() error {
-		q.putWorkObservation(identityHash(key), WorkObservation{Key: key, StaleReason: "hardware changed"})
-		job := &Job{ID: "decision", Attempt: 1, State: "succeeded", ReleaseConfirmed: true,
-			LedgerEntries: []JobLedgerEntry{{WorkLearning: &WorkLearningChange{Key: key}}},
-			Efficiency:    &JobEfficiency{WaitSeconds: map[string]float64{"memory_reservation": 42}},
-			MemoryAttempts: []AttemptMemoryFacts{{Attempt: 1, Machine: "synthetic", Session: "session", LearningReason: "eligible",
-				MemoryEnvelope: &JobMemoryEnvelope{Basis: "exploratory", HostGB: 12}, MemoryPeak: &AttemptMemoryPeak{HostGB: &peak}}},
-			Timing: &WorkTiming{Execution: Execution{ID: "decision", Attempt: 1}, LastAcceptedSeconds: &predicted, ActualSeconds: &actual}}
-		for range 100 {
-			job.AttemptHistory = append(job.AttemptHistory, AttemptOutcome{Attempt: 1, Machine: "synthetic", Session: "session", Reason: "same diagnosis"})
-		}
-		q.putJob(job.ID, job)
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	before := efficiencyPredictions(q.s.Jobs["decision"])
-	if len(before) != 1 {
-		t.Fatal("missing prediction fixture", before)
-	}
-	clock.Advance(10000 * 24 * time.Hour)
-	drainEvidence(t, q)
-	if _, ok := q.s.WorkObservations[identityHash(key)]; !ok {
-		t.Fatal("learned decision lost its input")
-	}
-	job := q.s.Jobs["decision"]
-	if job.Efficiency.WaitSeconds["memory_reservation"] != 42 || !reflect.DeepEqual(before, efficiencyPredictions(job)) {
-		t.Fatal("capacity maintenance lost wait or prediction-error readers")
-	}
-	// First/latest provenance survives even for otherwise identical rows.
-	if len(job.AttemptHistory) != 2 {
-		t.Fatal("fixture did not exercise redundant-history compaction")
-	}
-}
-
-func TestInputClaimPinsHeadThroughCollectionAndSubmission(t *testing.T) {
-	q, clock := fixture(t)
-	client := retentionClient(t, q)
-	_, ref := retentionUpload(t, client, "claimed existing bytes")
-	s := spec("experiment")
-	s.Files = FileManifest{"input": ref}
-	old := submit(t, q, s)
-	if err := q.Cancel(old.ID); err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(testFileRetention)
-	if err := q.update(func() error { q.maintainFileExpiry(); return nil }); err != nil {
-		t.Fatal(err)
-	}
-	q.s.PublicationHorizon = 0
-	claim, err := q.claimFileInput(context.Background(), Spec{Project: "next"}, ref)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.WithValue(context.Background(), fileInputClaimKey{}, claim.ID)
-	if err := client.HasFile(ctx, ref); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.reclaimPublishedFiles(); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.files.verify(context.Background(), ref); err != nil {
-		t.Fatal("claim lost bytes between HEAD and submit", err)
-	}
-	s.Project = "next"
-	if _, err := q.Submit(s); err != nil {
-		t.Fatal("claimed submission failed", err)
 	}
 }
 

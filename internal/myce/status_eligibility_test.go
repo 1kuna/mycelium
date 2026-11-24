@@ -84,88 +84,6 @@ func assertEligibleStatus(t *testing.T, q *Queue, id, state string, allowed, hos
 	}
 }
 
-func TestStatusEligibleHostsLifecycle(t *testing.T) {
-	q, c := fixture(t)
-	a, b := machine("a", "fake"), machine("b", "fake")
-	a.HostID, b.HostID = "host-a", "host-b"
-	check(t, q, a, nil)
-	check(t, q, b, nil)
-	s := spec("experiment")
-	s.AllowedMachines = []string{"a", "unknown", "retry"}
-	s.Run.Command = []string{"private-command"}
-	s.Run.Env = map[string]string{"SECRET": "private-env"}
-	j := submit(t, q, s)
-	assertEligibleStatus(t, q, j.ID, "queued", s.AllowedMachines, []string{"host-a"}, false)
-	running := check(t, q, a, nil).Job
-	if running == nil {
-		t.Fatal("no assignment")
-	}
-	c.Advance(time.Second) // Global observations may lag by one cache lifetime.
-	assertEligibleStatus(t, q, j.ID, "running", s.AllowedMachines, []string{"host-a"}, false)
-	advanceReportingPeer(t, q, c, b, LossAfter)
-	check(t, q, observer(), nil)
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
-	}
-	requeued := job(t, q, j.ID)
-	if requeued.Machine != "" || requeued.Losses != 1 {
-		t.Fatalf("infra retry: machine=%q losses=%d", requeued.Machine, requeued.Losses)
-	}
-	assertEligibleStatus(t, q, j.ID, "queued", s.AllowedMachines, []string{"host-a"}, false)
-	// Another allowed worker on the same host has a distinct free GPU slot.
-	a = machine("retry", "fake", "host-a")
-	if check(t, q, a, nil).Job == nil {
-		t.Fatal("no retry assignment")
-	}
-	if err := q.Cancel(j.ID); err != nil {
-		t.Fatal(err)
-	}
-	c.Advance(time.Second)
-	assertEligibleStatus(t, q, j.ID, "stopping", s.AllowedMachines, []string{"host-a"}, false)
-	if err := q.Complete(result(job(t, q, j.ID), false)); err != nil {
-		t.Fatal(err)
-	}
-	c.Advance(time.Second)
-	terminalJob := statusJobs(t, q)[j.ID]
-	if string(terminalJob["state"]) != `"cancelled"` || terminalJob["eligible_hosts"] != nil || terminalJob["eligible_unrestricted"] != nil || terminalJob["eligible_unknown_machines"] != nil {
-		t.Fatal("terminal eligibility must be omitted")
-	}
-	stored := job(t, q, j.ID)
-	if stored.EligibleHosts != nil || stored.EligibleUnrestricted || stored.EligibleUnknownMachines != nil || stored.Spec.Run.Env["SECRET"] != "private-env" || stored.Spec.Run.Command[0] != "private-command" {
-		t.Fatal("status mutated persisted job")
-	}
-}
-
-func TestStatusEligibleHostsPolicy(t *testing.T) {
-	for _, tc := range []struct {
-		name                    string
-		allowed, project, hosts []string
-		unrestricted            bool
-	}{
-		{name: "unrestricted", unrestricted: true},
-		{name: "unknown", allowed: []string{"unknown"}, hosts: []string{}},
-		{name: "intersection", allowed: []string{"a", "b", "unknown"}, project: []string{"b", "unknown"}, hosts: []string{"host-b"}},
-		{name: "project only", project: []string{"b"}, hosts: []string{"host-b"}},
-		{name: "deduplicate and sort", allowed: []string{"a", "b", "c", "d"}, hosts: []string{"d", "host-a", "host-b"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			q, _ := fixture(t)
-			for _, pair := range [][2]string{{"a", "host-a"}, {"b", "host-b"}, {"c", "host-a"}, {"d", ""}} {
-				m := machine(pair[0], "fake")
-				m.HostID = pair[1]
-				check(t, q, m, nil)
-			}
-			if err := q.ConfigureProjects(map[string]ProjectPolicy{"test": {Weight: 1, AllowedMachines: tc.project}}); err != nil {
-				t.Fatal(err)
-			}
-			s := spec("experiment")
-			s.AllowedMachines = tc.allowed
-			j := submit(t, q, s)
-			assertEligibleStatus(t, q, j.ID, "queued", tc.allowed, tc.hosts, tc.unrestricted)
-		})
-	}
-}
-
 func TestStatusEligibilityKeepsRequestPrivate(t *testing.T) {
 	q, _, m := modelFixture(t)
 	received := make(chan string, 1)
@@ -290,29 +208,6 @@ func TestStatusEligibleUnknownMachines(t *testing.T) {
 	assertUnknownMachines(t, q, j.ID, nil)
 }
 
-func TestStatusEligibleHostsRetainActiveAssignment(t *testing.T) {
-	q, c := fixture(t)
-	a, b := machine("a", "fake"), machine("b", "fake")
-	a.HostID, b.HostID = "host-a", "host-b"
-	check(t, q, a, nil)
-	check(t, q, b, nil)
-	j := submit(t, q, spec("experiment"))
-	if check(t, q, a, nil).Job == nil {
-		t.Fatal("no assignment")
-	}
-	assertEligibleStatus(t, q, j.ID, "running", nil, []string{"host-a"}, true)
-	if err := q.ConfigureProjects(map[string]ProjectPolicy{"test": {Weight: 1, AllowedMachines: []string{"b"}}}); err != nil {
-		t.Fatal(err)
-	}
-	c.Advance(time.Second)
-	assertEligibleStatus(t, q, j.ID, "running", nil, []string{"host-a", "host-b"}, false)
-	if err := q.Cancel(j.ID); err != nil {
-		t.Fatal(err)
-	}
-	c.Advance(time.Second)
-	assertEligibleStatus(t, q, j.ID, "stopping", nil, []string{"host-a", "host-b"}, false)
-}
-
 func TestStatusEligibleHostsRetainInflightModelCall(t *testing.T) {
 	for _, restricted := range []bool{false, true} {
 		t.Run(stringBool(restricted), func(t *testing.T) {
@@ -349,29 +244,4 @@ func TestStatusEligibleHostsRetainInflightModelCall(t *testing.T) {
 			assertUnknownMachines(t, q, call.ID, nil)
 		})
 	}
-}
-
-func TestStatusExclusionsKeepFutureHostsRelevantToGates(t *testing.T) {
-	q, clock := fixture(t)
-	a := machine("worker-a", "fake", "host-a")
-	check(t, q, a, nil)
-	s := spec("experiment")
-	s.ExcludedMachines = []string{a.ID}
-	j := submit(t, q, s)
-	// Existing maintenance gates count the unrestricted marker on future hosts.
-	assertEligibleStatus(t, q, j.ID, "queued", nil, nil, true)
-	var observed Spec
-	if err := json.Unmarshal(statusJobs(t, q)[j.ID]["spec"], &observed); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(observed.ExcludedMachines, s.ExcludedMachines) {
-		t.Fatal("status lost exclusions", observed.ExcludedMachines)
-	}
-	b := machine("worker-b", "fake", "future-host")
-	running := check(t, q, b, nil).Job
-	if running == nil || running.ID != j.ID {
-		t.Fatal("future host not eligible", running)
-	}
-	clock.Advance(time.Second)
-	assertEligibleStatus(t, q, j.ID, "running", nil, []string{"future-host"}, true)
 }

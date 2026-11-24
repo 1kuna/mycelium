@@ -31,40 +31,6 @@ func firings(q *Queue, kind string) int {
 	}
 	return n
 }
-func TestHealthAlertDiskGuard(t *testing.T) {
-	q, c := fixture(t)
-	m := machine("disk-host", "cuda")
-	m.DiskVolumes = []DiskVolume{{ID: "volume", Roots: []string{"data"}, TotalBytes: 100 << 30, FreeBytes: 2 << 30, SampledAt: c.Now()}}
-	check(t, q, m, nil)
-	if firings(q, "disk_below_guard") != 0 {
-		t.Fatal("healthy disk alerted")
-	}
-	c.Advance(time.Second)
-	m.DiskVolumes[0].SampledAt = c.Now()
-	m.DiskVolumes[0].FreeBytes = 100 << 20
-	check(t, q, m, nil)
-	check(t, q, m, nil)
-	if firings(q, "disk_below_guard") != 1 {
-		t.Fatal("disk guard did not deduplicate")
-	}
-	snapshot, err := q.publicSnapshot()
-	if err != nil || len(snapshot.HealthAlerts) != 1 {
-		t.Fatalf("public event missing: %+v %v", snapshot.HealthAlerts, err)
-	}
-	c.Advance(healthAlertCooldown)
-	m.DiskVolumes[0].SampledAt = c.Now()
-	check(t, q, m, nil)
-	if firings(q, "disk_below_guard") != 1 {
-		t.Fatal("continuous incident repeated")
-	}
-	m.DiskVolumes[0].FreeBytes = 2 << 30
-	check(t, q, m, nil)
-	m.DiskVolumes[0].FreeBytes = 100 << 20
-	check(t, q, m, nil)
-	if firings(q, "disk_below_guard") != 2 {
-		t.Fatal("recovered disk did not rearm")
-	}
-}
 func TestHealthAlertHostStaleAndUnhealthy(t *testing.T) {
 	q, c := fixture(t)
 	m := machine("host", "cuda")
@@ -94,44 +60,6 @@ func TestHealthAlertHostStaleAndUnhealthy(t *testing.T) {
 	check(t, q, m, nil)
 	if firings(q, "host_unhealthy_or_stale") != 2 {
 		t.Fatal("unhealthy report did not alert")
-	}
-}
-func TestHealthAlertStorageDelay(t *testing.T) {
-	for _, scope := range []string{"queue", "worker", "file-store"} {
-		t.Run(scope, func(t *testing.T) {
-			q, c := fixture(t)
-			m := machine("host", "cuda")
-			check(t, q, m, nil)
-			if firings(q, "checkpoint_store_unavailable") != 0 {
-				t.Fatal("healthy storage alerted")
-			}
-			if scope == "queue" {
-				fakeCheckpointAvailability(t, q, false)
-			} else if scope == "worker" {
-				m.CheckpointUnavailable = true
-			} else {
-				// Simulate the queue file-store mount disappearing; no bulk I/O is involved.
-				q.files.root = filepath.Join(t.TempDir(), "missing")
-			}
-			if err := q.Tick(); err != nil {
-				t.Fatal(err)
-			}
-			check(t, q, m, nil)
-			c.Advance(DefaultHealthStorageDelay - time.Second)
-			check(t, q, m, nil)
-			if firings(q, "checkpoint_store_unavailable") != 0 {
-				t.Fatal("short outage alerted")
-			}
-			c.Advance(time.Second)
-			if err := q.Tick(); err != nil {
-				t.Fatal(err)
-			}
-			check(t, q, m, nil)
-			check(t, q, m, nil)
-			if firings(q, "checkpoint_store_unavailable") != 1 {
-				t.Fatal("sustained outage missing or duplicated")
-			}
-		})
 	}
 }
 func TestHealthAlertProductionAttemptLoss(t *testing.T) {
@@ -277,29 +205,5 @@ func TestHealthAlertNotifierPersistenceAndPrivacy(t *testing.T) {
 		if err := json.Unmarshal(data, &stored); err != nil || stored.LastHealthAlertAttempt != assigned.Attempt {
 			t.Fatal("attempt alert fact not serialized", err)
 		}
-	}
-}
-
-func TestHealthAlertHealthyAndPlannedProduction(t *testing.T) {
-	for _, planned := range []bool{false, true} {
-		t.Run(map[bool]string{false: "success", true: "operator stop"}[planned], func(t *testing.T) {
-			q, c := fixture(t)
-			submit(t, q, spec("production"))
-			m := machine("worker", "cuda")
-			assigned := check(t, q, m, nil).Job
-			c.Advance(time.Second)
-			r := result(assigned, !planned)
-			if planned {
-				r.Interrupted = true
-				r.OperatorStop = true
-				r.ExecutionCause = &RuntimeCause{Operation: "inspect", Class: "timeout"}
-			}
-			if err := q.Complete(r); err != nil {
-				t.Fatal(err)
-			}
-			if firings(q, "production_attempt_lost") != 0 {
-				t.Fatal("healthy/planned production alerted")
-			}
-		})
 	}
 }

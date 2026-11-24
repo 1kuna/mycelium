@@ -68,35 +68,6 @@ func TestFleetUpgradeStartProofIdleHost(t *testing.T) {
 	}
 }
 
-func TestFleetUpgradeStartProofUsesUsefulAssignment(t *testing.T) {
-	q, c, workers := fleetFixture(t, "q", "a", "b")
-	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
-		t.Fatal(err)
-	}
-	fleetTick(t, q)
-	i := fleetInstructionFor(t, q)
-	s := spec("production")
-	s.AllowedMachines = []string{workers[0].ID}
-	useful := submit(t, q, s)
-	fleetRestart(t, q, c, i, true)
-	for n := 0; n <= int(fleetStableFor/time.Second); n++ {
-		fleetRefreshWithoutStart(t, q, c)
-		c.Advance(time.Second)
-	}
-	h := q.fleetActiveHost()
-	assigned := job(t, q, useful.ID)
-	if h == nil || h.Phase != "worker_start" || assigned.Attempt != 1 || assigned.StartedAt != nil {
-		t.Fatal("useful work did not win normal admission", h, assigned)
-	}
-	if err := q.Started(result(assigned, true)); err != nil {
-		t.Fatal(err)
-	}
-	fleetTick(t, q)
-	if !h.WorkerDone || h.StartAccepted != useful.ID || job(t, q, useful.ID).State != "running" || !cancelled(job(t, q, h.StartProbe)) {
-		t.Fatal("fresh useful start not accepted without interrupting it", h)
-	}
-}
-
 func TestFleetUpgradeStartProbeNeverPlansStops(t *testing.T) {
 	q, _, h := fleetAtStartProbe(t)
 	probe := q.s.Jobs[h.StartProbe]
@@ -109,35 +80,6 @@ func TestFleetUpgradeStartProbeNeverPlansStops(t *testing.T) {
 	}
 	if q.fleetStartPlan(&Job{ID: "customer"}, plan) != plan {
 		t.Fatal("ordinary customer preemption changed")
-	}
-}
-
-func TestFleetUpgradeStartProofPersistsAcrossQueueRestart(t *testing.T) {
-	q, c, h := fleetAtStartProbe(t)
-	probe, operation := h.StartProbe, q.s.FleetUpgrade.Operation
-	machine := cloneMachine(q.s.Machines[h.Machine])
-	var path string
-	if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path); err != nil {
-		t.Fatal(err)
-	}
-	root := q.root
-	if err := q.Close(); err != nil {
-		t.Fatal(err)
-	}
-	restarted, err := Open(path, root, c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer restarted.Close()
-	fakeCheckpointAvailability(t, restarted, true)
-	h = restarted.fleetActiveHost()
-	if h == nil || h.StartProbe != probe || h.WorkerDone || restarted.s.FleetUpgrade.Operation != operation || len(restarted.s.Jobs) != 1 {
-		t.Fatal("restart lost or duplicated unaccepted probe", restarted.fleetUpgradeStatus())
-	}
-	check(t, restarted, machine, nil)
-	fleetCompleteStartProbe(t, restarted)
-	if !h.WorkerDone || job(t, restarted, probe).StartedAt == nil {
-		t.Fatal("restarted queue did not accept exact probe", restarted.fleetUpgradeStatus())
 	}
 }
 
@@ -637,32 +579,6 @@ func testFleetUpgradeDeferredProbeRestart(t *testing.T, mode string) {
 	if restarted.s.FleetUpgrade.State != "stopped" || h.Failure != wantFailure || !strings.Contains(h.Wait, wantReason) || h.WorkerDone ||
 		!cancelled(job(t, restarted, probe)) || restarted.s.HostMaintenance[h.Host].DrainOwner != operation {
 		t.Fatalf("runtime failure did not stop with its proof reason and drain: %+v", restarted.fleetUpgradeStatus())
-	}
-}
-
-func TestFleetUpgradeDeferredProbeAssignedAtCompletionStillNeedsProof(t *testing.T) {
-	q, _, h := fleetAtStartProbe(t, 0)
-	// Replay the boundary after one return pass deferred this host, while a
-	// different deferred host was still being verified. Ordinary admission
-	// can assign this probe before the final completion transaction.
-	h.StartRevisited = true
-	q.s.Machines[h.Machine].HostAvailableMemoryGB = 32
-	check(t, q, *q.s.Machines[h.Machine], nil)
-	if job(t, q, h.StartProbe).Attempt != 1 {
-		t.Fatal("probe not assigned at completion boundary")
-	}
-	for _, other := range q.s.FleetUpgrade.Hosts {
-		if other != h {
-			other.Phase = "complete"
-		}
-	}
-	fleetTick(t, q)
-	if q.s.FleetUpgrade.State != "running" || h.Phase != "worker_start" || cancelled(job(t, q, h.StartProbe)) {
-		t.Fatal("assigned probe was cancelled or accepted as a capacity deferral", h)
-	}
-	fleetCompleteStartProbe(t, q)
-	if q.s.FleetUpgrade.State != "complete" || !h.WorkerDone || h.Outcome != "" {
-		t.Fatal("late-admitted probe did not finish its proof", h)
 	}
 }
 

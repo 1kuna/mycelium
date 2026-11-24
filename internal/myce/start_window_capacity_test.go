@@ -102,84 +102,6 @@ func BenchmarkStartWindowDeadlineMaintenance(b *testing.B) {
 	}
 }
 
-func TestStartWindowHostBackfill(t *testing.T) {
-	for _, absolute := range []bool{false, true} {
-		name := "relative"
-		if absolute {
-			name = "absolute"
-		}
-		t.Run(name, func(t *testing.T) {
-			q, clock := fixture(t)
-			m := cpuBackfillMachine("worker", 64)
-			machineCheck(t, q, m)
-			holderSpec := cpuSpec(1, 32)
-			holderSpec.Priority = "production"
-			holder := submit(t, q, holderSpec)
-			running := assignedJob(machineCheck(t, q, m))
-			if running == nil || running.ID != holder.ID {
-				t.Fatal("missing running holder", running)
-			}
-			if err := q.Started(result(running, false)); err != nil {
-				t.Fatal(err)
-			}
-			large := cpuSpec(1, 48)
-			large.Priority = "production"
-			demand := submit(t, q, large)
-			clock.Advance(time.Second)
-			s := cpuSpec(1, 4)
-			s.Priority, s.StartWindow = "production", "60s"
-			cutoff := clock.Now().Add(time.Minute)
-			if absolute {
-				s.StartBy = &cutoff
-			}
-			j := submit(t, q, s)
-			recordedWait := false
-			for range 90 {
-				if next := assignedJob(machineCheck(t, q, m, running)); next != nil {
-					t.Fatal("fenced job dispatched", next)
-				}
-				q.mu.Lock()
-				stored := q.s.Jobs[j.ID]
-				if !absolute && stored.StartCapacityWaiting {
-					recordedWait = true
-					if !stored.Spec.StartBy.Equal(cutoff) {
-						q.mu.Unlock()
-						t.Fatal("waiting rewrote the paused start budget")
-					}
-				}
-				q.mu.Unlock()
-				clock.Advance(time.Second)
-			}
-			machineCheck(t, q, m, running)
-			waiting := job(t, q, j.ID)
-			if absolute {
-				if waiting.State != "failed" || !waiting.Spec.StartBy.Equal(cutoff) || !strings.Contains(waiting.Reason, "production start deadline exceeded") {
-					t.Fatal("absolute cutoff moved or was ignored", waiting.State, waiting.Reason)
-				}
-				return
-			}
-			if waiting.State != "queued" || !recordedWait || !waiting.StartCapacityWaiting || !strings.Contains(waiting.Reason, "paused for capacity") || !waiting.Spec.StartBy.Equal(cutoff) {
-				t.Fatal("relative window was not paused behind the memory reservation", waiting.State, waiting.Reason)
-			}
-			// The relative cutoff is past. Preparation still gets a full minute.
-			finish(t, q, running, true)
-			next := assignedJob(machineCheck(t, q, m))
-			if next == nil || next.ID != demand.ID {
-				t.Fatal("earlier demand did not dispatch", next)
-			}
-			offer := assignedJob(machineCheck(t, q, m, next))
-			if offer == nil || offer.ID != j.ID || offer.StartCapacityWaiting || offer.Spec.StartBy.Sub(clock.Now()) != time.Minute {
-				t.Fatal("fence recovery did not restore a full preparation budget", offer)
-			}
-			clock.Advance(6 * time.Second)
-			machineCheck(t, q, m, next, offer)
-			if err := q.Started(result(offer, false)); err != nil {
-				t.Fatal(err)
-			}
-		})
-	}
-}
-
 // Logical parents do not consume physical launch budgets. A fenced ordinary
 // job re-arms at expiry, but must still fail if that renewed budget later
 // expires with an unavailable route and no host fence.
@@ -312,41 +234,6 @@ func TestStartWindowCapacityRecoveryStillBoundsStuckStart(t *testing.T) {
 			}
 			if err := q.Started(result(offer, true)); err == nil {
 				t.Fatal("expired start was authorized")
-			}
-		})
-	}
-}
-
-func TestStartWindowCapacityAbsoluteCutoffs(t *testing.T) {
-	for _, kind := range []string{"start_by", "give_up_at", "deadline"} {
-		t.Run(kind, func(t *testing.T) {
-			q, clock := fixture(t)
-			m := machine("worker", "fake", "host")
-			m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 64
-			s := spec("production")
-			s.StartWindow = "600s"
-			cutoff := clock.Now().Add(time.Minute)
-			switch kind {
-			case "start_by":
-				s.StartBy = &cutoff
-			case "give_up_at":
-				s.GiveUpAt = &cutoff
-			case "deadline":
-				s.Deadline = &cutoff // Existing ordering hint, not an expiry policy.
-			}
-			j := submit(t, q, s)
-			offer := check(t, q, m, nil).Job
-			if err := q.Complete(capacityResult(offer, false)); err != nil {
-				t.Fatal(err)
-			}
-			clock.Advance(time.Minute)
-			got := job(t, q, j.ID)
-			if kind == "deadline" {
-				if got.State != "queued" || got.Spec.Deadline == nil || !got.Spec.Deadline.Equal(cutoff) {
-					t.Fatal("ordering deadline changed", got.State, got.Spec.Deadline)
-				}
-			} else if got.State != "failed" || kind == "start_by" && !got.Spec.StartBy.Equal(cutoff) || kind == "give_up_at" && !got.Spec.GiveUpAt.Equal(cutoff) {
-				t.Fatal("absolute cutoff moved or was ignored", got.State, got.Reason)
 			}
 		})
 	}

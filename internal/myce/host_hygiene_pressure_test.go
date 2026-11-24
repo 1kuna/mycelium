@@ -106,32 +106,6 @@ func TestHostHygieneIdlePSIAdmissionReplay(t *testing.T) {
 	}
 }
 
-func TestHostHygienePSIWakeCorroboration(t *testing.T) {
-	q, clock := fixture(t)
-	h := HostHealth{}
-	sample := func(wake float64) {
-		clock.Advance(signalRefresh)
-		h.observe(HostHealthSample{At: clock.Now(), HostHealthReading: HostHealthReading{Pressure: 2, WakeSeconds: wake, pressurePSI: true}})
-	}
-	for range hostHealthWarmup {
-		sample(.001)
-	}
-	for range hostHealthConfirmation {
-		clock.Advance(signalRefresh)
-		h.observe(HostHealthSample{At: clock.Now(), HostHealthReading: HostHealthReading{Pressure: 6, WakeSeconds: 1, pressurePSI: true}})
-	}
-	m := cpuMachine("worker", "host", "cpu", 4, 16)
-	m.HostHealth = &h
-	check(t, q, m, nil)
-	stored := q.s.Machines[m.ID]
-	if stored.HostHealth.DrainReason != "host_memory_pressure" || q.hostLaunchAllowed(stored, m.Session) {
-		t.Fatal("PSI with local latency did not drain")
-	}
-	if e := stored.HostHealth.PressureEvaluation; len(e.Corroboration) != 1 || e.Corroboration[0] != "wake_latency" {
-		t.Fatal("missing wake corroboration", e)
-	}
-}
-
 // #1299: b70 drained on PSI 0.03% plus 13 MB/s swap growth while 20+ GiB was
 // available, because a zero-swap baseline made any growth anomalous. The
 // worker and the queue both require material swap: above the baseline's

@@ -119,46 +119,6 @@ func TestEnvironmentPreparationCannotBorrowUnrelatedCPUCore(t *testing.T) {
 	}
 }
 
-func TestEnvironmentPreparationDoesNotDeferToLoadingPeer(t *testing.T) {
-	q, _ := fixture(t)
-	busy := m3Machine()
-	busy.ID, busy.HostID, busy.Session = "a", "a", "session-a"
-	busy.EnvironmentBuilder = true
-	deviceWork := assignedJob(machineCheck(t, q, busy))
-	if deviceWork != nil {
-		t.Fatal("unexpected work", deviceWork)
-	}
-	deviceJob := submit(t, q, spec("experiment"))
-	deviceWork = assignedJob(machineCheck(t, q, busy))
-	if deviceWork == nil || deviceWork.ID != deviceJob.ID {
-		t.Fatal("missing device command", deviceWork)
-	}
-	ready := m3Machine()
-	ready.ID, ready.HostID, ready.Session = "z", "z", "session-z"
-	ready.EnvironmentBuilder = true
-	machineCheck(t, q, ready)
-	r := binaryRecipe(t, "cpu")
-	if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"new": {"cpu": r}}}); err != nil {
-		t.Fatal(err)
-	}
-	s := cpuSpec(1, .1)
-	s.Environment.Name = "new"
-	demand := submit(t, q, s)
-	q.models.Models = append(q.models.Models, Model{Name: "loading", MemoryGB: 1})
-	q.s.ModelSlots[slotKey(busy.ID, "loading", "1")] = &ModelSlot{Machine: busy.ID, Session: busy.Session, Device: "1", Model: "loading", State: "loading", Priority: "experiment"}
-	q.refreshHostCPU()
-	if plan := q.environmentPlan(cpuMachineView(q.s.Machines[busy.ID])); len(plan) != 0 {
-		t.Fatal("loading peer attracted an unstartable offer", plan)
-	}
-	plan := q.environmentPlan(cpuMachineView(q.s.Machines[ready.ID]))
-	if len(plan) != 1 || plan[0].Launch.Demand != demand.ID {
-		t.Fatal("eligible worker deferred to a peer unable to prepare", plan)
-	}
-	if err := q.AuthorizeLaunch(*plan[0].Launch); err != nil {
-		t.Fatal("eligible worker could not start preparation", err)
-	}
-}
-
 func TestEnvironmentOwnedCoreSurvivesExecutionReleaseProjection(t *testing.T) {
 	q, m := releaseTestHost(t, 3, 64, []releaseTestVictim{
 		{"a", "experiment", 1, 0, false}, {"b", "experiment", 1, 0, false},

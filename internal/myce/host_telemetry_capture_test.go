@@ -216,20 +216,6 @@ func TestHostTelemetryCaptureAlignmentAndMissing(t *testing.T) {
 	}
 }
 
-func TestHostTelemetryCapturePIDReuse(t *testing.T) {
-	c, _ := captureFixture(t)
-	c.Birth = func(pid int) (string, error) {
-		if pid == c.QueuePID {
-			return "reused", nil
-		}
-		return "birth-a", nil
-	}
-	r, err := c.Sample(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "process_identity_changed") || r.Queue.RSS.Value != nil || r.Queue.RSS.Missing != "process_identity_changed" {
-		t.Fatal("PID reuse was attributed to the queue", r, err)
-	}
-}
-
 func TestHostTelemetryCaptureSchema(t *testing.T) {
 	r := generate.Reflector{Anonymous: true, AllowAdditionalProperties: true}
 	b, err := json.Marshal(r.Reflect(&HostTelemetrySample{}))

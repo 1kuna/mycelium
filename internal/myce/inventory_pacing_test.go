@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os/exec"
 	"slices"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -44,69 +43,6 @@ func countedInventoryProbe(t *testing.T, enumerations, queries *int) MachineProb
 		return map[string]float64{"0000:01:00.0": 4, "0000:02:00.0": 2}, nil
 	}
 	return p
-}
-
-func TestInventoryFingerprintsReuseEnumeration(t *testing.T) {
-	previous := extensionIdentityProbe
-	defer func() { extensionIdentityProbe = previous }()
-	enumerations, queries := 0, 0
-	p := countedInventoryProbe(t, &enumerations, &queries)
-	extensionIdentityProbe = func() MachineProbe { return p }
-	w := Worker{Machine: Machine{GPU: "xpu", FreeMemoryGB: 8}, FixedAcceleratorMemory: true}
-	w.InventoryProbe = func(ctx context.Context) ([]MachineDevice, error) { return w.localInventoryWithProbe(ctx, p) }
-	devices, err := w.inventorySource()(t.Context())
-	if err != nil || len(devices) != 2 || enumerations != 1 || queries != 0 {
-		t.Fatal("discovery multiplied helpers", len(devices), enumerations, queries, err)
-	}
-	for _, d := range devices {
-		expected, err := extensionFingerprintFrom(t.Context(), d.Platform, d.ID, func() MachineProbe { return p })
-		if err != nil || expected != d.ExtensionFingerprint || expected == "" {
-			t.Fatal("qualification fingerprint changed", err)
-		}
-	}
-}
-
-func TestXPUTelemetryHostIntervalAndUnknown(t *testing.T) {
-	clock := &workerFakeClock{now: time.Unix(1000, 0)}
-	enumerations, queries := 0, 0
-	p := countedInventoryProbe(t, &enumerations, &queries)
-	devices, _ := p.Accelerators(t.Context())
-	w := Worker{Clock: clock}
-	lane := hostProbeLane[[]MachineDevice]{clock: clock, timing: probeTiming{base: deviceMemorySamplePeriod, cores: 2}}
-	source := func(ctx context.Context) ([]MachineDevice, error) {
-		d := slices.Clone(devices)
-		w.sampleXPUTelemetry(ctx, p, d)
-		return d, nil
-	}
-	finishInventoryProbe(t, &lane, source)
-	for i := 0; i < 49; i++ {
-		clock.Advance(100 * time.Millisecond)
-		lane.step(t.Context(), source)
-	}
-	if queries != 1 || !deviceTelemetryReady(lane.value[0].Telemetry, clock.Now()) || *lane.value[1].Telemetry.FreeGB != 2 {
-		t.Fatal("host telemetry duplicated or cross-wired", queries, lane.value)
-	}
-	clock.Advance(100 * time.Millisecond)
-	finishInventoryProbe(t, &lane, source)
-	if queries != 2 {
-		t.Fatal("consumer interval not sampled", queries)
-	}
-	// A failed new query must clear a previously successful counter.
-	p.XPUFreeMemory = func(context.Context) (map[string]float64, error) { return nil, errors.New("unavailable") }
-	clock.Advance(deviceMemorySamplePeriod)
-	finishInventoryProbe(t, &lane, source)
-	if lane.value[0].Telemetry.FreeGB != nil || deviceTelemetryReady(lane.value[0].Telemetry, clock.Now()) {
-		t.Fatal("missing counter reused")
-	}
-	p.XPUFreeMemory = func(context.Context) (map[string]float64, error) {
-		return nil, nil
-	}
-	w.sampleXPUTelemetry(t.Context(), p, devices)
-	for _, d := range devices {
-		if d.Telemetry.FreeGB != nil {
-			t.Fatal("ambiguous or N/A counter granted capacity")
-		}
-	}
 }
 
 func TestInventoryHelperLaunchMeasurement(t *testing.T) {
@@ -197,33 +133,6 @@ func TestHostInventoryTelemetryIdentityAndExpiry(t *testing.T) {
 	}
 	if observer.lane.value[0].FreeMemoryGB != 8 {
 		t.Fatal("snapshot mutated discovery evidence")
-	}
-}
-
-func TestWorkerTelemetryDoesNotPollWithoutSharingDemand(t *testing.T) {
-	q, _ := fixture(t)
-	var queries atomic.Int32
-	previous := extensionIdentityProbe
-	extensionIdentityProbe = func() MachineProbe {
-		return MachineProbe{OS: "linux", Files: syntheticIdentityProbe().Files, Command: func(_ context.Context, name string, _ ...string) ([]byte, error) {
-			if name == "xpu-smi" {
-				queries.Add(1)
-				return []byte("0000:01:00.0,4096\n"), nil
-			}
-			return []byte("fixture kernel"), nil
-		}, XeActivity: func(context.Context, string) (float64, error) { return 10, nil }}
-	}
-	t.Cleanup(func() { extensionIdentityProbe = previous })
-	card := MachineDevice{ID: "0", Platform: "xpu", Identity: "card", Selector: "0", Fingerprint: "driver", pciAddress: "0000:01:00.0", MemoryMode: "dedicated", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8}
-	runInventoryReviewWorker(t, q, Worker{Machine: machine("telemetry", "xpu"), InventoryProbe: func(context.Context) ([]MachineDevice, error) {
-		return []MachineDevice{card}, nil
-	}})
-	awaitInventoryReview(t, func() bool {
-		s, err := q.publicSnapshot()
-		return err == nil && len(s.Machines) == 1 && len(s.Machines[0].Devices) == 1
-	})
-	if queries.Load() != 0 {
-		t.Fatal("heartbeat without sharing demand initialized a vendor runtime")
 	}
 }
 

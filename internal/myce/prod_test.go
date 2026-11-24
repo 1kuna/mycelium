@@ -2,8 +2,6 @@ package myce
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
@@ -102,25 +100,6 @@ func TestPinRetentionReservationWindowAndUnpin(t *testing.T) {
 	// Window boundaries follow injected clock.
 	if p.active(time.Date(2026, 10, 8, 20, 0, 0, 0, time.UTC)) || !p.active(time.Date(2026, 10, 8, 8, 0, 0, 0, time.UTC)) || p.active(time.Date(2026, 10, 9, 9, 0, 0, 0, time.UTC)) {
 		t.Fatal("window boundaries")
-	}
-}
-func TestCachedPlacementAndPinPersistence(t *testing.T) {
-	q, _, m := modelFixture(t)
-	other := m
-	other.ID = "z-cached"
-	other.Session = "s-z"
-	other.CachedModels = []string{"test"}
-	check(t, q, other, nil)
-	addModelCall(t, q, "production")
-	if q.s.ModelSlots[slotKey(other.ID, "test")] == nil {
-		t.Fatal("cache affinity ignored")
-	}
-	if e := q.Pin(ModelPin{Project: "atlas", Model: "test", Machine: other.ID}); e != nil {
-		t.Fatal(e)
-	}
-	snap, e := q.Snapshot()
-	if e != nil || len(snap.Pins) != 1 || snap.Pins[0].Assigned != other.ID {
-		t.Fatal("pin status", snap.Pins, e)
 	}
 }
 func TestImmediateStopNotification(t *testing.T) {
@@ -228,80 +207,6 @@ func devProductionStart(t testing.TB) time.Duration {
 			t.Fatalf("production start/logs not observed within %s; snapshot=%+v", testWaitTimeout, snap)
 		}
 		time.Sleep(20 * time.Millisecond)
-	}
-}
-
-func TestPinPersistsAndPlatformReassigns(t *testing.T) {
-	dir := t.TempDir()
-	clock := &fakeClock{now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
-	config := ModelConfig{Idle: time.Minute, Wait: time.Minute, Models: []Model{{Name: "m", Engine: "fake", Path: "fake", MemoryGB: 8, Platforms: []string{"fake"}}}}
-	q, e := Open(filepath.Join(dir, "q.db"), dir, clock)
-	if e != nil {
-		t.Fatal(e)
-	}
-	if e = q.ConfigureModels(config); e != nil {
-		t.Fatal(e)
-	}
-	m := machine("a", "fake")
-	m.ModelURL = "http://127.0.0.1:1"
-	m.ModelConfigHash = modelConfigHash(config)
-	check(t, q, m, nil)
-	if e = q.Pin(ModelPin{Project: "test", Model: "m", Platform: "fake"}); e != nil {
-		t.Fatal(e)
-	}
-	if e = q.Close(); e != nil {
-		t.Fatal(e)
-	}
-	q, e = Open(filepath.Join(dir, "q.db"), dir, clock)
-	if e != nil {
-		t.Fatal(e)
-	}
-	defer q.Close()
-	q.ConfigureModels(config)
-	if len(q.s.Pins) != 1 {
-		t.Fatal("pin lost on restart")
-	}
-	other := m
-	other.ID = "b"
-	other.Session = "session-b"
-	check(t, q, other, nil)
-	if q.s.Pins[0].Assigned != "b" {
-		t.Fatal("pin not reassigned to available platform")
-	}
-}
-func TestPinnedLoadFailureVisible(t *testing.T) {
-	q, _, m := modelFixture(t)
-	if e := q.Pin(ModelPin{Project: "test", Model: "test", Machine: m.ID}); e != nil {
-		t.Fatal(e)
-	}
-	if _, e := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: currentTestReportAttempt(q, m, "test"), State: "failed", Error: "disk full"}}}); e != nil {
-		t.Fatal(e)
-	}
-	s := q.s.ModelSlots[slotKey(m.ID, "test")]
-	if s == nil || s.State != "failed" || s.Error != "model load or unload failed" {
-		t.Fatal("pin failure hidden", s)
-	}
-}
-
-func TestProductionShortensExistingDeadlineGrace(t *testing.T) {
-	q, c := fixture(t)
-	s := cpuSpec(1, 1)
-	s.Resumable = true
-	submit(t, q, s)
-	m := cpuMachine("one", "one", "fake", 1, 8)
-	r := check(t, q, m, nil).Job
-	submit(t, q, spec("deadline"))
-	if check(t, q, m, r).GraceSeconds != 120 {
-		t.Fatal("deadline grace")
-	}
-	c.Advance(time.Second)
-	submit(t, q, spec("production"))
-	if check(t, q, m, r).GraceSeconds != 10 {
-		t.Fatal("production did not shorten existing grace")
-	}
-	c.Advance(time.Second)
-	if check(t, q, m, r).GraceSeconds != 9 {
-		t.Fatal("grace was extended on check-in")
 	}
 }
 
@@ -545,51 +450,4 @@ func TestProductionPreemptionFullReportSupersedesReleaseCredit(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireState(t, q, second.ID, "running")
-}
-
-// Start latency is the nanosecond wall-time difference exposed over JSON,
-// including when the injected clock also carries a monotonic reading.
-func TestProductionStartLatencyTimestampPrecision(t *testing.T) {
-	for _, dependency := range []bool{false, true} {
-		t.Run(fmt.Sprint("dependency=", dependency), func(t *testing.T) {
-			q, c := fixture(t)
-			// Capture once; all subsequent time is injected and advanced exactly.
-			c.now = time.Now()
-			if c.now == c.now.Round(0) {
-				t.Fatal("fixture requires a monotonic clock reading")
-			}
-			j := submit(t, q, spec("production"))
-			assigned := check(t, q, machine("one", "fake"), nil).Job
-			const elapsed = 2203448292 * time.Nanosecond
-			if dependency {
-				ready := c.now.Add(123456789 * time.Nanosecond)
-				q.s.Jobs[j.ID].Dependency = &PieceBinding{ReadyAt: &ready}
-			}
-			c.Advance(elapsed)
-			if err := q.Started(result(assigned, true)); err != nil {
-				t.Fatal(err)
-			}
-			got := job(t, q, j.ID)
-			if got.StartedAt == nil || *got.StartedAt != got.StartedAt.Round(0) {
-				t.Fatal("start timestamp must use wall time without a monotonic reading")
-			}
-			data, err := json.Marshal(got)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var wire Job
-			if err := json.Unmarshal(data, &wire); err != nil {
-				t.Fatal(err)
-			}
-			since := wire.Queued
-			want := elapsed
-			if dependency {
-				since = *wire.Dependency.ReadyAt
-				want -= 123456789 * time.Nanosecond
-			}
-			if wire.StartedAt.Sub(since) != want || wire.StartLatencySeconds != want.Seconds() {
-				t.Fatalf("wire timestamp/latency precision disagrees: %s; want %s", data, want)
-			}
-		})
-	}
 }

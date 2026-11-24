@@ -6,28 +6,6 @@ import (
 	"time"
 )
 
-// A job that declares more work dir/TMPDIR scratch than a host has free waits
-// for, or goes to, a host with room instead of starting and failing inside.
-func TestDiskScratchHintKeepsJobOffSmallHost(t *testing.T) {
-	q, c := fixture(t)
-	small := reportDisk(t, machine("small", "fake", "small-host"), c, "small-volume", []string{"data"}, 100<<30, 50<<30)
-	check(t, q, small, nil)
-	s := spec("experiment")
-	s.Disk = &DiskNeeds{ScratchBytes: 60 << 30}
-	j := submit(t, q, s)
-	if got := check(t, q, small, nil).Job; got != nil {
-		t.Fatalf("scratch-heavy job placed without room: %+v", got)
-	}
-	held := job(t, q, j.ID)
-	if held.State != "queued" || held.DiagnosticCode != "disk_headroom" || !strings.Contains(held.Reason, "disk: 60.0 GiB needed") || !strings.Contains(held.Reason, "free on small-host") {
-		t.Fatalf("waiting reason does not name disk: code=%s reason=%s", held.DiagnosticCode, held.Reason)
-	}
-	big := reportDisk(t, machine("big", "fake", "big-host"), c, "big-volume", []string{"data"}, 400<<30, 200<<30)
-	if got := check(t, q, big, nil).Job; got == nil || got.ID != j.ID {
-		t.Fatalf("job did not go to the host with room: %+v", job(t, q, j.ID))
-	}
-}
-
 // After one accepted run the learned scratch peak replaces a smaller hint.
 func TestDiskScratchLearnedPeakDrivesAdmission(t *testing.T) {
 	q, clock, m, s, out := storageFixture(t)

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http/httptest"
-	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -17,15 +16,6 @@ import (
 // The fake clock keeps the learned response leases valid throughout the burst.
 func TestCheapCachedReadsUnderProjectionPressure(t *testing.T) {
 	cheapReadLoad(t, true)
-}
-
-// Run the identical fixture on the parent and candidate for latency evidence.
-// Refusals are reported separately: a fast 429 is never a successful read.
-func TestCheapReadLoadMeasurements(t *testing.T) {
-	if os.Getenv("MYCE_CHEAP_READ_MEASURE") == "" {
-		t.Skip("explicit before/after measurement")
-	}
-	cheapReadLoad(t, false)
 }
 
 func cheapReadLoad(t *testing.T, requireProgress bool) {

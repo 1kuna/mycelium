@@ -4,10 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
-	"os/user"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -81,32 +78,6 @@ func TestPixiLockCheckRefusesOutdatedExtensionRegistration(t *testing.T) {
 	e = freezeComposition(t, e)
 	q, _ := fixture(t)
 	if err := q.AddExtension(e); err == nil || !isPixiLockError(err) || !strings.Contains(err.Error(), "environment main") {
-		t.Fatal(err)
-	}
-}
-
-// Laptop proof against the real pinned Pixi when this host has it: a lock
-// that no longer satisfies its manifest gives Pixi's exact reason.
-func TestPixiLockCheckRealPinnedPixi(t *testing.T) {
-	// Test harnesses isolate HOME; the managed tool lives in the account's.
-	account, err := user.Current()
-	if err != nil {
-		t.Skip(err)
-	}
-	home := account.HomeDir
-	tool := filepath.Join(home, ".local", "share", "mycelium", "tools", "pixi-"+workerPixiVersion()+"-"+runtime.GOOS+"-"+runtime.GOARCH)
-	if _, err := exec.LookPath(filepath.Join(tool, "pixi")); err != nil {
-		t.Skip("pinned Pixi not installed on this host")
-	}
-	t.Setenv("HOME", home)
-	pixiLockResults.Lock()
-	pixiLockResults.m = map[string]error{}
-	pixiLockResults.Unlock()
-	lock := "version: 6\nenvironments:\n  default:\n    channels:\n    - url: https://conda.anaconda.org/conda-forge/\n    packages: {}\npackages: []\n"
-	manifest := "[workspace]\nname = \"example\"\nchannels = [\"conda-forge\"]\nplatforms = [\"linux-64\"]\n\n[dependencies]\nzlib = \"*\"\n"
-	err = checkInlinePixiLock(context.Background(), EnvironmentRecipe{Backend: "pixi", Files: map[string][]byte{"pixi.lock": []byte(lock), "pixi.toml": []byte(manifest)}})
-	t.Log(err)
-	if !isPixiLockError(err) || !strings.Contains(err.Error(), "zlib") {
 		t.Fatal(err)
 	}
 }

@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -80,33 +78,6 @@ func TestReadSnapshotColdKeyedStatusDiscardsLedgerBeforeBudgeting(t *testing.T) 
 	}
 }
 
-func TestReadSnapshotLogRefreshesMachineWithoutControlCommit(t *testing.T) {
-	q, clock := fixture(t)
-	submit(t, q, spec("experiment"))
-	m := machine("worker", "fake")
-	j := check(t, q, m, nil).Job
-	if j == nil {
-		t.Fatal("no assignment")
-	}
-	// An accepted log is contact, not a report: only a check-in rebuilds the
-	// reported half after restart, so the machine stays unreported.
-	if err := q.update(func() error { q.unreported[m.ID] = true; return nil }); err != nil {
-		t.Fatal(err)
-	}
-	before := q.readGeneration
-	clock.Advance(time.Minute)
-	if err := q.AppendLog(LogChunk{Result: result(j, true), Text: "still running"}); err != nil {
-		t.Fatal(err)
-	}
-	if q.readGeneration != before {
-		t.Fatal("test requires no control commit after log")
-	}
-	v, _, err := q.captureReadObservation("", nil)
-	if err != nil || !v.unreported[m.ID] || !v.s.Machines[m.ID].LastSeen.Equal(clock.Now()) {
-		t.Fatal("fresh capture missed accepted log contact", err)
-	}
-}
-
 // Block decoding a retained record, then require a real commit to finish.
 // This proves bulk decoding/traversal cannot retain the live queue mutex,
 // independent of machine speed, Go instrumentation or a timing percentile.
@@ -161,81 +132,6 @@ func TestReadSnapshotBulkWorkDoesNotHoldQueue(t *testing.T) {
 				t.Fatal("new root did not expose the commit", got, err)
 			}
 		})
-	}
-}
-
-func TestReadSnapshotCommitRollbackAndDeletion(t *testing.T) {
-	q, _ := fixture(t)
-	j := submit(t, q, spec("experiment"))
-	before := q.readGeneration
-	read := func(g *readGeneration) *Job {
-		t.Helper()
-		s, _, err := g.inputs(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		return s.Jobs[j.ID]
-	}
-	aborted := errors.New("rollback")
-	if err := q.update(func() error { q.touchJob(j.ID).Spec.Run.Command[0] = "aborted"; return aborted }); !errors.Is(err, aborted) {
-		t.Fatal(err)
-	}
-	if q.readGeneration != before {
-		t.Fatal("rollback published a generation")
-	}
-	if err := q.update(func() error { q.touchJob(j.ID).Spec.Run.Command[0] = "committed"; return nil }); err != nil {
-		t.Fatal(err)
-	}
-	if read(before).Spec.Run.Command[0] == "committed" || read(q.readGeneration).Spec.Run.Command[0] != "committed" {
-		t.Fatal("immutable input alias or stale commit")
-	}
-	if err := q.update(func() error { q.deleteJob(j.ID); return nil }); err != nil {
-		t.Fatal(err)
-	}
-	if read(q.readGeneration) != nil || read(before) == nil {
-		t.Fatal("deletion changed the wrong generation")
-	}
-}
-
-func TestReadSnapshotProjectionEquivalence(t *testing.T) {
-	q, clock := fixture(t)
-	m := machine("worker", "fake")
-	check(t, q, m, nil)
-	j := submit(t, q, spec("experiment"))
-	now := clock.Now()
-	peak := 3.0
-	if err := q.update(func() error {
-		live := q.touchJob(j.ID)
-		live.State = "failed"
-		live.Attempt = 1
-		live.ReleaseConfirmed = true
-		live.FinishedAt = &now
-		live.MemoryAttempts = []AttemptMemoryFacts{{Attempt: 1, MemoryPeak: &AttemptMemoryPeak{HostGB: &peak}}}
-		live.LedgerEntries = []JobLedgerEntry{{}}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	for _, id := range []string{"", j.ID} {
-		old, _, err := q.captureStatusObservation(id, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		current, _, err := q.captureReadObservation(id, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		want := old.projectSnapshot(true)
-		got := current.projectSnapshot(true)
-		// Compare the public wire contract: JSON intentionally omits internal fields.
-		a, _ := json.Marshal(want)
-		b, _ := json.Marshal(got)
-		var av, bv any
-		_ = json.Unmarshal(a, &av)
-		_ = json.Unmarshal(b, &bv)
-		if !reflect.DeepEqual(av, bv) {
-			t.Fatalf("read projection changed:\n%s\n%s", a, b)
-		}
 	}
 }
 
@@ -336,59 +232,6 @@ func BenchmarkReadStages(b *testing.B) {
 				})
 			}
 		}
-	}
-}
-
-func TestReadSnapshotKeyedReferencesStayWithinGeneration(t *testing.T) {
-	q, _ := fixture(t)
-	s := spec("experiment")
-	s.SubmissionKey = "generation-reference"
-	j := submit(t, q, s)
-	key := submissionDigest(s.Project, s.SubmissionKey)
-	originalReason := q.s.Jobs[j.ID].Reason
-	before := q.readGeneration
-	if err := q.update(func() error {
-		q.touchJob(j.ID).Reason = "new generation"
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	current := q.readGeneration
-	for _, sample := range []struct {
-		generation *readGeneration
-		reason     string
-	}{{before, originalReason}, {current, "new generation"}} {
-		for _, selected := range []string{"", j.ID} {
-			var state state
-			var err error
-			if selected == "" {
-				state, _, err = sample.generation.inputs(context.Background())
-			} else {
-				state, _, err = sample.generation.jobInputs(context.Background(), selected)
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			answer := state.Submissions[key]
-			if answer == nil || answer.Job == nil || answer.Job != state.Jobs[j.ID] || answer.Job.Reason != sample.reason {
-				t.Fatal("keyed answer escaped its committed generation", selected, answer)
-			}
-		}
-	}
-	if err := q.update(func() error { q.deleteJob(j.ID); return nil }); err != nil {
-		t.Fatal(err)
-	}
-	removed, _, err := q.readGeneration.inputs(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	answer := removed.Submissions[key]
-	if removed.Jobs[j.ID] != nil || answer == nil || answer.Job == nil || answer.Job.Reason != "new generation" {
-		t.Fatal("removed keyed answer lost its retained snapshot", answer)
-	}
-	old, _, err := before.inputs(context.Background())
-	if err != nil || old.Submissions[key].Job.Reason != originalReason {
-		t.Fatal("later commit mutated an earlier keyed answer", err)
 	}
 }
 

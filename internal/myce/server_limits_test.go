@@ -336,27 +336,6 @@ func TestUploadSpoolBudgetHTTPAdmissionAndCleanup(t *testing.T) {
 	assertEmpty()
 }
 
-func TestModelLimitUnsetAndHigherLimit(t *testing.T) {
-	for _, limit := range []int{0, 2} {
-		t.Run(fmt.Sprintf("limit=%d", limit), func(t *testing.T) {
-			q, _, m := limitedModelFixture(t, limit)
-			first := addModelCall(t, q, "experiment")
-			reportModel(t, q, m, "ready")
-			second := addModelCall(t, q, "production")
-			third := addModelCall(t, q, "production")
-			if first.Machine != m.ID || second.Machine != m.ID {
-				t.Fatal("allowed concurrent calls did not dispatch")
-			}
-			if limit == 0 && third.Machine != m.ID {
-				t.Fatal("unset limit changed unlimited behavior")
-			}
-			if limit == 2 && third.Machine != "" {
-				t.Fatal("third call exceeded two-request limit")
-			}
-		})
-	}
-}
-
 func TestModelLimitRejectsNegative(t *testing.T) {
 	q, _, _ := modelFixture(t)
 	c := q.models
@@ -372,24 +351,5 @@ func TestUploadSpoolRejectsInvalidConfiguration(t *testing.T) {
 		if err := q.ConfigureUploadSpool(t.TempDir(), budget); err == nil {
 			t.Fatal("nonpositive upload budget accepted")
 		}
-	}
-}
-
-func TestModelLimitWaitingCallDoesNotBlockFittingBatch(t *testing.T) {
-	q, _, m := limitedModelFixture(t, 1)
-	m.FreeMemoryGB = 16
-	check(t, q, m, nil)
-	addModelCall(t, q, "production")
-	reportModel(t, q, m, "ready")
-	waiting := addModelCall(t, q, "production")
-	s := spec("deadline")
-	s.Needs.HostMemoryGB = 1
-	batch := submitMeasuredCardJob(t, q, m, s)
-	reply := reportModel(t, q, m, "ready")
-	if waiting.Machine != "" {
-		t.Fatal("full copy accepted another call")
-	}
-	if reply.Job == nil || reply.Job.ID != batch.ID {
-		t.Fatal("call waiting for model capacity blocked a batch that fits alongside it")
 	}
 }

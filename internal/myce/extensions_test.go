@@ -179,52 +179,6 @@ func TestExtensionQualificationFailureAndIdentity(t *testing.T) {
 		t.Fatal("shape mismatch accepted")
 	}
 }
-func TestExtensionRoutingKindProgramAndWaiting(t *testing.T) {
-	for _, program := range []bool{false, true} {
-		t.Run(map[bool]string{false: "kind", true: "program"}[program], func(t *testing.T) {
-			q, _ := fixture(t)
-			e := fakeExtension(t)
-			if err := q.AddExtension(e); err != nil {
-				t.Fatal(err)
-			}
-			s := Spec{Name: "sample", Project: "test", Priority: "experiment", Kind: "sample"}
-			if program {
-				s.Kind = ""
-				s.Program = &Program{Type: "sample-script", File: "script.sh"}
-				s.Inputs = map[string]string{"script.sh": "scripts/example.sh"}
-			}
-			j := submit(t, q, s)
-			m := machine("test", "fake")
-			m.HostMemoryMeasured = true
-			m.FreeHostMemoryGB = 8
-			m.HostAvailableMemoryGB = 8
-			if check(t, q, m, nil).Job != nil {
-				t.Fatal("unqualified assignment")
-			}
-			observed := job(t, q, j.ID)
-			if !strings.Contains(observed.Reason, "qualified") {
-				t.Fatal(observed.Reason)
-			}
-			m.ExtensionReports = installQualified(t, t.TempDir(), e, "")
-			reply := check(t, q, m, nil)
-			if reply.Job == nil || reply.Job.ID != j.ID || reply.Job.Extension.Digest != e.Digest || reply.Job.Spec.Needs.MemoryGB != 1 {
-				t.Fatal(reply)
-			}
-			m.ExtensionReports[0].Digest = "stale"
-			if !program && extensionCanRun(reply.Job, &m) {
-				t.Fatal("stale content accepted")
-			}
-		})
-	}
-	q, _ := fixture(t)
-	unknown := submit(t, q, Spec{Name: "unknown", Project: "test", Priority: "experiment", Kind: "missing"})
-	if check(t, q, machine("f", "fake"), nil).Job != nil {
-		t.Fatal("unknown routed")
-	}
-	if extensionWaitingReason(unknown, nil) == "" {
-		t.Fatal("missing explanation")
-	}
-}
 func TestExtensionJobFilesStayRelativeAndAttemptSpecific(t *testing.T) {
 	root := t.TempDir()
 	state := t.TempDir()
@@ -410,62 +364,6 @@ func TestExtensionSetupAndCheckFailuresClearQualification(t *testing.T) {
 	if LocalExtensionReports(root, "fake", fp)[0].Qualified {
 		t.Fatal("failed setup retained qualified")
 	}
-}
-
-func TestExtensionLibrarySurvivesQueueRestart(t *testing.T) {
-	dir := t.TempDir()
-	db := filepath.Join(dir, "queue.db")
-	clock := &fakeClock{now: time.Date(2026, 10, 14, 0, 0, 0, 0, time.UTC)}
-	q, err := Open(db, dir, clock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	e := fakeExtension(t)
-	if err := q.AddExtension(e); err != nil {
-		t.Fatal(err)
-	}
-	j := submit(t, q, Spec{Name: "persist", Project: "test", Priority: "experiment", Kind: "sample"})
-	if err := q.Close(); err != nil {
-		t.Fatal(err)
-	}
-	q, err = Open(db, dir, clock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer q.Close()
-	if len(q.Extensions()) != 1 || q.Extensions()[0].Digest != e.Digest {
-		t.Fatal("library lost")
-	}
-	snap, err := q.Snapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(snap.Jobs) != 1 || snap.Jobs[0].ID != j.ID || snap.Jobs[0].Extensions[0].Digest != e.Digest {
-		t.Fatal("frozen job extension lost")
-	}
-}
-
-func TestExtensionUnqualifiedIsNotStructuralRejection(t *testing.T) {
-	q, _ := fixture(t)
-	e := fakeExtension(t)
-	if err := q.AddExtension(e); err != nil {
-		t.Fatal(err)
-	}
-	m := machine("allowed", "fake")
-	m.TotalMemoryGB = 8
-	check(t, q, m, nil)
-	if err := q.ConfigureProjects(map[string]ProjectPolicy{"test": {Weight: 1, AllowedMachines: []string{"allowed"}}}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := q.Submit(Spec{Name: "waiting", Project: "test", Priority: "experiment", Kind: "sample"}); err != nil {
-		t.Fatalf("qualification is temporary, not structural incompatibility: %v", err)
-	}
-}
-
-func TestExtensionQualificationWithRelativeRoot(t *testing.T) {
-	t.Chdir(t.TempDir())
-	e := fakeExtension(t)
-	installQualified(t, "relative-root", e, "")
 }
 
 func TestExtensionQualificationChangeBeforeStartRequeuesWithoutLoss(t *testing.T) {

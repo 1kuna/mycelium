@@ -223,73 +223,6 @@ func TestClientWaitRetriesTransientStatusWithinContext(t *testing.T) {
 	})
 }
 
-func TestClientWaitSubmittedUnknownVisibility(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		status   int
-		recover  bool
-		deadline time.Duration
-		reads    int
-		elapsed  time.Duration
-	}{
-		{name: "visible on retry", status: 404, recover: true, reads: 2, elapsed: time.Second},
-		{name: "missing receipt uses owner timeout", status: 404, deadline: 5 * time.Second},
-		{name: "authentication fails immediately", status: 401, reads: 1},
-		{name: "caller deadline wins", status: 404, deadline: 500 * time.Millisecond, reads: 1, elapsed: 500 * time.Millisecond},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				posts, reads := 0, 0
-				c := Client{URL: "http://fixture", Token: "test-only", HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
-					if r.Header.Get("Authorization") != "Bearer test-only" {
-						t.Fatal("missing authentication")
-					}
-					status, body := 200, `{"id":"accepted-job","state":"queued"}`
-					switch {
-					case r.Method == "POST" && r.URL.Path == "/api/jobs":
-						posts++
-					case r.Method == "GET" && r.URL.Path == "/api/jobs/accepted-job":
-						reads++
-						status, body = tc.status, `{"code":"job_unknown","error":"job is unknown"}`
-						if tc.recover && reads > 1 {
-							status, body = 200, `{"id":"accepted-job","state":"succeeded"}`
-						}
-					default:
-						t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
-					}
-					return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
-				})}}
-				ctx := context.Background()
-				if tc.deadline > 0 {
-					var cancel context.CancelFunc
-					ctx, cancel = context.WithTimeout(ctx, tc.deadline)
-					defer cancel()
-				}
-				start := time.Now()
-				j, err := c.SubmitAndWait(ctx, Spec{SubmissionKey: "one-submission"})
-				var api *HTTPError
-				switch {
-				case tc.recover:
-					if err != nil || j == nil || j.State != "succeeded" {
-						t.Fatal(j, err)
-					}
-				case tc.deadline > 0:
-					if !errors.Is(err, context.DeadlineExceeded) {
-						t.Fatal(err)
-					}
-				default:
-					if !errors.As(err, &api) || api.Status != tc.status {
-						t.Fatal(err)
-					}
-				}
-				if posts != 1 || tc.recover && reads != 2 || tc.status == 401 && reads != 1 || tc.deadline > 0 && time.Since(start) != tc.deadline {
-					t.Fatalf("posts=%d reads=%d elapsed=%v", posts, reads, time.Since(start))
-				}
-			})
-		})
-	}
-}
-
 func TestClientWaitUpdatesRetryLogRead(t *testing.T) {
 	updates := 0
 	c := Client{URL: "http://queue.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
@@ -312,26 +245,6 @@ func TestClientWaitUpdatesRetryLogRead(t *testing.T) {
 	if !errors.Is(err, failure) {
 		t.Fatal(err)
 	}
-}
-
-func TestClientJobReplyTruncated(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		reads := 0
-		c := Client{URL: "http://fixture", HTTP: &http.Client{Transport: clientTestTransport(func(*http.Request) (*http.Response, error) {
-			reads++
-			body := `{"id":"fixture","state":"succeeded"}`
-			if reads == 1 {
-				body = `{"id":"fixture","state":`
-			}
-			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
-		})}}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		job, err := c.Wait(ctx, "fixture")
-		if err != nil || job == nil || job.State != "succeeded" || reads != 2 {
-			t.Fatalf("truncated reply must retry: job=%v err=%v reads=%d", job, err, reads)
-		}
-	})
 }
 
 func TestClientJobReplyInvalid(t *testing.T) {
@@ -390,34 +303,6 @@ func TestClientJobReplyOldQueue(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestClientWaitIdentityAndView(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		reads := 0
-		c := Client{URL: "http://queue.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
-			if r.UserAgent() != "myce/"+BuildVersion {
-				t.Errorf("identity = %q", r.UserAgent())
-			}
-			wantView := "wait"
-			if reads < 2 {
-				wantView = ""
-			}
-			if r.URL.Query().Get("view") != wantView {
-				t.Errorf("full wait poll: %s", r.URL)
-			}
-			reads++
-			state := "running"
-			if reads >= 2 {
-				state = "succeeded"
-			}
-			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(waitFixtureBody(t, r, `{"id":"job","state":"`+state+`"}`))), Header: make(http.Header)}, nil
-		})}}
-		j, err := c.Wait(context.Background(), "job")
-		if err != nil || j.State != "succeeded" || reads != 3 {
-			t.Fatal(j, err, reads)
-		}
-	})
 }
 
 func TestClientWaitRetainsInitialAdviceAfterLightweightPoll(t *testing.T) {

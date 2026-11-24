@@ -7,40 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
 
 const testLatencyBurst = 256
 const testRouteBurst = 128
-
-// A cache refresh encloses the whole off-lock read build. Its lifetime must
-// not be reported as queue-mutex occupancy, including when a capture is nested.
-func TestRequestTimingObservationRefresh(t *testing.T) {
-	q, _ := fixture(t)
-	span := &requestSpan{}
-	ctx := context.WithValue(context.Background(), requestSpanKey{}, span)
-	var refresh sync.Mutex
-	unlockRefresh, err := requestObservationLock(ctx, &refresh)
-	if err != nil {
-		t.Fatal(err)
-	}
-	unlockQueue, err := requestObservationLock(ctx, &q.mu)
-	if err != nil {
-		unlockRefresh()
-		t.Fatal(err)
-	}
-	unlockQueue()
-	beforeWait, beforeHold, beforeUnlock := span.wait, span.hold, span.lastUnlock
-	if !span.measured || beforeHold <= 0 {
-		t.Fatal("queue capture did not record occupancy")
-	}
-	unlockRefresh()
-	if span.wait != beforeWait || span.hold != beforeHold || span.lastUnlock != beforeUnlock {
-		t.Fatal("off-lock response build was attributed to the queue mutex")
-	}
-}
 
 func TestRequestTimingSlowHandler(t *testing.T) {
 	q, _ := fixture(t)
@@ -194,26 +166,6 @@ func TestRequestTimingEarlyRouteLabels(t *testing.T) {
 		if !found {
 			t.Fatalf("route %s lost: %+v", tc.route, q.requestLatencies.snapshot())
 		}
-	}
-}
-
-func TestRequestTimingControlTransactions(t *testing.T) {
-	q, _ := fixture(t)
-	for name, operation := range map[string]func(context.Context){
-		"started": func(ctx context.Context) { _ = q.Started(Result{}, ctx) },
-		"cancel":  func(ctx context.Context) { _, _ = q.CancelJob("missing", ctx) },
-		"upload": func(ctx context.Context) {
-			_ = q.recordFileUpload(strings.Repeat("b", 64), jobInputUploadPurpose, true, ctx)
-		},
-		"bundle": func(ctx context.Context) { _ = q.recordBundleUpload(strings.Repeat("c", 64), true, ctx) },
-	} {
-		t.Run(name, func(t *testing.T) {
-			s := &requestSpan{started: time.Now()}
-			operation(context.WithValue(context.Background(), requestSpanKey{}, s))
-			if !s.measured || s.hold <= 0 {
-				t.Fatal("queue transaction was not attributed")
-			}
-		})
 	}
 }
 

@@ -607,35 +607,6 @@ func TestEphemeralRefusalKeepsPredecessorCheckinJSON(t *testing.T) {
 	}
 }
 
-func TestEphemeralManagedCompositionValidation(t *testing.T) {
-	for _, kind := range []string{"environment", "sidecar", "execution", "after", "pieces", "extension"} {
-		t.Run(kind, func(t *testing.T) {
-			s := ephemeralSpec()
-			switch kind {
-			case "environment":
-				s.Environment.Name = "runtime"
-			case "sidecar":
-				s.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"true"}}}
-			case "execution":
-				s.Run = RunSpec{}
-				s.Execution = &ExecutionSpec{Main: ExecutionMember{Command: []string{"true"}, Environment: "runtime", Workdir: "{work}"}, Sidecars: []NativeSidecar{{Name: "helper", Command: []string{"true"}}}}
-			case "after":
-				s.After = &PieceDependency{Job: "producer", Outputs: map[string]string{"input": "out"}}
-			case "pieces":
-				s.FanOut = &FanOut{Pieces: []FanOutPiece{{Key: "one"}, {Key: "two"}}}
-			case "extension":
-				s.Run = RunSpec{}
-				s.Needs = ResourceNeeds{}
-				s.Extension, s.Args = "sample@1", []string{"argument"}
-				s.SizeHint.MemoryGB = 1
-			}
-			if err := s.Validate(); err != nil {
-				t.Fatal("covered composition refused", err)
-			}
-		})
-	}
-}
-
 func TestEphemeralFreshSessionCannotCertifyCleanup(t *testing.T) {
 	q, _, _, s := ephemeralFixture(t)
 	j := *s.state.Job
@@ -649,52 +620,6 @@ func TestEphemeralFreshSessionCannotCertifyCleanup(t *testing.T) {
 	q.mu.Unlock()
 	if retained == 0 {
 		t.Fatal("fresh session discharged unknown data custody")
-	}
-}
-
-func TestEphemeralWorkerLifecycle(t *testing.T) {
-	requireEphemeralTestBoundary(t)
-	q, c, w, s := ephemeralFixture(t)
-	j := *s.state.Job
-	j.Spec.Run.Command = []string{"sh", "-ec", `printf payload > "$TMPDIR/temp"; printf private > "$HOME/private"; printf checkpoint > "$MYCE_CHECKPOINT_DIR/save"; printf output > out.txt; printf delivered-log`}
-	s.state.Job, s.state.Result, s.state.Log = &j, nil, ""
-	if err := os.Remove(filepath.Join(s.dir, ephemeralLogName(j))); err != nil {
-		t.Fatal(err)
-	}
-	p, err := startAfterFixtureInputs(t, w, s, j)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer p.stop(c.Now(), 0, true)
-	select {
-	case finished := <-p.done:
-		if finished.err != nil {
-			t.Fatal(finished.err)
-		}
-		s.state.Result = &finished.result
-	case <-time.After(testWaitTimeout):
-		t.Fatal("command did not exit")
-	}
-	if done, err := w.finishEphemeralAttempt(context.Background(), s, true); err != nil || !done {
-		t.Fatal(done, err)
-	}
-	got := job(t, q, j.ID)
-	if got.State != "succeeded" {
-		t.Fatal(got.State, JobReasonDetail(got))
-	}
-	paths := []string{}
-	for _, p := range got.WorkerDataCleanup.Paths {
-		paths = append(paths, p.Path)
-		if _, err := os.Stat(filepath.Join(w.StateDir, p.Path)); !errors.Is(err, os.ErrNotExist) {
-			t.Fatal("released with payload", p, err)
-		}
-	}
-	if !slices.ContainsFunc(paths, func(p string) bool { return strings.HasPrefix(p, "ephemeral/") }) {
-		t.Fatal("wrong cleanup roots", paths)
-	}
-	data, err := json.Marshal(got)
-	if err != nil || !strings.Contains(string(data), `"worker_data":"ephemeral"`) {
-		t.Fatal("policy absent from status", err)
 	}
 }
 

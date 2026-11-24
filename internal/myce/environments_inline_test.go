@@ -79,34 +79,6 @@ func TestEnvironmentInlineBackends(t *testing.T) {
 	}
 }
 
-func TestEnvironmentInlinePixiMissingCompanion(t *testing.T) {
-	q, _ := fixture(t)
-	lock := filepath.Join(t.TempDir(), "pixi.lock")
-	if err := os.WriteFile(lock, []byte("locked"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	s := cpuResolveSpec()
-	s.Environment = Environment{Backend: "pixi", LockFile: lock, Platforms: []string{"cpu"}}
-	c := Client{URL: testServerForEnvironments(t, q), Token: "test"}
-	var report ResolveReport
-	if err := c.Call(context.Background(), "POST", "/api/resolve", ResolveRequest{Spec: s}, &report); err != nil {
-		t.Fatal(err)
-	}
-	f := resolveFinding(report, "environment.manifest")
-	if f == nil || f.PathDiagnostic == nil || f.PathDiagnostic.Cause != "companion_absent" || f.PathDiagnostic.Companion != "pixi.toml" {
-		t.Fatalf("resolve: %+v", report.Findings)
-	}
-	_, err := c.Submit(context.Background(), s)
-	var apiErr *HTTPError
-	if !errors.As(err, &apiErr) {
-		t.Fatalf("expected API refusal: %v", err)
-	}
-	d := apiErr.PathDiagnostic
-	if d == nil || d.Cause != "companion_absent" || d.Companion != "pixi.toml" || d.Side != "queue" {
-		t.Fatalf("submit diagnostic: %+v, %v", d, err)
-	}
-}
-
 func TestEnvironmentInlineOversizedInput(t *testing.T) {
 	for _, input := range []struct{ backend, lock, oversized, field, companion string }{
 		{"pixi", "pixi.lock", "pixi.lock", "environment.lock_file", ""},

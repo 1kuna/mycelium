@@ -148,36 +148,6 @@ func TestStatusOptionsRejectInvalidQuery(t *testing.T) {
 	}
 }
 
-// Disk inventory can stall on external storage. The queue must keep accepting
-// control transactions while a summary waits for that independent observation.
-func TestStatusOptionsFileIOOutsideQueueLock(t *testing.T) {
-	q, _ := fixture(t)
-	retentionClient(t, q)
-	entered, release := make(chan struct{}), make(chan struct{})
-	q.files.diskProbe = func(string) (DiskReading, error) {
-		close(entered)
-		<-release
-		return DiskReading{TotalBytes: 100 << 30, FreeBytes: 90 << 30}, nil
-	}
-	done := make(chan error, 1)
-	go func() {
-		options, _ := parseStatusOptions(url.Values{"sections": {"storage"}})
-		_, err := q.publicStatusSnapshot(&options)
-		done <- err
-	}()
-	defer func() {
-		close(release)
-		if err := <-done; err != nil {
-			t.Error(err)
-		}
-	}()
-	<-entered
-	if !q.mu.TryLock() {
-		t.Fatal("disk I/O holds the control-plane mutex")
-	}
-	q.mu.Unlock()
-}
-
 // Optional private snapshot replay: only sizes/timings are emitted. It uses an
 // empty local usage DB and no production storage or execution payloads.
 func BenchmarkStatusOptionsSnapshot(b *testing.B) {

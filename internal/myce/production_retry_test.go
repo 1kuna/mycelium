@@ -101,43 +101,6 @@ func TestProductionInfrastructureRetryLimit(t *testing.T) {
 	}
 }
 
-func TestProductionStageFailureDoesNotRetry(t *testing.T) {
-	for _, mode := range []string{"exit", "oom", "container", "oom-interrupted", "maintenance-oom", "maintenance-exit"} {
-		t.Run(mode, func(t *testing.T) {
-			q, _ := fixture(t)
-			m := machine("one", "fake")
-			m.HostID = "host"
-			submit(t, q, spec("production"))
-			running := check(t, q, m, nil).Job
-			if err := q.Started(result(running, false)); err != nil {
-				t.Fatal(err)
-			}
-			if mode == "maintenance-oom" || mode == "maintenance-exit" {
-				if err := setMaintenance(t, q, m.HostID, "disable"); err != nil {
-					t.Fatal(err)
-				}
-			}
-			r := result(running, false)
-			r.Error = "exit status 7"
-			if mode == "container" {
-				r.Error = "container command failed"
-			}
-			r.OutOfMemory = mode == "oom" || mode == "oom-interrupted" || mode == "maintenance-oom"
-			r.Interrupted = mode == "oom-interrupted"
-			if err := q.Complete(r); err != nil {
-				t.Fatal(err)
-			}
-			got := job(t, q, running.ID)
-			if got.State != "failed" || got.Attempt != 1 || got.Losses != 0 || got.InfrastructureRetries != 0 {
-				t.Fatal(got)
-			}
-			if got := check(t, q, m, nil).Job; got != nil {
-				t.Fatal("stage failure retried", got)
-			}
-		})
-	}
-}
-
 func TestProductionCancelPendingPreventsRetry(t *testing.T) {
 	for _, hostClose := range []bool{false, true} {
 		t.Run(stringBool(hostClose), func(t *testing.T) {

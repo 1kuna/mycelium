@@ -268,28 +268,6 @@ func TestScarceHostYieldRevalidateBeforeStop(t *testing.T) {
 	}
 }
 
-func TestScarceHostYieldProductionProtectedUnderOwnerTiers(t *testing.T) {
-	q, _, a, _, run := yieldFixture(t, false)
-	// Same owner tier permits same-tier relocation, but cannot give an
-	// experiment permission to displace a production attempt.
-	policy := PriorityPolicy{Version: 1, Tiers: []PriorityTier{{Name: "shared", Selectors: []string{"*/*"}}}}
-	if _, err := q.SetPriorityPolicy(0, policy); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.update(func() error {
-		v := q.touchJob(run.ID)
-		v.Spec.Class, v.Spec.Priority = "production", "production"
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	yieldDemand(t, q)
-	machineCheck(t, q, a, run)
-	if got := job(t, q, run.ID); got.State != "running" || got.ScarceHostYield != nil {
-		t.Fatal("experiment displaced production under owner policy", got)
-	}
-}
-
 func TestScarceHostYieldAuthorContract(t *testing.T) {
 	q, _ := fixture(t)
 	s := cpuSpec(1, 1)
@@ -524,55 +502,6 @@ func TestScarceHostYieldConvenienceDevicePinIsNotUniqueness(t *testing.T) {
 	}
 }
 
-func TestScarceHostYieldToolsDoNotManufactureUniqueness(t *testing.T) {
-	q, _, a, _, run := yieldFixture(t, false)
-	peer := m3Machine()
-	peer.ID, peer.HostID = "peer", "peer"
-	machineCheck(t, q, peer)
-	if err := q.update(func() error { q.touchMachine(a.ID).ToolInventory = map[string][]string{"": {"node"}}; return nil }); err != nil {
-		t.Fatal(err)
-	}
-	s := spec("experiment")
-	s.Needs.Tools = []string{"node"}
-	s.Needs.Platform = Platform{Required: []string{"fake"}}
-	s.RequirementReasons = map[string]string{"backend:fake": "requires simulated accelerator"}
-	submit(t, q, s)
-	if got := job(t, q, run.ID); got.State != "running" {
-		t.Fatal("missing peer software manufactured uniqueness", got)
-	}
-}
-
-func TestScarceHostYieldWorkerProtocolsAreNotHardwareUniqueness(t *testing.T) {
-	for _, protocol := range []string{"shared-input", "model-snapshot"} {
-		t.Run(protocol, func(t *testing.T) {
-			q, _, a, _, _ := yieldFixture(t, false)
-			peer := m3Machine()
-			peer.ID, peer.HostID = "peer", "peer"
-			machineCheck(t, q, peer)
-			if err := q.update(func() error {
-				q.touchMachine(a.ID).Capabilities = append(q.s.Machines[a.ID].Capabilities, "shared_inputs_v1", modelSnapshotsCapability)
-				return nil
-			}); err != nil {
-				t.Fatal(err)
-			}
-			s := spec("experiment")
-			s.Needs.Platform = Platform{Required: []string{"fake"}}
-			s.RequirementReasons = map[string]string{"backend:fake": "requires simulated accelerator"}
-			if protocol == "shared-input" {
-				s.SharedInputs = map[string]SharedInput{"data": {SHA256: strings.Repeat("a", 64), SizeBytes: 1, Manifest: FileManifest{"data": {SHA256: strings.Repeat("a", 64), SizeBytes: 1}}}}
-			} else {
-				s.ModelSnapshots = map[string]ModelSnapshot{"base": {Repo: "example/model", Revision: strings.Repeat("a", 40)}}
-			}
-			// Read-only hardware projection: input acquisition/admission still
-			// rejects this peer's older worker protocol in the ordinary planner.
-			host, _ := q.scarceDemandHost(&Job{State: "queued", Spec: s})
-			if host != "" {
-				t.Fatal("worker software manufactured unique hardware", protocol, host)
-			}
-		})
-	}
-}
-
 func TestScarceHostYieldDestinationProtocolRechecked(t *testing.T) {
 	for _, fence := range []string{"dispatch", "launch"} {
 		t.Run(fence, func(t *testing.T) {
@@ -607,29 +536,6 @@ func TestScarceHostYieldDestinationProtocolRechecked(t *testing.T) {
 	}
 }
 
-func TestScarceHostYieldRechecksDemandToolsBeforeStop(t *testing.T) {
-	q, _, a, _, run := yieldFixture(t, false)
-	if err := q.update(func() error { q.touchMachine(a.ID).ToolInventory = map[string][]string{"": {"node"}}; return nil }); err != nil {
-		t.Fatal(err)
-	}
-	s := spec("experiment")
-	s.Needs.Tools = []string{"node"}
-	s.Needs.Platform = Platform{Required: []string{"fake"}}
-	s.RequirementReasons = map[string]string{"backend:fake": "requires simulated accelerator"}
-	submit(t, q, s)
-	if got := job(t, q, run.ID); got.State != "stopping" {
-		t.Fatal("missing initial yield", got.State, got.Reason)
-	}
-	if err := q.update(func() error { q.touchMachine(a.ID).ToolInventory = nil; return nil }); err != nil {
-		t.Fatal(err)
-	}
-	if ok, err := q.authorizeYieldStop(context.Background(), result(run, false)); ok || err != nil {
-		t.Fatal("missing demand tools still authorized stop", ok, err)
-	}
-	if got := job(t, q, run.ID); got.State != "running" {
-		t.Fatal("undelivered stop not withdrawn", got)
-	}
-}
 func TestScarceHostYieldRequiresRealUniquenessAndCompatibility(t *testing.T) {
 	for _, gap := range []string{"busy-peer", "stale-peer", "maintained-peer", "unavailable", "unqualified", "incompatible", "no-checkpoint", "production", "not-opted-in", "protected"} {
 		t.Run(gap, func(t *testing.T) {

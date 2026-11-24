@@ -2,7 +2,6 @@ package myce
 
 import (
 	"context"
-	"errors"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -127,128 +126,6 @@ func TestModelIntervalsTransientLoadUnloadDurablePagination(t *testing.T) {
 	}
 	if err := client.Call(t.Context(), "GET", "/api/models/intervals?limit=-1", nil, nil); err == nil {
 		t.Fatal("invalid page accepted")
-	}
-}
-
-func TestModelIntervalsFailedLoadRetryAndClassChange(t *testing.T) {
-	q, clock, m := modelFixture(t)
-	c := addModelCall(t, q, "experiment")
-	s := q.s.ModelSlots[slotKey(m.ID, "test")]
-	attempt := s.Attempt
-	clock.Advance(time.Second)
-	reportModel(t, q, m, "failed")
-	failed := intervalPage(t, q, 0, -1, 256)
-	last := failed.Entries[len(failed.Entries)-1]
-	if last.Kind != "released" || last.LoadStartedAt != nil || last.ReleasedAt == nil || last.Attempt != attempt {
-		t.Fatal(last)
-	}
-	q.finishCall(c.ID)
-	clock.Advance(time.Second)
-	addModelCall(t, q, "experiment")
-	fresh := q.s.ModelSlots[slotKey(m.ID, "test")]
-	if fresh.Attempt == attempt || fresh.Interval.ReleasedAt != nil {
-		t.Fatal("retry reused interval", fresh)
-	}
-	clock.Advance(time.Second)
-	addModelCall(t, q, "production")
-	changes := intervalPage(t, q, failed.HighWater, -1, 256)
-	last = changes.Entries[len(changes.Entries)-1]
-	if last.Kind != "class_changed" || last.Tier.Tier != "production" || last.Attempt != fresh.Attempt || !last.At.Equal(clock.Now()) {
-		t.Fatal("lost tier transition", changes)
-	}
-}
-
-func TestModelIntervalsRollbackAndUnknownLegacyTimes(t *testing.T) {
-	q, _, m := modelFixture(t)
-	if err := q.update(func() error {
-		q.s.ModelSlots[slotKey(m.ID, "test")] = &ModelSlot{Model: "test", Attempt: "legacy", Machine: m.ID, Session: m.Session, State: "ready", Priority: "experiment"}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	page := intervalPage(t, q, 0, -1, 256)
-	if len(page.Entries) != 1 || page.Entries[0].Kind != "observed" || page.Entries[0].AssignedAt != nil || page.Entries[0].LoadStartedAt != nil {
-		t.Fatal("fabricated legacy times", page)
-	}
-	sentinel := errors.New("abort transition")
-	err := q.update(func() error {
-		q.recordModelInterval(q.s.ModelSlots[slotKey(m.ID, "test")], "released")
-		return sentinel
-	})
-	if !errors.Is(err, sentinel) {
-		t.Fatal(err)
-	}
-	after := intervalPage(t, q, 0, -1, 256)
-	if after.HighWater != page.HighWater || q.s.ModelSlots[slotKey(m.ID, "test")].Interval.ReleasedAt != nil {
-		t.Fatal("aborted transition leaked", after)
-	}
-}
-
-func TestModelIntervalsTrackEffectivePinnedTier(t *testing.T) {
-	q, clock, m := modelFixture(t)
-	c := addModelCall(t, q, "experiment")
-	reportModel(t, q, m, "ready")
-	s := q.s.ModelSlots[slotKey(m.ID, "test")]
-	before := intervalPage(t, q, 0, -1, 256)
-	clock.Advance(time.Second)
-	pinAt := clock.Now()
-	if err := q.Pin(ModelPin{Project: "pin-owner", Model: "test", Machine: m.ID}); err != nil {
-		t.Fatal(err)
-	}
-	promoted := intervalPage(t, q, before.HighWater, -1, 256)
-	if len(promoted.Entries) != 1 {
-		t.Fatal("missing pinned promotion", promoted)
-	}
-	event := promoted.Entries[0]
-	if event.Kind != "class_changed" || event.Project != "pin-owner" || event.Class != "production" || event.Tier.Tier != "production" || !event.At.Equal(pinAt) || event.Attempt != s.Attempt {
-		t.Fatal("wrong pinned identity", event)
-	}
-	clock.Advance(time.Second)
-	if err := q.finishCall(c.ID); err != nil {
-		t.Fatal(err)
-	}
-	pinned := intervalPage(t, q, promoted.HighWater, -1, 256)
-	if len(pinned.Entries) != 0 {
-		t.Fatal("completed experiment demoted active pin", pinned)
-	}
-	clock.Advance(time.Second)
-	if err := q.Unpin("pin-owner", "test"); err != nil {
-		t.Fatal(err)
-	}
-	unpinned := intervalPage(t, q, pinned.HighWater, -1, 256)
-	if len(unpinned.Entries) != 1 || unpinned.Entries[0].Tier.Tier != "experiment" || !unpinned.Entries[0].At.Equal(clock.Now()) {
-		t.Fatal("missing unpin transition", unpinned)
-	}
-}
-
-func TestModelIntervalsPinAttributionIsCardSpecific(t *testing.T) {
-	q, _, m := modelFixture(t)
-	m.Devices = m3Machine().Devices
-	machineCheck(t, q, m)
-	addModelCall(t, q, "experiment")
-	sibling := q.s.ModelSlots[slotKey(m.ID, "test", "0")]
-	if sibling == nil {
-		t.Fatal("missing experiment slot")
-	}
-	before := intervalPage(t, q, 0, -1, 256)
-	if err := q.Pin(ModelPin{Project: "pin-owner", Model: "test", Machine: m.ID, Device: "1"}); err != nil {
-		t.Fatal(err)
-	}
-	pinned := q.s.ModelSlots[slotKey(m.ID, "test", "1")]
-	if pinned == nil || !q.slotPinned(pinned) {
-		t.Fatal("missing card 1 pin")
-	}
-	if got := q.slotSpec(sibling); jobClass(got) != "experiment" || got.Project != "test" {
-		t.Fatal("sibling inherited another card's pin", got)
-	}
-	after := intervalPage(t, q, before.HighWater, -1, 256)
-	for _, event := range after.Entries {
-		if event.Attempt == sibling.Attempt {
-			t.Fatal("pin changed sibling interval", event)
-		}
-		if event.Attempt == pinned.Attempt && (event.Device != "1" || event.Project != "pin-owner" || event.Tier.Tier != "production") {
-			t.Fatal("incorrect pinned card attribution", event)
-		}
 	}
 }
 

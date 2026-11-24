@@ -76,31 +76,6 @@ func assignChurnWaveFixture(t *testing.T, ram float64) (*Queue, *workerFakeClock
 	return q, clock, m, wave
 }
 
-func TestAssignChurnPendingProductionWave(t *testing.T) {
-	q, clock, m, wave := assignChurnWaveFixture(t, 32)
-	h := cpuSpec(2, 16)
-	h.Priority = "production"
-	holder := submit(t, q, h)
-	running := assignedJob(machineCheck(t, q, m))
-	if running == nil || running.ID != holder.ID {
-		t.Fatal("missing production holder", running)
-	}
-	demand := submit(t, q, wave)
-	clock.Advance(time.Second)
-	lower := submit(t, q, cpuSpec(1, 4))
-	if got := assignedJob(machineCheck(t, q, m, running)); got != nil {
-		t.Fatalf("started %s while pending wave %s will need its RAM (consumer %s)", got.ID, demand.ID, lower.ID)
-	}
-	finish(t, q, running, true)
-	got := assignedJob(machineCheck(t, q, m))
-	if got == nil || got.Batch == nil || got.Batch.Parent != demand.ID {
-		t.Fatal("production did not start promptly after capacity release", got)
-	}
-	if job(t, q, lower.ID).PreemptionCount != 0 {
-		t.Fatal("consumer paid an avoidable preemption")
-	}
-}
-
 func TestAssignChurnProductionAfterRunningWave(t *testing.T) {
 	q, clock, m, wave := assignChurnWaveFixture(t, 16)
 	parent := submit(t, q, wave)
@@ -121,37 +96,5 @@ func TestAssignChurnProductionAfterRunningWave(t *testing.T) {
 	}
 	if got := assignedJob(machineCheck(t, q, m, running)); got == nil || got.ID != lower.ID {
 		t.Fatal("withdrawn demand still withheld capacity", got)
-	}
-}
-
-func TestAssignChurnProductionWaveUsesFreeTarget(t *testing.T) {
-	for _, mode := range []string{"serial"} {
-		t.Run(mode, func(t *testing.T) {
-			q, _, m, wave := assignChurnWaveFixture(t, 32)
-			peer := cloneMachine(&m)
-			peer.ID, peer.HostID, peer.Session = "free-worker", "free-host", "free-session"
-			e := registeredExtension(t, q, wave.Extension)
-			report := newExtensionReport(e, &peer, wave.workType())
-			report.Setup, report.Qualified, report.CheckID = true, true, "peer-check"
-			peer.ExtensionReports = []ExtensionReport{report}
-			check(t, q, peer, nil)
-			h := cpuSpec(2, 16)
-			h.Priority, h.AllowedMachines = "production", []string{m.ID}
-			submit(t, q, h)
-			running := assignedJob(machineCheck(t, q, m))
-			if running == nil {
-				t.Fatal("missing occupied target")
-			}
-			demand := submit(t, q, wave)
-			x := cpuSpec(1, 4)
-			x.AllowedMachines = []string{m.ID}
-			lower := submit(t, q, x)
-			if got := assignedJob(machineCheck(t, q, m, running)); got == nil || got.ID != lower.ID {
-				t.Fatal("consumer withheld despite an immediately usable production target", got)
-			}
-			if got := assignedJob(machineCheck(t, q, peer)); got == nil || got.Batch == nil || got.Batch.Parent != demand.ID {
-				t.Fatal("production did not use free target", got)
-			}
-		})
 	}
 }

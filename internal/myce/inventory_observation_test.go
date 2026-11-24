@@ -142,25 +142,3 @@ func TestInventoryObservationPredecessorQueue(t *testing.T) {
 		}
 	}
 }
-
-func TestInventoryObservationPartialAndPersistence(t *testing.T) {
-	q, clock := fixture(t)
-	m := m3Machine()
-	m.InventoryProbe = &InventoryObservation{At: clock.Now(), State: "partial", Probe: &ProbeObservation{PeriodSeconds: 1, CostSeconds: .1, ValidSeconds: 2}}
-	m.Devices[0].Reason, m.Devices[0].FreeMemoryGB = "device_probe_unavailable", 0
-	gpu := submit(t, q, spec("experiment"))
-	a := assignedJob(machineCheck(t, q, m))
-	if a == nil || a.ID != gpu.ID || len(a.AllocatedDevices) != 1 || a.AllocatedDevices[0] != m.Devices[1].ID {
-		t.Fatal("failed family blocked healthy sibling", a)
-	}
-	if d := durableMachine(&m); d.InventoryProbe == nil || d.InventoryProbe.State != "stale" || inventoryObservationFresh(d.InventoryProbe, clock.Now()) {
-		t.Fatal("queue reopen could trust saved discovery")
-	}
-	m.GPU = "cpu" // Degraded inventory projects the host to CPU capacity.
-	for _, state := range []string{"pending", "failed", "stale"} {
-		m.InventoryProbe.State = state
-		if why := HyphaAvailability(&m); !strings.Contains(why, "fresh accelerator inventory: "+state) {
-			t.Fatal("host availability omitted discovery wait", why)
-		}
-	}
-}

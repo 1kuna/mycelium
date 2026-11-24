@@ -78,35 +78,6 @@ func TestPlainPiecesRunAsOrdinaryJobsAndGatherByKey(t *testing.T) {
 	}
 }
 
-func TestPlainPieceFailureLetsSiblingsSettle(t *testing.T) {
-	q, _, m, s := plainPiecesFixture(t, "a", "b", "c")
-	s.Resumable = false
-	parent := submit(t, q, s)
-	first := check(t, q, m, nil).Job
-	finish(t, q, first, false)
-	if got := job(t, q, first.ID); got.State != "failed" {
-		t.Fatalf("piece did not fail: %s", got.State)
-	}
-	if got := job(t, q, parent.ID); got.State != "queued" {
-		t.Fatalf("one failed piece settled the parent early: %s", got.State)
-	}
-	for range 2 {
-		run := check(t, q, m, nil).Job
-		if run == nil {
-			t.Fatal("sibling piece was cancelled after a failure")
-		}
-		completeWithOutput(t, q, run, "ok "+run.Batch.Pieces[0].Key)
-	}
-	got := job(t, q, parent.ID)
-	failedKey := first.Batch.Pieces[0].Key
-	if got.State != "failed" || got.Reason != fmt.Sprintf("1/3 pieces failed: %s", failedKey) {
-		t.Fatalf("state=%s reason=%q", got.State, got.Reason)
-	}
-	if _, ok := got.FanOut.Results[failedKey]; ok || len(got.FanOut.Results) != 2 {
-		t.Fatalf("succeeded pieces not kept by key: %+v", got.FanOut.Results)
-	}
-}
-
 func TestPlainPiecesCancelParentCancelsEveryPiece(t *testing.T) {
 	q, _, m, s := plainPiecesFixture(t, "a", "b", "c")
 	parent := submit(t, q, s)

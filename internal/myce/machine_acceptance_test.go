@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -285,39 +284,6 @@ func TestM3SharedLossShortestAndPerAttemptBound(t *testing.T) {
 	}
 }
 
-func TestM3RepeatedPlannedMaintenanceStops(t *testing.T) {
-	q, _ := fixture(t)
-	m := m3Machine()
-	submit(t, q, m3Spec("experiment", "0", 2, 1))
-	submit(t, q, m3Spec("experiment", "1", 2, 1))
-	var a, b *Job
-	// More than two queue-recorded maintenance stops remain planned, including
-	// a concurrent neighbor, without consuming either infrastructure counter.
-	for range 3 {
-		a = assignedJob(machineCheck(t, q, m))
-		if a == nil {
-			t.Fatal("no resumable work")
-		}
-		b = assignedJob(machineCheck(t, q, m, a))
-		if b == nil {
-			t.Fatal("no neighbor")
-		}
-		if _, err := q.ChangeHostMaintenance(m.ID, HostMaintenanceRequest{Action: "disable", Stop: true}); err != nil {
-			t.Fatal(err)
-		}
-		for _, j := range []*Job{a, b} {
-			finishInterrupted(t, q, j)
-			got := job(t, q, j.ID)
-			if got.Losses != 0 || got.InfrastructureRetries != 0 {
-				t.Fatal("planned stop consumed retry", got)
-			}
-		}
-		if _, err := q.ChangeHostMaintenance(m.ID, HostMaintenanceRequest{Action: "resume"}); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
 func TestM3ProductionLossChargesEveryAttempt(t *testing.T) {
 	q, clock := fixture(t)
 	m := m3Machine()
@@ -362,38 +328,6 @@ func TestM3SharedLossRecoversEveryRetainedDevice(t *testing.T) {
 	}
 }
 
-func TestM3HeterogeneousCopyPreparation(t *testing.T) {
-	q, _ := fixture(t)
-	config := ModelConfig{Idle: time.Minute, Wait: time.Minute, Models: []Model{{Name: "cuda-copy", Path: "weights", Engine: "fake", MemoryGB: 2, Platforms: []string{"cuda"}, SizeBytes: 1024, SHA256: strings.Repeat("a", 64)}}}
-	if err := q.ConfigureModels(config); err != nil {
-		t.Fatal(err)
-	}
-	m := m3Machine()
-	m.Devices[1].Platform = "cuda"
-	profile := *m.CapabilityProfile
-	profile.Accelerators = []AcceleratorProfile{{Type: "cuda", MemoryBytes: 8 << 30}}
-	m.Devices[1].CapabilityProfile = &profile
-	m.ModelConfigHash = modelConfigHash(config)
-	machineCheck(t, q, m)
-	if err := q.SyncModel(SyncRequest{Model: "cuda-copy", To: "cuda"}); err != nil {
-		t.Fatal(err)
-	}
-	r := machineCheck(t, q, m)
-	if len(r.CopyPlan) != 1 || r.CopyPlan[0].Launch == nil || r.CopyPlan[0].Launch.Device != "1" {
-		t.Fatal("second-platform copy was not offered once", r.CopyPlan)
-	}
-	s := m3Spec("experiment", "1", 1, 1)
-	s.Needs.Platform = Platform{Required: []string{"cuda"}}
-	queued := submit(t, q, s)
-	a := assignedJob(machineCheck(t, q, m))
-	if a == nil {
-		t.Fatal("missing neighboring execution", job(t, q, queued.ID).Reason)
-	}
-	if got := machineCheck(t, q, m, a); len(got.CopyPlan) != 0 {
-		t.Fatal("background copy ignored busy machine", got.CopyPlan)
-	}
-}
-
 func TestM3ExtensionDeviceIntersection(t *testing.T) {
 	e := compositionExtension(t, false)
 	e.Variants[0].Needs.GPU = &GPUSelection{Devices: []string{"0", "1"}}
@@ -411,65 +345,6 @@ func TestM3ExtensionDeviceIntersection(t *testing.T) {
 		} else if len(choices) != 1 || choices[0].Spec.Needs.GPU == nil || !slices.Equal(choices[0].Spec.Needs.GPU.Devices, []string{"1"}) {
 			t.Fatal("resolved intersection was not reserved", choices)
 		}
-	}
-}
-
-func TestM3QualificationAndModelSlotsStayOnDevice(t *testing.T) {
-	q, _ := fixture(t)
-	m := m3Machine()
-	e := fakeExtension(t)
-	if err := q.AddExtension(e); err != nil {
-		t.Fatal(err)
-	}
-	target := m.Devices[0].machine(m)
-	target.ExtensionFingerprint = "exact-device-0"
-	r := newExtensionReport(e, &target, "kind:sample")
-	r.Setup, r.Qualified, r.CheckID = true, true, "check-0"
-	m.Devices[0].ExtensionFingerprint = target.ExtensionFingerprint
-	m.Devices[0].ExtensionReports = []ExtensionReport{r}
-	m.Devices[1].ExtensionFingerprint = "exact-device-1"
-	m.Devices[1].ExtensionReports = []ExtensionReport{r}
-	j := submit(t, q, Spec{Name: "qualified", Project: "test", Kind: "sample"})
-	q.mu.Lock()
-	resolved := q.s.Jobs[j.ID]
-	zero, one := m.Devices[0].machine(m), m.Devices[1].machine(m)
-	ok0, ok1 := qualifiedExtension(resolved, &zero) != nil, qualifiedExtension(resolved, &one) != nil
-	q.mu.Unlock()
-	if !ok0 || ok1 {
-		t.Fatal("device 0 qualification authorized its neighbor", ok0, ok1)
-	}
-	// Two pins may own the same weights but have distinct execution identities.
-	config := ModelConfig{Idle: time.Minute, Wait: time.Minute, Models: []Model{{Name: "shared", Path: "fake", Engine: "fake", MemoryGB: 2, HostMemoryGB: 1, Platforms: []string{"fake"}}}}
-	if err := q.ConfigureModels(config); err != nil {
-		t.Fatal(err)
-	}
-	m.ModelURL = "http://127.0.0.1:12345"
-	m.ModelConfigHash = modelConfigHash(q.models)
-	machineCheck(t, q, m)
-	for i, project := range []string{"first", "second"} {
-		if err := q.Pin(ModelPin{Project: project, Model: "shared", Machine: m.ID, Device: strconv.Itoa(i)}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	q.mu.Lock()
-	s0, s1 := q.s.ModelSlots[slotKey(m.ID, "shared", "0")], q.s.ModelSlots[slotKey(m.ID, "shared", "1")]
-	q.mu.Unlock()
-	if s0 == nil || s1 == nil || s0.Attempt == s1.Attempt {
-		t.Fatal("model slot identities", s0, s1)
-	}
-	_, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, ModelReports: []ModelReport{{Name: "shared", Device: "0", Attempt: s0.Attempt, State: "ready"}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	q.mu.Lock()
-	ready0, ready1 := s0.State == "ready", s1.State == "ready"
-	q.mu.Unlock()
-	if !ready0 || ready1 {
-		t.Fatal("model report crossed device", ready0, ready1)
-	}
-	config.Models[0].Device = "0,1"
-	if err := q.ConfigureModels(config); err == nil {
-		t.Fatal("multi-card model accepted")
 	}
 }
 

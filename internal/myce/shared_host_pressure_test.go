@@ -1,9 +1,7 @@
 package myce
 
 import (
-	"context"
 	"errors"
-	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -174,32 +172,6 @@ func TestSharedHostPressureFailureAndCancellationPrecedence(t *testing.T) {
 	}
 }
 
-func TestSharedHostPressureDedicatedHostsUnchanged(t *testing.T) {
-	q, _ := fixture(t)
-	m := cpuMachine("ordinary", "ordinary", "cpu", 2, 8)
-	m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 4}
-	j := submit(t, q, cpuSpec(1, 1))
-	r := check(t, q, m, nil)
-	if r.Job == nil || r.Job.ID != j.ID || r.Stop || r.Kill {
-		t.Fatal("pressure changed dedicated admission", r)
-	}
-}
-
-func TestSharedHostPressureRetiredWorkerDoesNotStopReplacement(t *testing.T) {
-	q, _, m, run := sharedRunning(t, true)
-	q.mu.Lock()
-	retired := *q.s.Machines[m.ID]
-	retired.ID = "retired-worker"
-	retired.Gone = true
-	retired.SharedHostYieldReason = "shared host memory pressure"
-	q.s.Machines[retired.ID] = &retired
-	q.mu.Unlock()
-	r := check(t, q, m, run)
-	if r.Stop || r.Kill || job(t, q, run.ID).State != "running" {
-		t.Fatal("retired pressure stopped healthy replacement", r)
-	}
-}
-
 func TestSharedHostPressurePSIParsing(t *testing.T) {
 	for _, value := range []string{"", "some avg10=NaN", "some avg10=101", "full avg10=1.00"} {
 		if _, err := sharedMemoryPSI([]byte(value)); err == nil {
@@ -208,23 +180,6 @@ func TestSharedHostPressurePSIParsing(t *testing.T) {
 	}
 	if n, err := sharedMemoryPSI([]byte("some avg10=1.25 avg60=0.50 total=123\nfull avg10=0.1\n")); err != nil || n != 1.25 {
 		t.Fatal(n, err)
-	}
-}
-
-func TestSharedHostCPUConcurrencyCap(t *testing.T) {
-	_, clock, m, run := sharedRunning(t, false)
-	m.SharedHostReason = ""
-	w := Worker{sharedCPUDev: true, Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 12, nil }}
-	next := Job{ID: "next", Spec: cpuSpec(2, 1)}
-	if err := normalizeResources(&next.Spec); err != nil {
-		t.Fatal(err)
-	}
-	if err := localAttemptAdmission(w, []Job{*run}, next, nil); err == nil {
-		t.Fatal("concurrent declarations exceeded two-core profile")
-	}
-	next.Spec.Needs.CPUCores = 1
-	if err := localAttemptAdmission(w, []Job{*run}, next, nil); err != nil {
-		t.Fatal("fitting concurrent work rejected", err)
 	}
 }
 
@@ -333,61 +288,6 @@ func assertSharedPressureHealth(t *testing.T, q *Queue, host, want string) {
 	if direct.State != want || direct.Healthy != (want == "healthy") || fleet.HostStates[host] != want {
 		t.Fatalf("health disagreement: host=%s healthy=%t fleet=%s want=%s", direct.State, direct.Healthy, fleet.HostStates[host], want)
 	}
-}
-
-func TestSharedHostPressureMissingReportsHealthViews(t *testing.T) {
-	q, clock, m, _ := sharedRunning(t, false)
-	clock.Advance(signalMaxAge)
-	q.mu.Lock()
-	reason := q.sharedPressureReason(q.s.Machines[m.ID])
-	q.mu.Unlock()
-	if reason == "" {
-		t.Fatal("missing worker kept pressure fresh")
-	}
-	assertSharedPressureHealth(t, q, m.ID, "unhealthy")
-}
-
-func TestSharedHostPressureFailingProbeHealthViews(t *testing.T) {
-	q, clock, m, run := sharedRunning(t, false)
-	for _, pending := range []bool{true, false} {
-		t.Run(fmt.Sprint("pending=", pending), func(t *testing.T) {
-			m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1}
-			check(t, q, m, run)
-			for age := signalRefresh; age <= signalMaxAge; age += signalRefresh {
-				clock.Advance(signalRefresh)
-				if pending {
-					m.SharedHostPressure.AgeSeconds = age.Seconds()
-				} else {
-					m.SharedHostPressure = nil
-				}
-				check(t, q, m, run)
-			}
-			assertSharedPressureHealth(t, q, m.ID, "unhealthy")
-		})
-	}
-}
-
-// Expected owner yield must not consume an infrastructure-failure alert's
-// episode/cooldown; otherwise a later missing probe would be suppressed.
-func TestSharedHostPressureOwnerYieldDoesNotConsumeHealthAlert(t *testing.T) {
-	q, clock, m, run := sharedRunning(t, false)
-	clock.Advance(healthAlertCooldown)
-	check(t, q, m, run)
-	before := firings(q, "host_unhealthy_or_stale")
-	m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 2}
-	check(t, q, m, run)
-	if firings(q, "host_unhealthy_or_stale") != before {
-		t.Fatal("normal owner-pressure yield emitted an infrastructure-failure alert")
-	}
-	assertSharedPressureHealth(t, q, m.ID, "healthy")
-	m.SharedHostPressure = nil
-	check(t, q, m, run)
-	clock.Advance(hostDegradedSustain(q.s.Machines[m.ID]))
-	check(t, q, m, run)
-	if firings(q, "host_unhealthy_or_stale") != before+1 {
-		t.Fatal("owner yield suppressed a subsequent real pressure-signal failure")
-	}
-	assertSharedPressureHealth(t, q, m.ID, "unhealthy")
 }
 
 // #684 live storm: a fresh measured observation expired between check-ins

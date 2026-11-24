@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"math"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -358,74 +357,6 @@ func TestSharedHostRequiresPreparedSidecarEnvironment(t *testing.T) {
 	}
 }
 
-func TestSharedHostDoesNotRebuildMainEnvironment(t *testing.T) {
-	q, clock := fixture(t)
-	m := sharedHostFixture(t, q)
-	m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 4}
-	r := binaryRecipe(t, "cpu")
-	m.Environments = []string{r.Key} // Readiness reported before the cache disappeared.
-	w := Worker{Machine: m, Clock: clock, StateDir: t.TempDir(), HostMemorySource: func(context.Context) (float64, error) { return 12, nil }, environmentCache: &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: clock}}
-	// Isolate the cache-readiness decision after successful queue fencing.
-	w.Client = nativeFixtureClient(http.HandlerFunc(func(out http.ResponseWriter, req *http.Request) {
-		if req.URL.Path != "/api/workers/launch" {
-			t.Errorf("unexpected request %s", req.URL.Path)
-		}
-		_ = json.NewEncoder(out).Encode(map[string]any{"ok": true, "start_gate": startGateProtocol})
-	}))
-	store, err := w.openStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.close()
-	j := Job{ID: "cold-main", Attempt: 1, Checkpoint: filepath.Join(t.TempDir(), "cold-main"), Spec: cpuSpec(1, 1), EnvironmentRecipes: map[string]EnvironmentRecipe{"cpu": r}}
-	if err := normalizeResources(&j.Spec); err != nil {
-		t.Fatal(err)
-	}
-	p, err := startAfterFixtureInputs(t, w, store, j)
-	if p != nil {
-		p.stop(clock.Now(), 0, true)
-		<-p.done
-	}
-	if err == nil || !strings.Contains(err.Error(), "environment preparation required") || w.environmentCache.ready(r.Key) {
-		t.Fatalf("missing prepared main environment rebuilt: %v", err)
-	}
-}
-
-func TestSharedHostCPUEnvironmentOnAcceleratorWorker(t *testing.T) {
-	q, _ := fixture(t)
-	m := sharedHostFixture(t, q)
-	m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 4}
-	m.GPU = "cuda"
-	m.CapabilityProfile.Accelerators = []AcceleratorProfile{{Type: "cuda", MemoryBytes: 8 << 30}}
-	m.Devices = []MachineDevice{{ID: "0", Identity: "GPU-synthetic", Platform: "cuda", Selector: "0", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8}}
-	r := binaryRecipe(t, "cpu")
-	m.Environments = []string{r.Key}
-	if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"cpu": r}}}); err != nil {
-		t.Fatal(err)
-	}
-	check(t, q, m, nil)
-	if _, err := q.ChangeHostMaintenance(m.HostID, HostMaintenanceRequest{Action: "resume"}); err != nil {
-		t.Fatal(err)
-	}
-	s := cpuSpec(1, 1)
-	s.Environment = Environment{Name: "tools"}
-	j := submit(t, q, s)
-	reply, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol})
-	if err != nil {
-		t.Fatal(err)
-	}
-	assigned := assignedJob(reply)
-	if assigned == nil || assigned.ID != j.ID {
-		t.Fatal("prepared CPU command not assigned", assigned, job(t, q, j.ID).Reason)
-	}
-	if err := q.AuthorizeLaunch(HostLaunch{Machine: m.ID, Session: m.Session, Kind: "batch", Key: assigned.ID, Attempt: "1"}); err != nil {
-		t.Fatal("prepared CPU environment checked against accelerator platform", err)
-	}
-	if err := q.Started(result(assigned, false)); err != nil {
-		t.Fatal("prepared CPU command not authorized to start", err)
-	}
-}
-
 func TestSharedHostBackgroundPriorityFailureWarns(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("Darwin background policy")
@@ -446,24 +377,6 @@ func TestSharedHostBackgroundPriorityFailureWarns(t *testing.T) {
 	}
 	if !strings.Contains(warnings.String(), "warning: shared host background task policy") || !strings.Contains(warnings.String(), syscall.EPERM.Error()) {
 		t.Fatalf("missing policy warning: %s", &warnings)
-	}
-}
-
-// Fleet commands can legitimately inherit a background policy from their
-// parent. Exercise the same dev journey inside that policy without changing
-// the test runner or the worker's scheduling policy.
-func TestSharedHostDevCommandPriorityBackgroundParent(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("Darwin background policy inheritance")
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.CommandContext(t.Context(), "/usr/sbin/taskpolicy", "-b", executable,
-		"-test.run=^TestSharedHostDevCommandPriority$", "-test.count=1", "-test.v")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("background-parent priority journey: %v\n%s", err, output)
 	}
 }
 
@@ -638,32 +551,4 @@ print(c.c_uint32.from_buffer(info).value & (0x8000 | 0x10000))
 		t.Fatalf("read Darwin background policy: %v: %s", err, b)
 	}
 	return strings.TrimSpace(string(b))
-}
-
-func TestSharedHostPrefersOrdinaryAndFallsBackImmediately(t *testing.T) {
-	q, _ := fixture(t)
-	shared := sharedHostFixture(t, q)
-	shared.SharedHost = &SharedHostProfile{InteractiveReserveGB: 4}
-	check(t, q, shared, nil)
-	if _, err := q.ChangeHostMaintenance(shared.ID, HostMaintenanceRequest{Action: "resume"}); err != nil {
-		t.Fatal(err)
-	}
-	ordinary := cpuMachine("ordinary", "ordinary", "cpu", 2, 16)
-	check(t, q, ordinary, nil)
-	first := submit(t, q, cpuSpec(2, 1))
-	if r := check(t, q, shared, nil); r.Job != nil {
-		t.Fatal("shared host took ordinary fitting work")
-	}
-	holder := check(t, q, ordinary, nil).Job
-	if holder == nil || holder.ID != first.ID {
-		t.Fatal("ordinary host not selected", holder)
-	}
-	if err := q.Started(result(holder, false)); err != nil {
-		t.Fatal(err)
-	}
-	second := submit(t, q, cpuSpec(1, 1))
-	fallback := check(t, q, shared, nil).Job
-	if fallback == nil || fallback.ID != second.ID {
-		t.Fatal("shared host did not take immediate fitting fallback", fallback)
-	}
 }

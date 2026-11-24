@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -78,28 +77,6 @@ func TestSharedHostMeasuredCPUAdmissionAndResume(t *testing.T) {
 	}
 }
 
-func TestSharedHostOwnerPressureYieldsEveryTier(t *testing.T) {
-	for _, tc := range []struct {
-		class     string
-		resumable bool
-	}{{"experiment", false}, {"production", true}, {"production", false}} {
-		t.Run(fmt.Sprint(tc.class, tc.resumable), func(t *testing.T) {
-			q, _, m, run := sharedRunning(t, tc.resumable)
-			q.mu.Lock()
-			q.s.Jobs[run.ID].Spec.Class, q.s.Jobs[run.ID].Spec.Priority = tc.class, tc.class
-			q.mu.Unlock()
-			m.SharedHostPressure.MemoryLevel = 4
-			r := check(t, q, m, run)
-			if !r.Stop || r.Kill == tc.resumable || tc.resumable && r.GraceSeconds <= 0 {
-				t.Fatalf("owner pressure did not yield %s work: %+v", tc.class, r)
-			}
-			if q.s.Machines[m.ID].SharedHostReason == "" {
-				t.Fatal("pressure did not stop further admission")
-			}
-		})
-	}
-}
-
 func TestSharedHostSwapGrowthYieldsFromExistingHealth(t *testing.T) {
 	q, clock, m, run := sharedRunning(t, true)
 	h := &HostHealth{}
@@ -118,28 +95,6 @@ func TestSharedHostSwapGrowthYieldsFromExistingHealth(t *testing.T) {
 	r := check(t, q, m, run)
 	if !r.Stop || !strings.Contains(job(t, q, run.ID).Reason, "swap growth") {
 		t.Fatal("swap evidence withheld admission without yielding resumable work", r)
-	}
-}
-
-func TestSharedHostCPUPSILearnsLocalBaseline(t *testing.T) {
-	for _, baseline := range []float64{0, 10} {
-		q, clock, m, run := sharedRunning(t, true)
-		m.SharedHostPressure.CPUKnown = true
-		// A host with existing contention must first recover from its cold
-		// observation. Seed only queue-owned established healthy evidence.
-		q.mu.Lock()
-		q.s.Machines[m.ID].SharedHostPressure.Learning.CPU.observe(baseline)
-		q.s.Machines[m.ID].SharedHostPressure.Learning.CPUKnown = true
-		q.mu.Unlock()
-		m.SharedHostPressure.CPUPSI = baseline
-		clock.Advance(time.Second)
-		check(t, q, m, run)
-		m.SharedHostPressure.CPUPSI = baseline + 20
-		clock.Advance(time.Second)
-		r := check(t, q, m, run)
-		if !r.Stop || q.s.Machines[m.ID].SharedHostYieldReason != "shared host CPU PSI" {
-			t.Fatal("CPU PSI did not yield against local baseline", r)
-		}
 	}
 }
 

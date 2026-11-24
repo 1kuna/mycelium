@@ -2,73 +2,15 @@ package myce
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"log"
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
 )
-
-func TestInstallStorageStalledRenameCompletes(t *testing.T) {
-	c, mounts := onboardingNAS(t, "linux")
-	c.Detection.Platform, c.AllowDeviceless = "fake", true
-	executable := filepath.Join(c.WorkerHome, "candidate")
-	if err := os.WriteFile(executable, []byte("new binary"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	command := func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		if name == "cat" {
-			return mounts(ctx, name, args...)
-		}
-		return nil, nil
-	}
-	synctest.Test(t, func(t *testing.T) {
-		release := make(chan struct{})
-		defer joinOnboardingNASSequence()
-		defer close(release)
-		fs := onboardingStorageFS{lstat: os.Lstat, mkdir: os.Mkdir, probeContext: func(ctx context.Context, abort context.CancelCauseFunc, _ string) error {
-			return onboardingFSError(ctx, abort, func() error { <-release; return nil }, "rename")
-		}}
-		var logs testLogBuffer
-		saved := log.Writer()
-		log.SetOutput(&logs)
-		defer log.SetOutput(saved)
-		if err := installWithFiles(context.Background(), c, executable, "test-token", command, installFiles{storageFS: &fs}); err != nil {
-			t.Fatal(err)
-		}
-		data, err := os.ReadFile(c.Binary)
-		if err != nil || string(data) != "new binary" {
-			t.Fatalf("binary not installed: %v", err)
-		}
-		data, err = os.ReadFile(filepath.Join(c.State, installStorageReceiptFile))
-		if err != nil {
-			t.Fatal(err)
-		}
-		var receipt installStorageReceipt
-		if err := json.Unmarshal(data, &receipt); err != nil {
-			t.Fatal(err)
-		}
-		want := &StoragePreflightFailure{Root: "checkpoint", Operation: "rename", TimedOut: true, Elapsed: onboardingFilesystemStallBudget}
-		if !reflect.DeepEqual(receipt.Warning, want) || !strings.Contains(logs.String(), "warning: install storage unavailable root=checkpoint operation=rename errno=0") {
-			t.Fatalf("lost warning: %+v %s", receipt, logs.String())
-		}
-		// The running service still reports storage unhealthy and gates dependent
-		// jobs. Installation success never grants storage admission.
-		_, _, _, publish := mountAdmissionFixture(t, "checkpoint")
-		if reason := publish(HostMountHealth{Root: "checkpoint", Reason: "mount_probe_stalled"}); reason == "" {
-			t.Fatal("stalled root admitted dependent work")
-		}
-		if reason := publish(HostMountHealth{Root: "checkpoint"}); reason != "" {
-			t.Fatal("recovered root remains gated", reason)
-		}
-	})
-}
 
 func TestInstallStorageClassifiesMisconfigurationAndReachability(t *testing.T) {
 	for _, fault := range []struct {

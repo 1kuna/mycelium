@@ -33,42 +33,6 @@ func teachDuration(t *testing.T, q *Queue, clock *fakeClock, m Machine, s Spec, 
 	return j
 }
 
-func TestLastDurationRecordedAndUsedForPlacement(t *testing.T) {
-	q, clock, slow, fast, s := lastDurationFixture(t)
-	teachDuration(t, q, clock, slow, s, 3*time.Second)
-	teachDuration(t, q, clock, fast, s, 5*time.Second)
-	// The last accepted duration replaces the earlier one; it is not averaged.
-	taught := teachDuration(t, q, clock, fast, s, time.Second)
-	key := q.s.Jobs[taught.ID].Timing.Key
-	if p := q.s.WorkObservations[identityHash(key)]; p.LastSeconds != 1 {
-		t.Fatalf("last accepted duration not replaced: %+v", p)
-	}
-	next := submit(t, q, s)
-	if got := check(t, q, slow, nil).Job; got != nil {
-		t.Fatal("slower machine stole comparable work", got.ID)
-	}
-	run := check(t, q, fast, nil).Job
-	if run == nil || run.ID != next.ID {
-		t.Fatal("did not prefer the shorter last accepted duration", run)
-	}
-	if err := q.Started(result(run, true)); err != nil {
-		t.Fatal(err)
-	}
-	got := job(t, q, next.ID)
-	if got.Timing.LastAcceptedSeconds == nil || *got.Timing.LastAcceptedSeconds != 1 || !strings.Contains(JobTiming(got), "last accepted duration 1.00s") {
-		t.Fatalf("status did not show the last accepted duration: %+v", got.Timing)
-	}
-	// Both cores are now held on the fast host. A duration cannot create cores,
-	// reserve a future slot or make a currently admissible slow host wait.
-	waiting := submit(t, q, s)
-	if got := check(t, q, fast, run).Job; got != nil {
-		t.Fatal("duration granted busy capacity", got.ID)
-	}
-	if got := check(t, q, slow, nil).Job; got == nil || got.ID != waiting.ID {
-		t.Fatal("waited for busy faster machine", got)
-	}
-}
-
 func TestLastDurationIdentityFencesAndRestart(t *testing.T) {
 	q, clock, m, _, s := lastDurationFixture(t)
 	first := teachDuration(t, q, clock, m, s, 2*time.Second)

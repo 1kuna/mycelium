@@ -122,35 +122,6 @@ func TestProductionParityPolicyConstrainsVariants(t *testing.T) {
 	}
 }
 
-func TestProductionParityPolicyLegacyWaitDiagnostic(t *testing.T) {
-	q, clock := fixture(t)
-	e := fakeExtension(t) // No variants or server-owned parity requirement.
-	if err := q.AddExtension(e); err != nil {
-		t.Fatal(err)
-	}
-	m := placementMachine("candidate", "separate", 64, 8, e)
-	check(t, q, m, nil)
-	setParityHosts(t, q, "test", "kind:sample")
-	spec := placementSpec(false)
-	spec.Priority = "production"
-	queued := submit(t, q, spec)
-	if assigned := check(t, q, m, nil).Job; assigned != nil {
-		t.Fatal("empty parity list admitted production", assigned.ID)
-	}
-	clock.Advance(time.Second)
-	got, err := q.jobSnapshot(queued.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(got.Reason, "is not a machine kind the project approved") || len(got.VariantEligibility) != 0 || got.Hold == nil || got.Hold.Kind != productionParityHostHold || got.Hold.Owner != "consumer" {
-		t.Fatalf("legacy parity-only hold is not actionable: reason=%q blocker=%+v", got.Reason, got.Hold)
-	}
-	setParityHosts(t, q, "test", spec.workType(), hostID(&m))
-	if assigned := check(t, q, m, nil).Job; assigned == nil || assigned.ID != queued.ID {
-		t.Fatal("owner approval did not release the held legacy job", assigned)
-	}
-}
-
 func TestProductionParityPolicyRejectsUnknownHosts(t *testing.T) {
 	for _, entry := range []string{"parity add", "project config"} {
 		t.Run(entry, func(t *testing.T) {

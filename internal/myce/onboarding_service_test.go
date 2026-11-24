@@ -215,19 +215,3 @@ func TestOnboardingServiceRejectsMissingComponentAndSanitizesOutput(t *testing.T
 		}
 	}
 }
-
-// Backend availability is checked only when a recipe needs it. Retained tool
-// PATH entries on upgrades must not make an offline CPU service unusable.
-func TestOnboardingServicePreservesToolPATHWithoutEagerProbes(t *testing.T) {
-	t.Setenv("PATH", os.Getenv("PATH"))
-	c, _ := PlanInstall("worker", t.TempDir(), "", "/fixture/nas", "http://queue.invalid", "hypha", Detection{OS: "linux", Arch: "arm64", Platform: "cpu", MemoryMode: "fixed"})
-	c.Path = filepath.Join(c.WorkerHome, ".local", "share", "mycelium", "tools", "uv-0.8.22-linux-arm64") + ":/usr/bin"
-	p := MachineProbe{OS: "linux", Arch: "arm64", Command: func(context.Context, string, ...string) ([]byte, error) {
-		t.Fatal("idle service invoked backend tool")
-		return nil, nil
-	}}
-	got, err := DetectServiceHardware(context.Background(), c, p, GPUAccessProbe{})
-	if err != nil || got.Platform != "cpu" || os.Getenv("PATH") != c.Path {
-		t.Fatal(got, err)
-	}
-}

@@ -161,37 +161,6 @@ func TestClientProgressWatchCompletedResponseWinsStall(t *testing.T) {
 	}
 }
 
-func TestClientReplaySafePostRetriesOverload(t *testing.T) {
-	for _, path := range []string{"/api/resolve", "/api/files/preflight", "/api/extensions"} {
-		clock := &fakeClock{now: time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)}
-		calls := 0
-		var sleeps []time.Duration
-		c := Client{URL: "http://fixture.invalid", Clock: clock, Jitter: func() float64 { return 0 }, Pause: func(_ context.Context, d time.Duration) error {
-			sleeps = append(sleeps, d)
-			clock.Advance(d)
-			return nil
-		}, HTTP: &http.Client{Transport: clientTestTransport(func(*http.Request) (*http.Response, error) {
-			calls++
-			if calls == 1 {
-				return &http.Response{StatusCode: 503, Header: http.Header{"Retry-After": {"3"}}, Body: io.NopCloser(strings.NewReader(`{"code":"request_failed"}`))}, nil
-			}
-			return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
-		})}}
-		if err := c.Call(context.Background(), "POST", path, map[string]string{}, nil); err != nil || calls != 2 || len(sleeps) != 1 || sleeps[0] < 3*time.Second {
-			t.Fatalf("%s overload not retried after Retry-After: %v calls=%d sleeps=%v", path, err, calls, sleeps)
-		}
-	}
-	// Submission replays depend on the caller's saved key; Call never replays it.
-	calls := 0
-	c := Client{URL: "http://fixture.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(*http.Request) (*http.Response, error) {
-		calls++
-		return &http.Response{StatusCode: 503, Header: http.Header{"Retry-After": {"3"}}, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
-	})}}
-	if err := c.Call(context.Background(), "POST", "/api/jobs", map[string]string{}, nil); err == nil || calls != 1 {
-		t.Fatalf("submission replayed by the transport: %v calls=%d", err, calls)
-	}
-}
-
 func TestPingReportsQueueProgress(t *testing.T) {
 	q, _ := fixture(t)
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())

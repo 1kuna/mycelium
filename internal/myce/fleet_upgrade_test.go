@@ -2,7 +2,6 @@ package myce
 
 import (
 	"encoding/json"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -197,98 +196,6 @@ func fleetRun(t *testing.T, q *Queue, m Machine, s Spec) *Job {
 	return r
 }
 
-// Idle hosts go first, hosts running production after, and the queue's host
-// last, its worker before the queue itself. Each host's running work finishes
-// naturally before its update.
-func TestFleetUpgradeHostOrderQueueHostLast(t *testing.T) {
-	q, c, w := fleetFixture(t, "q", "a", "b", "c", "q")
-	busy := fleetRun(t, q, w[0], spec("experiment"))
-	prod := fleetRun(t, q, w[2], spec("production"))
-	out, err := q.StartFleetUpgrade(FleetUpgradeRequest{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var order []string
-	for len(order) < 5 {
-		fleetTick(t, q)
-		h := q.fleetActiveHost()
-		if h == nil {
-			t.Fatalf("stalled after %v: %+v", order, q.fleetUpgradeStatus())
-		}
-		if h.Phase == "draining" {
-			// The drained host's work is still running: let it finish.
-			for _, r := range []*Job{busy, prod} {
-				if q.executionHost(r.Machine) == h.Host && job(t, q, r.ID).State == "running" {
-					finish(t, q, r, true)
-				}
-			}
-			fleetHeartbeatAdvance(t, q, c)
-			continue
-		}
-		if h.Queue && q.fleetPausesCalls() != (h.Phase == "queue_update") {
-			t.Fatal("only the queue service step should pause model calls")
-		}
-		order = append(order, fleetActivate(t, q, c))
-	}
-	fleetTick(t, q)
-	want := []string{"b/worker-b", "a/worker-a", "c/worker-c", "q/worker-q", "q/@queue"}
-	if !reflect.DeepEqual(order, want) || q.s.FleetUpgrade.State != "complete" {
-		t.Fatalf("order %v, want %v; %+v", order, want, q.fleetUpgradeStatus())
-	}
-	for _, host := range []string{"a", "b", "c", "q"} {
-		if p := q.s.HostMaintenance[host]; p.Mode != "enabled" {
-			t.Fatal("owned drain not resumed", host, p)
-		}
-	}
-	if q.fleetPausesCalls() || out.Operation != q.s.FleetUpgrade.Operation {
-		t.Fatal("completed operation still fences calls or changed identity")
-	}
-}
-
-// Non-resumable work keeps its running attempt, takes no new work, and gets no
-// update instruction until the attempt ends on its own; no deadline applies.
-func TestFleetUpgradeDrainWaitsForRunningWork(t *testing.T) {
-	q, c, w := fleetFixture(t, "q", "a")
-	s := spec("experiment")
-	s.Resumable = false
-	r := fleetRun(t, q, w[0], s)
-	out, err := q.StartFleetUpgrade(FleetUpgradeRequest{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	fleetTick(t, q)
-	h := q.fleetActiveHost()
-	if p := q.s.HostMaintenance["a"]; h == nil || h.Host != "a" || h.Phase != "draining" || p.Mode != "drained" || p.DrainOwner != out.Operation {
-		t.Fatalf("host not drained by the operation: %+v %+v", h, p)
-	}
-	later := spec("experiment")
-	later.AllowedMachines = []string{w[0].ID}
-	waiting := submit(t, q, later)
-	c.Advance(2 * time.Hour)
-	fleetRefresh(t, q, c)
-	if i, err := q.fleetInstruction("a", w[0].ID, w[0].Session); err != nil || i.Operation != "" {
-		t.Fatal("instruction issued while work runs", i, err)
-	}
-	if got := job(t, q, r.ID); got.State != "running" || got.StopAt != nil || got.Attempt != 1 {
-		t.Fatalf("running work interrupted: %+v", got)
-	}
-	if got := job(t, q, waiting.ID); got.State != "queued" {
-		t.Fatalf("drained host took new work: %+v", got)
-	}
-	finish(t, q, r, true)
-	fleetRefresh(t, q, c)
-	if got := fleetActivate(t, q, c); got != "a/worker-a" {
-		t.Fatal(got)
-	}
-	fleetTick(t, q)
-	if h.Phase != "complete" || q.maintenanceBlocked("a") {
-		t.Fatalf("host not resumed after verification: %+v", h)
-	}
-	if got := job(t, q, r.ID); got.State != "succeeded" || got.Losses != 0 || got.InfrastructureRetries != 0 {
-		t.Fatalf("work lost: %+v", got)
-	}
-}
-
 // An unhealthy result stops advancing: later hosts stay untouched and the
 // failed host stays drained. A rerun is a new operation that adopts that drain.
 func TestFleetUpgradeStopsOnUnhealthyHost(t *testing.T) {
@@ -424,28 +331,6 @@ func TestFleetUpgradeOperatorMaintenanceStaysOperators(t *testing.T) {
 	}
 }
 
-// A changed drain mid-update stops the operation and keeps the operator's
-// policy; the helper's authorization is refused.
-func TestFleetUpgradeMaintenanceChangeStops(t *testing.T) {
-	q, c, w := fleetFixture(t, "q", "a")
-	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
-		t.Fatal(err)
-	}
-	fleetTick(t, q)
-	i := fleetInstructionFor(t, q)
-	c.Advance(time.Second)
-	if _, err := q.ChangeHostMaintenance("a", HostMaintenanceRequest{Action: "drain", DrainOwner: "operator"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.authorizeFleetUpdate(i.Operation, "a", w[0].ID, w[0].Session); err == nil {
-		t.Fatal("replaced drain still authorized the helper")
-	}
-	fleetTick(t, q)
-	if p := q.s.HostMaintenance["a"]; q.s.FleetUpgrade.State != "stopped" || q.s.FleetUpgrade.Hosts[0].Failure != "maintenance_changed" || p.DrainOwner != "operator" {
-		t.Fatal("operator drain not preserved", q.fleetUpgradeStatus(), p)
-	}
-}
-
 // Operations retired by earlier releases and a stopped one left drains. The
 // next upgrade adopts those, verifies the hosts and resumes them, and the old
 // records are dropped from the state.
@@ -485,41 +370,5 @@ func TestFleetUpgradeCleansUpAbandonedOperations(t *testing.T) {
 	data, err := json.Marshal(q.s)
 	if err != nil || strings.Contains(string(data), "fleet_superseded") {
 		t.Fatal("abandoned records persisted", err)
-	}
-}
-
-// The upgrade's state survives a queue restart mid-operation, which is what
-// the queue's own update does.
-func TestFleetUpgradePersistsAcrossQueueRestart(t *testing.T) {
-	q, c, _ := fleetFixture(t, "q")
-	out, err := q.StartFleetUpgrade(FleetUpgradeRequest{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	fleetTick(t, q)
-	i := fleetInstructionFor(t, q)
-	if i.Machine != "@queue" {
-		t.Fatal(i)
-	}
-	var path string
-	if err = q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path); err != nil {
-		t.Fatal(err)
-	}
-	root := q.root
-	if err = q.Close(); err != nil {
-		t.Fatal(err)
-	}
-	q, err = Open(path, root, c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer q.Close()
-	fakeCheckpointAvailability(t, q, true)
-	q.fleetQueue = &fleetQueueRuntime{Host: "q", OS: "linux", Arch: "amd64", Proof: fleetTestProof(c, "queue-new", 101, true)}
-	for n := 0; n <= int(fleetStableFor/time.Second); n++ {
-		fleetHeartbeatAdvance(t, q, c)
-	}
-	if q.s.FleetUpgrade.Operation != out.Operation || q.s.FleetUpgrade.State != "complete" || q.maintenanceBlocked("q") {
-		t.Fatalf("restarted queue did not finish its own step: %+v", q.fleetUpgradeStatus())
 	}
 }

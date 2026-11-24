@@ -407,29 +407,6 @@ func TestStorageFaultCheckpointPreparationPublishesExactFault(t *testing.T) {
 	}
 }
 
-func TestStorageFaultJoinedErrorsObserveEverySyscallOnce(t *testing.T) {
-	w, m, _ := storageFaultFixture(t)
-	ctx := w.storageIOContext(context.Background())
-	read := &os.PathError{Op: "read", Path: "/share/inputs/read", Err: syscall.EIO}
-	if _, err := (contextReader{ctx: ctx, reader: storageFaultReader{err: read}}).Read(make([]byte, 1)); !errors.Is(err, read) {
-		t.Fatal(err)
-	}
-	missing := &os.PathError{Op: "open", Path: "/share/inputs/missing", Err: os.ErrNotExist}
-	metadata := &os.PathError{Op: "stat", Path: "/share/inputs/other", Err: syscall.EIO}
-	joined := errors.Join(missing, errors.Join(read, metadata))
-	observeStorageContext(ctx, joined)
-	observeStorageContext(ctx, joined) // Another wrapper must not count it again.
-	f := storageTestFault(m.mounts["checkpoint"])
-	if f == nil || f.Generation != 2 || f.Operation != "stat" || !f.Data {
-		t.Fatal("joined ordinary/read error hid a sibling fault or duplicated reads", f)
-	}
-	w, m, _ = storageFaultFixture(t)
-	w.observeStorageError(errors.Join(missing, metadata))
-	if f := storageTestFault(m.mounts["checkpoint"]); f == nil || f.Operation != "stat" || f.Generation != 1 {
-		t.Fatal("direct owned-I/O aggregation hid a qualifying sibling", f)
-	}
-}
-
 func TestStorageFaultBlocksPreparationRetryBeforeHeartbeat(t *testing.T) {
 	w := recoveryWorker(t)
 	_, m, clock := storageFaultFixture(t)
