@@ -430,7 +430,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		db.Close()
 		return nil, err
 	}
-	q.memoryEvidence, err = loadMemoryEvidence(db, q.s.WorkObservations)
+	q.memoryEvidence, err = loadMemoryEvidence(db, q.s)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("load memory evidence: %w", err)

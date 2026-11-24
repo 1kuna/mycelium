@@ -16,25 +16,34 @@ import (
 func projectMemoryEvidence(points map[string]WorkObservation) []memoryEvidencePoint {
 	var out []memoryEvidencePoint
 	for _, p := range points {
-		if p.MemoryFamily == "" || p.MemoryConfiguration == "" || p.Key.Target.OS == "" || p.Key.Target.Platform == "" {
+		key, ok := legacyMemoryEvidenceKey(p)
+		if !ok || p.MemoryPeak == nil {
 			continue
 		}
-		key := memoryEvidenceKey{
-			Platform: memoryPlatform(p.Key.Target, p.MemoryLayout == "unified"),
-			Family:   p.MemoryFamily,
-			Exact:    memoryEvidenceExact(p.Key, p.MemoryConfiguration),
-		}
-		if p.MemoryPeak != nil {
-			out = appendProjectedMemoryPeaks(out, key, memoryEvidencePoint{At: p.MemoryRecordedAt, Limited: p.MemoryPeak.constrained()}, p.MemoryPeak)
-		}
-		if prior := p.MemoryEscalation; prior != nil && prior.Peak != nil {
-			out = appendProjectedMemoryPeaks(out, key, memoryEvidencePoint{At: prior.RecordedAt, Limited: true}, prior.Peak)
+		limited := legacyWorkloadLimited(p.MemoryPeak)
+		if limited || !p.MemoryRecordedAt.IsZero() && !p.MemoryPeak.constrained() {
+			out = appendProjectedMemoryPeaks(out, key, memoryEvidencePoint{At: p.MemoryRecordedAt, Limited: limited}, p.MemoryPeak)
 		}
 	}
 	slices.SortFunc(out, func(a, b memoryEvidencePoint) int {
 		return cmp.Or(a.At.Compare(b.At), cmp.Compare(a.Key.Platform, b.Key.Platform), cmp.Compare(a.Key.Pool, b.Key.Pool), cmp.Compare(a.Key.Family, b.Key.Family), cmp.Compare(a.Key.Exact, b.Key.Exact), cmp.Compare(a.Peak, b.Peak))
 	})
 	return out
+}
+
+func legacyMemoryEvidenceKey(p WorkObservation) (memoryEvidenceKey, bool) {
+	if p.MemoryFamily == "" || p.MemoryConfiguration == "" || p.Key.Target.OS == "" || p.Key.Target.Platform == "" {
+		return memoryEvidenceKey{}, false
+	}
+	return memoryEvidenceKey{
+		Platform: memoryPlatform(p.Key.Target, p.MemoryLayout == "unified"),
+		Family:   p.MemoryFamily,
+		Exact:    memoryEvidenceExact(p.Key, p.MemoryConfiguration),
+	}, true
+}
+
+func legacyWorkloadLimited(p *AttemptMemoryPeak) bool {
+	return pooledSampleLimited(p) || p.Events != nil && p.Events.High > 0
 }
 
 func memoryEvidenceExact(k ObservationKey, configuration string) string {
@@ -129,16 +138,19 @@ func (e *memoryEvidence) persist(tx *sql.Tx) error {
 
 // Load or project before the queue begins serving requests. The projection
 // marker commits with its rows, so an interrupted upgrade can safely retry.
-func loadMemoryEvidence(db *sql.DB, legacy map[string]WorkObservation) (*memoryEvidence, error) {
+func loadMemoryEvidence(db *sql.DB, s state) (*memoryEvidence, error) {
 	if _, err := db.Exec(memoryEvidenceSchema); err != nil {
 		return nil, err
 	}
 	evidence, err := readMemoryEvidence(db)
+	if err == nil {
+		return repairMemoryEvidence(db, evidence, s)
+	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return evidence, err
+		return nil, err
 	}
 	evidence = newMemoryEvidence().stage()
-	for _, point := range projectMemoryEvidence(legacy) {
+	for _, point := range projectMemoryEvidence(s.WorkObservations) {
 		evidence.observe(point)
 	}
 	tx, err := db.Begin()
@@ -149,7 +161,7 @@ func loadMemoryEvidence(db *sql.DB, legacy map[string]WorkObservation) (*memoryE
 	if err := evidence.persist(tx); err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(`INSERT INTO memory_evidence(kind,key,data) VALUES ('projection','v1','true')`); err != nil {
+	if _, err := tx.Exec(`INSERT INTO memory_evidence(kind,key,data) VALUES ('projection','v1','true'), ('projection','v2','true'), ('projection','v3','true')`); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
