@@ -107,6 +107,9 @@ parity approval. Use a [production lease](references/waiting.md#production-lease
 only for future production stages you cannot submit yet. A lease protects drain
 coverage and grants no priority or reservation.
 
+Within a project and tier, stages with verified upstream outputs get first use
+of shared host capacity before the project's new root jobs.
+
 ## Checkpoints
 
 Make work checkpointable or otherwise resumable. When higher-priority work

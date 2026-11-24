@@ -13,6 +13,7 @@ type candidateSet struct {
 	q         *Queue
 	m         *Machine
 	jobs      []*Job
+	stages    []*Job
 	scores    map[string]float64
 	actives   map[string]float64
 	resources map[batchResourceKey]batchResourceRoom
@@ -60,6 +61,9 @@ func (q *Queue) buildCandidates(m *Machine, scans ...*placementScan) *candidateS
 		q.endAdmissionCandidate(j, m, candidate, previousDecision, previousJob)
 		if candidate != nil {
 			s.jobs = append(s.jobs, candidate)
+			if candidate.Spec.After != nil {
+				s.stages = append(s.stages, candidate)
+			}
 		}
 	}
 	for _, c := range q.calls {

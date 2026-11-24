@@ -225,21 +225,40 @@ func (q *Queue) addPoolBackfillHeads(scan *placementScan, demands []*Job, live m
 	}
 	for host, choices := range byHost {
 		set := &candidateSet{q: q, scores: map[string]float64{}, actives: map[string]float64{}}
+		var stages []*hostBackfillDemand
 		for _, c := range choices {
 			if !ready[c.job.ID] {
 				set.jobs = append(set.jobs, c.job)
+				if c.job.Spec.After != nil {
+					stages = append(stages, c)
+				}
 			}
 		}
+		var head *hostBackfillDemand
 		for _, c := range choices {
 			if ready[c.job.ID] {
 				continue
 			}
-			old := scan.hostBackfill[host]
-			if old == nil || q.beforeWithFair(c.job, old.job, c.machine, set.score, set.active) {
-				c.order = set
-				scan.hostBackfill[host] = c
+			if head == nil || q.beforeWithFair(c.job, head.job, c.machine, set.score, set.active) {
+				head = c
 			}
 		}
+		if head == nil {
+			continue
+		}
+		root := head
+		if freshPipelineRoot(root.job) {
+			for _, c := range stages {
+				if q.pipelineStagePrecedes(c.job, root.job) && (head == root || q.beforeWithFair(c.job, head.job, c.machine, set.score, set.active)) {
+					head = c
+				}
+			}
+		}
+		if head != root {
+			head.fairHead = root
+		}
+		head.order = set
+		scan.hostBackfill[host] = head
 	}
 }
 

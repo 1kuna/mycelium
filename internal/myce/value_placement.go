@@ -269,14 +269,21 @@ func (q *Queue) assignmentPlan(scan *placementScan) map[string]*Job {
 	q.placementValues(scan)
 	q.placementLiveness(scan)
 	sets := make([]*candidateSet, 0, len(scan.machines))
+	hasStages := false
 	for _, m := range scan.machines {
-		sets = append(sets, q.candidates(m, scan))
+		set := q.candidates(m, scan)
+		sets = append(sets, set)
+		hasStages = hasStages || len(set.stages) > 0
 	}
 	excluded := map[string]bool{}
 	for {
 		j, selected := q.nextProjection(sets, excluded, scan, true)
 		if j == nil {
 			break
+		}
+		turn := selected.m.ID
+		if hasStages {
+			j, selected = q.readyPipelineStage(j, selected, sets, excluded, scan)
 		}
 		excluded[j.ID] = true
 		// Keep production's existing preparation turn, and honor a target
@@ -291,7 +298,8 @@ func (q *Queue) assignmentPlan(scan *placementScan) map[string]*Job {
 		remaining := sets[:0]
 		for _, s := range sets {
 			// A check-in offers one next attempt, even on a multi-device worker.
-			if s.m.ID != selected.m.ID {
+			// A stage on a peer worker uses the original worker's turn as well.
+			if s.m.ID != selected.m.ID && s.m.ID != turn {
 				remaining = append(remaining, s)
 			}
 		}
@@ -302,6 +310,34 @@ func (q *Queue) assignmentPlan(scan *placementScan) map[string]*Job {
 
 func preparationOwnsTurn(j *Job) bool {
 	return j.Spec.Priority == "production" || j.PreemptionPlacement != nil && len(j.PreemptionPlacement.Releases) > 0
+}
+
+// Choose the project using normal fair order. A fitting downstream stage can
+// use that project's turn on the same physical host, including a CPU target
+// beside a separate GPU target. Comparing projects still uses the root.
+func (q *Queue) readyPipelineStage(root *Job, selected *candidateSet, sets []*candidateSet, excluded map[string]bool, scan *placementScan) (*Job, *candidateSet) {
+	if !freshPipelineRoot(root) || !environmentReady(root, selected.m) {
+		return root, selected
+	}
+	var best *Job
+	var target *candidateSet
+	for _, set := range sets {
+		if hostID(set.m) != hostID(selected.m) {
+			continue
+		}
+		for _, stage := range set.stages {
+			if excluded[stage.ID] || !q.pipelineStagePrecedes(stage, root) || !q.immediateProjectionFits(stage, set.m, scan) || q.immediateCandidate(stage, set.m) == nil {
+				continue
+			}
+			if best == nil || stage.ID != best.ID && set.before(stage, best) || stage.ID == best.ID && q.projectionTargetBetter(stage, set.m, target.m, scan, true) {
+				best, target = stage, set
+			}
+		}
+	}
+	if best != nil {
+		return best, target
+	}
+	return root, selected
 }
 
 // Shared with queueProjection: every target offers its next admissible fair
@@ -319,7 +355,7 @@ func (q *Queue) nextProjection(sets []*candidateSet, excluded map[string]bool, s
 		}
 		// Background copies yield to foreground commands in the existing worker.
 		// Builds and stopping preparations still fence admission.
-		if immediate && (!q.admissionGate(winner, set.m, !q.launchCapacityBlocked(winner, set.m), predicateLaunchCapacity) || !q.admissionGate(winner, set.m, !q.preemptionReleasesPending(winner), predicateReleasePending) || !q.admissionGate(winner, set.m, scan.live[set.m.ID], predicateWorkerNotLive) || !q.admissionGate(winner, set.m, q.batchSlotFree(set.m, winner), predicateBatchSlot) || !q.admissionGate(winner, set.m, !q.preparationActive(set.m), predicatePreparationActive) || !q.admissionGate(winner, set.m, !q.preparationStopping(set.m), predicatePreparationStopping) || !q.admissionGate(winner, set.m, q.calls[winner.ID] == nil, predicateModelCall) || !q.admissionGate(winner, set.m, fits(winner, set.m, set.m.FreeMemoryGB), predicateResources)) {
+		if immediate && !q.immediateProjectionFits(winner, set.m, scan) {
 			continue
 		}
 		if best == nil || winner.ID != best.ID && set.before(winner, best) || winner.ID == best.ID && q.projectionTargetBetter(winner, set.m, selected.m, scan, immediate) {
@@ -327,6 +363,17 @@ func (q *Queue) nextProjection(sets []*candidateSet, excluded map[string]bool, s
 		}
 	}
 	return best, selected
+}
+
+func (q *Queue) immediateProjectionFits(j *Job, m *Machine, scan *placementScan) bool {
+	return q.admissionGate(j, m, !q.launchCapacityBlocked(j, m), predicateLaunchCapacity) &&
+		q.admissionGate(j, m, !q.preemptionReleasesPending(j), predicateReleasePending) &&
+		q.admissionGate(j, m, scan.live[m.ID], predicateWorkerNotLive) &&
+		q.admissionGate(j, m, q.batchSlotFree(m, j), predicateBatchSlot) &&
+		q.admissionGate(j, m, !q.preparationActive(m), predicatePreparationActive) &&
+		q.admissionGate(j, m, !q.preparationStopping(m), predicatePreparationStopping) &&
+		q.admissionGate(j, m, q.calls[j.ID] == nil, predicateModelCall) &&
+		q.admissionGate(j, m, fits(j, m, m.FreeMemoryGB), predicateResources)
 }
 
 // Immediate capacity wins over an unready host's value or identity. Keep the
