@@ -685,7 +685,16 @@ func (w Worker) ackAttemptRelease(ctx context.Context, r Result) error {
 		return errWorkerReleasePending
 	}
 	r.ReleaseOnly, r.OutputRefs = true, nil
-	return w.Client.Call(ctx, "POST", "/api/workers/complete", r, nil)
+	clock := w.Client.clock()
+	started := clock.Now()
+	err := w.Client.Call(ctx, "POST", "/api/workers/complete", r, nil)
+	if err == nil && w.Client.publication != nil {
+		// The first upload has no transfer sample yet, but its attempt just
+		// measured service at the same queue's writer. Use the existing idle
+		// calculation and leave publication owned by the caller's context.
+		w.Client.publication.timing.observe(clock.Now().Sub(started), 0)
+	}
+	return err
 }
 
 func (w Worker) currentAttemptHostMemory(p *process, j Job, cgroup string) *CurrentHostMemory {
