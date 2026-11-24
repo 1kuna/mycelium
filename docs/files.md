@@ -17,8 +17,8 @@ their existing file references still load under MY-42.
 
 The versioned worker-local destination route is parked. Ordinary accepted outputs
 and asynchronous NAS publication remain active. See the
-[pending storage proposal](design-learned-storage.md) and
-[parked integration](development.md#backed-storage-admission-integration) for
+[pending storage proposal](https://github.com/1kuna/mycelium/blob/fd74bf1b5e0c74feaabef92541a4f80e2164496d/docs/design-learned-storage.md) and
+[parked integration](https://github.com/1kuna/mycelium/blob/fd74bf1b5e0c74feaabef92541a4f80e2164496d/docs/development.md#backed-storage-admission-integration) for
 future backend work.
 
 The queue's always-on hypha stores immutable files. Every execution hypha has

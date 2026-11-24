@@ -65,4 +65,4 @@ Attempts already running retain their exact custody and containment.
 `memory` on a job reports per-pool estimates, current held and observed
 peak values, and an explicit limit if present. `memory_envelope` is kept
 readable for the adjacent release. See the migration and rollback details
-in the [design](../design-memory-admission.md#4-migration).
+in the [design](https://github.com/1kuna/mycelium/blob/fd74bf1b5e0c74feaabef92541a4f80e2164496d/docs/design-memory-admission.md#4-migration).
