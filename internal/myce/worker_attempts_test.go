@@ -3,7 +3,9 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"math"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -182,11 +184,7 @@ func TestAttemptOrdinaryCleanupRetainsCgroupCustody(t *testing.T) {
 // The queue may be unavailable after physical release. Reopening repeatedly
 // must not resurrect the old pending result after its PID has been cleared.
 func TestAttemptCleanupReleaseSurvivesRepeatedRestart(t *testing.T) {
-	for _, live := range []bool{false, true} {
-		name := "recovery"
-		if live {
-			name = "live_retry"
-		}
+	for _, name := range []string{"recovery", "live_retry", "detached_completion"} {
 		t.Run(name, func(t *testing.T) {
 			marker := filepath.Join(t.TempDir(), "executions")
 			cmd := exec.Command("sh", "-c", `printf x >> "$1"; exit 7`, "fixture", marker)
@@ -195,7 +193,8 @@ func TestAttemptCleanupReleaseSurvivesRepeatedRestart(t *testing.T) {
 				t.Fatal("fixture payload did not fail")
 			}
 			w := recoveryWorker(t)
-			w.control = &processControl{}
+			w.Clock = &fakeClock{now: time.Unix(100, 0)}
+			w.control = &processControl{clock: w.Clock}
 			s, err := w.openStore()
 			if err != nil {
 				t.Fatal(err)
@@ -207,7 +206,7 @@ func TestAttemptCleanupReleaseSurvivesRepeatedRestart(t *testing.T) {
 			}()
 			j := harnessJob(t, "durable-cleanup", "", "true")
 			j.Spec.Run.Command = cmd.Args
-			j.Session = "original-session"
+			j.Machine, j.Session = w.Machine.ID, "original-session"
 			r := Result{Machine: w.Machine.ID, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: "payload failed; inventory unavailable", ReleasePending: true,
 				ExecutionCause: &RuntimeCause{Operation: "command", Class: "command_exit"}, CleanupCause: &RuntimeCause{Operation: "process_group", Class: "command_exit"}}
 			s.state = workerState{Session: j.Session, Identity: ID(), PID: cmd.Process.Pid, Job: &j, Result: &r}
@@ -218,11 +217,26 @@ func TestAttemptCleanupReleaseSurvivesRepeatedRestart(t *testing.T) {
 			if err := saveWorkerJSON(s.dir, identity+".result.json", r); err != nil {
 				t.Fatal(err)
 			}
+			var recovered *process
+			if name == "detached_completion" {
+				id, dir := ID(), custodianDir(s.dir)
+				if err := os.MkdirAll(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				v := custodianSnapshot{Protocol: custodianProtocol, ID: id, Started: true, Finished: true, At: w.Clock.Now(), State: s.state}
+				if err := saveWorkerJSON(dir, custodianName(id, "snapshot"), v); err != nil {
+					t.Fatal(err)
+				}
+				s.state.Custodian, s.state.Result = id, nil
+				if recovered, err = w.recoverAttempt(s); err != nil || recovered == nil {
+					t.Fatal("detached exit did not replay", recovered, err)
+				}
+			}
 			if err := s.save(); err != nil {
 				t.Fatal(err)
 			}
-			if live {
-				actor := &attemptSupervisor{store: s, job: j, worker: w, done: make(chan struct{}), wake: make(chan struct{}, 1)}
+			if name != "recovery" {
+				actor := &attemptSupervisor{store: s, job: j, worker: w, recovering: recovered, done: make(chan struct{}), wake: make(chan struct{}, 1)}
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
 				go actor.run(ctx) // Disconnected: terminal queue acknowledgement is withheld.
@@ -253,6 +267,134 @@ func TestAttemptCleanupReleaseSurvivesRepeatedRestart(t *testing.T) {
 			}
 		})
 	}
+}
+
+// #1792: a finished attempt can owe publication after exact release. A lost
+// completion reply must leave a durable sender for the accepted result.
+func TestAttemptReleasedResultSurvivesLostPublicationReply(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	_, input := retentionUpload(t, c, "input")
+	w := recoveryWorker(t)
+	w.Client, w.Clock, w.control = c, clock, &processControl{clock: clock}
+	root, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.close()
+	s := spec("experiment")
+	s.Resumable = false
+	s.Files = FileManifest{"input": input}
+	s.Outputs = map[string]string{"output": "results"}
+	submit(t, q, s)
+	check(t, q, w.Machine, nil)
+	j := check(t, q, w.Machine, nil).Job
+	if j == nil {
+		t.Fatal("no assignment")
+	}
+	j.Spec.Run.Workdir = t.TempDir()
+	output := filepath.Join(j.Spec.Run.Workdir, "output")
+	if err := os.WriteFile(output, []byte("released result"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	want, err := IdentifyFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := newAttemptStore(root, *j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := result(j, true)
+	r.Error = ""
+	store.state.Result, store.state.Log = &r, "saved.log"
+	if err := os.WriteFile(filepath.Join(store.dir, store.state.Log), []byte("finished\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.save(); err != nil {
+		t.Fatal(err)
+	}
+	var failUpload atomic.Bool
+	failUpload.Store(true)
+	lostReply := make(chan struct{})
+	var loseOnce sync.Once
+	w.Client.HTTP = &http.Client{Transport: fetchTransport(func(req *http.Request) (*http.Response, error) {
+		if strings.HasPrefix(req.URL.Path, "/api/files/uploads") && failUpload.Load() {
+			return nil, syscall.EACCES
+		}
+		var submitted Result
+		if req.URL.Path == "/api/workers/complete" {
+			if err := json.NewDecoder(req.Body).Decode(&submitted); err != nil {
+				return nil, err
+			}
+			var err error
+			req.Body, err = req.GetBody()
+			if err != nil {
+				return nil, err
+			}
+		}
+		resp, err := http.DefaultTransport.RoundTrip(req)
+		if err == nil && resp.StatusCode == http.StatusOK && submitted.ID == j.ID && !submitted.ReleaseOnly {
+			loseOnce.Do(func() {
+				_ = resp.Body.Close()
+				resp, err = nil, io.ErrUnexpectedEOF
+				close(lostReply)
+			})
+		}
+		return resp, err
+	})}
+	ctx, cancel := context.WithCancel(t.Context())
+	first := &attemptSupervisor{store: store, job: *j, worker: w, connected: true, publication: &publicationProgress{}, done: make(chan struct{}), wake: make(chan struct{}, 1)}
+	go first.run(ctx)
+	defer func() { cancel(); <-first.done }()
+	await(t, func() bool {
+		got := storedTestJob(t, q, j.ID)
+		return got.ReleaseConfirmed && got.State == "running" && got.ExecutionCause != nil && got.ExecutionCause.Finalization != nil
+	})
+	failUpload.Store(false)
+	await(t, func() bool {
+		clock.Advance(100 * time.Millisecond)
+		select {
+		case <-lostReply:
+			return true
+		default:
+			return false
+		}
+	})
+	cancel()
+	<-first.done
+	var retained workerState
+	data, err := os.ReadFile(filepath.Join(store.dir, store.stateName))
+	if err != nil || decodeWorkerState(data, &retained) != nil || retained.Job == nil || retained.Result == nil || retained.Result.ReleasePending || retained.Offset != int64(len("finished\n")) {
+		t.Fatalf("lost reply discarded the exact sender: %+v %v", retained, err)
+	}
+	checkAccepted := func() {
+		t.Helper()
+		got := job(t, q, j.ID)
+		if got.Attempt != j.Attempt || got.Session != j.Session || got.State != "succeeded" || !got.ReleaseConfirmed ||
+			got.OutputRefs["output"].SHA256 != want.SHA256 || got.ExecutionCause != nil || strings.HasPrefix(got.Reason, "finalization pending:") {
+			t.Fatalf("wrong accepted result: %+v", got)
+		}
+	}
+	checkAccepted()
+	w.Client = c
+	store.state = retained
+	if p, err := w.recoverAttempt(store); err != nil || p != nil {
+		t.Fatal("replay re-opened process custody", p, err)
+	}
+	replayCtx, stopReplay := context.WithCancel(t.Context())
+	a := &attemptSupervisor{store: store, job: *j, worker: w, connected: true, publication: &publicationProgress{}, done: make(chan struct{}), wake: make(chan struct{}, 1)}
+	go a.run(replayCtx)
+	defer func() { stopReplay(); <-a.done }()
+	select {
+	case <-a.done:
+		if _, _, finished, err := a.snapshot(); err != nil || !finished || store.state.Job != nil || store.state.Result != nil {
+			t.Fatal("acknowledged result did not retire", finished, err)
+		}
+	case <-time.After(testWaitTimeout):
+		t.Fatal("publication acknowledgement did not converge")
+	}
+	checkAccepted()
 }
 
 // Ordinary commands record delivered stop intent separately. Both their

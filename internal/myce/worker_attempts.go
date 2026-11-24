@@ -172,6 +172,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 	}
 	defer initial.control.remove(a.job)
 	s := a.store
+	record := attemptRecordFor(&a.job, initial.Machine.ID)
 	// A short observation retry must not cancel the operation it will consume.
 	// Stop cancels this attempt context directly, including between start retries.
 	prepareCtx, cancelPreparation := context.WithCancel(ctx)
@@ -222,6 +223,13 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 	}()
 	tick := time.NewTicker(min(initial.Interval, 100*time.Millisecond))
 	defer tick.Stop()
+	wait := func() {
+		select {
+		case <-ctx.Done():
+		case <-a.wake:
+		case <-tick.C:
+		}
+	}
 	finish := func(err error) { a.mu.Lock(); a.err, a.finished = err, true; a.mu.Unlock() }
 	var publicationPace ClientPace
 	var publicationRetryAt time.Time
@@ -253,6 +261,10 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					finish(fmt.Errorf("persist command result: %w", f.err))
 					return
 				}
+				if !record.ownsResult(&f.result) {
+					finish(errors.New("mismatched command result; custody retained"))
+					return
+				}
 				if s.state.OperatorStopped {
 					f.result = operatorOutcome(f.result, true)
 				}
@@ -275,26 +287,20 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		// A failed inventory/cleanup keeps custody, but must not freeze the
 		// finished actor until a worker restart. Reuse recovery's exact process
 		// identity checks; only confirmed cleanup can clear pending release.
+		if s.state.Result != nil && !record.ownsResult(s.state.Result) {
+			finish(errors.New("mismatched saved worker result; custody retained"))
+			return
+		}
 		if p == nil && s.state.Result != nil && s.state.Result.ReleasePending && !s.extensionFiles.inFlight() {
 			var fs memoryFS = osMemoryFS{}
 			if w.memoryCeilings != nil {
 				fs = w.memoryCeilings.fs
 			}
-			cleanupErr := s.cleanupOrphan(w.Clock, fs)
-			if cleanupErr == nil {
-				released := *s.state.Result
-				released.ReleasePending = false
-				// Recovery reloads this receipt before state. Record confirmed
-				// release there before discarding the ordinary PID custody.
-				if s.state.Identity != "" {
-					if err := saveWorkerJSON(s.dir, s.state.Identity+".result.json", released); err != nil {
-						finish(err)
-						return
-					}
+			if s.cleanupOrphan(w.Clock, fs) == nil {
+				if err := s.recordLocalRelease(record); err != nil {
+					finish(err)
+					return
 				}
-				s.state.Result = &released
-				s.state.InputWriterPending = false
-				s.state.PID = 0
 				if err := s.save(); err != nil {
 					finish(err)
 					return
@@ -467,9 +473,10 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		if diagnostics.FileTransferError == "" && s.inputTransferRecovering.Load() {
 			diagnostics.FileTransferError = inputTransferRecoveringReason
 		}
+		canRelease := record.readyToRelease(s.state.Result, p != nil)
 		if needsCheckpoint(&a.job) {
 			var err error
-			report.Progress, err = s.checkpointReport(w, a.job, recoveryProgress, s.state.Result != nil && !s.state.Result.ReleasePending)
+			report.Progress, err = s.checkpointReport(w, a.job, recoveryProgress, canRelease)
 			if !errors.Is(err, errCheckpointIOPending) {
 				recoveryProgress = false
 			}
@@ -487,14 +494,14 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		}
 		a.mu.Lock()
 		a.report, a.diagnostics = report, diagnostics
-		a.released = p == nil && s.state.Result != nil && !s.state.Result.ReleasePending && (!a.job.Spec.ephemeral() || s.state.WorkerDataCleanup != nil && s.state.WorkerDataCleanup.State == "complete")
+		a.released = canRelease && (!a.job.Spec.ephemeral() || s.state.WorkerDataCleanup != nil && s.state.WorkerDataCleanup.State == "complete")
 		releasedLocally := a.released
 		a.mu.Unlock()
 		if releasedLocally {
 			a.releaseAdmission()
 			w.Client.publication = a.publication
 		}
-		if a.job.Spec.ephemeral() && s.state.Result != nil && !s.state.Result.ReleasePending && !s.extensionFiles.inFlight() {
+		if a.job.Spec.ephemeral() && canRelease && !s.extensionFiles.inFlight() {
 			done, err := w.finishEphemeralAttempt(ioCtx, s, connected)
 			if err != nil {
 				s.fileError = "ephemeral data cleanup or result transfer pending"
@@ -504,28 +511,21 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				finish(nil)
 				return
 			}
-			select {
-			case <-ctx.Done():
-			case <-a.wake:
-			case <-tick.C:
-			}
+			wait()
 			continue
 		}
 		if connected && !d.Hold && !now.Before(publicationRetryAt) {
 			publicationStarted := w.Clock.Now()
 			var err error
-			releaseAcknowledged := false
-			if d.Stop && d.Kill && !scarceYieldStop(s.state.PriorityStop) {
-				if s.state.Result != nil {
-					released := *s.state.Result
-					released.ReleaseOnly = !released.ReleasePending
-					err = w.Client.Call(ioCtx, "POST", "/api/workers/complete", released, nil)
-					if err == nil {
-						releaseAcknowledged = true
-						// Skip obsolete publication without losing the successful
-						// release acknowledgement or sending another completion.
-						err = &HTTPError{Status: 409}
-					}
+			resultReady := p == nil && s.state.Result != nil
+			stopWithoutPublication := d.Stop && d.Kill && !scarceYieldStop(s.state.PriorityStop)
+			var resultAcknowledged, discarded bool
+			if stopWithoutPublication {
+				if canRelease {
+					err = w.ackAttemptRelease(ioCtx, *s.state.Result)
+					discarded = err == nil
+				} else if resultReady {
+					err = w.Client.Call(ioCtx, "POST", "/api/workers/complete", s.state.Result, nil)
 				}
 			} else {
 				err = w.replayWithProgress(ioCtx, s, func() {
@@ -536,18 +536,15 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					publicationPace = ClientPace{}
 				})
 			}
-			if err == nil && (a.job.storedFileResults() || s.state.Result != nil && scarceYieldStop(s.state.Result.PriorityStop)) {
+			if !stopWithoutPublication && err == nil && (a.job.storedFileResults() || resultReady && scarceYieldStop(s.state.Result.PriorityStop)) {
 				w.storageObserver = s.storageObserver
-				if s.state.Result != nil {
-					if !s.state.Result.ReleasePending && !releaseSent {
-						released := *s.state.Result
-						released.ReleaseOnly = true
-						released.OutputRefs = nil
-						err = w.Client.Call(ioCtx, "POST", "/api/workers/complete", released, nil)
+				if resultReady {
+					if canRelease && !releaseSent {
+						err = w.ackAttemptRelease(ioCtx, *s.state.Result)
+						releaseSent = err == nil
 						if stale(err) {
 							err = nil
 						}
-						releaseSent = err == nil
 					}
 					if err == nil && s.fileProgress.inFlight() {
 						err = errCheckpointIOPending
@@ -576,17 +573,15 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 							err = s.save()
 						} else {
 							s.fileError = "file publication pending; local results retained"
-							if finished.Execution == result.Execution && finished.Session == result.Session && finished.ExecutionCause != nil && finished.ExecutionCause.Finalization != nil {
+							if record.ownsResult(&finished) && finished.ExecutionCause != nil && finished.ExecutionCause.Finalization != nil {
 								s.state.Result = &finished
 								if saveErr := s.save(); saveErr != nil {
 									finish(saveErr)
 									return
 								}
-								if !finished.ReleasePending {
-									released := finished
-									released.ReleaseOnly, released.OutputRefs = true, nil
+								if record.readyToRelease(&finished, false) {
 									// Best effort: the saved cause replays with the next release.
-									_ = w.Client.Call(ioCtx, "POST", "/api/workers/complete", released, nil)
+									_ = w.ackAttemptRelease(ioCtx, finished)
 								}
 							}
 						}
@@ -604,55 +599,43 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					}
 				}
 			}
-			if err == nil && s.state.Result != nil {
+			if !stopWithoutPublication && err == nil && resultReady {
+				if !record.ownsResult(s.state.Result) {
+					finish(errors.New("mismatched publication result; custody retained"))
+					return
+				}
 				err = w.Client.Call(ioCtx, "POST", "/api/workers/complete", s.state.Result, nil)
+				resultAcknowledged = err == nil
 			}
-			releaseAcknowledged = releaseAcknowledged || err == nil
-			if !releaseAcknowledged && stale(err) && s.state.Result != nil && !s.state.Result.ReleasePending {
+			canRelease = record.readyToRelease(s.state.Result, p != nil)
+			if stale(err) && canRelease {
 				// A stale log/publication reply says nothing about release. The
 				// queue may have lost this copy while staging was still running.
 				// Retain its only sender until an exact release is acknowledged.
-				released := *s.state.Result
-				released.ReleaseOnly, released.OutputRefs = true, nil
-				releaseErr := w.Client.Call(ioCtx, "POST", "/api/workers/complete", released, nil)
-				releaseAcknowledged = releaseErr == nil
-				if releaseErr != nil {
-					err = releaseErr
-				}
+				err = w.ackAttemptRelease(ioCtx, *s.state.Result)
+				discarded = err == nil
 			}
-			if s.state.Result != nil && releaseAcknowledged && !s.state.Result.ReleasePending {
+			if canRelease && (resultAcknowledged || discarded) {
 				if e := w.cleanupRefusedCheckpoint(ioCtx, s); e != nil {
 					s.fileError = "refused checkpoint cleanup pending; attempt custody retained"
 					publicationPace.Observe(w.Clock.Now().Sub(publicationStarted), false)
 					publicationRetryAt = w.Clock.Now().Add(publicationPace.ServiceDelay(e, w.Client.Jitter))
-					select {
-					case <-ctx.Done():
-					case <-a.wake:
-					case <-tick.C:
-					}
+					wait()
 					continue
 				}
 				// Release callbacks are best effort and may race result delivery.
 				// Never retire the durable owner until every cache pin is removed.
 				if e := s.releaseAttemptCachePins(); e != nil {
 					s.fileError = "cache pin cleanup pending; attempt custody retained"
-					select {
-					case <-ctx.Done():
-					case <-a.wake:
-					case <-tick.C:
-					}
+					wait()
 					continue
 				}
-				if err == nil {
+				if resultAcknowledged {
 					published, e := w.publishedAttemptFiles(ioCtx, s.state)
 					if e != nil {
 						s.fileError = "result confirmation pending; local files retained"
 						// Keep custody and replay until the queue can confirm the result.
-						select {
-						case <-ctx.Done():
-						case <-a.wake:
-						case <-tick.C:
-						}
+						wait()
 						continue
 					}
 					s.state.PublishedAttempt = published
@@ -689,12 +672,16 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				publicationRetryAt = w.Clock.Now().Add(publicationPace.ServiceDelay(err, w.Client.Jitter))
 			}
 		}
-		select {
-		case <-ctx.Done():
-		case <-a.wake:
-		case <-tick.C:
-		}
+		wait()
 	}
+}
+
+func (w Worker) ackAttemptRelease(ctx context.Context, r Result) error {
+	if r.ReleasePending {
+		return errWorkerReleasePending
+	}
+	r.ReleaseOnly, r.OutputRefs = true, nil
+	return w.Client.Call(ctx, "POST", "/api/workers/complete", r, nil)
 }
 
 func (w Worker) currentAttemptHostMemory(p *process, j Job, cgroup string) *CurrentHostMemory {
@@ -762,17 +749,10 @@ func (w Worker) recoverAttempt(s *workerStore) (*process, error) {
 		r := classifyAttemptOutcome(Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: "worker restarted; previous process group cleaned up"}, attemptCause{memberOutcome: facts, PriorityStop: s.state.PriorityStop})
 		s.state.Result = &r
 	}
-	released := *s.state.Result
-	released.ReleasePending = false
-	s.state.InputWriterPending = false
-	if s.state.OperatorStopped {
-		released = operatorOutcome(released, true)
-	}
-	if err := saveWorkerJSON(s.dir, s.state.Identity+".result.json", released); err != nil {
+	if err := s.recordLocalRelease(attemptRecordFor(s.state.Job, w.Machine.ID)); err != nil {
 		return nil, err
 	}
-	s.state.Result = &released
-	s.state.PID = 0
+	released := s.state.Result
 	if s.state.Job.Spec.ephemeral() && (!released.Success || released.Interrupted || s.state.WorkerDataAccepted) {
 		// Failed cleanup remains a saved, visible pending attempt, retried by the actor.
 		_ = w.removeEphemeralPaths(s, s.state.WorkerDataAccepted)
