@@ -962,10 +962,11 @@ type Snapshot struct {
 
 	HealthAlertDelivery *HealthAlertDelivery `json:"health_alert_delivery,omitempty"`
 
-	HealthAlerts []HealthAlert       `json:"health_alerts,omitempty"`
-	QueueRelease RunningRelease      `json:"queue_release"`
-	FleetUpgrade *FleetUpgradeStatus `json:"fleet_upgrade,omitempty"`
-	FileStore    *FileStoreStatus    `json:"file_store,omitempty"`
+	HealthAlerts      []HealthAlert       `json:"health_alerts,omitempty"`
+	QueueRelease      RunningRelease      `json:"queue_release"`
+	QueueCapabilities []string            `json:"queue_capabilities,omitempty"`
+	FleetUpgrade      *FleetUpgradeStatus `json:"fleet_upgrade,omitempty"`
+	FileStore         *FileStoreStatus    `json:"file_store,omitempty"`
 	// Settled NAS checkpoint folders still held (#894); storage section.
 	CheckpointExpiry *CheckpointExpiryStatus `json:"checkpoint_expiry,omitempty"`
 	HostStates       map[string]string       `json:"host_states,omitempty"`

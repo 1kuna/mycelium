@@ -819,6 +819,11 @@ func (q *Queue) statusSnapshotOptions(options *statusOptions, contexts ...contex
 	}
 }
 
+// The serving queue owns this list. Client projections only forward it.
+func queueCapabilities() []string {
+	return []string{"paused_start_window_frozen"}
+}
+
 func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...context.Context) (Snapshot, error) {
 	ctx, finishBudget, budgetErr := q.requestBudgets.projectionContext(requestContext(contexts))
 	if budgetErr != nil {
@@ -829,7 +834,7 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 	if options != nil && !options.full && len(options.sections) == 1 && options.sections[0] == "idle" {
 		now := q.clock.Now()
 		idle, err := q.readIdleStatus(ctx, options, now)
-		return Snapshot{Now: now, Idle: idle}, err
+		return Snapshot{Now: now, Idle: idle, QueueCapabilities: queueCapabilities()}, err
 	}
 	if options.compact() {
 		v, summary, delivery, err := q.compactStatusObservation(options, ctx)

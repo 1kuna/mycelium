@@ -32,6 +32,8 @@ type CompactStatus struct {
 	Paused        []CompactPaused      `json:"paused,omitempty"`
 	Detail        string               `json:"detail"`
 	Freshness     *SnapshotFreshness   `json:"freshness,omitempty"`
+
+	QueueCapabilities []string `json:"queue_capabilities,omitempty"`
 }
 type CompactHypha struct {
 	ModelConfigHash   string             `json:"model_config_hash,omitempty"`
@@ -96,6 +98,7 @@ func compactJobGroup(j *Job) string {
 // the text view bounds them to one line.
 func NewCompactStatus(s Snapshot) CompactStatus {
 	c := CompactStatus{Now: s.Now, QueueRelease: s.QueueRelease, RestartGrace: s.RestartGrace, Counts: map[string]int{}, Hyphas: []CompactHypha{}, Detail: compactStatusDetail, Freshness: s.Freshness}
+	c.QueueCapabilities = s.QueueCapabilities
 	if s.Summary != nil {
 		c.RetainedJobs, c.Alerts, c.Leases, c.NotQuiescent = s.Summary.RetainedJobs, s.Summary.Alerts, s.Summary.Leases, s.Summary.NotQuiescent
 	}

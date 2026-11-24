@@ -180,6 +180,11 @@ Wait for the attempt's exact release and `paused` state before resuming.
 Non-resumable yield requires `--confirm-restart`. See
 [pausing](references/waiting.md#reservations-and-pausing) for API fencing.
 
+Before relying on a frozen start window for a batch pause, check that the live
+queue's `queue_capabilities` list contains `paused_start_window_frozen`. Read it
+from `myce status --json` or `GET /api/status`. Treat an absent field or entry as
+unsupported.
+
 `myce cancel --wait JOB_ID` waits for exclusion and release. A timeout before
 acknowledgement leaves the outcome uncertain. A pending release at the deadline
 exits 75 with the last acknowledgement. Retry by the same ID or project/key.

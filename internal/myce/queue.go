@@ -2671,6 +2671,7 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 	defer q.memoizeExtensionQualifications(nil)()
 	compact := q.observationSelection != nil && q.observationSelection.compact
 	out := Snapshot{CheckpointExpiry: q.checkpointExpiryCounts(), EvidenceRetention: q.evidenceRetention, Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), QueueRelease: CurrentRelease(), Holds: []Hold{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
+	out.QueueCapabilities = queueCapabilities()
 	out.HealthAlertDelivery = q.healthAlertDelivery()
 	if compact {
 		out.FleetUpgrade = q.observationSelection.upgrade
