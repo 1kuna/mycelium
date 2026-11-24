@@ -203,7 +203,9 @@ func TestMachineCompletionPlanningCreditBound(t *testing.T) {
 			if afterBound {
 				clock.Advance(time.Second)
 			}
-			submit(t, q, spec("production"))
+			production := spec("production")
+			production.Needs.HostMemoryGB = 1 // Keep this test about card release credit, with known RAM demand.
+			submit(t, q, production)
 			got := job(t, q, b.ID)
 			if (got.State == "stopping") != afterBound {
 				t.Fatalf("completion credit expiry: afterBound=%t neighbor=%s", afterBound, got.State)

@@ -8,9 +8,9 @@ import (
 	"time"
 )
 
-// I2 (#585 step 2): an explicit figure with accepted evidence shows both
-// values on job GET, and status counts each host's admissions by basis.
-func TestResourceBasisDeclaredBesideLearned(t *testing.T) {
+// Job GET retains the submitted hint alongside the measured pool estimate,
+// and status counts every retained admission even with a paged job list.
+func TestResourceBasisWithMemoryPools(t *testing.T) {
 	q, clock := fixture(t)
 	if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
 		t.Fatal(err)
@@ -66,8 +66,11 @@ func TestResourceBasisDeclaredBesideLearned(t *testing.T) {
 		t.Fatalf("want host memory, CPU and storage for a CPU job: %+v", got.Resources)
 	}
 	mem, cpu := got.Resources[0], got.Resources[1]
-	if mem.Dimension != "host_memory_gb" || mem.Basis != "declared" || mem.Declared == nil || *mem.Declared != 6 || mem.Learned == nil || *mem.Learned != peak+minimumHostMemoryGB || mem.Evidence != 1 || mem.Used == nil {
-		t.Fatalf("explicit figure without its learned comparison: %+v", mem)
+	if mem.Dimension != "host_memory_gb" || mem.Basis != pooledMemoryCapability || mem.Declared == nil || *mem.Declared != 6 || mem.Used == nil || *mem.Used != 6 {
+		t.Fatalf("submitted memory hint and charge: %+v", mem)
+	}
+	if got.Memory == nil || got.Memory.RAM.TypicalGB != peak || got.Memory.RAM.ChargeGB != 6 || got.Memory.RAM.Evidence.Runs != 1 {
+		t.Fatalf("missing estimate and its measured evidence: %+v", got.Memory)
 	}
 	if cpu.Dimension != "cpu_cores" || cpu.Used == nil || *cpu.Used != 1 || cpu.Basis != "declared" || cpu.Declared == nil || cpu.Learned != nil {
 		t.Fatalf("CPU dimension: %+v", cpu)
@@ -77,7 +80,7 @@ func TestResourceBasisDeclaredBesideLearned(t *testing.T) {
 		t.Fatal(err)
 	}
 	host := hostID(&m)
-	if len(snap.Admissions) != 1 || snap.Admissions[0].Host != host || !maps.Equal(snap.Admissions[0].Current, map[string]int{"declared": 1}) || !maps.Equal(snap.Admissions[0].Recent, map[string]int{"exploratory": 1, "declared": 1}) || snap.Admissions[0].DeclaredWithEvidence != 1 {
+	if len(snap.Admissions) != 1 || snap.Admissions[0].Host != host || !maps.Equal(snap.Admissions[0].Current, map[string]int{pooledMemoryCapability: 1}) || !maps.Equal(snap.Admissions[0].Recent, map[string]int{pooledMemoryCapability: 2}) {
 		t.Fatalf("admissions summary for %s: %+v", host, snap.Admissions)
 	}
 	// A one-job status page still counts every retained admission.

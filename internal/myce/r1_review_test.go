@@ -15,6 +15,7 @@ func TestR1MixedHostSteersCPUAndPreservesGPUBackfill(t *testing.T) {
 		check(t, q, cpu, nil)
 		cs, gs := cpuSpec(2, 1), spec("experiment")
 		gs.Needs.Platform = Platform{Required: []string{"cuda"}}
+		gs.Needs.HostMemoryGB = 1
 		cs.Project = gs.Project
 		cj := submit(t, q, cs)
 		clock.Advance(time.Millisecond)
@@ -57,6 +58,7 @@ func TestR1MixedHostSteersCPUAndPreservesGPUBackfill(t *testing.T) {
 				clock.Advance(time.Millisecond)
 				gs := spec("experiment")
 				gs.Needs.Platform = Platform{Required: []string{"cuda"}}
+				gs.Needs.HostMemoryGB = 1
 				gj = submit(t, q, gs)
 			}
 			run := check(t, q, gpu, nil).Job

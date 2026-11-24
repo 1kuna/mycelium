@@ -18,7 +18,7 @@ type hostBackfillDemand struct {
 	// to fit anyway, or nil when unknown.
 	drain bool
 	start *time.Time
-	// A deferred startup probe has first use of non-production backfill.
+	// A fleet startup probe has first use of non-production backfill.
 	// When production owns the main fence, its vector is protected first.
 	fleetProbe bool
 	probeReady bool
