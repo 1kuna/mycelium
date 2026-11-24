@@ -110,7 +110,7 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 					if why := q.poolCustodyWaitingReason(candidate, m); why != "" {
 						block("capacity", why)
 					} else if need := candidate.Spec.Needs.MemoryGB; memoryPools(candidate).Card != nil && need > m.FreeMemoryGB {
-						block(memoryWaitReason, fmt.Sprintf("card %s needs %.3f GiB, available %.3f GiB", m.Device, need, m.FreeMemoryGB))
+						block(memoryWaitReason, fmt.Sprintf("card needs %.3f GiB, available %.3f GiB (device %s)", need, m.FreeMemoryGB, m.Device))
 					}
 				}
 			}
