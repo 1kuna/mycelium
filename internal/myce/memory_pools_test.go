@@ -377,6 +377,51 @@ func TestMemoryPoolReplayBackfill(t *testing.T) {
 	}
 }
 
+func TestMemoryPoolBackfillSkipsHeadAboveLiveHostCapacity(t *testing.T) {
+	q, clock := fixture(t)
+	tight := m3Machine()
+	tight.ID, tight.HostID, tight.Session = "tight", "tight", "tight-session"
+	tight.HostMemoryBudgetGB, tight.HostAvailableMemoryGB = 24, 16
+	tight.Capabilities = append(tight.Capabilities, pooledMemoryCapability, sampledMemoryCapability)
+	wide := tight
+	wide.ID, wide.HostID, wide.Session = "wide", "wide", "wide-session"
+	wide.HostMemoryBudgetGB, wide.HostAvailableMemoryGB = 48, 48
+	machineCheck(t, q, tight)
+	machineCheck(t, q, wide)
+
+	s := spec("production")
+	s.Needs.Platform = Platform{Required: []string{"fake"}}
+	s.Needs.GPU = &GPUSelection{Devices: []string{"0"}}
+	s.AllowedMachines = []string{wide.ID}
+	s.Needs.HostMemoryGB, s.Needs.MemoryGB = 4, 8
+	holder := submit(t, q, s)
+	running := assignedJob(machineCheck(t, q, wide))
+	if running == nil || running.ID != holder.ID {
+		t.Fatalf("missing wide-host card holder: %+v", running)
+	}
+	if err := q.Started(result(running, false)); err != nil {
+		t.Fatal(err)
+	}
+
+	clock.Advance(time.Second)
+	s.Name = "larger head"
+	s.AllowedMachines = []string{tight.ID, wide.ID}
+	s.Needs.HostMemoryGB, s.Needs.MemoryGB = 18, 4
+	head := submit(t, q, s)
+	clock.Advance(time.Second)
+	s.Name = "smaller job"
+	s.AllowedMachines = []string{tight.ID}
+	s.Needs.HostMemoryGB = 8
+	small := submit(t, q, s)
+	if got := assignedJob(machineCheck(t, q, tight)); got == nil || got.ID != small.ID {
+		t.Fatalf("unfit head blocked the smaller job on the free card: %+v, %s", got, job(t, q, small.ID).Reason)
+	}
+	finish(t, q, running, true)
+	if got := assignedJob(machineCheck(t, q, wide)); got == nil || got.ID != head.ID {
+		t.Fatalf("head did not start on the wider host after release: %+v, %s", got, job(t, q, head.ID).Reason)
+	}
+}
+
 func TestMemoryPoolReplay1813(t *testing.T) {
 	q, clock := fixture(t)
 	m := machine("deadline-host", "cpu")
