@@ -137,6 +137,48 @@ func TestEntryRevokedApprovalNotMaskedBySlowSibling(t *testing.T) {
 	}
 }
 
+func TestEntryMismatchedRecordPrecedesSlowWalk(t *testing.T) {
+	cache, a, _, _ := localApprovalFixture(t)
+	bcache, b, _, _ := localApprovalFixture(t)
+	b.LocalSource = "slow"
+	b.Name = "slow"
+	data, err := os.ReadFile(filepath.Join(bcache.ApprovalRoot, "approved.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache.ApprovalRoot, "slow.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	record := filepath.Join(cache.ApprovalRoot, "approved.json")
+	data, err = os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var approval localModelApproval
+	if err := json.Unmarshal(data, &approval); err != nil {
+		t.Fatal(err)
+	}
+	approval.Host = "mismatched-host-placeholder"
+	data, err = json.Marshal(approval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(record, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	cache.localMetadataProbe = func(ctx context.Context, path, root string) ([]localModelMetadata, error) {
+		<-release
+		return localMetadata(ctx, path, root)
+	}
+	_, states := cache.modelApprovals([]Model{b, a})
+	if states[a.LocalSource] != approvalInvalid || states[b.LocalSource] != approvalUnknown {
+		t.Fatalf("host mismatch was hidden: %v", states)
+	}
+}
+
 func TestEntryAlwaysSlowApprovalDrainsAfterGrace(t *testing.T) {
 	cache, model, _, _ := localApprovalFixture(t)
 	q, clock, m := modelFixture(t)
