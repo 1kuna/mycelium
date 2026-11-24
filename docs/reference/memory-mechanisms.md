@@ -44,7 +44,10 @@ cgroup limit. During a slice OOM, inherited tier-relative OOM scores favor
 keeping higher-priority work.
 
 On Darwin, Mycelium samples the owned process tree's physical footprint and
-reacts to the OS warning level or falling availability. A pressure stop
+reacts to the OS warning level or falling availability. The host forecast uses
+the lower loss rate from two consecutive sampling intervals for the stop
+grace. A single drop can still trigger a stop if the reserve is breached or
+projected to run out before the next sample. A pressure stop
 follows tier priority and measured overage. Workers without usable native
 containment or sampled protection report a typed readiness hold.
 
