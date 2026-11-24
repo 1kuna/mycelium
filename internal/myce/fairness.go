@@ -724,10 +724,6 @@ func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
 	if reason := q.preparationWaitingReason(j, machines); reason != "" {
 		return newHold("waiting_for_builder", reason)
 	}
-	if h := q.memoryPoolHold(j, machines); h != nil {
-		return h
-	}
-
 	if reason := q.hostBackfillWaitingReason(j, q.placementScan(scans...)); reason != "" {
 		if strings.HasPrefix(reason, memoryWaitReason+":") {
 			return newHold(memoryWaitReason, reason)

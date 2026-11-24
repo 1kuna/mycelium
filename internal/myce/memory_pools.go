@@ -3,8 +3,8 @@ package myce
 import (
 	"context"
 	"fmt"
-	"maps"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -148,16 +148,36 @@ func (q *Queue) pooledMemoryCandidate(j *Job, m *Machine) *Job {
 	}
 	confidence := evidence.confidence()
 	pools := MemoryPools{RAM: evidence.estimate(key, hostHint, confidence), KeepGB: q.pooledKeep(m)}
+	if !n.cpuOnly() && pools.RAM.Alone {
+		// A cold accelerator job shares RAM. Missing device evidence can
+		// require a discrete card to itself, but never the entire host.
+		if pools.RAM.TypicalGB == 0 {
+			cpu := memoryEvidenceKey{Platform: memoryPlatform(ExecutionTarget{OS: machineTarget(m).OS, Platform: "cpu"}, false), Pool: "ram"}
+			prior := evidence.first[key.platformKey()]
+			if len(prior) == 0 {
+				prior = evidence.first[cpu]
+			}
+			if len(prior) > 0 {
+				pools.RAM = memoryPoolEstimate{TypicalGB: memoryMedian(prior), ChargeGB: slices.Max(prior),
+					Evidence: memoryEstimateEvidence{Level: "platform", Runs: len(prior)}}
+			}
+		}
+		pools.RAM.Alone = false
+		pools.RAM.TypicalGB = max(pools.RAM.TypicalGB, minimumHostMemoryGB)
+		pools.RAM.ChargeGB = max(pools.RAM.ChargeGB, pools.RAM.TypicalGB)
+	}
 	if j.Spec.MemoryLimitGB != nil {
 		pools.LimitGB = *j.Spec.MemoryLimitGB
 		pools.RAM.TypicalGB = min(pools.RAM.TypicalGB, pools.LimitGB)
 		pools.RAM.ChargeGB = min(pools.RAM.ChargeGB, pools.LimitGB)
 	}
+	fitPoolCharge(&pools.RAM, q.poolAllowance(m), evidence.exact[key].Lower)
 	n.MemoryGB = 0
 	if !n.cpuOnly() && !m.UnifiedMemory {
 		key.Pool = "card"
 		count := max(1, len(m.groupMembers))
 		card := evidence.estimate(key, deviceHint/float64(count), confidence)
+		fitPoolCharge(&card, m.TotalMemoryGB/float64(count), evidence.exact[key].Lower)
 		pools.Card, n.MemoryGB = &card, card.ChargeGB*float64(count)
 	}
 	// The adjacent planner carries a positive scalar RAM declaration. Pool
@@ -168,6 +188,16 @@ func (q *Queue) pooledMemoryCandidate(j *Job, m *Machine) *Job {
 		Source: "memory pool estimate", HostGB: pools.RAM.ChargeGB, DeviceGB: n.MemoryGB, LimitHostGB: pools.LimitGB}
 	q.observeMemoryAdmission(j, m)
 	return j
+}
+
+// A cautious estimate above the entire pool would strand work even after all
+// holders release. Use the typical estimate on that target, preserving the
+// retry floor from measured shortages and the ordinary live-room check.
+func fitPoolCharge(estimate *memoryPoolEstimate, allowance, lower float64) {
+	floor := max(estimate.TypicalGB, 2*lower)
+	if allowance > 0 && estimate.ChargeGB > allowance && floor <= allowance {
+		estimate.ChargeGB = floor
+	}
 }
 
 func (q *Queue) pooledKeep(m *Machine) float64 {
@@ -291,37 +321,39 @@ func (q *Queue) poolBackfillFits(j *Job, m *Machine, head *hostBackfillDemand) b
 	return hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) <= budget
 }
 
-func (q *Queue) memoryPoolHold(j *Job, machines map[string]*Machine) *Hold {
-	var blocked *Hold
-	for _, key := range slices.Sorted(maps.Keys(machines)) {
-		m := machines[key]
-		if workerMemoryHold(m) != nil || !q.placementAllowed(j, m) {
+func (q *Queue) poolCapacityFailure(j *Job, m *Machine) string {
+	pools := memoryPools(j)
+	allowance := q.poolAllowance(m)
+	if (allowance > 0 || m.HostMemoryBudgetMeasured) && j.Spec.Needs.HostMemoryGB > allowance {
+		return fmt.Sprintf("RAM needs %.3f GiB (typical %.3f GiB); host allowance %.3f GiB", j.Spec.Needs.HostMemoryGB, pools.RAM.TypicalGB, allowance)
+	}
+	if pools.Card != nil && m.TotalMemoryGB > 0 && j.Spec.Needs.MemoryGB > m.TotalMemoryGB {
+		count := float64(max(1, len(m.groupMembers)))
+		return fmt.Sprintf("card needs %.3f GiB (typical %.3f GiB); card allowance %.3f GiB", pools.Card.ChargeGB, pools.Card.TypicalGB, m.TotalMemoryGB/count)
+	}
+	return ""
+}
+
+func (q *Queue) poolCustodyWaitingReason(j *Job, m *Machine) string {
+	var holders []string
+	for _, o := range q.hostObligations(hostID(m)) {
+		if !q.poolCustodyConflicts(j, m, o) {
 			continue
 		}
-		capacity := q.qualificationCapacity(m)
-		for _, c := range q.memoryCandidates(j, m) {
-			if !pooledMemory(c) || !fitsResources(c, &capacity, capacity.TotalMemoryGB) {
-				continue
-			}
-			pools := memoryPools(c)
-			if fits(c, m, m.FreeMemoryGB) && q.poolCustodyAllows(c, m) && q.batchSlotFree(m, c) {
-				return nil
-			}
-			ledger := q.hostMemoryLedgers[m.ID]
-			if ledger != nil && (!hostFits(m, c.Spec.Needs.MemoryGB, c.Spec.Needs.HostMemoryGB) || !ledger.AvailableKnown) {
-				available := "unknown"
-				if ledger.AvailableKnown {
-					available = fmt.Sprintf("%.3f GiB", ledger.AvailableGB)
-				}
-				blocked = newHold(memoryWaitReason, fmt.Sprintf("%s: RAM needs %.3f GiB, available %s, keep %.3f GiB, outstanding reservations %.3f GiB", m.ID, pools.RAM.ChargeGB, available, pools.KeepGB, ledger.GrowthGB))
-			} else if !q.poolCustodyAllows(c, m) {
-				blocked = newHold(memoryWaitReason, "waiting for exclusive access to the pool")
-			} else if pools.Card != nil && m.FreeMemoryGB < c.Spec.Needs.MemoryGB {
-				blocked = newHold(memoryWaitReason, fmt.Sprintf("card needs %.3f GiB, available %.3f GiB", c.Spec.Needs.MemoryGB, m.FreeMemoryGB))
-			}
+		switch {
+		case o.Engine != nil:
+			holders = append(holders, "model "+o.Engine.Model)
+		case o.Preparation:
+			holders = append(holders, "worker preparation")
+		default:
+			holders = append(holders, fmt.Sprintf("job %s attempt %d", o.Result.ID, o.Result.Attempt))
 		}
 	}
-	return blocked
+	if len(holders) == 0 {
+		return ""
+	}
+	slices.Sort(holders)
+	return "memory pool custody held by " + strings.Join(slices.Compact(holders), ", ")
 }
 
 func (q *Queue) poolCustodyAllows(j *Job, m *Machine) bool {

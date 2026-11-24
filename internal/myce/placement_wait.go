@@ -11,6 +11,7 @@ import (
 // diagnostics; unrelated platforms, devices and qualifications are not.
 func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 	var reasons []string
+	var memoryCapacity []string
 	var ephemeralRefusals []string
 	targets := 0
 	// One kind when every blocked target agrees; mixed causes are capacity.
@@ -28,6 +29,10 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 		}
 		capacity := q.qualificationCapacity(m)
 		for _, candidate := range q.memoryCandidates(j, m) {
+			poolFailure := ""
+			if pooledMemory(candidate) {
+				poolFailure = q.poolCapacityFailure(candidate, m)
+			}
 			var fit targetFit
 			fitsResourcesChecked(candidate, &capacity, capacity.TotalMemoryGB, &fit)
 			unrelated := false
@@ -37,6 +42,12 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 					// These are actionable blockers to explain below. All other
 					// failures at permanent capacity exclude this target, including
 					// undersized CPUs/devices and unsupported execution runtimes.
+				case "GPU memory", "hardware capacity":
+					// A pool that cannot fit even when empty is actionable
+					// evidence. Keep only otherwise compatible targets.
+					if poolFailure == "" || candidate.OOMCapacity != nil {
+						unrelated = true
+					}
 				default:
 					unrelated = true
 				}
@@ -71,6 +82,11 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 			if candidate.MemoryEnvelope != nil && candidate.MemoryEnvelope.Refusal != "" {
 				block("memory", targetFitReason("memory envelope", candidate, m))
 			}
+			if len(blocked) == 0 && poolFailure != "" {
+				targets--
+				memoryCapacity = append(memoryCapacity, m.ID+": "+poolFailure)
+				continue
+			}
 			if hold := workerMemoryHold(m); hold != nil {
 				block(hold.Kind, hold.Reason)
 			}
@@ -84,6 +100,12 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 			if len(blocked) == 0 {
 				if why := q.cardWaitingReason(candidate, m); why != "" {
 					block("capacity", why)
+				} else if pooledMemory(candidate) {
+					if why := q.poolCustodyWaitingReason(candidate, m); why != "" {
+						block("capacity", why)
+					} else if need := candidate.Spec.Needs.MemoryGB; memoryPools(candidate).Card != nil && need > m.FreeMemoryGB {
+						block(memoryWaitReason, fmt.Sprintf("card %s needs %.3f GiB, available %.3f GiB", m.Device, need, m.FreeMemoryGB))
+					}
 				}
 			}
 			// Permanent capacity above deliberately ignores current occupancy.
@@ -106,11 +128,15 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 			}
 			if why := hostFitFailure(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB); why != "" {
 				n := candidate.Spec.Needs
-				keep, pending := q.pooledKeep(m), 0.0
-				if ledger := q.hostMemoryLedgers[m.ID]; ledger != nil {
-					pending = ledger.GrowthGB
+				available := "unknown"
+				if m.HostMemoryMeasured && m.HostMemoryError == "" {
+					available = fmt.Sprintf("%.3f GiB", m.HostAvailableMemoryGB)
 				}
-				detail := fmt.Sprintf("RAM needs %.3f GiB, available %.3f GiB, keep %.3f GiB, outstanding reservations %.3f GiB", hostNeed(m, n.MemoryGB, n.HostMemoryGB), m.HostAvailableMemoryGB, keep, pending)
+				detail := fmt.Sprintf("RAM needs %.3f GiB, available %s, keep %.3f GiB, reserved %.3f GiB, admission room %.3f GiB",
+					hostNeed(m, n.MemoryGB, n.HostMemoryGB), available, q.pooledKeep(m), m.HostMemoryInUseGB, m.FreeHostMemoryGB)
+				if ledger := q.hostMemoryLedgers[m.ID]; ledger != nil {
+					detail += fmt.Sprintf(", outstanding reservations %.3f GiB", ledger.GrowthGB)
+				}
 				if candidate.MemoryEnvelope != nil {
 					detail += " (" + candidate.MemoryEnvelope.Origin() + ")"
 				}
@@ -125,6 +151,10 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 			}
 			reasons = append(reasons, m.ID+": "+strings.Join(blocked, "; "))
 		}
+	}
+	if targets == 0 && len(memoryCapacity) > 0 {
+		slices.Sort(memoryCapacity)
+		return newHold("memory_capacity", strings.Join(slices.Compact(memoryCapacity), "; "))
 	}
 	if !specific {
 		return nil

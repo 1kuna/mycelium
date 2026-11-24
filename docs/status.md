@@ -187,8 +187,12 @@ RSS guards where applicable, and tier OOM scores retain their existing behavior.
 For a pooled-memory assignment, job GET includes `memory.ram` and, on a
 discrete accelerator, `memory.card`. Each pool shows the typical estimate,
 admission charge, evidence level and run count, held memory and measured peak.
-`memory.limit_gb` appears when the submitter set an explicit RAM limit. A
-pooled launch shortage uses `memory_wait` with the worker's memory comparison.
+`memory.limit_gb` appears when the submitter set an explicit RAM limit.
+The queue can use the typical estimate when the cautious charge exceeds the
+target pool's allowance. A temporary shortage uses `memory_wait` with the RAM
+or card comparison. An occupied card reports queue-owned `capacity` and names
+the holder when known. If every compatible pool is too small even when empty,
+`memory_capacity` identifies the limiting estimates and allowances.
 
 Attempt history distinguishes OOM/resource-limit stops from entry coverage
 findings. `myce status JOB_ID` prints each stopped attempt's retained memory
