@@ -146,6 +146,10 @@ durability is required. Status comes from the running worker.
 - CPU work blocked by live RAM can report `memory_wait` with the current
   room and the attempts that hold RAM. A `memory_wait` or occupied-card
   `capacity` hold clears as room or custody becomes available.
+  On supporting unified-memory workers, ready production can reclaim
+  lower-tier attempts when the pool allowance can hold the production charge.
+  The queue checks for released attempts and fresh RAM headroom before
+  continuing reclaim or offering the production job.
   A `memory_capacity` hold gives the estimate and the
   allowance of each eligible pool that is too small even when empty.
   For `fan_out_dispatched`, inspect the piece's status for any remaining wait.

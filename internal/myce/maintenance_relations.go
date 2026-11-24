@@ -20,17 +20,23 @@ func relationVersion(j *Job) maintenanceVersion {
 }
 
 type queueMaintenance struct {
-	pending    []string
-	queued     map[string]bool
-	forced     map[string]bool
-	seen       map[string]maintenanceVersion
-	dependents map[string]map[string]bool
-	draining   bool
-	ran        bool
+	pending       []string
+	queued        map[string]bool
+	forced        map[string]bool
+	seen          map[string]maintenanceVersion
+	dependents    map[string]map[string]bool
+	draining      bool
+	ran           bool
+	memoryCheckin string
 }
 
 func (q *Queue) beginMaintenance() {
+	var memoryCheckin string
+	if q.maintenance != nil {
+		memoryCheckin = q.maintenance.memoryCheckin
+	}
 	q.maintenance = &queueMaintenance{ran: true, queued: map[string]bool{}, forced: map[string]bool{}, seen: map[string]maintenanceVersion{}, dependents: map[string]map[string]bool{}}
+	q.maintenance.memoryCheckin = memoryCheckin
 	for _, j := range q.liveJobs() {
 		q.maintenanceJob(j)
 	}

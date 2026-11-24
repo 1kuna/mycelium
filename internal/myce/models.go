@@ -1338,6 +1338,12 @@ func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool, candidat
 			continue
 		}
 		p := set.batchPlan(winner)
+		if p != nil && p.poolReclaim {
+			if !environmentReady(winner, m) || winner.PreemptionPlacement != nil &&
+				(q.preemptionReleasesPending(winner) || q.maintenance == nil || q.maintenance.memoryCheckin != m.ID) {
+				continue // Wait for exact release and a new RAM observation before asking for more.
+			}
+		}
 		decision := WaitPreemption{Considered: true, Reason: "no_feasible_release_plan"}
 		if p != nil {
 			decision.Reason = "feasible_other_target_selected"
