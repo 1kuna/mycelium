@@ -111,12 +111,6 @@ func (q *Queue) invalidateDependentSnapshots() {
 	q.readDependenciesInvalid = true
 }
 
-func (c Client) inspectionSnapshot(ctx context.Context) (Snapshot, error) {
-	var out Snapshot
-	err := c.Call(ctx, "GET", "/api/inspection", nil, &out)
-	return out, err
-}
-
 // Only HTTP observations use this cache. Durable/control operations always read
 // the queue itself. Encoded JSON is immutable; callers that need a struct decode
 // a private copy, so even an HTML renderer cannot mutate the cached generation.
@@ -766,11 +760,6 @@ func (q *Queue) jobSnapshotReceipt(id string, contexts ...context.Context) (*Job
 		entry.mu.Unlock()
 	}
 	return out, captured, hit, err
-}
-
-func (q *Queue) jobSnapshotGeneration(id string, contexts ...context.Context) (*Job, error) {
-	j, _, err := q.jobSnapshotCapture(id, contexts...)
-	return j, err
 }
 
 // jobSnapshotCapture also reports when its committed inputs were published.

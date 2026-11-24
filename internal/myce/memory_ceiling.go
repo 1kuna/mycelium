@@ -810,31 +810,3 @@ func memoryEnforcementDiagnostic(value string) string {
 	}
 	return "memory ceiling not enforced on this host (invalid capability report)"
 }
-
-// Limits remain per execution. Attribution includes detached siblings and the
-// worker's engines; subtracting only one scope would blame it for a neighbor.
-func (a *memoryAttempt) accountingPaths() []string {
-	if len(a.accountingRoots) > 0 {
-		return a.accountingRoots
-	}
-	return []string{filepath.Dir(a.path)}
-}
-func (a *memoryAttempt) accountingResidentGB() (float64, bool) {
-	total := 0.0
-	for _, path := range a.accountingPaths() {
-		v, ok := cgroupResidentGB(a.fs, path)
-		if !ok {
-			return 0, false
-		}
-		total += v
-	}
-	return total, true
-}
-func (a *memoryAttempt) accountingProcessIDs(ids map[int]bool) error {
-	for _, path := range a.accountingPaths() {
-		if err := (&memoryAttempt{fs: a.fs, path: path}).processIDs(ids); err != nil {
-			return err
-		}
-	}
-	return nil
-}

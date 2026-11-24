@@ -361,15 +361,3 @@ func (q *Queue) recordWorkLearning(j *Job, old WorkObservation, exists bool, poi
 	e.WorkLearning = &WorkLearningChange{Key: point.Key, Before: before, After: workMeasurementDigest(point)}
 	q.appendJobLedger(j, e)
 }
-
-// recordMemoryInvalidation binds each comparable memory key rewritten by a
-// constrained or OOM attempt to its ledger, without adding an accepted sample.
-func (q *Queue) recordMemoryInvalidation(j *Job, old, point WorkObservation) {
-	before, after := workMeasurementDigest(old), workMeasurementDigest(point)
-	if before == after {
-		return
-	}
-	e := ledgerAttempt(j, "work_learning", "memory_invalidated")
-	e.WorkLearning = &WorkLearningChange{Key: point.Key, Before: before, After: after}
-	q.appendJobLedger(j, e)
-}

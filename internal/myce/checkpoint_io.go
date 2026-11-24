@@ -192,10 +192,6 @@ func (n *checkpointAvailability) periodic(clock Clock, key string, fn func(func(
 	return value, err
 }
 
-func (n *checkpointAvailability) run(key string, fn func() (bool, error)) (bool, error) {
-	return n.runProgress(key, func(func()) (bool, error) { return fn() })
-}
-
 func (n *checkpointAvailability) runProgress(key string, fn func(func()) (bool, error)) (bool, error) {
 	value, err := n.checkpointIO.run(key, func() (bool, error) {
 		progress := func() {

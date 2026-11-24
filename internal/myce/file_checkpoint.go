@@ -346,10 +346,6 @@ func (w Worker) prepareFileCheckpoint(j Job, stateDir string) (string, error) {
 	}
 	return dest, nil
 }
-func (w Worker) finishFileResult(j Job, result Result, parent string, metadata ...string) (finished Result, err error) {
-	return w.finishFileResultContext(context.Background(), j, result, parent, metadata...)
-}
-
 func (w Worker) finishFileResultContext(ctx context.Context, j Job, result Result, parent string, metadata ...string) (finished Result, err error) {
 	done := w.Client.publication.begin(w.Client.clock(), "filesystem/checkpoint_publication")
 	defer done()

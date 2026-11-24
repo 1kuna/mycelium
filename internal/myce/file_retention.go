@@ -662,16 +662,10 @@ func (q *Queue) expiredBlob(hash string, requestContexts ...context.Context) boo
 // Tick snapshots candidates, then fences reference publication and rechecks
 // custody for each unlink. Neither filesystem access nor waiting for the fence
 // holds q.mu. Only positively marked job-input uploads can be orphans.
-func (q *Queue) reclaimJobFiles() error { return q.reclaimJobFilesContext(context.Background()) }
-
 func (q *Queue) reclaimJobFilesContext(requestContexts ...context.Context) error {
 	requestCtx := requestContext(requestContexts)
 
 	return errors.Join(q.reclaimInterruptedUploads(requestCtx), q.reclaimPublishedFilesContext(requestCtx))
-}
-
-func (q *Queue) reclaimPublishedFiles() error {
-	return q.reclaimPublishedFilesContext(context.Background())
 }
 
 func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context) error {

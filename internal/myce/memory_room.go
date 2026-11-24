@@ -109,13 +109,6 @@ func (q *Queue) workerLiveMemoryReading(m, w *Machine) (live float64, known bool
 	return live, known
 }
 
-func known(gb float64) float64 {
-	if validMemoryValue(gb) {
-		return gb
-	}
-	return 0
-}
-
 func (s hostMemorySample) freshAt(now time.Time) bool {
 	_, fresh := s.hostGrowth(now)
 	return fresh

@@ -307,12 +307,6 @@ func openHostHealth(dir string, clock Clock) (*hostHealthMonitor, error) {
 	return m, nil
 }
 
-func (m *hostHealthMonitor) sample(ctx context.Context) error {
-	at := m.clock.Now()
-	r, err := m.source(ctx)
-	return m.record(ctx, at, r, err, nil)
-}
-
 func (m *hostHealthMonitor) record(ctx context.Context, at time.Time, r HostHealthReading, err error, observation *ProbeObservation) error {
 	s := HostHealthSample{HostHealthReading: r, At: at}
 	if err != nil {

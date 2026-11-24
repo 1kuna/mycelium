@@ -75,10 +75,6 @@ func receivedDeviceTelemetry(c Checkin, now time.Time) Checkin {
 	return c
 }
 
-func deviceTelemetryReady(s *DeviceTelemetry, now time.Time) bool {
-	return deviceTelemetryFresh(s, now) && s.FreeGB != nil && s.ActivePercent != nil
-}
-
 func deviceTelemetryFresh(s *DeviceTelemetry, now time.Time) bool {
 	return validDeviceTelemetry(s) && s != nil && !now.Before(s.At) && now.Sub(s.At) < deviceMemorySampleFreshFor
 }

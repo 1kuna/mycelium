@@ -37,14 +37,6 @@ func sharedInputPath(ctx context.Context, root, relative string) (string, error)
 	return path, err
 }
 
-// Active independent inputs retain s055's concurrency. Once a source is
-// withdrawn, refuse new source operations until its private writer joins. This
-// bounds detached work by the attempts already admitted, without serializing I/O.
-// Publication belongs only to the caller; no process runs in a detached writer.
-func (c *SharedInputCache) stageInput(parent context.Context, populate func(context.Context, string) error, publish func(string) error) error {
-	return c.stageInputNamed(parent, "", populate, publish)
-}
-
 func (c *SharedInputCache) stageInputNamed(parent context.Context, key string, populate func(context.Context, string) error, publish func(string) error) (stageErr error) {
 	if err := parent.Err(); err != nil {
 		return err

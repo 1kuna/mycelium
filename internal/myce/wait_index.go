@@ -201,9 +201,6 @@ func (s *waitStateIndex) observationPriority(id string) (int, bool) {
 	}
 	return len(s.policy.Tiers), false
 }
-func (s *waitStateIndex) read(request WaitRequest) ([]WaitState, <-chan struct{}, bool, error) {
-	return s.readContext(context.Background(), request)
-}
 func (s *waitStateIndex) readContext(ctx context.Context, request WaitRequest) ([]WaitState, <-chan struct{}, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -238,9 +235,6 @@ func (s *waitStateIndex) readContext(ctx context.Context, request WaitRequest) (
 		jobs = append(jobs, j)
 	}
 	return jobs, s.changed, changed, nil
-}
-func (s *waitStateIndex) wait(ctx context.Context, request WaitRequest) (WaitReply, error) {
-	return s.waitFor(ctx, request, time.Duration(request.Seconds)*time.Second)
 }
 func (s *waitStateIndex) waitFor(ctx context.Context, request WaitRequest, duration time.Duration) (WaitReply, error) {
 	// This is an HTTP transport wait, not queue/scheduler time. One bounded timer

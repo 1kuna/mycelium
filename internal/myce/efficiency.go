@@ -736,19 +736,6 @@ func (q *Queue) publishEfficiencyDiagnostics(d *efficiencyDiagnostics) {
 	}
 }
 
-// Test/explicit maintenance entry point; ordinary Tick shares its existing commit.
-func (q *Queue) updateEfficiencyDiagnostics(ctx context.Context) error {
-	d, err := q.prepareEfficiencyDiagnostics(ctx)
-	if err != nil {
-		return err
-	}
-	err = q.updateRequest(ctx, func() error { q.applyEfficiencyDiagnostics(d); return nil }, nil)
-	if err == nil {
-		q.publishEfficiencyDiagnostics(d)
-	}
-	return err
-}
-
 func (q *Queue) efficiencyReport() *EfficiencyReport {
 	now := q.clock.Now()
 	r := &EfficiencyReport{At: now, CPUStatus: "unknown", Coverage: "queue-clock reservation/memory integrals since first observation; measured memory covers fresh samples only; CPU/I/O counters cover retained attempt windows (elapsed coverage is not the reservation horizon), may be lower bounds, and exclude dropped attempts; per-program memory is nonreclaimable attribution, host memory includes worker and managed descendants; retained jobs only"}

@@ -21,7 +21,6 @@ entries:
             platform: cpu
         outputs:
             gate-result.txt: results
-            gate-timings.jsonl: results
         run:
             command:
                 - bash
@@ -56,7 +55,6 @@ entries:
             platform: cpu
         outputs:
             gate-result.txt: results
-            gate-timings.jsonl: results
         run:
             command:
                 - bash
@@ -88,7 +86,6 @@ entries:
             platform: cpu
         outputs:
             gate-result.txt: results
-            gate-timings.jsonl: results
         run:
             command:
                 - bash
@@ -124,7 +121,6 @@ entries:
             platform: cpu
         outputs:
             gate-result.txt: results
-            gate-timings.jsonl: results
         run:
             command:
                 - bash

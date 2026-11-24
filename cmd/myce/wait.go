@@ -140,11 +140,6 @@ func waitPause(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// Clock and pause are injected so deadlines, backoff, and recovery tests do not sleep.
-func waitJobs(ctx context.Context, c myce.Client, ids []string, timeout time.Duration, out, errOut io.Writer, clock myce.Clock, pause func(context.Context, time.Duration) error) error {
-	return waitJobsReporting(ctx, c, nil, ids, timeout, out, errOut, clock, pause, false)
-}
-
 func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myce.Client, error), ids []string, timeout time.Duration, out, errOut io.Writer, clock myce.Clock, pause func(context.Context, time.Duration) error, jsonOutput bool) error {
 	pending := map[string]bool{}
 	completed := map[string]bool{}

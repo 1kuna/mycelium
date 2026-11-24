@@ -19,7 +19,7 @@ import (
 )
 
 // #579: the nested supervisor has its own PGID and process identity. Exercise
-// cancellation through the real quick-budget supervisor too, and normal exit.
+// cancellation and normal exit.
 func TestProcessTreeCancellation(t *testing.T) {
 	if os.Getenv(processSessionVariable) != "" && os.Getenv("TREE_TEST_DRIVER") == "" {
 		// This test qualifies an outer worker boundary. An already managed gate
@@ -37,7 +37,7 @@ func TestProcessTreeCancellation(t *testing.T) {
 		return
 	}
 
-	for _, mode := range []string{"cancel", "complete", "gate-budget"} {
+	for _, mode := range []string{"cancel", "complete"} {
 		t.Run(mode, func(t *testing.T) {
 			w := recoveryWorker(t)
 			w.Machine.GPU = "cpu"
@@ -48,20 +48,6 @@ func TestProcessTreeCancellation(t *testing.T) {
 			defer store.close()
 			dir := t.TempDir()
 			command := []string{os.Args[0], "-test.run=^TestProcessTreeHelper$"}
-			if mode == "gate-budget" {
-				budget, err := filepath.Abs("../../scripts/gate-budget.py")
-				if err != nil {
-					t.Fatal(err)
-				}
-				script := filepath.Join(dir, "scripts", "fixture.sh")
-				if err := os.MkdirAll(filepath.Dir(script), 0700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(script, []byte("#!/bin/bash\nexec \"$@\"\n"), 0700); err != nil {
-					t.Fatal(err)
-				}
-				command = append([]string{"python3", budget, script}, command...)
-			}
 			j := recoveryJob(t, command)
 			j.Spec.Needs.Platform = Platform{Required: []string{"cpu"}}
 			j.Spec.Run.Env = map[string]string{"TREE_TEST_DIR": dir, "TREE_TEST_MODE": mode, "TREE_TEST_OWNER": strconv.Itoa(os.Getpid())}
