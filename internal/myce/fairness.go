@@ -706,7 +706,7 @@ func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
 	if h := q.checkpointTargetWait(j, scans...); h != nil {
 		return h
 	}
-	if h := q.holdWait(j); h != nil {
+	if h := q.holdWait(j, scans...); h != nil {
 		return h
 	}
 	if h := q.targetWait(j, scans...); h != nil {

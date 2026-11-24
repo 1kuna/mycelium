@@ -374,7 +374,7 @@ func (q *Queue) diskCapacityRefusal(j *Job) string {
 }
 
 // Disk and output-storage space that holds this job, on host when one is named.
-func (q *Queue) diskWait(j *Job, host string) *Hold {
+func (q *Queue) diskWait(j *Job, host string, scans ...*placementScan) *Hold {
 	if parkedStorage(j) {
 		return newHold("storage_parked", parkedStorageReason)
 	}
@@ -385,7 +385,7 @@ func (q *Queue) diskWait(j *Job, host string) *Hold {
 		return nil
 	}
 	reasons := []string{}
-	for _, m := range q.plannerMachines() {
+	for _, m := range q.planningMachines(scans...) {
 		if !q.jobAllowsMachine(j, m.ID) || host != "" && hostID(m) != host {
 			continue
 		}

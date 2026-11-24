@@ -48,6 +48,24 @@ func (q *Queue) executionHost(machine string) string {
 	return ""
 }
 func (q *Queue) hostObligations(host string) []HostObligation {
+	cache := q.memoryPlanning
+	if cache == nil {
+		return q.collectHostObligations(host)
+	}
+	if obligations, ok := cache.hostObligations[host]; ok {
+		return obligations
+	}
+	if cache.hostObligations == nil {
+		cache.hostObligations = make(map[string][]HostObligation)
+	}
+	// The immutable pass can test hundreds of jobs against the same exact
+	// custody. Keep even an empty result, and rebuild after any mutation.
+	obligations := q.collectHostObligations(host)
+	cache.hostObligations[host] = obligations
+	return obligations
+}
+
+func (q *Queue) collectHostObligations(host string) []HostObligation {
 	pending := map[string]HostObligation{}
 	add := func(p HostObligation) { pending[obligationKey(p)] = p }
 	jobs := map[string]*Job{}

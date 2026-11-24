@@ -315,19 +315,20 @@ func (q *Queue) placementDemandPolicy(j *Job, m *Machine, resident bool) bool {
 }
 
 // Production and disk fences that hold this job.
-func (q *Queue) holdWait(j *Job) *Hold {
-	for _, m := range q.plannerMachines() {
+func (q *Queue) holdWait(j *Job, scans ...*placementScan) *Hold {
+	scan := q.placementScan(scans...)
+	for _, m := range scan.machines {
 		if q.jobAllowsMachine(j, m.ID) && fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
 			if h := q.productionAdmissionHold(j, m); h != nil {
 				return h
 			}
 		}
 	}
-	if h := q.diskWait(j, ""); h != nil {
+	if h := q.diskWait(j, "", scan); h != nil {
 		return h
 	}
 	if j.Spec.Priority == "production" {
-		for _, m := range q.plannerMachines() {
+		for _, m := range scan.machines {
 			h := q.s.Hosts[hostID(m)]
 			if h == nil || !h.Policy.ProductionHold || !q.jobAllowsMachine(j, m.ID) || !fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
 				continue

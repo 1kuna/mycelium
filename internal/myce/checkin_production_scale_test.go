@@ -199,6 +199,12 @@ func BenchmarkCheckinProductionScaleConcurrent(b *testing.B) {
 	if err := q.update(func() error { return nil }); err != nil {
 		b.Fatal(err)
 	}
+	benchmarkConcurrentCheckins(b, q, workers)
+	verifyProductionCheckinFixture(b, q, workers)
+}
+
+func benchmarkConcurrentCheckins(b *testing.B, q *Queue, workers []Machine) {
+	b.Helper()
 	var maximum, maxBody, allHolds time.Duration
 	q.observePersistenceHold = func(p queueHoldPhases) {
 		maximum = max(maximum, p.last.Sub(p.started))
@@ -235,7 +241,6 @@ func BenchmarkCheckinProductionScaleConcurrent(b *testing.B) {
 	b.ReportMetric(float64(allHolds)/float64(b.N*len(workers))/1e6, "all-holds-ms/checkin")
 	b.ReportMetric(float64(maximum)/1e6, "max-any-tx-hold-ms")
 	b.ReportMetric(float64(maxBody)/1e6, "max-any-tx-body-ms")
-	verifyProductionCheckinFixture(b, q, workers)
 }
 
 func verifyProductionCheckinFixture(b *testing.B, q *Queue, workers []Machine) {
