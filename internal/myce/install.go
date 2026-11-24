@@ -308,6 +308,10 @@ func unitQuote(v string) string { v = strings.ReplaceAll(v, "%", "%%"); return s
 func unitConditionPath(v string) string {
 	return strings.NewReplacer("%", "%%", "\n", "\\x0a", "\r", "\\x0d").Replace(v)
 }
+func (c ServiceConfig) workerContainmentSettings() string {
+	return "OOMScoreAdjust=0\nSlice=" + c.workerSlice() + "\n"
+}
+
 func (c ServiceConfig) ServiceText() string {
 	if c.Detection.OS == "linux" {
 		stopSettings := ""
