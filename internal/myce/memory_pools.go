@@ -239,6 +239,11 @@ func (q *Queue) addPoolBackfillHeads(scan *placementScan, demands []*Job, live m
 		// Project room after holders finish, while keeping today's device eligibility.
 		capacity.InventoryProbe, capacity.MemoryError = m.InventoryProbe, m.MemoryError
 		capacity.FreeHostMemoryGB = q.sharedHostRoom(&capacity, q.poolAllowance(m), 0)
+		if terms := q.hostMemoryTerms(m); terms != nil {
+			// The ledger already credits the measured part of current charges.
+			// A larger configured allowance cannot free other physical RAM.
+			capacity.FreeHostMemoryGB = min(capacity.FreeHostMemoryGB, terms.CapacityGB)
+		}
 		for _, j := range demands {
 			if !q.placementAllowed(j, m) || !q.preemptionPlacementAllows(j, m) || q.preemptionReleasesPending(j) || !q.checkpointReady(j, m) || q.environmentFailureBlocked(j, m) {
 				continue
