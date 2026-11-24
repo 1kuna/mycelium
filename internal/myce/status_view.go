@@ -2,6 +2,7 @@ package myce
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 )
@@ -183,8 +184,6 @@ func ExtensionStatus(r ExtensionReport) string {
 	return fmt.Sprintf("%s@%s · %s %s · %s", r.Name, r.Version, work, name, state)
 }
 
-// JobReason is the one-line reason with the hold's next action and evidence,
-// ending with the job's finding when it has one.
 // JobReason is the job's one current reason and its next action, as default
 // status, wait and run print it. JobReasonDetail adds the evidence.
 func JobReason(j *Job) string {
@@ -201,11 +200,7 @@ func jobReason(j *Job, detail bool) string {
 	if j.DiagnosticCode == deadEndWait && j.Finding != nil {
 		return j.Finding.Text()
 	}
-	text := (*Hold).Text
-	if detail {
-		text = (*Hold).FullText
-	}
-	reason := jobReasonWith(j, text)
+	reason := observeJobReason(j).text(j, true, detail)
 	if c := j.WorkerDataCleanup; c != nil {
 		if reason != "" {
 			reason += "; "
@@ -242,16 +237,18 @@ func JobHold(j *Job) *Hold {
 	return nil
 }
 
-// jobReasonText is the lifecycle/scheduler reason without the finding or the
-// hold's next action, for views that carry those as their own fields.
-func jobReasonText(j *Job) string {
-	return jobReasonWith(j, func(h *Hold) string { return h.Reason })
+// jobStatusReason selects the public blocker once. Its owner, next action and
+// evidence travel with the hold; formatting only decides which to show.
+type jobStatusReason struct {
+	hold   *Hold
+	reason string
 }
 
-func jobReasonWith(j *Job, holdText func(*Hold) string) string {
+func observeJobReason(j *Job) jobStatusReason {
+	hold := JobHold(j)
 	reason := j.Reason
-	if h := JobHold(j); h != nil {
-		reason = holdText(h)
+	if hold != nil {
+		reason = hold.Reason
 	}
 	if reason == "" {
 		switch j.State {
@@ -261,6 +258,20 @@ func jobReasonWith(j *Job, holdText func(*Hold) string) string {
 			reason = "running now"
 		case "stopping":
 			reason = "waiting for this attempt to stop"
+		}
+	}
+	return jobStatusReason{hold, reason}
+}
+
+func (r jobStatusReason) text(j *Job, next, detail bool) string {
+	reason := r.reason
+	if r.hold != nil && next {
+		reason = r.hold.Text()
+		if detail {
+			reason = r.hold.FullText()
+		}
+		if reason == "" {
+			reason = r.reason
 		}
 	}
 	if j.HealthRecovery != nil {
@@ -274,6 +285,7 @@ func jobReasonWith(j *Job, holdText func(*Hold) string) string {
 	}
 	return reason
 }
+
 func JobWork(j *Job) string {
 	if j.Spec.ExtensionCheck != nil {
 		return "checking extension: " + j.Spec.Extension + " (" + j.Spec.ExtensionCheck.Work + ")"
@@ -304,52 +316,212 @@ func (q *Queue) statusWaitingReason(j *Job) string {
 	if j.Hold != nil && (j.Hold.Kind == "native_qualification" || j.Hold.Kind == ephemeralIsolationHold) {
 		return j.Hold.Reason
 	}
-	if j.Hold != nil && j.Hold.Kind == "capacity" && j.wait != nil && j.wait.Kind == "no_eligible_host" {
-		// Keep any queue-order explanation and startup countdown already
-		// present in the legacy reason field.
-		copy := *j
-		copy.Reason = strings.Replace(j.Reason, j.wait.Detail, j.Hold.Reason, 1)
-		return q.statusWaitingReasonDetail(&copy)
+	reason := j.Reason
+	if j.Hold != nil && j.Hold.Kind == "capacity" && j.wait != nil && j.wait.Kind == "no_eligible_host" && j.wait.Detail != "" {
+		// Keep any queue-order explanation or startup countdown recorded
+		// alongside the scheduler's generic wait.
+		reason = strings.Replace(reason, j.wait.Detail, j.Hold.Reason, 1)
 	}
-	return q.statusWaitingReasonDetail(j)
+	return statusWaitingText(j, reason)
 }
 
 func (q *Queue) statusWaitingReasonDetail(j *Job) string {
-	reason := j.Reason
-	if rest, ok := strings.CutPrefix(reason, "requeued: disabled by operator; "); ok {
-		copy := *j
-		copy.Reason = rest
-		return "requeued after being disabled; " + q.statusWaitingReasonDetail(&copy)
+	return statusWaitingText(j, j.Reason)
+}
+
+func statusWaitingText(j *Job, reason string) string {
+	const legacyRequeue = "requeued: disabled by operator; "
+	const requeue = "requeued after being disabled; "
+	prefix := ""
+	for strings.HasPrefix(reason, legacyRequeue) {
+		prefix += requeue
+		reason = strings.TrimPrefix(reason, legacyRequeue)
 	}
 	if strings.HasPrefix(reason, "waiting for an extension for ") {
-		return "no extension is installed for this " + statusWorkType(j)
+		return prefix + "no extension is installed for this " + statusWorkType(j)
 	}
 	if strings.HasPrefix(reason, "waiting for a qualified extension for ") {
-		return "no hypha has a qualified extension for this " + statusWorkType(j)
+		return prefix + "no hypha has a qualified extension for this " + statusWorkType(j)
 	}
 	// Environment keys may be absolute lock-file paths. Never display them.
 	if key := j.Spec.Environment.Key(); key != "" {
 		reason = strings.ReplaceAll(reason, key, "required software")
 	}
-	reason = strings.NewReplacer(
-		"waiting for a worker to pull this job", "waiting for a hypha to take this job",
-		"waiting for a busy machine to make room", "waiting for a busy hypha to make room",
-		"waiting for a free machine", "waiting for a free hypha",
-		"NAS checkpoint root is unreachable", "saved progress storage is unavailable",
-		"building environment:", "preparing software:",
-		"environment not ready:", "software not ready:",
-		"concurrent experiment cap", "simultaneous experiment limit",
-		"GPU memory share cap", "accelerator memory share limit",
-		"telemetry unavailable", "memory readings unavailable",
-	).Replace(reason)
+	reason = statusWaitWords.Replace(reason)
 	if reason == "" {
-		return "waiting for a hypha to take this job"
+		reason = "waiting for a hypha to take this job"
 	}
-	return reason
+	return prefix + reason
 }
+
+var statusWaitWords = strings.NewReplacer(
+	"waiting for a worker to pull this job", "waiting for a hypha to take this job",
+	"waiting for a busy machine to make room", "waiting for a busy hypha to make room",
+	"waiting for a free machine", "waiting for a free hypha",
+	"NAS checkpoint root is unreachable", "saved progress storage is unavailable",
+	"building environment:", "preparing software:",
+	"environment not ready:", "software not ready:",
+	"concurrent experiment cap", "simultaneous experiment limit",
+	"GPU memory share cap", "accelerator memory share limit",
+	"telemetry unavailable", "memory readings unavailable",
+)
+
 func statusWorkType(j *Job) string {
 	if j.Spec.Program != nil {
 		return "program"
 	}
 	return "kind of work"
+}
+
+func (q *Queue) projectJob(stored *Job, order int, reason string, forStatus bool) *Job {
+	value := *stored
+	if !forStatus {
+		value = cloneJob(stored)
+		q.projectCancellation(&value, stored)
+	} else if stored.Delivery != nil {
+		delivery := *stored.Delivery
+		value.Delivery = &delivery
+	}
+	j := &value
+	if j.State == "queued" {
+		j.Reason = reason
+		if j.RequeuedByOperator {
+			j.Reason = "requeued: disabled by operator; " + j.Reason
+		}
+	}
+	if q.startupPending(j) || q.startCapacityPaused(j) {
+		j.Reason = q.startStatusReason(j)
+	}
+	projectReleasedJobReason(j)
+	j.QueueOrder = order
+	q.projectStatusLifecycle(j)
+	if terminal(j.State) && j.LastStopOutcome == "release pending" {
+		j.Reason += "; release pending"
+	}
+	return j
+}
+
+func projectReleasedJobReason(j *Job) {
+	if j.State == "running" && j.ReleaseConfirmed {
+		j.Reason = "execution released; awaiting final result publication"
+		if cause := safeRuntimeCause(j.ExecutionCause); cause != nil && cause.Finalization != nil {
+			j.Reason += "; " + cause.String()
+		}
+	}
+}
+
+func (q *Queue) projectStatusLifecycle(j *Job) {
+	j.Spec.Class = jobClass(j.Spec)
+	j.PriorityPolicy = q.priorityMatch(j.Spec)
+	q.projectRuntime(j)
+}
+
+func (q *Queue) projectCompactJob(stored *Job) *Job {
+	j := *stored
+	if j.State == "queued" && j.Reason == "" {
+		j.Reason = "waiting; use myce status JOB_ID for placement diagnostics"
+	}
+	projectReleasedJobReason(&j)
+	q.projectStatusLifecycle(&j)
+	j = statusJobValue(&j)
+	j.Timing = nil
+	return &j
+}
+
+// projectStatusJob projects a selected detail or history row. The captured
+// context owns the facts, and projection leaves the stored row intact.
+func (q *Queue) projectStatusJob(stored *Job, call *ModelCall, order int, reason string, wait *Hold, receipt bool) *Job {
+	var j *Job
+	if call != nil {
+		j = q.projectCall(call, order, reason)
+	} else {
+		j = q.projectJob(stored, order, reason, true)
+		j.wait = wait
+	}
+	if receipt && j.Resources == nil {
+		j.Resources = jobResources(j)
+	}
+	q.projectJobDiagnostics(j, true, receipt)
+	return j
+}
+
+func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
+	projectCommandStarted(j)
+	q.projectEfficiency(j)
+	j.YieldPlan = q.yieldProjection(j)
+	// The code is the scheduler's wait kind, never a reading of its text.
+	if j.State == "queued" && j.wait != nil {
+		if code := holdDiagnosticCodes[j.wait.Kind]; code != "" {
+			j.DiagnosticCode = code
+		}
+	}
+	if j.State != "queued" && j.ExecutionCause != nil && j.ExecutionCause.Class == cpuIsolationUnavailable {
+		j.DiagnosticCode = cpuIsolationUnavailable
+	}
+	if forStatus {
+		q.statusEligibility(j)
+		q.projectVariantEligibility(j)
+		if j.State == "queued" {
+			j.Reason = q.statusWaitingReason(j)
+		}
+		if j.State == "paused" {
+			j.Hold = pauseHold(j)
+		}
+		lock := j.EnvironmentLock
+		// Status projection owns a fully detached view. Redaction can reuse
+		// its fields without another JSON round-trip for every job.
+		*j = statusJobValue(j)
+		if !jobReply && j.Cancellation != nil {
+			ack := *j.Cancellation
+			ack.SubmissionKey = nil
+			j.Cancellation = &ack
+		}
+		if jobReply {
+			if lock != nil {
+				copied := *lock
+				copied.SHA256 = maps.Clone(lock.SHA256)
+				j.EnvironmentLock = &copied
+			}
+		}
+	}
+}
+
+func (q *Queue) projectStatusMachine(m *Machine, compact bool) Machine {
+	now := q.clock.Now()
+	copy := cloneMachine(m)
+	copy.Suspect = q.workerSuspect(m, now)
+	copy.ExternalMemory = q.externalMemoryStatus(hostID(m))
+	if copy.IOPressure != nil {
+		copy.IOPressure.AgeSeconds += max(0, now.Sub(copy.IOPressure.ReceivedAt).Seconds())
+	}
+	for i, v := range copy.DiskVolumes {
+		copy.DiskVolumes[i] = q.currentDiskVolume(v, m.DiskReceivedAt)
+	}
+	copy.RecoveryNeedsAttention = m.Recovering && m.RecoveringSince != nil && now.Sub(*m.RecoveringSince) > recoveryAttentionDelay
+	q.machineDeviceStatus(&copy, m)
+	copy.AdmissionReason = q.machineLimitReason(m)
+	copy.Disabled = ""
+	copy.LastResort = q.s.HostMaintenance[hostID(m)].LastResort
+	if q.maintenanceBlocked(hostID(m)) {
+		copy.Disabled = "planned host maintenance"
+	}
+	if a := machineAvailability(m); a != nil && !a.Available {
+		copy.AdmissionReason = a.Reason
+	}
+	copy.ReservedMemoryGB, copy.MemoryUsedGB = 0, 0 // Used is total − free.
+	for _, slot := range q.s.ModelSlots {
+		if slot.Machine == m.ID && slotReservesMemory(slot) && q.slotPinned(slot) {
+			model, _ := q.model(slot.Model)
+			copy.ReservedMemoryGB += model.MemoryGB
+		}
+	}
+	copy.ModelCopySeconds = map[string]float64{}
+	if !compact {
+		for _, model := range q.models.Models {
+			if q.modelFitsMachine(model, m) {
+				copy.ModelCopySeconds[model.Name] = q.loadSeconds(model.Name, m)
+			}
+		}
+	}
+	return copy
 }

@@ -782,30 +782,15 @@ func (q *Queue) jobSnapshotCapture(id string, contexts ...context.Context) (*Job
 	if err != nil {
 		return nil, time.Time{}, err
 	}
-	var reasons map[string]string
 	var wait *Hold
+	var reason string
 	if j.State == "queued" {
-		// The detached generation's observations are immutable. Reuse one
-		// index across waiting, eligibility and deadline diagnostics rather
-		// than copying every curve again for each target comparison.
-		v.memoryPlanning = newMemoryPlanningCache()
-		v.observationScan = v.placementScan()
-		v.observationScan.observationOwner = v
-		v.observationScan.memory = v.memoryPlanning
-		// A receipt explains this job; full fleet ordering belongs to status.
+		// A receipt explains this job; fleet ordering belongs to status.
+		v.initStatusPlanning()
 		wait = v.waitHold(j)
-		reasons = map[string]string{j.ID: wait.Detail}
+		reason = wait.Detail
 	}
-	if c := v.calls[j.ID]; c != nil {
-		j = v.projectCall(c, nil, reasons)
-	} else {
-		j = v.projectJob(j, nil, reasons, true)
-		j.wait = wait
-	}
-	if j.Resources == nil {
-		j.Resources = jobResources(j)
-	}
-	v.projectJobDiagnostics(j, true, true)
+	j = v.projectStatusJob(j, v.calls[j.ID], 0, reason, wait, true)
 	j.DeadlineGuidance = v.deadlineGuidance(j)
 	return j, readCommitted(v.clock), nil
 }
@@ -889,10 +874,7 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 	}
 	// One detached generation is one immutable planning pass. Without this,
 	// each queued job/target diagnostic rebuilds the retained-evidence catalog.
-	v.memoryPlanning = newMemoryPlanningCache()
-	v.observationScan = v.placementScan()
-	v.observationScan.observationOwner = v
-	v.observationScan.memory = v.memoryPlanning
+	v.initStatusPlanning()
 	out := v.projectSnapshot(true, &q.requestBudgets)
 	out.RequestLatencies = q.requestLatencies.snapshot()
 	if options.includes("usage") {
@@ -934,4 +916,12 @@ func openUsageReader(path string) (*sql.DB, error) {
 		return nil, err
 	}
 	return db, nil
+}
+
+// All diagnostics in one detached generation share one planning index.
+func (v *Queue) initStatusPlanning() {
+	v.memoryPlanning = newMemoryPlanningCache()
+	v.observationScan = v.placementScan()
+	v.observationScan.observationOwner = v
+	v.observationScan.memory = v.memoryPlanning
 }

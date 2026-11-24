@@ -161,9 +161,10 @@ func NewCompactStatus(s Snapshot) CompactStatus {
 		c.Models = append(c.Models, strings.TrimSpace(fmt.Sprintf("model %s on %s: %s, calls in flight %d %s", m.Model, m.Machine, m.State, m.InFlight, m.Error)))
 	}
 	for _, j := range s.Jobs {
-		reason, next := jobReasonText(j), ""
-		if h := JobHold(j); h != nil {
-			next = h.Next
+		blocker := observeJobReason(j)
+		reason, next := blocker.text(j, false, false), ""
+		if blocker.hold != nil {
+			next = blocker.hold.Next
 		}
 		if compactJobGroup(j) == "paused" {
 			i := slices.IndexFunc(c.Paused, func(p CompactPaused) bool { return p.Project == j.Spec.Project && p.Reason == reason })
@@ -179,19 +180,7 @@ func NewCompactStatus(s Snapshot) CompactStatus {
 			reason = ""
 		}
 		row := CompactJob{ID: j.ID, Name: j.Spec.Name, Project: j.Spec.Project, SubmissionKey: j.Spec.SubmissionKey, Class: j.Spec.Class, State: j.State, Attempt: j.Attempt, Machine: j.Machine, Reason: reason, Next: next, Finding: j.Finding, CommandStarted: commandStarted(j)}
-		if j.State == "queued" {
-			since := j.WaitingSince
-			if since.IsZero() {
-				since = j.Queued
-			}
-			if !since.IsZero() {
-				row.Since = &since
-			}
-		} else if j.StartedAt != nil {
-			row.Since = j.StartedAt
-		} else if j.AssignedAt != nil {
-			row.Since = j.AssignedAt
-		}
+		row.Since = statusJobSince(j)
 		if d := j.Delivery; d != nil {
 			row.Delivery = strings.TrimSpace(fmt.Sprintf("attempt=%d: %s bytes=%d attempts=%d %s", d.Attempt, d.State, d.Bytes, d.Attempts, d.Cause))
 		}

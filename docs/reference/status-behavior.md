@@ -317,27 +317,13 @@ shows full job IDs. Open the queue address in a browser for the same information
 sign in as `myce`, using the token as the password. The page is read-only and
 refreshes every five seconds. Keep tokens in private configuration, not URLs.
 
-Every status view (the page, default, `view=snapshot`, sections, history pages
-and `detail=full`) and every `GET /api/jobs/{id}` is projected from the queue's
-last committed publication. Each successful commit (every check-in, submit and
-the one-second maintenance tick) publishes an immutable snapshot of its records
-and observation context; accepted logs and startup configuration republish it
-too. Readers never acquire the live queue mutex and never wait for a writer, so
-a burst of status or job reads cannot delay submits, check-ins or scheduling.
-Unknown or ambiguous job IDs are answered from the same publication. Because a
-build owns no live queue work, default status and job receipts do not enter
-control-pressure admission. Legacy scalar wait admission and the independent
-batch-wait index retain their existing behavior. Newly published records are
-decoded once in the background, off the queue lock and outside every request,
-so concurrent reads do not each charge the same retained history. A history page
-copies only its returned rows; other retained work contributes its shared
-immutable summary. Response copies still consume the queue's measured memory
-allowance. `detail=full` streams one complete JSON document from one pinned
-publication: it copies, projects and encodes one job at a time, outside `q.mu`.
-Its per-request ordering index grows with the number of jobs, rather than their
-retained attempt payloads. Fleet metadata and each individual job must fit the
-measured allowance. A client that explicitly negotiates a maximum response byte
-count retains the existing buffered response/byte-ceiling contract.
+Status and job receipts read an immutable publication. Commits, accepted logs
+and startup configuration publish records and observation context. Normal reads
+resolve IDs and project responses without taking the live queue mutex. A history
+page materializes its selected rows and uses immutable summaries for other jobs.
+`detail=full` pins one publication and projects and encodes one job at a time.
+The ordering index grows with job count. Fleet metadata and each job must fit
+the measured memory allowance. Explicit byte negotiation uses a buffered response.
 
 The page and `GET /api/status` share a cached response for a lease learned from
 local build/hit costs and mutation intervals. Job receipts use the same
@@ -471,10 +457,9 @@ No installation-sized row or byte cap hides current work.
 The default captures maintained current facts instead of materializing the full
 retained generation, rebuilding evidence catalogs/placement plans, reading usage
 SQL, or traversing retained file references. Job reasons are the last committed
-reason; a generic capacity wait means no detailed reason was committed. Queue
-order is unknown unless recorded. Use `status JOB_ID` or `sections=jobs` for a
-fresh placement explanation. Runtime/progress ages and machine contact freshness
-still use the captured clock. These observations grant no launch or release authority.
+reason. Use `status JOB_ID` or `sections=jobs` for a fresh placement explanation.
+Every view reports pending result publication after execution release. Runtime,
+progress and machine freshness use the captured clock.
 
 Retained diagnostic fields are absent or empty/null placeholders in the default
 JSON, **not zero evidence**. `summary.diagnostics` identifies that projection.

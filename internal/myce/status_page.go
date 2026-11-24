@@ -56,23 +56,30 @@ func JobState(j *Job) string {
 	}
 	return state
 }
-func JobAge(j *Job, now time.Time) string {
-	start := j.StartedAt
-	if start == nil {
-		start = j.AssignedAt
-	}
+func statusJobSince(j *Job) *time.Time {
 	if j.State == "queued" {
 		since := j.WaitingSince
 		if since.IsZero() {
 			since = j.Queued
 		}
 		if since.IsZero() {
-			return ""
+			return nil
 		}
-		return "waited " + elapsed(since, now)
+		return &since
 	}
+	if j.StartedAt != nil {
+		return j.StartedAt
+	}
+	return j.AssignedAt
+}
+
+func JobAge(j *Job, now time.Time) string {
+	start := statusJobSince(j)
 	if start == nil {
 		return ""
+	}
+	if j.State == "queued" {
+		return "waited " + elapsed(*start, now)
 	}
 	if j.FinishedAt != nil {
 		return "duration " + elapsed(*start, *j.FinishedAt)

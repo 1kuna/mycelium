@@ -310,7 +310,7 @@ func BenchmarkReadStages(b *testing.B) {
 								}
 								reasons = map[string]string{j.ID: v.waitReason(j)}
 							}
-							j = v.projectJob(j, nil, reasons, true)
+							j = v.projectJob(j, 0, reasons[j.ID], true)
 							if j.Resources == nil {
 								j.Resources = jobResources(j)
 							}
