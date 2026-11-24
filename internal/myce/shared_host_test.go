@@ -521,7 +521,8 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 		if err != nil {
 			var current Job
 			_ = call("GET", "/api/jobs/"+j.ID, nil, &current)
-			t.Fatalf("%s: %v (attempt=%d hold=%+v cause=%v)", kind, err, current.Attempt, current.Hold, current.ExecutionCause)
+			admission, _ := json.Marshal(current.AdmissionWait)
+			t.Fatalf("%s: %v (attempt=%d hold=%+v admission=%s cause=%v)", kind, err, current.Attempt, current.Hold, admission, current.ExecutionCause)
 		}
 		if finished.State != "succeeded" {
 			var logs []Log
@@ -579,6 +580,15 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForJob("native command", j)
+	// The successful result is visible before exact release. This journey
+	// exercises each launch path with its full two-core shared allowance.
+	await(t, func() bool {
+		var prior Job
+		if err := call("GET", "/api/jobs/"+j.ID, nil, &prior); err != nil {
+			t.Fatal(err)
+		}
+		return prior.ReleaseConfirmed
+	})
 	if err := call("GET", path, nil, &status); err != nil {
 		t.Fatal(err)
 	}
