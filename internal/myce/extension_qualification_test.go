@@ -586,7 +586,7 @@ func qualificationStorageFixture(t testing.TB) (*Queue, *Machine, Extension, *Jo
 	e := compositionExtension(t, false)
 	m := machine("worker", "fake")
 	target := e.Variants[0].Target
-	m.CapabilityProfile = &CapabilityProfile{OS: target.OS, Arch: target.Arch}
+	m.CapabilityProfile.OS, m.CapabilityProfile.Arch = target.OS, target.Arch
 	m.ExtensionFingerprint = "qualified-target"
 	m.DiskReceivedAt = clock.Now()
 	m.DiskVolumes = []DiskVolume{{ID: "data", Roots: []string{"data"}, TotalBytes: 1 << 30, FreeBytes: 512 << 20, SampledAt: clock.Now()}}
