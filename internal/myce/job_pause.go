@@ -125,6 +125,10 @@ func (q *Queue) resumeJob(j *Job) {
 	if !absoluteStartBy(j) {
 		// Clear any pre-pause cutoff or saved capacity budget. Dependency
 		// binding starts the new window if the producer is still pending.
+		if j.StartByExplicit == nil {
+			explicit := false
+			j.StartByExplicit = &explicit
+		}
 		j.Spec.StartBy = nil
 		j.StartCapacityBudget = nil
 		j.DeviceFaultStartWait = nil

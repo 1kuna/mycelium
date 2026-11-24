@@ -36,24 +36,26 @@ func initializeStartDeadline(j *Job, since time.Time) {
 	if relativeStartPaused(j) {
 		return
 	}
-	var window time.Duration
-	switch {
-	case j.Spec.ExtensionCheck != nil && j.Spec.ExtensionCheck.Timeout != "":
+	if j.Spec.ExtensionCheck != nil && j.Spec.ExtensionCheck.Timeout != "" {
 		// Reuse the startup fence without promoting qualification to production.
 		// One hour bounds unavailable-route/preparation waits at the existing
 		// maximum start window. Capacity waiting pauses this startup budget,
 		// independently of the execution budget.
-		window = MaxProductionStartWindow
-	case j.Spec.Priority == "production":
-		window = productionStartWindow(j.Spec)
-	default:
+		if j.Spec.StartBy == nil {
+			j.StartWindow = MaxProductionStartWindow
+			deadline := since.Add(j.StartWindow)
+			j.Spec.StartBy = &deadline
+		} else if j.StartWindow == 0 {
+			j.StartWindow = j.Spec.StartBy.Sub(j.Queued)
+		}
+		return
+	}
+	if j.Spec.Priority != "production" {
 		return
 	}
 	if j.Spec.StartBy == nil {
-		explicit := false
-		j.StartByExplicit = &explicit
-		j.StartWindow = window
-		deadline := since.Add(window)
+		j.StartWindow = productionStartWindow(j.Spec)
+		deadline := since.Add(j.StartWindow)
 		j.Spec.StartBy = &deadline
 	} else if j.StartWindow == 0 {
 		j.StartWindow = j.Spec.StartBy.Sub(j.Queued)
