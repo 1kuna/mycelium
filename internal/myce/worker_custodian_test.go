@@ -429,7 +429,9 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 		s.Run.Sidecars = []NativeSidecar{{Name: "helper", MemoryGB: 0.25, Command: []string{"/bin/sleep", "600"}}}
 	}
 	if mode == "memory" {
-		s = cpuSpec(1, 0.125)
+		limit := 0.125
+		s = cpuSpec(1, limit)
+		s.MemoryLimitGB = &limit
 		s.Resumable = false
 		s.Run.Command = []string{os.Args[0], "-test.run=^TestCustodianMemoryPayload$"}
 		s.Run.Env = map[string]string{"MY55_MEMORY_PAYLOAD": "1", "MYCE_TEST_ROOT": os.Getenv("MYCE_TEST_ROOT")}
