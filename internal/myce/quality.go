@@ -97,27 +97,3 @@ func variantQuality(e Extension, s Spec, m *Machine) (measured bool, reason stri
 	}
 	return measured, ""
 }
-
-// Existing production bindings require positive parity evidence even for legacy
-// registrations. Measurements cannot widen an explicit owner host list.
-func (q *Queue) productionParityKnown(j *Job, m *Machine) bool {
-	if !j.Spec.extensionJob() || j.Spec.ExtensionCheck != nil {
-		return false
-	}
-	if !q.productionParityAllowed(j, m) {
-		return false
-	}
-	approved, _ := q.parityApproved(j, m)
-	for _, e := range j.Extensions {
-		copy := *j
-		copy.Extensions = []Extension{e}
-		if qualifiedExtension(&copy, m) == nil {
-			continue
-		}
-		measured, reason := variantQuality(e, j.Spec, m)
-		if reason == "" && (measured || approved) {
-			return true
-		}
-	}
-	return false
-}

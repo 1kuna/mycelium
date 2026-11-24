@@ -208,10 +208,6 @@ func processGroupResident(out []byte, groups map[int]bool) (uint64, int, error) 
 // attribute the cause to this attempt or invalidate other hosts' learned peaks.
 type attemptMemorySampleSink func(start, at time.Time, sample *AttemptMemoryPeak, period time.Duration, device bool)
 
-func (w Worker) observeProcessMemory(groups func() []int, attempts ...*process) func() *AttemptMemoryPeak {
-	return w.observeProcessMemoryWith(groups, nil, attempts...)
-}
-
 func (w Worker) observeProcessMemoryWith(groups func() []int, sink attemptMemorySampleSink, attempts ...*process) func() *AttemptMemoryPeak {
 	var attempt *process
 	if len(attempts) > 0 {
@@ -431,19 +427,6 @@ const (
 	deviceFootprintSource = "phys_footprint beyond RSS"
 	ownedFootprintSource  = "owned phys_footprint"
 )
-
-// Anonymous, kernel and shmem pages charged to one cgroup subtree.
-func cgroupResidentGB(fs memoryFS, path string) (float64, bool) {
-	b, err := fs.ReadFile(filepath.Join(path, "memory.stat"))
-	if err != nil {
-		return 0, false
-	}
-	stats := memoryCounters(b)
-	anon, aok := stats["anon"]
-	kernel, kok := stats["kernel"]
-	shmem, sok := stats["shmem"]
-	return (float64(anon) + float64(kernel) + float64(shmem)) / (1 << 30), aok && kok && sok
-}
 
 // The bool reports another process on the attempt's CUDA device.
 func (w Worker) attemptDeviceMemoryReading(ctx context.Context, ids map[int]bool, fs memoryFS, resident *float64, known ...map[int]bool) (float64, bool, error) {

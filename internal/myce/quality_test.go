@@ -120,15 +120,11 @@ func TestQualityUnknownUncertainty(t *testing.T) {
 	spec := variantSpec(e, "production")
 	spec.QualityTolerance = map[string]float64{"score": 1}
 	j := submit(t, q, spec)
-	// Admission evidence may read the same job while these private helpers
-	// inspect parity. Keep both assertions on one synchronized queue state.
+	// Admission evidence may read the same job while inspecting parity.
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if reason := q.variantParityReason(q.s.Jobs[j.ID], &b); !strings.Contains(reason, "unknown") {
 		t.Fatal("absent uncertainty treated as zero:", reason)
-	}
-	if q.productionParityKnown(q.s.Jobs[j.ID], &b) {
-		t.Fatal("unknown uncertainty permits retargeting")
 	}
 }
 

@@ -463,10 +463,6 @@ func (q *Queue) batchReclaimableGB(j *Job, m *Machine) float64 {
 func (q *Queue) candidate(m *Machine, excluded map[string]bool, scans ...*placementScan) *Job {
 	return q.candidates(m, scans...).pick(excluded)
 }
-func (q *Queue) pick(m *Machine, scans ...*placementScan) *Job {
-	return q.immediateCandidate(q.candidate(m, nil, scans...), m)
-}
-
 func (q *Queue) plannedPick(m *Machine, scan *placementScan) *Job {
 	if t := q.admissionTrace; t != nil {
 		previous := t.selecting

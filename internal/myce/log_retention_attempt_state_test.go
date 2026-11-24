@@ -145,6 +145,7 @@ func TestWorkerRetentionNativeStartFailureAcknowledgement(t *testing.T) {
 	}
 	defer root.close()
 	job := recoveryJob(t, []string{"sh", "-c", "exit 0"})
+	job.Machine, job.Session = w.Machine.ID, root.state.Session
 	job.Spec.Resumable = false
 	job.Spec.Run.Workdir = "{work}/not-a-directory"
 	store, err := newAttemptStore(root, job)
@@ -163,7 +164,7 @@ func TestWorkerRetentionNativeStartFailureAcknowledgement(t *testing.T) {
 	if p != nil || cause == nil || !store.state.LaunchPending {
 		t.Fatalf("did not reach native cmd.Start failure: p=%v error=%v state=%+v", p, cause, store.state)
 	}
-	result := startFailureOutcome(Result{}, cause)
+	result := startFailureOutcome(result(&job, false), cause)
 	store.state.Result = &result
 	if err := store.save(); err != nil {
 		t.Fatal(err)

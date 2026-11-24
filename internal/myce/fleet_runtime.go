@@ -389,14 +389,6 @@ func (r *workerFleetRuntime) observeProof(ctx context.Context, m Machine, eligib
 	return &p, ""
 }
 
-func pollFleetRuntime(ctx context.Context, config ServiceConfig, client Client, collect func(context.Context, ServiceConfig, string) (*FleetRuntimeProof, error), launch func(context.Context, ServiceConfig, FleetUpdateInstruction) error, host, machine, session string, eligible bool, attempted string, failed *fleetLaunchFailure, handled ...string) fleetPollResult {
-	prior := fleetPollResult{attempted: attempted, failed: failed}
-	if len(handled) > 0 {
-		prior.failureReceipt = handled[0]
-	}
-	return pollFleetRuntimeAt(ctx, config, client, collect, launch, host, machine, session, eligible, prior, RealClock{})
-}
-
 func pollFleetRuntimeAt(ctx context.Context, config ServiceConfig, client Client, collect func(context.Context, ServiceConfig, string) (*FleetRuntimeProof, error), launch func(context.Context, ServiceConfig, FleetUpdateInstruction) error, host, machine, session string, eligible bool, prior fleetPollResult, clock Clock) fleetPollResult {
 	result := prior
 	result.proof = nil

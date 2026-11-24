@@ -141,14 +141,6 @@ type gpuTelemetrySnapshot struct {
 	VRAM      map[string]gpuDeviceMemory `json:"vram"`
 }
 
-func readGPUTelemetryHelper(ctx context.Context, clock Clock, path string) (map[string]string, error) {
-	s, err := readGPUTelemetrySnapshot(ctx, clock, path)
-	if err != nil {
-		return nil, err
-	}
-	return s.GTTMM, nil
-}
-
 func readGPUTelemetrySnapshot(ctx context.Context, clock Clock, path string) (*gpuTelemetrySnapshot, error) {
 	if err := validateGPUTelemetryHelper(path); err != nil || path == "" {
 		return nil, errAttemptMemoryUnsupported
@@ -192,13 +184,4 @@ type HostMemorySampling struct {
 	FailedState          string  `json:"failed_state,omitempty"`
 	FailedCounter        string  `json:"failed_counter,omitempty"`
 	FailedCounterReason  string  `json:"failed_counter_reason,omitempty"`
-}
-
-func cardTelemetry(m *Machine) *DeviceTelemetry {
-	for _, d := range m.Devices {
-		if d.ID == m.Device {
-			return d.Telemetry
-		}
-	}
-	return nil
 }

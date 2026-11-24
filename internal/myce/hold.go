@@ -54,8 +54,6 @@ func (h *Hold) FullText() string {
 	return text
 }
 
-func (h Hold) operatorAction() bool { return h.Owner == ownerOperator }
-
 const (
 	hostMaintenanceJobHold = "host_maintenance"
 	ephemeralIsolationHold = "ephemeral_isolation"

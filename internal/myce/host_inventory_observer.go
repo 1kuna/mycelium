@@ -77,15 +77,6 @@ func sameInventoryObservation(a []MachineDevice, aerr error, b []MachineDevice, 
 	return aPartial == bPartial && (!aPartial || maps.Equal(ap.families, bp.families))
 }
 
-// Inventory is an observation lane, not an attempt sampler. No per-host driver
-// latency default kills a progressing scan; cancellation owns its lifetime.
-// A pending scan retains identity but never indefinitely retains live capacity.
-func sampleHostInventory(ctx context.Context, lane *hostProbeLane[[]MachineDevice], source func(context.Context) ([]MachineDevice, error)) ([]MachineDevice, error) {
-	lane.equal = sameInventoryObservation
-	lane.step(ctx, source)
-	return hostInventorySnapshot(lane)
-}
-
 func hostInventorySnapshot(lane *hostProbeLane[[]MachineDevice]) ([]MachineDevice, error) {
 	if lane.fresh(lane.clock.Now()) {
 		return slices.Clone(lane.value), nil
@@ -141,12 +132,6 @@ func (m *hostInventoryObserver) stepTelemetry(ctx context.Context) {
 	}
 	devices, _ := hostInventorySnapshot(&m.lane)
 	m.telemetry.stepWhen(ctx, func(ctx context.Context) ([]MachineDevice, error) { return m.sampleTelemetry(ctx, devices) }, m.telemetryDemand)
-}
-
-func (m *hostInventoryObserver) snapshot() ([]MachineDevice, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.snapshotLocked()
 }
 
 func (m *hostInventoryObserver) snapshotWithObservation() ([]MachineDevice, error, *InventoryObservation) {

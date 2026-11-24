@@ -78,26 +78,6 @@ func jobCapabilityCapacity(j *Job, m *Machine) (accelerator, system float64, ok 
 	return capabilityCapacity(m)
 }
 
-// Profile v0 has no throughput measurement. Memory-first ordering is provisional
-// until #33 supplies measurements. IDs make equal profiles deterministic.
-func capabilityBetter(a, b *Machine) bool {
-	aa, as, aok := capabilityCapacity(a)
-	ba, bs, bok := capabilityCapacity(b)
-	if aok != bok {
-		return aok
-	}
-	if aa != ba {
-		return aa > ba
-	}
-	if as != bs {
-		return as > bs
-	}
-	if a.CapabilityProfile != nil && b.CapabilityProfile != nil && a.CapabilityProfile.LogicalCPUs != b.CapabilityProfile.LogicalCPUs {
-		return a.CapabilityProfile.LogicalCPUs > b.CapabilityProfile.LogicalCPUs
-	}
-	return a.ID < b.ID
-}
-
 // NAS references must be immutable. Input content addressing belongs to #24.
 func capabilityWaitingReason(j *Job) string {
 	if j.OOMCapacity != nil {

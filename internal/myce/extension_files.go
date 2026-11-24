@@ -79,9 +79,6 @@ func copyJobFileContentsContext(ctx context.Context, src, dst string) error {
 	syncErr := out.Sync()
 	return errors.Join(copyErr, syncErr, out.Close())
 }
-func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
-	return w.prepareExtensionFilesContext(context.Background(), j, stateDir)
-}
 func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateDir string) (stageErr error) {
 	ctx = w.storageIOContext(ctx)
 	defer func() { observeStorageContext(ctx, stageErr) }()

@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"gopkg.in/yaml.v3"
 	"io"
 	"log"
 	"math"
@@ -19,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 type ModelFile struct {
@@ -779,10 +780,6 @@ func (q *Queue) addCall(c *ModelCall, requestContexts ...context.Context) error 
 		return nil
 	}, nil)
 }
-func (q *Queue) finishCall(id string, requestContexts ...context.Context) error {
-	return q.finishCallWithMemory(id, nil, requestContext(requestContexts))
-}
-
 func (q *Queue) finishCallWithMemory(id string, memory *ModelMemoryWindow, ctx context.Context) error {
 	return q.updateRequest(ctx, func() error {
 		c := q.calls[id]

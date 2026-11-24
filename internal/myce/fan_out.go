@@ -205,10 +205,6 @@ func (q *Queue) fanOutCapHold(j *Job) *Hold {
 	return newHold("fan_out_cap", fmt.Sprintf("max_concurrency %d reached: %d pieces unfinished, %d not started", j.Spec.FanOut.MaxConcurrency, active, len(j.Spec.FanOut.Pieces)-j.FanOut.Next))
 }
 
-func (q *Queue) fanOutCandidate(j *Job, m *Machine) *Job {
-	return q.fanOutCandidateWithResources(j, m, nil)
-}
-
 func (q *Queue) fanOutCandidateWithResources(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) *Job {
 	if j.State != "queued" || absoluteStartBy(j) && expired(j.Spec.StartBy, q.clock.Now()) || !dependencyReady(j) || cancelled(j) || j.FanOut == nil || j.FanOut.Next >= len(j.Spec.FanOut.Pieces) || q.fanOutCapHold(j) != nil || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
 		return nil

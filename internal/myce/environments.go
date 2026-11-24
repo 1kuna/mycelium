@@ -103,10 +103,6 @@ func ReadEnvironments(path string) (EnvironmentCatalog, error) {
 	}
 	return c, nil
 }
-func snapshotEnvironment(r EnvironmentRecipe, platform string) (EnvironmentRecipe, error) {
-	return snapshotEnvironmentFiles(r, platform, "queue-working-directory", "", nil)
-}
-
 func snapshotEnvironmentAt(r EnvironmentRecipe, platform, base, label string) (EnvironmentRecipe, error) {
 	return snapshotEnvironmentFiles(r, platform, base, label, nil)
 }
@@ -308,9 +304,6 @@ func (q *Queue) ConfigureEnvironments(c EnvironmentCatalog) error {
 		q.environments = c
 		return nil
 	})
-}
-func (q *Queue) resolveEnvironment(e Environment) (map[string]EnvironmentRecipe, error) {
-	return q.environments.resolveEnvironment(e)
 }
 
 // The catalog is immutable after configuration. Resolve on a captured catalog
@@ -1787,41 +1780,6 @@ func insertEnvironmentJobLog(tx *sql.Tx, j *Job, l EnvironmentLog) error {
 	}
 	return e
 }
-func (q *Queue) copyEnvironmentLogs(j *Job, m *Machine, key string) error {
-	if j.Spec.Logs == "none" {
-		return nil
-	}
-	rows, e := q.db.Query("SELECT offset,text FROM environment_build_logs WHERE machine=? AND session=? AND key=? ORDER BY offset", m.ID, m.Session, key)
-	if e != nil {
-		return e
-	}
-	chunks := []EnvironmentLog{}
-	for rows.Next() {
-		l := EnvironmentLog{Machine: m.ID, Session: m.Session, Key: key}
-		if e = rows.Scan(&l.Offset, &l.Text); e != nil {
-			rows.Close()
-			return e
-		}
-		chunks = append(chunks, l)
-	}
-	e = rows.Err()
-	rows.Close()
-	if e != nil {
-		return e
-	}
-	tx, e := q.db.Begin()
-	if e != nil {
-		return e
-	}
-	defer tx.Rollback()
-	for _, l := range chunks {
-		if e = insertEnvironmentJobLog(tx, j, l); e != nil {
-			return e
-		}
-	}
-	return tx.Commit()
-}
-
 func syncEnvironmentFiles(root string) error {
 	dirs := []string{}
 	e := filepath.WalkDir(root, func(p string, d os.DirEntry, e error) error {

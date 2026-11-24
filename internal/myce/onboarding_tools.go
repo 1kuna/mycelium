@@ -75,19 +75,6 @@ func LocalToolBootstrapProbe(p MachineProbe) ToolBootstrapProbe {
 	}}
 }
 
-// BootstrapEnvironmentTools installs only into this user's Mycelium tool tree.
-// Existing suitable service tools and verified pinned executables are reused.
-// User-managed uv/pixi are never overwritten; acquired paths are appended.
-func BootstrapEnvironmentTools(ctx context.Context, c ServiceConfig, p ToolBootstrapProbe) (ServiceConfig, error) {
-	releases, err := PinnedEnvironmentTools(c.Detection.OS, c.Detection.Arch)
-	if err != nil {
-		return c, err
-	}
-	if !filepath.IsAbs(c.WorkerHome) || p.Command == nil || p.Fetch == nil {
-		return c, preflightError("tool_bootstrap_unavailable", "tools", "user home and tool probes are required")
-	}
-	return bootstrapEnvironmentTools(ctx, c, p, releases)
-}
 func bootstrapEnvironmentTools(ctx context.Context, c ServiceConfig, p ToolBootstrapProbe, releases []ToolRelease) (ServiceConfig, error) {
 	dirs := filepath.SplitList(c.Path)
 	for _, r := range releases {

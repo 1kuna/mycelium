@@ -297,15 +297,6 @@ func (q *Queue) captureFileStoreStatus() fileStoreObservation {
 	}
 }
 
-func (q *Queue) fileStoreStatus(ctx context.Context) *FileStoreStatus {
-	if err := lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock); err != nil {
-		return &FileStoreStatus{Error: "file store capacity unavailable"}
-	}
-	view := q.captureFileStoreStatus()
-	q.mu.RUnlock()
-	return view.status(ctx)
-}
-
 func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 	store := v.store
 	expired, keep, referenced, markers := v.expired, v.keep, v.referenced, v.markers

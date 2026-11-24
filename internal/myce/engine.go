@@ -1129,13 +1129,6 @@ func (rt *modelRuntime) admissionMemorySnapshot() map[attemptKey]hostMemorySampl
 	return samples
 }
 
-func (rt *modelRuntime) memoryStopGrace() time.Duration {
-	if rt.worker != nil && rt.worker.AcceleratorStopGrace > 0 {
-		return rt.worker.AcceleratorStopGrace
-	}
-	return defaultGPUStopGrace
-}
-
 // All blocking sensors run before this exact-attempt accounting snapshot.
 // Call with rt.mu and rt.admissionMu held. Stop publication shares this ledger;
 // actor reads never acquire process/control locks or perform receipt I/O.

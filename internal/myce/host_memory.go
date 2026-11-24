@@ -428,10 +428,6 @@ func (s hostMemorySample) hostGrowth(now time.Time) (float64, bool) {
 	return growth, validMemoryValue(growth)
 }
 
-func currentHostMemorySamples(reports []AttemptReport, now time.Time) map[attemptKey]hostMemorySample {
-	return updateHostMemorySamples(reports, now, nil)
-}
-
 func updateHostMemorySamples(reports []AttemptReport, now time.Time, previous map[attemptKey]hostMemorySample) map[attemptKey]hostMemorySample {
 	samples := map[attemptKey]hostMemorySample{}
 	for _, r := range reports {

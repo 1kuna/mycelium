@@ -133,12 +133,6 @@ func inventoryErrorClass(err error) string {
 	return "probe_failed"
 }
 
-func (m *hostInventoryObserver) observation() *InventoryObservation {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.observationLocked()
-}
-
 func (m *hostInventoryObserver) observationLocked() *InventoryObservation {
 	lane := &m.lane
 	now := lane.clock.Now()

@@ -398,10 +398,6 @@ func TestLogsNoneEnvironmentOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertNoBatchLogs(t, q, j.ID, "")
-	if err := q.copyEnvironmentLogs(q.s.Jobs[j.ID], &m, r.Key); err != nil {
-		t.Fatal(err)
-	}
-	assertNoBatchLogs(t, q, j.ID, "")
 	m.EnvironmentReports = []EnvironmentReport{{Key: r.Key, State: "failed", Error: "build exit 9", Log: "synthetic-failure-output"}}
 	check(t, q, m, nil)
 	if got := job(t, q, j.ID); got.State != "queued" || got.EnvironmentFailureLog != "" {
