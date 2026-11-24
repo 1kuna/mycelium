@@ -524,7 +524,7 @@ for its explanation; add field names to the types, rather than this index.
 - [Automatic host health (#834)](reference/status-behavior.md#automatic-host-health-834)
 
 <a id="retained-queue-measurement-1120"></a>
-- [Retained-queue measurement (#1120)](reference/status-behavior.md#retained-queue-measurement-1120)
+- [Retained-queue measurement (#1120)](https://github.com/1kuna/mycelium/blob/fd74bf1b5e0c74feaabef92541a4f80e2164496d/docs/reference/status-behavior.md#retained-queue-measurement-1120)
 
 <a id="positive-execution-evidence-1008"></a>
 - [Positive execution evidence (#1008)](reference/status-behavior.md#positive-execution-evidence-1008)

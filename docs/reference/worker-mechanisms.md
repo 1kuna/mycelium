@@ -186,7 +186,7 @@ mismatch before mutation. Keyed workers require the echo and fail closed with
 HTTP 426 `worker_protocol_invalid` against older queues; upgrade the queue first,
 preserving saved custody. The bounded current unkeyed v3 adapter remains for
 supported old workers, restricted to one attempt/device and the common host
-ledger. Pre-v3 is refused. No automatic downgrade. See [wire details](../development.md#current-worker-protocol).
+ledger. Pre-v3 is refused. No automatic downgrade. See [wire details](https://github.com/1kuna/mycelium/blob/fd74bf1b5e0c74feaabef92541a4f80e2164496d/docs/development.md#current-worker-protocol).
 
 New assignments use physical `machine` plus additive `allocated_devices` (empty
 for CPU). Retired identities exist only for exact historical result/release

@@ -13,4 +13,4 @@ and macOS arm64, and the device taken from `MYCE_DEVICE`.
 To try it, copy this folder into its own Git repository, commit, and run
 `myce run --entry train --wait --out accepted`. To exercise CPU explicitly, add a CPU entry using `needs: {platform: cpu}`.
 The dated prototype runs and their limits are in
-[the research note](../../research/run-anywhere-entry-2026-11.md).
+[the research note](https://github.com/1kuna/mycelium/blob/fd74bf1b5e0c74feaabef92541a4f80e2164496d/docs/research/run-anywhere-entry-2026-11.md).

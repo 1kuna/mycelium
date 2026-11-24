@@ -81,7 +81,7 @@ The [approved design](design-proposal.md) is the product spec. Current maintaine
 - MY-18 placement ruling, 2026-10-25 (#193).
 - MY-07 vision ruling, 2026-10-21 (#107).
 - MY-19 vision ruling, 2026-10-25 (#107).
-- MY-30, 2026-11-02: “[the two-GPU host] is meant to be a dual card system. 64gb of vram. this whole "split the cards" thing is nonsense to me. we can either split the cards or shard the models across both cards. mycelium should understand that and handle it, whichever way is most beneficial to the running projects, that's the point. we need to stop with this whole [the production consumer] production paranoia stuff and get mycelium to a place where it can actually do its job for all my projects.” See [the dual-GPU research](research/dual-b70-and-xpu-variants.md).
+- MY-30, 2026-11-02: “[the two-GPU host] is meant to be a dual card system. 64gb of vram. this whole "split the cards" thing is nonsense to me. we can either split the cards or shard the models across both cards. mycelium should understand that and handle it, whichever way is most beneficial to the running projects, that's the point. we need to stop with this whole [the production consumer] production paranoia stuff and get mycelium to a place where it can actually do its job for all my projects.” See [the dual-GPU research](https://github.com/1kuna/mycelium/blob/fd74bf1b5e0c74feaabef92541a4f80e2164496d/docs/research/dual-b70-and-xpu-variants.md).
 
 </details>
 
