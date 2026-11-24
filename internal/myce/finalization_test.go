@@ -45,10 +45,16 @@ func TestFinalizationUploadBusyQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	creates, patches := 0, 0
+	releaseService := 2 * time.Second
+	uploadProgress := ""
 	c.Clock = clock
 	c.HTTP = &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
+		if r.Method == "POST" && r.URL.Path == "/api/workers/complete" {
+			clock.Advance(releaseService)
+		}
 		if r.Method == "POST" && r.URL.Path == "/api/files/uploads/" && r.Header.Get("Content-Type") == "application/offset+octet-stream" {
 			creates++
+			uploadProgress = r.Header.Get("X-Myce-Upload-Progress")
 		}
 		if r.Method == "PATCH" {
 			patches++
@@ -56,6 +62,12 @@ func TestFinalizationUploadBusyQueue(t *testing.T) {
 		return http.DefaultTransport.RoundTrip(r)
 	})}
 	w := Worker{Client: c, Clock: clock}
+	w.Client.publication = &publicationProgress{}
+	released := result(j, true)
+	released.ReleaseOnly, released.OutputRefs = true, nil
+	if err := w.Client.Call(context.Background(), "POST", "/api/workers/complete", released, nil); err != nil {
+		t.Fatal(err)
+	}
 	type outcome struct {
 		result Result
 		err    error
@@ -90,6 +102,9 @@ func TestFinalizationUploadBusyQueue(t *testing.T) {
 	}
 	if creates != 1 || patches != 0 {
 		t.Fatalf("want one creation upload after queue service, creates=%d patches=%d", creates, patches)
+	}
+	if uploadProgress != releaseService.String() {
+		t.Fatalf("first upload progress cadence = %s, want %s from release service", uploadProgress, releaseService)
 	}
 	if err := q.Complete(finished); err != nil {
 		t.Fatal(err)
