@@ -188,7 +188,7 @@ qualification. The explicit speed/deadline tradeoff is later work.
 
 The host's highest-ranked blocked job keeps a memory reservation. Backfill
 uses the surplus beyond its charge through the
-[pool reservation rule](design-memory-admission.md#211-backfill).
+[pool reservation rule](design-memory-admission.md#211-waiting-fairly-one-reservation-rule).
 
 ## Scarce-host yield
 <a id="amendment-scarce-host-yield-327-328-my-26"></a>
@@ -1696,4 +1696,4 @@ multi-machine/gang work and vision expansion remain deferred under #17, #22 and
 #69. Automatic dependency detection for arbitrary projects and a backup queue
 service also wait; a shared queue is a direction, not yet a design (MY-40). Jobs
 name their software recipe or lock file and state their needs; memory may be
-left to Mycelium ([learned memory](#learned-memory-by-default-and-bounded-first-runs), MY-31).
+left to Mycelium ([learned memory](#memory), MY-31).

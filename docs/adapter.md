@@ -1155,36 +1155,12 @@ variants:
     # Bundle the matching native baseline under baselines.kind:example-work.
 ```
 
-Use the usual pinned environments and native baselines. The standard
-`myce extension check` submits `needs.memory: auto` for this variant. A check
-uses earlier accepted checks of the same variant and work. A new version also starts from its nearest prior version's accepted memory on
-the same platform and native identity. Checks include prior workload peaks when
-both versions and the check launch the same main command, assets and environment.
-Shared incidental helpers alone do not prove workload comparability. Separate
-reference-only checks keep their own evidence.
-Measured peak variation and sampling growth supply headroom. Accepted evidence
-of the new version replaces the prior; it never grants qualification. Without
-usable evidence, the first run reserves a measured physical host-memory opportunity
-(its card still explores), under the existing
-[memory envelope rules](design-proposal.md#amendment-job-memory-envelopes-146).
-An unknown native accelerator check waits instead of
-using a tiny leftover ledger reservation as a hard limit. A host cgroup OOM
-retains the killed peak as a floor and grows from measured demand, sampling
-growth and ceiling overshoot. Available RAM constrains admission and never sets
-the recovery demand. Recovery has no fixed
-exploratory retry count; device-OOM handling is separate.
-Missing telemetry or headroom leaves it waiting; qualification still requires a
-successful check and matching baseline output.
-
-With an authored `references` entry, a successful solo auto check can seed
-the memory envelope of later work with the same frozen variant, work type and
-input shape until that work has accepted peaks of its own, which then replace
-the seed. Later jobs declare `workload: {input_shape: sample-v1, units: 10}`.
-Checks teach memory rather than duration. Reuse depends on matching evidence identity and qualification.
-Failed or ceiling-constrained peaks
-cannot seed an estimate. The variant's auto mode applies when the caller omits
-`needs.memory`; an explicit caller mode takes precedence. Numeric variants keep
-their existing reservations, and legacy extensions still require numeric floors.
+Use pinned environments and the variant's native baseline.
+`myce extension check` submits `needs.memory: auto` for this variant.
+Checks and workload runs each contribute to their own evidence families.
+A successful check must still match its native baseline before the variant can
+serve production. See [memory admission](reference/memory-mechanisms.md)
+for estimate levels, limits and waits.
 
 ## Bundle a native baseline, then replay it
 
