@@ -112,6 +112,31 @@ Pause metadata is additive JSON in the existing SQLite job record; no table
 rewrite is needed. Reopen preserves pauses and revisions. Use forward fixes:
 older binaries do not understand these non-runnable states.
 
+### Fenced job control
+
+Check the serving queue's `GET /api/status` for `queue_capabilities` containing
+`fenced_job_control` before using these routes. Use exact job IDs.
+
+- `POST /api/jobs/JOB/control/pause` takes `project`, `reason`, `if_attempt`
+  and `control_generation`. The current attempt must match. A new generation
+  can hold queued work or replace a direct hold and always advances the revision.
+- `POST /api/jobs/JOB/control/resume` takes `control_generation` and
+  `if_revision`. Use the current `pause_revision`, treating omission as zero.
+  A matching or newer generation can release a direct hold. On a queued job it
+  records the resume fence while keeping the job runnable and preserving its
+  start window. A parent-owned hold can only be released through its parent.
+- `POST /api/jobs/control/cancel` takes `project` and `submission_key`. It uses
+  the durable keyed exclusion and exact-attempt stop/release protocol described
+  under [Abort and wait for release](#abort-and-wait-for-release).
+
+Use positive, increasing generations per job. A pause and its matching resume
+may share a generation. Resume seals its generation against delayed pauses.
+Repeat uncertain writes with the same body. Exact retries return the current
+job while their fence remains current. Superseded controls return a conflict.
+After a lost reply, read `GET /api/jobs/JOB` for `control.generation`,
+`control.action`, `control.revision`, current `pause_revision`, and job state.
+These fields persist with the job across queue restarts.
+
 ## Batch YAML
 
 `myce submit job.yaml` accepts exactly one YAML document, at most 1 MiB, and
