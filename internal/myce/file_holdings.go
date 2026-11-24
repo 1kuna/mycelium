@@ -52,11 +52,6 @@ type FileHoldingClaim struct {
 	EligibleAt   time.Time `json:"eligible_at,omitzero"`
 }
 
-type fileHoldingFact struct {
-	file  FileRef
-	owner FileKeepingReference
-}
-
 type fileHoldingPayload struct {
 	claimPayloadObservation
 	err error
@@ -64,7 +59,7 @@ type fileHoldingPayload struct {
 
 type fileHoldingsSnapshot struct {
 	at       time.Time
-	facts    []fileHoldingFact
+	refs     fileReferenceView
 	payloads map[string]fileHoldingPayload
 	claims   map[string]FileHoldingClaim
 }
@@ -119,13 +114,22 @@ func (q *Queue) captureProjectFileHoldings(ctx context.Context, project string) 
 		at: at, payloads: map[string]fileHoldingPayload{}, claims: map[string]FileHoldingClaim{},
 	}
 	age := q.filePublicationAge(at)
-	q.collectFileReferences(true, nil, func(file FileRef, owner FileKeepingReference) {
-		if file.SHA256 != "" {
-			snapshot.facts = append(snapshot.facts, fileHoldingFact{file, owner})
-			if owner.Project == project && owner.Kind == "input_claim" {
-				claim := q.s.FileInputClaims[owner.Name]
-				claims[owner.Name] = claimSnapshot{claim, q.inputClaimNeedsLegacyCustody(claim)}
-			}
+	snapshot.refs = fileReferenceView{}
+	keep := func(file FileRef, flags fileReferenceFlags, owner fileKeeper) {
+		if flags&fileKept == 0 || file.SHA256 == "" {
+			return
+		}
+		if owner.Project != project {
+			// Only the kinds of other holders are visible to this project.
+			owner = fileKeeper{FileKeepingReference: FileKeepingReference{Kind: owner.Kind}}
+		}
+		snapshot.refs.note(file, flags, owner, true)
+	}
+	q.visitDurableFileReferences(true, nil, keep)
+	q.visitFileInputClaimKeepers(func(claim FileInputClaim, owner fileKeeper) {
+		keep(claim.File, fileKept, owner)
+		if owner.Project == project && claim.File.SHA256 != "" {
+			claims[claim.ID] = claimSnapshot{claim, q.inputClaimNeedsLegacyCustody(claim)}
 		}
 	})
 	unlock()
@@ -139,21 +143,19 @@ func (q *Queue) captureProjectFileHoldings(ctx context.Context, project string) 
 			break
 		}
 	}
-	for _, fact := range snapshot.facts {
-		if fact.owner.Project != project || fact.owner.Kind == "worker_local_custody" {
+	for hash, refs := range snapshot.refs {
+		if !refs.heldByProject(project) {
+			delete(snapshot.refs, hash)
 			continue
 		}
 		if err := ctx.Err(); err != nil {
 			return fileHoldingsSnapshot{}, err
 		}
-		hash := fact.file.SHA256
-		if _, observed := snapshot.payloads[hash]; !observed {
-			payload, err := claimPayloadObservation{}, storeErr
-			if err == nil {
-				payload, err = store.observeClaimPayload(FileRef{SHA256: hash})
-			}
-			snapshot.payloads[hash] = fileHoldingPayload{payload, err}
+		payload, err := claimPayloadObservation{}, storeErr
+		if err == nil {
+			payload, err = store.observeClaimPayload(FileRef{SHA256: hash})
 		}
+		snapshot.payloads[hash] = fileHoldingPayload{payload, err}
 	}
 	for id, saved := range claims {
 		if err := ctx.Err(); err != nil {
@@ -207,64 +209,56 @@ func validFileProject(project string) bool {
 	return strings.TrimSpace(project) != "" && !strings.ContainsAny(project, "\r\n\x00")
 }
 
+func (r fileDigestReferences) heldByProject(project string) bool {
+	for owner := range r.keepers {
+		if owner.Project == project && owner.Kind != "worker_local_custody" {
+			return true
+		}
+	}
+	return false
+}
+
 func summarizeProjectFileHoldings(project string, snapshot fileHoldingsSnapshot) ProjectFileHoldings {
 	out := ProjectFileHoldings{Project: project, CapturedAt: snapshot.at, ByKind: map[string]FileHoldingUsage{}, Files: []ProjectHeldFile{}}
-	type heldFile struct {
-		ProjectHeldFile
-		holders map[FileKeepingReference]struct{}
-		kinds   map[string]uint64
-	}
-	files := map[string]*heldFile{}
-	for _, f := range snapshot.facts {
-		if f.owner.Project != project || f.owner.Kind == "worker_local_custody" {
-			continue
-		}
-		hash := f.file.SHA256
-		item := files[hash]
-		if item == nil {
-			item = &heldFile{ProjectHeldFile: ProjectHeldFile{SHA256: hash, State: "absent"}, holders: map[FileKeepingReference]struct{}{}, kinds: map[string]uint64{}}
-			p := snapshot.payloads[hash]
-			if p.err != nil {
-				item.State = "unknown"
-			} else if p.present {
-				item.StoredBytes, item.State = p.payload.size, "published"
-				if p.payload.upload {
-					item.State = "uploading"
-				}
+	for hash, refs := range snapshot.refs {
+		item := ProjectHeldFile{SHA256: hash, State: "absent"}
+		p := snapshot.payloads[hash]
+		if p.err != nil {
+			item.State = "unknown"
+		} else if p.present {
+			item.StoredBytes, item.State = p.payload.size, "published"
+			if p.payload.upload {
+				item.State = "uploading"
 			}
-			files[hash] = item
 		}
-		var charge uint64
-		if projectFileCharge(f.owner) {
-			charge = uint64(f.file.SizeBytes)
-		}
-		item.RetainedBytes = max(item.RetainedBytes, charge)
-		item.kinds[f.owner.Kind] = max(item.kinds[f.owner.Kind], charge)
-		// Exclude duplicated provenance (for example a checkpoint in both the
-		// locally accepted manifest and the resume pointer).
-		item.holders[f.owner] = struct{}{}
-	}
-	for _, f := range snapshot.facts {
-		if item := files[f.file.SHA256]; item != nil {
-			item.DurableCustody = item.DurableCustody || f.owner.Kind != "input_claim"
-			if f.owner.Project != project {
+		kinds := map[string]uint64{}
+		for owner, size := range refs.keepers {
+			item.DurableCustody = item.DurableCustody || owner.Kind != "input_claim"
+			if owner.Project != project {
 				item.Shared = true
-				item.OtherHolderKinds = append(item.OtherHolderKinds, f.owner.Kind)
+				item.OtherHolderKinds = append(item.OtherHolderKinds, owner.Kind)
+				continue
 			}
-		}
-	}
-	for _, item := range files {
-		for holder := range item.holders {
-			item.Holders = append(item.Holders, holder)
-			if detail, ok := snapshot.claims[holder.Name]; ok && holder.Kind == "input_claim" {
+			if owner.Kind == "worker_local_custody" {
+				continue
+			}
+			var charge uint64
+			if projectFileCharge(owner.FileKeepingReference) {
+				charge = size
+			}
+			item.RetainedBytes = max(item.RetainedBytes, charge)
+			kinds[owner.Kind] = max(kinds[owner.Kind], charge)
+			item.Holders = append(item.Holders, owner.FileKeepingReference)
+			if detail, ok := snapshot.claims[owner.Name]; ok && owner.Kind == "input_claim" {
 				item.InputClaims = append(item.InputClaims, detail)
 			}
 		}
 		slices.SortFunc(item.Holders, compareFileHolders)
+		item.Holders = slices.Compact(item.Holders)
 		slices.SortFunc(item.InputClaims, func(a, b FileHoldingClaim) int { return strings.Compare(a.ClaimID, b.ClaimID) })
 		slices.Sort(item.OtherHolderKinds)
 		item.OtherHolderKinds = slices.Compact(item.OtherHolderKinds)
-		for kind, charge := range item.kinds {
+		for kind, charge := range kinds {
 			s := out.ByKind[kind]
 			s.RetainedBytes = addDiskBytes(s.RetainedBytes, charge)
 			s.StoredBytes = addDiskBytes(s.StoredBytes, item.StoredBytes)
@@ -276,7 +270,7 @@ func summarizeProjectFileHoldings(project string, snapshot fileHoldingsSnapshot)
 		if item.Shared {
 			out.SharedBytes = addDiskBytes(out.SharedBytes, item.StoredBytes)
 		}
-		out.Files = append(out.Files, item.ProjectHeldFile)
+		out.Files = append(out.Files, item)
 	}
 	slices.SortFunc(out.Files, func(a, b ProjectHeldFile) int { return strings.Compare(a.SHA256, b.SHA256) })
 	return out

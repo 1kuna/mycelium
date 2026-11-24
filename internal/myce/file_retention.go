@@ -354,57 +354,110 @@ func (q *Queue) fileReferences(pendingOnly bool, subset ...map[string]*Job) (exp
 	return q.collectFileReferences(pendingOnly, nil, nil, subset...)
 }
 
-// The release planner uses the collector itself, treating only eligible selected
-// jobs as expired. Explanations therefore follow the same protection decisions.
 func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]fileReleaseScope, report func(FileRef, FileKeepingReference), subset ...map[string]*Job) (expired, keep, referenced map[string]bool) {
 	expired, keep, referenced = q.collectDurableFileReferences(pendingOnly, releasing, report, subset...)
-	for _, claim := range q.s.FileInputClaims {
-		if claim.SettledAt.IsZero() {
-			hash := claim.File.SHA256
-			keep[hash], referenced[hash] = true, true
-			if report != nil {
-				report(claim.File, FileKeepingReference{Kind: "input_claim", Name: claim.ID, Project: claim.Project})
-			}
+	q.visitFileInputClaimKeepers(func(claim FileInputClaim, owner fileKeeper) {
+		hash := claim.File.SHA256
+		keep[hash], referenced[hash] = true, true
+		if report != nil {
+			report(claim.File, owner.FileKeepingReference)
 		}
-	}
+	})
 	return expired, keep, referenced
 }
 
-// An unsettled input claim keeps a published blob. It does not retire the
-// cleanup marker or give an interrupted transfer the custody of a job, catalog
-// asset or other committed reference.
+type fileReferenceFlags uint8
+
+const (
+	fileReferenced fileReferenceFlags = 1 << iota
+	fileExpired
+	fileKept
+)
+
+// Registry identity is used for ownership deduplication. The existing public
+// reference describes the asset path and deliberately omits this identity.
+type fileKeeper struct {
+	FileKeepingReference
+	registry fileRegistryOwner
+}
+
+type fileRegistryOwner struct {
+	kind, name, variant string
+}
+
+type fileDigestReferences struct {
+	flags   fileReferenceFlags
+	keepers map[fileKeeper]uint64
+}
+
+type fileReferenceView map[string]fileDigestReferences
+
+func (v fileReferenceView) note(ref FileRef, flags fileReferenceFlags, owner fileKeeper, names bool) {
+	hash := ref.SHA256
+	entry := v[hash]
+	entry.flags |= flags
+	if names && flags&fileKept != 0 {
+		if entry.keepers == nil {
+			entry.keepers = map[fileKeeper]uint64{}
+		}
+		entry.keepers[owner] = max(entry.keepers[owner], uint64(ref.SizeBytes))
+	}
+	v[hash] = entry
+}
+
+func (r fileDigestReferences) collectionEligible() bool {
+	return r.flags&(fileExpired|fileKept) == fileExpired
+}
+
+// A claim protects a published blob but does not retire a cleanup marker or
+// give an interrupted transfer durable job or catalog custody.
 func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[string]fileReleaseScope, report func(FileRef, FileKeepingReference), subset ...map[string]*Job) (expired, keep, referenced map[string]bool) {
 	expired, keep, referenced = map[string]bool{}, map[string]bool{}, map[string]bool{}
-	if len(subset) == 0 {
-		for hash := range q.s.RetiredJobFiles {
-			expired[hash], referenced[hash] = true, true
+	q.visitDurableFileReferences(pendingOnly, releasing, func(ref FileRef, flags fileReferenceFlags, owner fileKeeper) {
+		hash := ref.SHA256
+		if flags&fileExpired != 0 {
+			expired[hash] = true
 		}
-	}
-	owner := FileKeepingReference{}
-	keepFiles := func(kind string, files FileManifest) {
-		for name, ref := range files {
-			keep[ref.SHA256] = true
+		if flags&fileReferenced != 0 {
+			referenced[hash] = true
+		}
+		if flags&fileKept != 0 {
+			keep[hash] = true
 			if report != nil {
-				r := owner
-				r.Kind, r.Name = kind, name
-				report(ref, r)
+				report(ref, owner.FileKeepingReference)
 			}
 		}
+	}, subset...)
+	return expired, keep, referenced
+}
+
+// q.mu held. This walk only reads committed identities. Callers can bound
+// retained facts by digest or project before inspecting the store.
+func (q *Queue) visitDurableFileReferences(pendingOnly bool, releasing map[string]fileReleaseScope, note func(FileRef, fileReferenceFlags, fileKeeper), subset ...map[string]*Job) {
+	if len(subset) == 0 {
+		for hash := range q.s.RetiredJobFiles {
+			note(FileRef{SHA256: hash}, fileExpired|fileReferenced, fileKeeper{})
+		}
 	}
-	add := func(to map[string]bool, files FileManifest) {
+	owner := fileKeeper{}
+	keep := func(kind, name string, ref FileRef) {
+		r := owner
+		r.Kind, r.Name = kind, name
+		note(ref, fileKept|fileReferenced, r)
+	}
+	keepFiles := func(kind string, files FileManifest) {
+		for name, ref := range files {
+			keep(kind, name, ref)
+		}
+	}
+	add := func(flags fileReferenceFlags, files FileManifest) {
 		for _, ref := range files {
-			to[ref.SHA256] = true
+			note(ref, flags, fileKeeper{})
 		}
 	}
 	bundle := func(ref *FileRef) {
-		if ref == nil {
-			return
-		}
-		keep[ref.SHA256] = true
-		if report != nil {
-			r := owner
-			r.Kind, r.Name = "extension_environment_bundle", "bundle"
-			report(*ref, r)
+		if ref != nil {
+			keep("extension_environment_bundle", "bundle", *ref)
 		}
 	}
 	recipe := func(kind string, r EnvironmentRecipe) {
@@ -412,9 +465,9 @@ func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[str
 		bundle(r.FilesRef)
 	}
 	model := func(kind string, m Model) {
-		keepFiles(kind, FileManifest{m.Name: {SHA256: m.SHA256, SizeBytes: m.SizeBytes}})
+		keep(kind, m.Name, FileRef{SHA256: m.SHA256, SizeBytes: m.SizeBytes})
 		for _, f := range m.Files {
-			keepFiles(kind, FileManifest{f.Path: {SHA256: f.SHA256, SizeBytes: f.SizeBytes}})
+			keep(kind, f.Path, FileRef{SHA256: f.SHA256, SizeBytes: f.SizeBytes})
 		}
 	}
 	extension := func(e Extension) {
@@ -442,7 +495,7 @@ func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[str
 			}
 			j = &planned
 		}
-		owner = FileKeepingReference{JobID: j.ID, Project: j.Spec.Project}
+		owner = fileKeeper{FileKeepingReference: FileKeepingReference{JobID: j.ID, Project: j.Spec.Project}}
 		filesExpired := j.FilesExpired
 		protected := parkedStorageCustody(j) || (deliveryPending(j) || checkpointMirrorsPending(j))
 		if terminal(j.State) && filesExpired {
@@ -453,13 +506,13 @@ func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[str
 		}
 		// Retained identities, including expired answers and completed
 		// reclamations, must never be mistaken for pre-submit orphans.
-		add(referenced, j.Spec.Files)
-		add(referenced, sharedStoredFiles(j.Spec))
-		add(referenced, j.OutputRefs)
+		add(fileReferenced, j.Spec.Files)
+		add(fileReferenced, sharedStoredFiles(j.Spec))
+		add(fileReferenced, j.OutputRefs)
 		if j.LocalOutputs != nil {
 			// Local custody can pin an existing shared identity, but never grants
 			// authority to collect an unrelated import with matching content.
-			add(referenced, j.LocalOutputs.Files)
+			add(fileReferenced, j.LocalOutputs.Files)
 			if !terminal(j.State) || !filesExpired || protected {
 				keepFiles("worker_local_custody", j.LocalOutputs.Files)
 			}
@@ -467,11 +520,11 @@ func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[str
 		// Recoveries have their own immutable retention deadline. They can be
 		// attached after the original job's ordinary files have already expired.
 		for _, r := range j.RecoveredResults {
-			add(referenced, r.Files)
+			add(fileReferenced, r.Files)
 			if r.ExpiresAt.IsZero() || q.clock.Now().Before(r.ExpiresAt) {
 				keepFiles("recovered_result", r.Files)
 			} else {
-				add(expired, r.Files)
+				add(fileExpired, r.Files)
 			}
 		}
 		if !terminal(j.State) {
@@ -482,7 +535,7 @@ func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[str
 		}
 		for _, a := range j.AttemptHistory {
 			if a.Diagnostics != nil {
-				add(referenced, a.Diagnostics.Files)
+				add(fileReferenced, a.Diagnostics.Files)
 				if j.Spec.OutputDestination != nil && j.FinishedAt != nil && (q.fileRetention == 0 || q.clock.Now().Before(j.FinishedAt.Add(q.fileRetention))) {
 					keepFiles("retained_attempt_diagnostics", a.Diagnostics.Files)
 				}
@@ -490,12 +543,12 @@ func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[str
 		}
 		if j.FileReclamation != nil {
 			for _, hash := range j.FileReclamation.Pending {
-				referenced[hash] = true
+				note(FileRef{SHA256: hash}, fileReferenced, fileKeeper{})
 			}
 		}
 		if j.FanOut != nil {
 			for _, result := range j.FanOut.Results {
-				add(referenced, result.OutputRefs)
+				add(fileReferenced, result.OutputRefs)
 				if !terminal(j.State) || !filesExpired || protected {
 					keepFiles("fan_out_result", result.OutputRefs)
 				}
@@ -504,12 +557,12 @@ func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[str
 		if terminal(j.State) && filesExpired && !protected {
 			if !pendingOnly {
 				for _, files := range jobFileManifests(j) {
-					add(expired, files)
+					add(fileExpired, files)
 				}
 			}
 			if j.FileReclamation != nil {
 				for _, hash := range j.FileReclamation.Pending {
-					expired[hash] = true
+					note(FileRef{SHA256: hash}, fileExpired, fileKeeper{})
 				}
 			}
 		} else {
@@ -518,9 +571,9 @@ func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[str
 		legacyCheckpointsExpired := j.FileReclamation != nil && j.FileReclamation.LegacyCheckpointsExpired
 		if legacyCheckpointsExpired {
 			visitLegacyCheckpointFiles(j, func(_ string, files FileManifest) {
-				add(referenced, files)
+				add(fileReferenced, files)
 				if !pendingOnly && terminal(j.State) && !protected {
-					add(expired, files)
+					add(fileExpired, files)
 				}
 			})
 		}
@@ -568,19 +621,22 @@ func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[str
 			}
 		}
 	}
-	owner = FileKeepingReference{}
-	for _, e := range q.s.Extensions {
+	for key, e := range q.s.Extensions {
+		owner = fileKeeper{registry: fileRegistryOwner{kind: "extension", name: key}}
 		extension(e)
 	}
-	for _, recipes := range q.environments.Environments {
-		for _, r := range recipes {
+	for key, recipes := range q.environments.Environments {
+		for variant, r := range recipes {
+			owner = fileKeeper{registry: fileRegistryOwner{kind: "environment", name: key, variant: variant}}
 			recipe("environment_asset", r)
 		}
 	}
 	for _, m := range q.models.Models {
+		owner = fileKeeper{registry: fileRegistryOwner{kind: "model", name: m.Name}}
 		model("model_catalog", m)
 	}
-	for _, slot := range q.s.ModelSlots {
+	for key, slot := range q.s.ModelSlots {
+		owner = fileKeeper{registry: fileRegistryOwner{kind: "model_slot", name: key}}
 		if slot.Resident != nil {
 			for _, recipe := range slot.Resident.Environments {
 				keepFiles("resident_environment", recipe.Assets)
@@ -591,10 +647,6 @@ func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[str
 			recipe("model_environment_asset", *slot.EnvironmentRecipe)
 		}
 	}
-	for hash := range keep {
-		referenced[hash] = true
-	}
-	return expired, keep, referenced
 }
 
 func (q *Queue) expiredBlob(hash string, requestContexts ...context.Context) bool {

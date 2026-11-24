@@ -3,10 +3,12 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -164,6 +166,136 @@ func TestProjectFileHoldingsClaimActivityAndCustodyUnavailable(t *testing.T) {
 }
 
 func TestProjectFileHoldingsAndCollectionAccounting(t *testing.T) {
+	t.Run("project totals and privacy", testProjectFileHoldingTotals)
+	t.Run("collector agreement", testFileOwnershipCollectorAgreement)
+}
+
+func testFileOwnershipCollectorAgreement(t *testing.T) {
+	for _, tc := range []struct {
+		name, keeper string
+		protected    bool
+		recent       bool
+	}{
+		{name: "expired and retained history"},
+		{name: "cross-project job", keeper: "input", protected: true},
+		{name: "unsettled upload claim", keeper: "input_claim", protected: true},
+		{name: "legacy checkpoint", keeper: "checkpoint", protected: true},
+		{name: "delayed delivery", keeper: "pending_delivery", protected: true},
+		{name: "unknown worker custody", keeper: "worker_local_custody", protected: true},
+		{name: "recent publication", recent: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			q, clock := fixture(t)
+			c := retentionClient(t, q)
+			selected, _, ref := releaseTerminal(t, q, c, "shared-payload")
+			if tc.keeper == "input_claim" {
+				if _, err := q.claimFileInput(ctx, Spec{Project: "foreign"}, ref); err != nil {
+					t.Fatal(err)
+				}
+			} else if tc.protected || tc.name == "expired and retained history" {
+				otherSpec := spec("experiment")
+				otherSpec.Project = "foreign"
+				otherSpec.Files = FileManifest{"foreign-input": ref}
+				other := submit(t, q, otherSpec)
+				if err := q.update(func() error {
+					other := q.touchJob(other.ID)
+					if tc.keeper == "input" {
+						return nil
+					}
+					other.State = "succeeded"
+					other.FilesExpired = true
+					enrollFileReclamation(other)
+					switch tc.keeper {
+					case "checkpoint":
+						other.FileCheckpoints = map[int]FileCheckpoint{1: {Files: FileManifest{"foreign-save": ref}}}
+					case "pending_delivery":
+						other.OutputRefs = FileManifest{"foreign-output": ref}
+						other.Delivery = &OutputDelivery{State: "pending"}
+					case "worker_local_custody":
+						other.Attempt = 1
+						other.LocalOutputs = &TaskOutputCustody{Files: FileManifest{"foreign-local": ref}}
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !tc.recent {
+				clock.Advance(filePublicationGrace + time.Second)
+			}
+			holdings, err := q.ProjectFileHoldings(ctx, "owner")
+			if err != nil || len(holdings.Files) != 1 {
+				t.Fatal("cannot inspect holdings", holdings, err)
+			}
+			held := holdings.Files[0]
+			if holdings.RetainedBytes != uint64(ref.SizeBytes) || holdings.StoredBytes != uint64(ref.SizeBytes) ||
+				held.Shared != tc.protected || len(held.Holders) != 2 || (tc.protected && !slices.Contains(held.OtherHolderKinds, tc.keeper)) {
+				t.Fatal("wrong keeper attribution", holdings)
+			}
+			for _, owner := range held.Holders {
+				if owner.Project != "owner" || owner.JobID != selected.ID {
+					t.Fatal("holdings disclosed another holder", owner)
+				}
+			}
+			if tc.keeper == "input_claim" {
+				partial, _ := claimedCapacityPartial(t, q, c, "active partial", jobInputUploadPurpose)
+				report, err := q.ProjectFileHoldings(ctx, partial.Project)
+				if err != nil || !slices.ContainsFunc(report.Files, func(f ProjectHeldFile) bool {
+					return f.SHA256 == partial.File.SHA256 && f.State == "uploading" && len(f.InputClaims) == 1
+				}) {
+					t.Fatal("partial upload lost its claim", report, err)
+				}
+			}
+			p := releasePlan(t, q, releaseSelection(selected))
+			if len(p.Blobs) != 1 || p.Blobs[0].CollectionEligible == tc.protected ||
+				(tc.protected && !slices.ContainsFunc(p.Blobs[0].References, func(r FileKeepingReference) bool { return r.Kind == tc.keeper })) {
+				t.Fatal("wrong planned keeper or scope", p)
+			}
+			if tc.name == "expired and retained history" {
+				refused := errors.New("reject fixture transaction")
+				err := q.update(func() error {
+					q.acceptFileExpiry(q.touchJob(selected.ID), p.ID, fileReleaseDigest(p.Selection))
+					return refused
+				})
+				if !errors.Is(err, refused) || job(t, q, selected.ID).FilesExpired || releasePlan(t, q, p.Selection).ID != p.ID {
+					t.Fatal("failed transaction changed release scope", err)
+				}
+			}
+			wantBytes := int64(0)
+			if !tc.protected && !tc.recent {
+				wantBytes = ref.SizeBytes
+			}
+			if p.ReclaimableBytes != wantBytes {
+				t.Fatal("wrong planned reclaimable bytes", p)
+			}
+			if _, err := releaseApply(q, p); err != nil {
+				t.Fatal(err)
+			}
+			q.mu.RLock()
+			expired, keep, _ := q.fileReferences(true)
+			q.mu.RUnlock()
+			if legacy := expired[ref.SHA256] && !keep[ref.SHA256]; legacy != p.Blobs[0].CollectionEligible {
+				t.Fatalf("planned scope and current collector disagree: plan=%+v expired=%t keep=%t", p.Blobs[0], expired[ref.SHA256], keep[ref.SHA256])
+			}
+			if status := q.fileStoreStatus(ctx); status.Error != "" || status.ReclaimableBytes != uint64(wantBytes) {
+				t.Fatal("dry-run status disagrees with plan", status)
+			}
+			if freed, err := q.reclaimPublishedFilesUntil(ctx, 0); err != nil || freed != uint64(wantBytes) {
+				t.Fatal("collector disagrees with plan", freed, err)
+			}
+			_, err = os.Stat(q.files.blob(ref))
+			if wantBytes > 0 && !os.IsNotExist(err) || wantBytes == 0 && err != nil {
+				t.Fatal("collector changed unexpected payload", err)
+			}
+			if _, err := releaseApply(q, p); err != nil {
+				t.Fatal("expiry receipt did not replay after collection", err)
+			}
+		})
+	}
+}
+
+func testProjectFileHoldingTotals(t *testing.T) {
 	ctx := context.Background()
 	q, clock := fixture(t)
 	c := retentionClient(t, q)
