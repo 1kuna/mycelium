@@ -104,6 +104,14 @@ func (w Worker) acceptMemoryOffer(j *Job) {
 }
 
 func pooledEvidenceKey(j *Job, m *Machine) memoryEvidenceKey {
+	var extension *Extension
+	if j.Spec.extensionJob() {
+		extension = qualifiedExtension(j, m)
+	}
+	return pooledEvidenceKeyForExtension(j, m, extension)
+}
+
+func pooledEvidenceKeyForExtension(j *Job, m *Machine, extension *Extension) memoryEvidenceKey {
 	target := machineTarget(m)
 	if j.Spec.Needs.cpuOnly() {
 		target.Platform = "cpu"
@@ -112,7 +120,7 @@ func pooledEvidenceKey(j *Job, m *Machine) memoryEvidenceKey {
 	key := ObservationKey{Concurrency: 1, BatchSize: 1}
 	identity := *j
 	if j.Spec.extensionJob() {
-		if e := qualifiedExtension(j, m); e != nil {
+		if e := extension; e != nil {
 			identity.Extension = &ExtensionSelection{Digest: e.Digest}
 			key.ExtensionDigest = e.Digest
 			if variant := e.variant(target); variant != nil {
