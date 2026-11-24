@@ -172,13 +172,15 @@ func benchmarkCheckinCandidateCost(b *testing.B, q *Queue, workers []Machine) {
 // Freeze the full per-target order, resolved vectors and five next-pull
 // placements under pooled admission. Retired envelope history no longer
 // changes these decisions. The grouped shape also covers multi-card placement.
+// Cold accelerators record the positive RAM bootstrap floor in the envelope
+// while preserving the candidate order, resource vectors and placements.
 func TestCandidateCostPlacementEquivalence(t *testing.T) {
 	for _, fixture := range []struct {
 		grouped                bool
 		candidates, placements string
 	}{
-		{false, "8a952b1d8c2c29a1b5eb8d0156580dcb9b8fe8d223bf6b096c9fd688ec328f2f", "ce389b0d2821a4de16e49c18bacc985f94c6174609a03a914e9426c98750ba1f"},
-		{true, "adce7ac2431c8b22fd181d0c843381e6f577b3494da66335cb16db8ff7780218", "2ec8a187e68ad3cef019bf66d3641b92880ea944d2aed7b90d8c1295e1fa57b8"},
+		{false, "ec2f1257c699478f8e177dfb621db36c0f742f9ec095d7bc5c16cf448c92b66a", "628382dc13958f2f4fd0e0171d2394282f1df11490e511aed371ca8da1f6d7c1"},
+		{true, "0bde2e852e966ef304d1f11a388de059aa250efb8e1533900aece67315eed91c", "224d4c213e0ed327c092b9c64a5f4d07119c2e8899a2e8c915c5f0acbfd383cc"},
 	} {
 		t.Run(fmt.Sprintf("grouped=%v", fixture.grouped), func(t *testing.T) {
 			q, _ := candidateCostFixture(t)
