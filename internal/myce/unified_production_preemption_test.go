@@ -159,11 +159,11 @@ func TestUnifiedProductionReclaimsPooledMemory(t *testing.T) {
 		if victim == 1 {
 			// The reported room now fits even while this attempt keeps its
 			// reservation. The exact release must still precede admission.
-			m.HostAvailableMemoryGB += holders[victim].freed
-			m.MemoryObservation.UsedGB -= holders[victim].freed
+			m.HostAvailableMemoryGB = 113
+			m.MemoryObservation.UsedGB = m.MemoryObservation.TotalGB - m.MemoryObservation.ReserveGB - m.HostAvailableMemoryGB
 			clock.Advance(time.Second)
 			if got := assignedJob(pull()); got != nil || q.hostMemoryLedgers[m.ID].FreeGB < need {
-				t.Fatalf("production offered with release pending, or fixture lacked RAM: %v", got)
+				t.Fatalf("production offered with release pending, or fixture lacked RAM: %v; ledger=%+v", got, q.hostMemoryLedgers[m.ID])
 			}
 		}
 		r := result(victimJob, false)
