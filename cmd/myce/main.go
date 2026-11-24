@@ -90,11 +90,12 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		return myce.CommandExec(args[1:])
 	}
 
+	const usage = topLevelUsage + "\n       myce job resize [flags] JOB_ID..."
 	if len(args) == 0 {
-		return errors.New(topLevelUsage)
+		return errors.New(usage)
 	}
 	if args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintln(os.Stdout, topLevelUsage)
+		fmt.Fprintln(os.Stdout, usage)
 		return nil
 	}
 	if args[0] == "dev" && len(args) > 1 && args[1] == "clock" {
@@ -231,6 +232,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		defer stop()
 		return pauseCommand(ctx, args[0], args[1:], os.Stdout)
 	}
+	if args[0] == "job" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return jobCommand(ctx, args[1:], os.Stdout)
+	}
 	if args[0] == "wait" {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -243,7 +249,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	switch args[0] {
 	case "dev", "queue", "join", "submit", "usage", "status", "efficiency", "cancel", "leave", "ledger", "logs":
 	default:
-		return &exitError{2, fmt.Errorf("unknown command %q\n%s", args[0], topLevelUsage)}
+		return &exitError{2, fmt.Errorf("unknown command %q\n%s", args[0], usage)}
 	}
 	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	serviceConfigPath := f.String("service-config", "", "saved installed service configuration")
