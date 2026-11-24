@@ -8,24 +8,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
-
-type heldVolumeSink struct {
-	started chan struct{}
-	release chan struct{}
-	writes  atomic.Int32
-}
-
-func (s *heldVolumeSink) Write(p []byte) (int, error) {
-	if s.writes.Add(1) == 1 {
-		close(s.started)
-	}
-	<-s.release
-	return len(p), nil
-}
 
 func TestJobGetVolumeBoundedConcurrent(t *testing.T) {
 	v := newJobGetVolume(&fakeClock{now: time.Unix(1, 0)})

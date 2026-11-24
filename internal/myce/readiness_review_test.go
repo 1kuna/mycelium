@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"context"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -177,16 +176,6 @@ func TestAdaptiveReadinessActivityAndContendedColdAlert(t *testing.T) {
 	}
 }
 
-type readinessRecordingEngine struct {
-	FakeEngine
-	clock *manualWorkerClock
-}
-
-func (e *readinessRecordingEngine) Load(ctx context.Context, m Model) error {
-	e.clock.Advance(time.Second)
-	readinessFromContext(ctx).advance()
-	return e.FakeEngine.Load(ctx, m)
-}
 func TestAdaptiveReadinessSharedResourceActivity(t *testing.T) {
 	clock := &manualWorkerClock{now: time.Unix(1, 0)}
 	p := newReadinessProgress(clock, readinessHistory{})
