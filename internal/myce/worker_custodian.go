@@ -79,10 +79,10 @@ type custodianControl struct {
 	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
 }
 
-func attemptControl(dir, id string, j Job) (custodianControl, bool) {
-	expected := custodianControl{ID: id, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session}
+func attemptControl(dir, id string, key attemptKey) (custodianControl, bool) {
+	expected := custodianControl{ID: id, Execution: Execution{ID: key.job, Attempt: key.attempt}, Session: key.session}
 	var saved custodianControl
-	if readCustodianJSON(dir, custodianName(id, "control"), &saved) == nil && saved.ID == id && saved.Execution == expected.Execution && saved.Session == j.Session {
+	if readCustodianJSON(dir, custodianName(id, "control"), &saved) == nil && saved.ID == id && saved.Execution == expected.Execution && saved.Session == key.session {
 		return saved, true
 	}
 	return expected, false
@@ -237,7 +237,7 @@ func persistUnadoptedCustodianStop(s *workerStore, j Job, d AttemptDirective, no
 		return nil
 	}
 	dir, id := custodianDir(s.dir), s.state.Custodian
-	control, _ := attemptControl(dir, id, j)
+	control, _ := attemptControl(dir, id, jobKey(j))
 	deadline := now.Add(time.Duration(max(0, d.GraceSeconds) * float64(time.Second)))
 	control.requestStop(deadline, d.Kill, d.UserCancel, d.PriorityStop)
 	return saveWorkerJSON(dir, custodianName(id, "control"), control)
@@ -279,7 +279,7 @@ func (w Worker) adoptCustodian(s *workerStore) (*process, error) {
 	}
 	g.updateStore(s)
 	p := &process{job: *s.state.Job, custodian: g, done: make(chan workerFinish, 1), savePriorityStop: s.priorityStopRecorder()}
-	g.control, g.controlSaved = attemptControl(g.dir, id, p.job)
+	g.control, g.controlSaved = attemptControl(g.dir, id, jobKey(p.job))
 	// Use the same proxy after launch and restart. Reading a result always checks
 	// its original attempt/session; a live PID is never inferred from its number.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -628,12 +628,13 @@ func (w Worker) runCustodian(stop context.Context) error {
 	var mu sync.Mutex
 	var running *process
 	controlDone := make(chan struct{})
+	key := jobKey(*req.State.Job) // Preparation can update the job while control watches.
 	go func() {
 		defer close(controlDone)
 		tick := time.NewTicker(10 * time.Millisecond) // Existing process-control cadence.
 		defer tick.Stop()
 		for {
-			c, _ := attemptControl(dir, id, *req.State.Job)
+			c, _ := attemptControl(dir, id, key)
 			if c.StopAt != nil || stop.Err() != nil {
 				cancelPreparation()
 			}
