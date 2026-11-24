@@ -481,7 +481,7 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	jobs := map[string]myce.Job{}
 	for _, m := range snapshot.Machines {
 		spec := myce.Spec{Name: "rollout-command-" + m.ID, Project: "fleet-test", Priority: "production", AllowedMachines: []string{m.ID}}
-		spec.Needs.MemoryGB, spec.Needs.Platform.Any = 1, true
+		spec.Needs.MemoryGB, spec.Needs.HostMemoryGB, spec.Needs.Platform.Any = 1, 1, true
 		// The command controls its own completion; the rollout never signals it.
 		spec.Run.Command = []string{"sh", "-c", `printf 'myce fixture work: %s\n' "$PWD"; printf 'myce fixture checkpoint: %s\n' "$MYCE_CHECKPOINT_DIR"; test -z "${MYCE_TOKEN:-}" || exit 91; printf '%s\n' "$MYCE_ATTEMPT" >> "$MYCE_CHECKPOINT_DIR/starts-$2" || exit 92; while ! test -f "$1/finish-$2"; do sleep 0.05; done; printf 'completed naturally\n'`, "fleet-command", "{work}", m.ID}
 		var job myce.Job
