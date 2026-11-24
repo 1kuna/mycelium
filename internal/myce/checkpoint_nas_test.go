@@ -421,11 +421,11 @@ func TestWorkerClearsWithdrawnPreparationFailure(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		reply := Reply{}
+		reply := Reply{AttemptProtocol: keyedAttemptProtocol}
 		if !assigned {
 			assigned = true
 			j.Machine, j.Session = c.Machine.ID, c.Machine.Session
-			reply.Job = &j
+			reply.Attempts = []AttemptDirective{attemptOffer(&j)}
 		} else if len(c.Attempts) != 0 {
 			if len(c.Attempts) != 1 {
 				t.Error("expected one held attempt")
@@ -437,7 +437,7 @@ func TestWorkerClearsWithdrawnPreparationFailure(t *testing.T) {
 			reports <- c.Machine.CheckpointUnavailable
 			reply.Leave = true
 		}
-		if err := json.NewEncoder(rw).Encode(attemptReply(c, reply)); err != nil {
+		if err := json.NewEncoder(rw).Encode(reply); err != nil {
 			t.Error(err)
 		}
 	}))

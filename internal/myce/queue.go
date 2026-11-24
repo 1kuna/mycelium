@@ -1681,7 +1681,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 	preparedMachine := cloneMachine(&c.Machine)
 	preparedMachine.EphemeralRefusal = c.ephemeralRefusal
 	preparedMachine.FleetProofIssue = c.fleetProofIssue
-	reply := Reply{WorkerDiskBudgetProtocol: workerDiskBudgetProtocol, WorkerDiskHeadroomProtocol: workerDiskHeadroomProtocol, WorkerDiskTrendProtocol: workerDiskTrendProtocol, DeviceHealthProtocol: deviceHealthProtocol, DeviceRecoveryProtocol: deviceRecoveryProtocol, HostMountProgressProtocol: hostMountProgressProtocol, DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, HostMemorySampleProtocol: hostMemorySampleProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, HostForeignProtocol: hostForeignProtocol, ToolInventoryProtocol: toolInventoryProtocol, CheckpointExpiryProtocol: checkpointExpiryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
+	reply := Reply{AttemptProtocol: keyedAttemptProtocol, WorkerDiskBudgetProtocol: workerDiskBudgetProtocol, WorkerDiskHeadroomProtocol: workerDiskHeadroomProtocol, WorkerDiskTrendProtocol: workerDiskTrendProtocol, DeviceHealthProtocol: deviceHealthProtocol, DeviceRecoveryProtocol: deviceRecoveryProtocol, HostMountProgressProtocol: hostMountProgressProtocol, DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, HostMemorySampleProtocol: hostMemorySampleProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, HostForeignProtocol: hostForeignProtocol, ToolInventoryProtocol: toolInventoryProtocol, CheckpointExpiryProtocol: checkpointExpiryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
 	q.kickCheckpointShards()
 	reports := c.Attempts
 	progresses := make([]attemptProgress, len(reports))
@@ -2103,7 +2103,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 				}
 				out := cloneJob(j)
 				out.LedgerEntries = nil
-				reply.Job = &out
+				reply.Attempts = append(reply.Attempts, attemptOffer(&out))
 				return nil
 			}
 		}
@@ -2119,10 +2119,10 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			if j != nil {
 				q.recordAdmissionSelection(j, &m)
 				out := q.assign(j, &m, scan)
-				reply.Job = &out
+				reply.Attempts = append(reply.Attempts, attemptOffer(&out))
 			}
 		}
-		if m.Leaving && reply.Job == nil && len(q.modelPlan(m.ID)) == 0 {
+		if m.Leaving && len(q.modelPlan(m.ID)) == 0 {
 			q.touchMachine(m.ID)
 			m.Gone = true
 			m.Models = nil
@@ -2130,13 +2130,6 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		q.settleMaintenance()
 		return nil
 	}, nil)
-	if reply.Job != nil {
-		relative, e := filepath.Rel(q.root, reply.Job.Checkpoint)
-		if e != nil {
-			return Reply{}, e
-		}
-		reply.Job.Checkpoint = relative
-	}
 	for i := range reply.Attempts {
 		if j := reply.Attempts[i].Job; j != nil {
 			relative, e := filepath.Rel(q.root, j.Checkpoint)
@@ -2146,7 +2139,6 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			j.Checkpoint = relative
 		}
 	}
-	reply = attemptReply(c, reply)
 	if err == nil {
 		reply.Attempts = append(reply.Attempts, releaseStops...)
 		err = q.hydrateReply(&reply, ctx)
@@ -2155,7 +2147,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 }
 func (q *Queue) current(r Result) (*Job, error) {
 	j := q.touchJob(r.ID)
-	if j == nil || j.Attempt != r.Attempt || j.Machine != r.Machine || j.Session != r.Session || (j.State != "running" && j.State != "stopping") {
+	if j == nil || !attemptRecordFor(j, j.Machine).ownsResult(&r) || (j.State != "running" && j.State != "stopping") {
 		return nil, ErrStale
 	}
 	return j, nil

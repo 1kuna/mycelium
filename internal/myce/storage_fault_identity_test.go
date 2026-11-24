@@ -148,10 +148,10 @@ func TestStorageFaultQueueCheckpointReplyPublishesIdentity(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
 				return nil, err
 			}
-			reply := Reply{CheckpointRoot: nas, HostHygieneProtocol: hostHygieneProtocol, HostMountProgressProtocol: hostMountProgressProtocol, HostProbeProtocol: hostProbeProtocol}
+			reply := Reply{AttemptProtocol: keyedAttemptProtocol, CheckpointRoot: nas, HostHygieneProtocol: hostHygieneProtocol, HostMountProgressProtocol: hostMountProgressProtocol, HostProbeProtocol: hostProbeProtocol}
 			if !sent {
 				j.Session, j.Machine = c.Machine.Session, c.Machine.ID
-				reply.Job, sent = &j, true
+				reply.Attempts, sent = []AttemptDirective{attemptOffer(&j)}, true
 			}
 			// The attempt-local CheckpointUnavailable flag can disappear when
 			// a later start retry is refused by the latched mount fault and its
@@ -166,7 +166,7 @@ func TestStorageFaultQueueCheckpointReplyPublishesIdentity(t *testing.T) {
 				reply.Leave = true
 				cancel()
 			}
-			_ = json.NewEncoder(out).Encode(attemptReply(c, reply))
+			_ = json.NewEncoder(out).Encode(reply)
 		default:
 			if strings.HasSuffix(r.URL.Path, "/events") {
 				<-r.Context().Done()

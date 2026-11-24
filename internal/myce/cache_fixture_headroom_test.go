@@ -55,7 +55,7 @@ func TestFixtureWorkerCheckinAfterLowHeadroomSizing(t *testing.T) {
 			return
 		}
 		seen.Store(true)
-		if err := json.NewEncoder(rw).Encode(attemptReply(checkin, Reply{Leave: true})); err != nil {
+		if err := json.NewEncoder(rw).Encode(Reply{AttemptProtocol: keyedAttemptProtocol, Leave: true}); err != nil {
 			t.Error(err)
 		}
 	}))
