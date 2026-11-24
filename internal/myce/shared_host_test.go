@@ -546,6 +546,7 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 	}
 	if runtime.GOOS == "darwin" {
 		ordinary := cpuSpec(1, .01)
+		ordinary.Name = "unprofiled-priority-command"
 		// No profile means no priority adjustment, so preserve an inherited
 		// background band too. Fleet gates may themselves run in that band.
 		comparison := "-gt"
@@ -572,6 +573,7 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 	change(HostMaintenanceRequest{Action: "profile", SharedHost: &SharedHostProfile{InteractiveReserveGB: .125}})
 	change(HostMaintenanceRequest{Action: "resume"})
 	s := cpuSpec(1, .01)
+	s.Name = "shared-priority-command"
 	s.Run.Env = map[string]string{"GOMAXPROCS": "64"}
 	priorityCheck := backgroundCheck + `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "$GOMAXPROCS" = 1 && test "${MYCE_TOKEN+x}" != x || { printf 'priority check: nice=%s GOMAXPROCS=%s token-present=%s\n' "$n" "$GOMAXPROCS" "${MYCE_TOKEN+x}" >&2; exit 42; }; `
 	s.Run.Command = []string{"sh", "-c", priorityCheck + `printf shared-host-ok`}
@@ -596,7 +598,8 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 		t.Fatal("profile not acknowledged", status)
 	}
 	// Exercise the separate group/member gates, including a sidecar and the
-	// main payload. Its marker proves the helper checked priority and token too.
+	// main payload. Give the different workload its own memory evidence.
+	s.Name = "shared-priority-group"
 	s.Run.Sidecars = []NativeSidecar{{Name: "helper", Env: map[string]string{"GOMAXPROCS": "64"}, Command: []string{"sh", "-c", priorityCheck + `touch helper-ready; while :; do sleep 1; done`}}}
 	s.Run.Command = []string{"sh", "-c", priorityCheck + `while test ! -f helper-ready; do sleep .01; done`}
 	if err := call("POST", "/api/jobs", s, &j); err != nil {
