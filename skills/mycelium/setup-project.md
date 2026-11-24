@@ -112,14 +112,17 @@ myce skill install
 This writes `skills/mycelium/` under each agent home that exists: `~/.claude`
 (Claude Code), `~/.agents` and `$CODEX_HOME` (default `~/.codex`). Pass skill
 folders to choose others, e.g. `myce skill install ~/.claude/skills/mycelium`.
-`myce install` does the same for agent homes on that machine. After an upgrade,
-the next `myce` command refreshes every copy it wrote to the new release; a copy
-you edited is left alone. `myce skill status` shows each copy's state.
+`myce install` does the same for agent homes on that machine. Automatic refresh
+fills missing copies, repairs malformed markers and upgrades unedited managed
+copies when the binary's release is newer. Equal and newer copies stay in place.
+Development builds skip automatic refresh. `myce skill status` shows each
+copy's state.
 
 A symlink, an edited copy or a copy `myce` didn't write (from an older manual
 `cp`) is kept and reported. `myce skill install --replace` replaces it: a symlink
 is removed without touching its target, and a directory is moved to the user
-cache's `mycelium/skill-backups/`. Reload skills or start a new session
+cache's `mycelium/skill-backups/`. Use `--replace` for a deliberate rollback.
+Reload skills or start a new session
 afterwards. Other harnesses can read the guide with `myce skill show`. This
 installs agent instructions; routing shell commands depends on the harness
 ([harness binding](harness-binding.md)).

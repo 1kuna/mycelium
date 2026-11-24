@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 
 	"golang.org/x/mod/semver"
 	"mycelium/internal/myce"
@@ -23,8 +24,10 @@ import (
 
 // The consumer skill ships inside the binary, so the guide an agent loads is
 // the one for the release it actually runs. A marker records what myce wrote;
-// only an unedited copy myce wrote is ever replaced without --replace.
+// unmarked and locally edited copies are kept unless explicitly replaced.
 const skillMarker = ".myce-skill.json"
+
+var errCorruptSkillMarker = errors.New("corrupt skill marker")
 
 type skillMarkerFile struct {
 	Version string `json:"version"`
@@ -37,6 +40,7 @@ const (
 	skillMissing   skillState = "missing"
 	skillCurrent   skillState = "current"
 	skillStale     skillState = "stale"     // written by myce for another release or content
+	skillCorrupt   skillState = "corrupt"   // present marker with invalid metadata
 	skillModified  skillState = "modified"  // written by myce, then edited
 	skillSymlink   skillState = "symlink"   // e.g. a link into a source checkout
 	skillUnmanaged skillState = "unmanaged" // a copy myce did not write
@@ -99,12 +103,24 @@ func readSkillDir(dir string) (map[string][]byte, error) {
 
 func readSkillMarker(dir string) (skillMarkerFile, error) {
 	var m skillMarkerFile
-	data, err := os.ReadFile(filepath.Join(dir, skillMarker))
+	path := filepath.Join(dir, skillMarker)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return m, err
 	}
-	if err := json.Unmarshal(data, &m); err != nil || m.Version == "" || m.SHA256 == "" {
-		return m, fmt.Errorf("unreadable skill marker in %s", dir)
+	if !info.Mode().IsRegular() {
+		return m, fmt.Errorf("not a regular skill marker: %s", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return m, err
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return m, errCorruptSkillMarker
+	}
+	digest, err := hex.DecodeString(m.SHA256)
+	if (m.Version != "development" && !semver.IsValid(m.Version)) || err != nil || len(digest) != sha256.Size {
+		return m, errCorruptSkillMarker
 	}
 	return m, nil
 }
@@ -125,11 +141,15 @@ func inspectSkill(dir, version, embeddedDigest string) (skillInspection, error) 
 		return r, nil
 	}
 	m, err := readSkillMarker(dir)
+	r.Installed = m.Version
+	if errors.Is(err, errCorruptSkillMarker) {
+		r.State = skillCorrupt
+		return r, nil
+	}
 	if !info.IsDir() || err != nil {
 		r.State = skillUnmanaged
 		return r, nil
 	}
-	r.Installed = m.Version
 	files, err := readSkillDir(dir)
 	if err != nil {
 		return r, err
@@ -170,14 +190,28 @@ type skillInstaller struct {
 	Out        io.Writer
 }
 
-// writeSkill replaces dir with the embedded skill. The new copy is staged
-// beside dir and swapped in by rename; a concurrent writer that wins the swap
-// leaves a current copy, which counts as success.
-func (s skillInstaller) writeSkill(dir string, files map[string][]byte, digest string) error {
+// lockSkill serializes inspection and replacement across processes. The
+// parent survives the renames that replace a skill, and aliases of the same
+// directory share the lock.
+func lockSkill(dir string) (*os.File, error) {
 	parent := filepath.Dir(dir)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
-		return err
+		return nil, err
 	}
+	f, err := os.Open(parent)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// writeSkill stages and replaces dir with the embedded skill under lockSkill.
+func (s skillInstaller) writeSkill(dir string, files map[string][]byte, digest string) error {
+	parent := filepath.Dir(dir)
 	tmp, err := os.MkdirTemp(parent, ".mycelium-skill-new-")
 	if err != nil {
 		return err
@@ -251,41 +285,9 @@ func (s skillInstaller) install(dirs []string, replace, dry bool) error {
 	}
 	var failed []string
 	for _, dir := range dirs {
-		r, err := inspectSkill(dir, s.Version, digest)
-		if err != nil {
+		if err := s.installDir(dir, files, digest, replace, dry); err != nil {
 			failed = append(failed, fmt.Sprintf("%s: %v", dir, err))
-			continue
 		}
-		kept := r.State == skillSymlink || r.State == skillModified || r.State == skillUnmanaged
-		switch {
-		case r.State == skillCurrent:
-			fmt.Fprintf(s.Out, "%s: current (%s)\n", dir, s.Version)
-			continue
-		case kept && !replace:
-			fmt.Fprintf(s.Out, "%s: kept %s; rerun with --replace to install this release's copy\n", dir, describeSkill(r))
-			continue
-		case dry:
-			fmt.Fprintf(s.Out, "%s: would install %s (now %s)\n", dir, s.Version, describeSkill(r))
-			continue
-		case r.State == skillSymlink:
-			if err := os.Remove(dir); err != nil {
-				failed = append(failed, fmt.Sprintf("%s: %v", dir, err))
-				continue
-			}
-			fmt.Fprintf(s.Out, "%s: removed symlink to %s\n", dir, r.Target)
-		case kept:
-			moved, err := s.backup(dir)
-			if err != nil {
-				failed = append(failed, err.Error())
-				continue
-			}
-			fmt.Fprintf(s.Out, "%s: moved previous %s copy to %s\n", dir, r.State, moved)
-		}
-		if err := s.writeSkill(dir, files, digest); err != nil {
-			failed = append(failed, fmt.Sprintf("%s: %v", dir, err))
-			continue
-		}
-		fmt.Fprintf(s.Out, "%s: installed %s\n", dir, s.Version)
 	}
 	if len(failed) > 0 {
 		return errors.New("skill install failed: " + strings.Join(failed, "; "))
@@ -293,9 +295,51 @@ func (s skillInstaller) install(dirs []string, replace, dry bool) error {
 	return nil
 }
 
-// refresh brings every unedited copy myce wrote to this binary's release. It
-// runs before release-build commands, reads only small marker files when
-// nothing changed, and never fails the command it precedes.
+func (s skillInstaller) installDir(dir string, files map[string][]byte, digest string, replace, dry bool) error {
+	if !dry {
+		lock, err := lockSkill(dir)
+		if err != nil {
+			return err
+		}
+		defer lock.Close()
+	}
+	r, err := inspectSkill(dir, s.Version, digest)
+	if err != nil {
+		return err
+	}
+	kept := r.State == skillSymlink || r.State == skillModified || r.State == skillUnmanaged
+	versionOrder := semver.Compare(s.Version, r.Installed)
+	switch {
+	case r.State == skillCurrent:
+		fmt.Fprintf(s.Out, "%s: current (%s)\n", dir, s.Version)
+		return nil
+	case !replace && (kept || versionOrder < 0 || (r.State == skillStale && versionOrder == 0 && semver.IsValid(r.Installed))):
+		fmt.Fprintf(s.Out, "%s: kept %s; rerun with --replace to install this release's copy\n", dir, describeSkill(r))
+		return nil
+	case dry:
+		fmt.Fprintf(s.Out, "%s: would install %s (now %s)\n", dir, s.Version, describeSkill(r))
+		return nil
+	case r.State == skillSymlink:
+		if err := os.Remove(dir); err != nil {
+			return err
+		}
+		fmt.Fprintf(s.Out, "%s: removed symlink to %s\n", dir, r.Target)
+	case kept:
+		moved, err := s.backup(dir)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(s.Out, "%s: moved previous %s copy to %s\n", dir, r.State, moved)
+	}
+	if err := s.writeSkill(dir, files, digest); err != nil {
+		return err
+	}
+	fmt.Fprintf(s.Out, "%s: installed %s\n", dir, s.Version)
+	return nil
+}
+
+// refresh installs missing copies, repairs corrupt markers and advances
+// unedited managed copies. It never fails the command it precedes.
 func (s skillInstaller) refresh(dirs []string) {
 	if !semver.IsValid(s.Version) {
 		return // development builds never overwrite a release's guide
@@ -304,7 +348,10 @@ func (s skillInstaller) refresh(dirs []string) {
 	var digest string
 	for _, dir := range dirs {
 		m, err := readSkillMarker(dir)
-		if err != nil || m.Version == s.Version {
+		if err == nil && semver.Compare(s.Version, m.Version) <= 0 {
+			continue
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, errCorruptSkillMarker) {
 			continue
 		}
 		if files == nil {
@@ -312,15 +359,40 @@ func (s skillInstaller) refresh(dirs []string) {
 				return
 			}
 		}
-		if r, err := inspectSkill(dir, s.Version, digest); err != nil || r.State != skillStale {
-			continue
-		}
-		if err := s.writeSkill(dir, files, digest); err != nil {
+		if err := s.refreshDir(dir, files, digest); err != nil {
 			fmt.Fprintf(s.Out, "myce: could not refresh agent skill %s: %v\n", dir, err)
-			continue
 		}
-		fmt.Fprintf(s.Out, "myce: refreshed agent skill %s from %s to %s\n", dir, m.Version, s.Version)
 	}
+}
+
+func (s skillInstaller) refreshDir(dir string, files map[string][]byte, digest string) error {
+	lock, err := lockSkill(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	r, err := inspectSkill(dir, s.Version, digest)
+	if err != nil {
+		return err
+	}
+	switch r.State {
+	case skillStale:
+		if semver.Compare(s.Version, r.Installed) <= 0 {
+			return nil
+		}
+	case skillMissing, skillCorrupt:
+	default:
+		return nil
+	}
+	if err := s.writeSkill(dir, files, digest); err != nil {
+		return err
+	}
+	if r.State == skillStale {
+		fmt.Fprintf(s.Out, "myce: refreshed agent skill %s from %s to %s\n", dir, r.Installed, s.Version)
+	} else {
+		fmt.Fprintf(s.Out, "myce: installed agent skill %s (%s)\n", dir, s.Version)
+	}
+	return nil
 }
 
 func describeSkill(r skillInspection) string {
@@ -387,7 +459,7 @@ func skillCommand(args []string, stdout io.Writer) error {
 	}
 	f := flag.NewFlagSet("skill "+args[0], flag.ContinueOnError)
 	f.SetOutput(stdout)
-	replace := f.Bool("replace", false, "also replace a symlink, an edited copy or a copy myce did not write (directories are moved to the user cache, symlink targets are untouched)")
+	replace := f.Bool("replace", false, "allow a downgrade or replace a symlink, edited copy or unmanaged copy (edited and unmanaged directories are moved to the user cache)")
 	dry := f.Bool("dry-run", false, "print what would change")
 	asJSON := f.Bool("json", false, "status as JSON")
 	if err := f.Parse(args[1:]); err != nil {
