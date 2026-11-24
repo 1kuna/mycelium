@@ -1235,6 +1235,7 @@ All IDs are checked and updated in one transaction. An assigned, active or
 unreleased attempt returns `job_resize_attempt_live` with its job ID and the
 batch is refused. The job ledger records the old and new values, reason and
 operator-asserted requester. Use the same installed authority as host maintenance.
+Resize already materialized fan-out pieces by their queued child IDs.
 
 ### Exclude components with a selector
 

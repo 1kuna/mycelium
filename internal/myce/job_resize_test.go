@@ -126,6 +126,26 @@ func TestQueuedJobResizeRefusesAttemptCustodyAtomically(t *testing.T) {
 	rejectBoth() // Queued again, with physical release pending.
 }
 
+func TestQueuedJobResizeUsesMaterializedPieceIDs(t *testing.T) {
+	q, _, _, s := plainPiecesFixture(t, "first", "second")
+	parent := submit(t, q, s)
+	_, err := q.ResizeJobs(t.Context(), resizeRequest(parent))
+	requireResizeError(t, err, 409, "job_resize_no_pending_pieces")
+	first := job(t, q, parent.FanOut.Children[0])
+	second := job(t, q, parent.FanOut.Children[1])
+	req := resizeRequest(first, second)
+	receipt, err := q.ResizeJobs(t.Context(), req)
+	if err != nil || !slices.Equal(receipt.Jobs, req.Jobs) {
+		t.Fatalf("queued pieces did not resize together: %+v, %v", receipt, err)
+	}
+	for _, id := range receipt.Jobs {
+		got := job(t, q, id)
+		if got.Spec.Needs.HostMemoryGB != req.HostMemoryGB || got.Batch == nil || got.Batch.Parent != parent.ID {
+			t.Fatalf("resize lost piece charge or parent binding: %+v", got)
+		}
+	}
+}
+
 func TestQueuedJobResizeMemoryAdmission(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
@@ -136,6 +156,7 @@ func TestQueuedJobResizeMemoryAdmission(t *testing.T) {
 		{name: "incident estimate stays held", budget: 16.5, avail: 13.8},
 		{name: "incident with two resized jobs still waits", budget: 16.5, avail: 13.8, resizeFirst: true},
 		{name: "two resized jobs fit on separate cards", budget: 22, avail: 13.8, resizeFirst: true, wantSecondCard: true},
+		{name: "larger allowance fits the incumbent estimate", budget: 28, avail: 18.2, wantSecondCard: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, clock := fixture(t)

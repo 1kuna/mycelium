@@ -53,6 +53,9 @@ func (q *Queue) ResizeJobs(ctx context.Context, req ResizeJobsRequest) (ResizeJo
 			if j.State != "queued" {
 				return &HTTPError{Status: 409, Code: "job_resize_not_queued", Message: fmt.Sprintf("job %s is %s; resize requires a queued job", id, j.State)}
 			}
+			if j.FanOut != nil && j.Spec.FanOut != nil && j.FanOut.Next >= len(j.Spec.FanOut.Pieces) {
+				return &HTTPError{Status: 409, Code: "job_resize_no_pending_pieces", Message: fmt.Sprintf("job %s has already materialized all its pieces; resize each queued child by ID", id)}
+			}
 			jobs = append(jobs, j)
 			seen[id] = true
 		}
