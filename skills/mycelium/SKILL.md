@@ -178,7 +178,18 @@ absolute `start_by` still applies during the pause. For a running job, use
 `myce pause JOB_ID --yield --project NAME --reason TEXT`.
 Wait for the attempt's exact release and `paused` state before resuming.
 Non-resumable yield requires `--confirm-restart`. See
-[pausing](references/waiting.md#reservations-and-pausing) for API fencing.
+[pausing](references/waiting.md#reservations-and-pausing) for the CLI and yield API.
+
+For automated pause/resume, require `fenced_job_control` in the serving queue's
+`queue_capabilities`. `paused_start_window_frozen` is a separate capability.
+Use the [fenced routes](https://github.com/1kuna/mycelium/blob/main/docs/jobs.md#fenced-job-control)
+with exact job IDs and increasing per-job `control_generation` values. Pause
+also takes `project`, `reason` and `if_attempt`. Resume takes `if_revision` from
+the current `pause_revision` (zero when absent) and can seal an already runnable
+job against a delayed pause. After a lost reply, read exact job GET for `control`,
+`pause_revision` and job state. Retry the same body or reconcile against the
+current receipt before issuing a new intent. Use the fenced keyed cancel route
+to exclude further controls and launches, then observe exact-attempt release.
 
 Before relying on a frozen start window for a batch pause, check that the live
 queue's `queue_capabilities` list contains `paused_start_window_frozen`. Read it

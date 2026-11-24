@@ -31,15 +31,21 @@ func TestStatusJSONQueueCapabilities(t *testing.T) {
 		fmt.Fprint(w, `{"hyphas":[]}`)
 	}))
 	defer older.Close()
+	frozenOnly := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"hyphas":[],"queue_capabilities":["paused_start_window_frozen"]}`)
+	}))
+	defer frozenOnly.Close()
 	for _, tc := range []struct {
 		name, queue string
 		flags       []string
-		advertises  bool
+		frozen      bool
+		fenced      bool
 	}{
-		{name: "compact", queue: current.URL, advertises: true},
-		{name: "sections", queue: current.URL, flags: []string{"--sections", "machines"}, advertises: true},
-		{name: "idle", queue: current.URL, flags: []string{"--sections", "idle"}, advertises: true},
-		{name: "full", queue: current.URL, flags: []string{"--history"}, advertises: true},
+		{name: "compact", queue: current.URL, frozen: true, fenced: true},
+		{name: "sections", queue: current.URL, flags: []string{"--sections", "machines"}, frozen: true, fenced: true},
+		{name: "idle", queue: current.URL, flags: []string{"--sections", "idle"}, frozen: true, fenced: true},
+		{name: "full", queue: current.URL, flags: []string{"--history"}, frozen: true, fenced: true},
+		{name: "legacy frozen windows", queue: frozenOnly.URL, frozen: true},
 		{name: "legacy compact", queue: older.URL},
 		{name: "legacy snapshot projection", queue: older.URL, flags: []string{"--sections", "machines"}},
 	} {
@@ -55,8 +61,8 @@ func TestStatusJSONQueueCapabilities(t *testing.T) {
 			if err := json.Unmarshal([]byte(output), &status); err != nil {
 				t.Fatal(err)
 			}
-			if slices.Contains(status.QueueCapabilities, "paused_start_window_frozen") != tc.advertises {
-				t.Fatalf("queue_capabilities = %v, want paused_start_window_frozen present = %t", status.QueueCapabilities, tc.advertises)
+			if slices.Contains(status.QueueCapabilities, "paused_start_window_frozen") != tc.frozen || slices.Contains(status.QueueCapabilities, "fenced_job_control") != tc.fenced {
+				t.Fatalf("queue_capabilities = %v, want frozen windows = %t and fenced controls = %t", status.QueueCapabilities, tc.frozen, tc.fenced)
 			}
 		})
 	}

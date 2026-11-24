@@ -382,6 +382,22 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		j, err := a.Queue.ResumeJob(r.PathValue("id"), request.IfRevision, r.Context())
 		respondOperation(w, j, err, "job_resume_invalid")
 	})
+	mux.HandleFunc("POST /api/jobs/{id}/control/pause", func(w http.ResponseWriter, r *http.Request) {
+		var request FencedPauseRequest
+		if !decode(w, r, &request) {
+			return
+		}
+		j, err := a.Queue.FencedPause(r.Context(), r.PathValue("id"), request)
+		respondOperation(w, j, err, "job_pause_invalid")
+	})
+	mux.HandleFunc("POST /api/jobs/{id}/control/resume", func(w http.ResponseWriter, r *http.Request) {
+		var request FencedResumeRequest
+		if !decode(w, r, &request) {
+			return
+		}
+		j, err := a.Queue.FencedResume(r.Context(), r.PathValue("id"), request)
+		respondOperation(w, j, err, "job_resume_invalid")
+	})
 	mux.HandleFunc("POST /api/jobs/resize", func(w http.ResponseWriter, r *http.Request) {
 		var request ResizeJobsRequest
 		if !decode(w, r, &request) {
@@ -394,7 +410,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		ack, err := a.Queue.CancelJob(r.PathValue("id"), r.Context())
 		respondOperation(w, ack, err, "job_cancel_invalid")
 	})
-	mux.HandleFunc("POST /api/jobs/cancel", func(w http.ResponseWriter, r *http.Request) {
+	cancelSubmission := func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Project       string          `json:"project"`
 			SubmissionKey json.RawMessage `json:"submission_key"`
@@ -409,7 +425,9 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		}
 		ack, err := a.Queue.CancelSubmission(request.Project, key, r.Context())
 		respondOperation(w, ack, err, "job_cancel_invalid")
-	})
+	}
+	mux.HandleFunc("POST /api/jobs/cancel", cancelSubmission)
+	mux.HandleFunc("POST /api/jobs/control/cancel-by-key", cancelSubmission)
 	mux.HandleFunc("GET /api/jobs/{id}/logs", func(w http.ResponseWriter, r *http.Request) {
 		after, err := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
 		if r.URL.Query().Get("after") == "" {

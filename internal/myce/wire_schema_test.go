@@ -71,7 +71,7 @@ func generatedJobSchema(t *testing.T) []byte {
 		for _, property := range properties {
 			property.(map[string]any)["x-contract"] = "diagnostic"
 		}
-		stable := []string{"id", "spec", "spec_projection", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "pause", "pause_revision", "cancelled_at", "infrastructure_retries", "dependency", "cancellation", "cancellation_scope", "command_started", "ledger", "delivery", "recovered_results"}
+		stable := []string{"id", "spec", "spec_projection", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "pause", "pause_revision", "control", "cancelled_at", "infrastructure_retries", "dependency", "cancellation", "cancellation_scope", "command_started", "ledger", "delivery", "recovered_results"}
 		if definition == "Spec" {
 			stable = []string{"project", "submission_key", "after", "output_delivery"}
 		}
@@ -84,6 +84,9 @@ func generatedJobSchema(t *testing.T) []byte {
 	binding["execution"].(map[string]any)["description"] = "Immutable producing child job ID and accepted attempt for a selected-piece edge; zero value for a whole-parent edge."
 	binding["executions"].(map[string]any)["description"] = "Whole-parent edge: accepted producing executions keyed by mapped producer piece. Immutable across retry and restart."
 	job := defs["Job"].(map[string]any)["properties"].(map[string]any)
+	job["control"].(map[string]any)["description"] = "Last committed fenced operation. Compare its revision with the current pause_revision to reconcile a retry. Omitted before the first fenced operation."
+	control := defs["JobControl"].(map[string]any)["properties"].(map[string]any)
+	control["action"].(map[string]any)["enum"] = []string{"pause", "resume"}
 	job["last_memory_admission"].(map[string]any)["description"] = "Last changed blocking host-memory target comparison in this waiting episode, retained through startup failure and restart. Canonical exact-owner charges, growth and reservation pending state; historical diagnostic, not live usage or proof RAM is the only blocker. Absence is unknown. A retry clears it."
 	job["recovered_results"].(map[string]any)["description"] = "Append-only recovery-time evidence linked to exact failed executions. Never changes state, native outcome, ordinary output_refs or dependency eligibility. Metadata and original provenance survive history pruning; bytes expire at each record's expires_at."
 	recovered := defs["RecoveredResult"].(map[string]any)["properties"].(map[string]any)

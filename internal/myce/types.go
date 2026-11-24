@@ -505,6 +505,7 @@ type Job struct {
 	Pause                  *JobPause                    `json:"pause,omitempty"`
 	YieldPause             *YieldPause                  `json:"yield_pause,omitempty"`
 	PauseRevision          uint64                       `json:"pause_revision,omitempty"`
+	Control                *JobControl                  `json:"control,omitempty"`
 	LocalOutputs           *TaskOutputCustody           `json:"local_outputs,omitempty"`
 	StorageAllocation      *StorageAllocation           `json:"storage_allocation,omitempty"`
 	StorageEnvelope        *JobStorageEnvelope          `json:"storage_envelope,omitempty"`
