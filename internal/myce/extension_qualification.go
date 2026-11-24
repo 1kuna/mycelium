@@ -204,6 +204,12 @@ func (q *Queue) extensionQualificationDemand(e Extension, m *Machine) bool {
 // optional selection keeps authoritative single-check validation equally cheap.
 // This map belongs only to this locked pass; it never survives a queue mutation.
 func (q *Queue) extensionQualificationDemands(m *Machine, only *Extension) map[string]bool {
+	if q.memoryPlanning == nil {
+		// Every candidate can consult the same retained storage observations.
+		// Reuse their indexes until this read-only demand pass returns.
+		q.memoryPlanning = newMemoryPlanningCache()
+		defer func() { q.memoryPlanning = nil }()
+	}
 	demand := map[string]bool{}
 	// A new admission reservation cannot revoke useful demand and cancel a
 	// check that already Started. New check offers/submissions gate separately.
@@ -211,10 +217,13 @@ func (q *Queue) extensionQualificationDemands(m *Machine, only *Extension) map[s
 		if j.State != "queued" || j.Spec.ExtensionCheck != nil || len(j.Extensions) == 0 {
 			continue
 		}
+		eligible := func(e Extension) bool {
+			return !demand[e.Digest] && (!j.Spec.Resumable || e.Resumable) && (only == nil || e.Digest == only.Digest)
+		}
+		if !slices.ContainsFunc(j.Extensions, eligible) {
+			continue
+		}
 		for _, candidate := range extensionJobs(j, m, false) {
-			eligible := func(e Extension) bool {
-				return (!j.Spec.Resumable || e.Resumable) && (only == nil || e.Digest == only.Digest)
-			}
 			if !slices.ContainsFunc(candidate.Extensions, eligible) {
 				continue
 			}
