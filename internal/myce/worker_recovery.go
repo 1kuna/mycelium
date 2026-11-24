@@ -632,6 +632,10 @@ func (s *workerStore) inputWriterOnly() bool {
 	return s.state.InputWriterPending && s.state.Job != nil && !s.state.hasProcessCustody()
 }
 
+func (s *workerStore) inputWriterInFlight() bool {
+	return s.extensionFiles.inFlight() || s.nasPrepare.inFlight()
+}
+
 // A preparation helper has an explicit outstanding release obligation. Unlike
 // an unrelated reused PID in ordinary orphan discovery, a live unidentifiable
 // helper group cannot be treated as proof of exit.
@@ -646,7 +650,7 @@ func (s *workerStore) cleanupOrphanCustody(clock Clock, requireHelperExit bool, 
 		}
 	}()
 	if s.inputWriterOnly() {
-		if s.extensionFiles.inFlight() || s.nasPrepare.inFlight() {
+		if s.inputWriterInFlight() {
 			return errWorkerReleasePending
 		}
 		// The live actor witnessed its writer finish, or this store was
@@ -749,24 +753,18 @@ func (s *workerStore) cleanupOrphanCustody(clock Clock, requireHelperExit bool, 
 		}
 		return nil // Preserve a live command whose identity does not match.
 	}
-	var memory *memoryAttempt
-	if s.state.Cgroup != "" {
+	if path := s.state.Cgroup; path != "" {
 		prefix := "engine-"
 		if s.state.Job != nil {
 			prefix = "attempt-"
 		}
-		if filepath.Base(s.state.Cgroup) != prefix+s.state.Identity {
+		if filepath.Base(path) != prefix+s.state.Identity {
 			return errors.New("mismatched cgroup custody")
 		}
-		if _, err := os.Stat(s.state.Cgroup); err == nil {
-			var fs memoryFS = osMemoryFS{}
-			if len(memoryFiles) > 0 {
-				fs = memoryFiles[0]
-			}
-			memory = &memoryAttempt{fs: fs, path: s.state.Cgroup}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
+	}
+	memory, err := recoveredMemory(s.state.Cgroup, memoryFiles...)
+	if err != nil {
+		return err
 	}
 	if requireHelperExit && !owned && len(members) > 0 {
 		return errors.New("helper process group identity unconfirmed; release pending")
@@ -800,47 +798,61 @@ func (s *workerStore) releaseSharedInputs() {
 	}
 }
 
-func cleanupAttemptGroups(st workerState, clock Clock, memoryFiles ...memoryFS) error {
+func recoveredMemory(path string, files ...memoryFS) (*memoryAttempt, error) {
+	if path == "" {
+		return nil, nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var system memoryFS = osMemoryFS{}
+	if len(files) > 0 {
+		system = files[0]
+	}
+	return &memoryAttempt{fs: system, path: path}, nil
+}
 
-	if st.Cgroup != "" {
-		if filepath.Base(st.Cgroup) != "attempt-"+st.Identity {
-			return errors.New("mismatched attempt cgroup custody")
+func ownedRecoveryGroup(group int, births map[int]string, clock Clock) (bool, error) {
+	members, err := inspectWorkerGroup(group, clock)
+	if err != nil {
+		return false, err
+	}
+	owned := false
+	for _, pid := range members {
+		if births[pid] == "" {
+			continue
 		}
-		if _, err := os.Stat(st.Cgroup); !errors.Is(err, os.ErrNotExist) {
-			if err != nil {
-				return err
-			}
-			var fs memoryFS = osMemoryFS{}
-			if len(memoryFiles) > 0 {
-				fs = memoryFiles[0]
-			}
-			if err := (&memoryAttempt{fs: fs, path: st.Cgroup}).cleanup(clock); err != nil {
-				return err
-			}
+		birth, err := processBirth(pid)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
 		}
+		if err != nil {
+			return false, err
+		}
+		owned = owned || birth == births[pid]
+	}
+	if len(members) != 0 && !owned {
+		return false, errors.New("attempt process group identity unconfirmed; release pending")
+	}
+	return owned, nil
+}
+
+func cleanupAttemptGroups(st workerState, clock Clock, memoryFiles ...memoryFS) error {
+	memory, err := recoveredAttemptMemory(st, memoryFiles...)
+	if err != nil {
+		return err
+	}
+	if err := memory.cleanup(clock); err != nil {
+		return err
 	}
 	for group, births := range st.Groups {
 		adoptGroupCustody(group, births)
-		members, err := inspectWorkerGroup(group, clock)
+		owned, err := ownedRecoveryGroup(group, births, clock)
 		if err != nil {
 			return err
-		}
-		owned := false
-		for _, pid := range members {
-			if births[pid] == "" {
-				continue
-			}
-			birth, err := processBirth(pid)
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			if err != nil {
-				return err
-			}
-			owned = owned || birth == births[pid]
-		}
-		if len(members) != 0 && !owned {
-			return errors.New("attempt process group identity unconfirmed; release pending")
 		}
 		if owned {
 			if err := signalWorkerGroup(group, syscall.SIGKILL); err != nil {
@@ -1105,107 +1117,56 @@ func syncCheckpointDirectory(dir string, filesystem func(*os.File) (bool, error)
 	return syncFile(f)
 }
 
+func recoveredAttemptMemory(st workerState, files ...memoryFS) (*memoryAttempt, error) {
+	if st.Cgroup != "" && filepath.Base(st.Cgroup) != "attempt-"+st.Identity {
+		return nil, errors.New("mismatched attempt cgroup custody")
+	}
+	return recoveredMemory(st.Cgroup, files...)
+}
+
 // Recovery authenticates every surviving group before sending any signal. A
 // persisted deadline prevents worker restarts from renewing or resending TERM.
 func gracefulRecoveredGroups(st *workerState, clock Clock, persist func() error, memoryFiles ...memoryFS) error {
-	var memory *memoryAttempt
-	if st.Cgroup != "" {
-		if filepath.Base(st.Cgroup) != "attempt-"+st.Identity {
-			return errors.New("mismatched attempt cgroup custody")
-		}
-		if _, err := os.Stat(st.Cgroup); err == nil {
-			var fs memoryFS = osMemoryFS{}
-			if len(memoryFiles) > 0 {
-				fs = memoryFiles[0]
-			}
-			memory = &memoryAttempt{fs: fs, path: st.Cgroup}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
+	memory, err := recoveredAttemptMemory(*st, memoryFiles...)
+	if err != nil {
+		return err
 	}
+	groups := make(map[int]bool, len(st.Groups))
 	for group, births := range st.Groups {
-		members, err := inspectWorkerGroup(group, clock)
-		if err != nil {
+		if _, err := ownedRecoveryGroup(group, births, clock); err != nil {
 			return err
 		}
-		owned := len(members) == 0
-		for _, pid := range members {
-			if births[pid] == "" {
-				continue
-			}
-			birth, err := processBirth(pid)
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			if err != nil {
-				return err
-			}
-			owned = owned || birth == births[pid]
-		}
-		if !owned {
-			return errors.New("attempt process group identity unconfirmed; release pending")
-		}
+		groups[group] = true
 	}
-	first := st.StopAt == nil
-	if first {
-		deadline := clock.Now().Add(acceleratorStopGrace(st.StopGrace))
-		st.StopAt = &deadline
-		if err := persist(); err != nil {
-			return err
-		}
-	}
-	// TERM is idempotent. A crash after deadline persistence but before signal
-	// dispatch must not let cancellation recovery skip helper TERM entirely.
-	if first || st.UserCancel {
-		groups := map[int]bool{}
-		for group := range st.Groups {
-			groups[group] = true
-			if err := signalWorkerGroup(group, syscall.SIGTERM); err != nil {
-				return err
-			}
-		}
-		if err := memory.termOutsideGroups(groups); err != nil {
-			return err
-		}
-	}
-	tick := time.NewTicker(10 * time.Millisecond)
-	defer tick.Stop()
-	for clock.Now().Before(*st.StopAt) {
-		alive, err := memory.populated()
-		if err != nil {
-			return err
-		}
-		for group := range st.Groups {
-			members, err := workerGroupMembers(group)
-			if err != nil {
-				return err
-			}
-			alive = alive || len(members) > 0
-		}
-		if !alive {
-			return nil
-		}
-		<-tick.C
-	}
-	return nil
+	// Replaying TERM after a durable cancel is safe and covers a crash between
+	// saving the helper deadline and delivering the first signal.
+	return recoverGroupGrace(clock, groups, memory, memory.populated, &st.StopAt, st.StopGrace, persist, st.UserCancel)
 }
 
 func gracefulRecoveredGroup(group int, clock Clock, deadline **time.Time, grace time.Duration, persist func() error, memories ...*memoryAttempt) error {
-	var memory *memoryAttempt
-	if len(memories) > 0 {
-		memory = memories[0]
-	}
 	groups := map[int]bool{}
 	if group > 0 {
 		groups[group] = true
 	}
-	if *deadline == nil {
+	var memory *memoryAttempt
+	if len(memories) > 0 {
+		memory = memories[0]
+	}
+	outside := func() (bool, error) { return memory.outsideGroups(groups, false) }
+	return recoverGroupGrace(clock, groups, memory, outside, deadline, grace, persist, false)
+}
+
+func recoverGroupGrace(clock Clock, groups map[int]bool, memory *memoryAttempt, memoryAlive func() (bool, error), deadline **time.Time, grace time.Duration, persist func() error, repeatTERM bool) error {
+	first := *deadline == nil
+	if first {
 		at := clock.Now().Add(acceleratorStopGrace(grace))
 		*deadline = &at
 		if err := persist(); err != nil {
 			return err
 		}
-		if group > 0 {
+	}
+	if first || repeatTERM {
+		for group := range groups {
 			if err := signalWorkerGroup(group, syscall.SIGTERM); err != nil {
 				return err
 			}
@@ -1217,19 +1178,18 @@ func gracefulRecoveredGroup(group int, clock Clock, deadline **time.Time, grace 
 	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
 	for clock.Now().Before(**deadline) {
-		var members []int
-		if group > 0 {
-			var err error
-			members, err = workerGroupMembers(group)
-			if err != nil {
-				return err
-			}
-		}
-		outside, err := memory.outsideGroups(groups, false)
+		alive, err := memoryAlive()
 		if err != nil {
 			return err
 		}
-		if len(members) == 0 && !outside {
+		for group := range groups {
+			members, err := workerGroupMembers(group)
+			if err != nil {
+				return err
+			}
+			alive = alive || len(members) > 0
+		}
+		if !alive {
 			return nil
 		}
 		<-tick.C

@@ -307,7 +307,7 @@ func TestAttemptReleasedResultSurvivesLostPublicationReply(t *testing.T) {
 	}
 	r := result(j, true)
 	r.Error = ""
-	store.state.Result, store.state.Log = &r, "saved.log"
+	store.state.Log = "saved.log"
 	if err := os.WriteFile(filepath.Join(store.dir, store.state.Log), []byte("finished\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -316,11 +316,21 @@ func TestAttemptReleasedResultSurvivesLostPublicationReply(t *testing.T) {
 	}
 	var failUpload atomic.Bool
 	failUpload.Store(true)
+	replayEntered, unblockReplay := make(chan struct{}), make(chan struct{})
+	var enteredOnce sync.Once
 	lostReply := make(chan struct{})
 	var loseOnce sync.Once
 	w.Client.HTTP = &http.Client{Transport: fetchTransport(func(req *http.Request) (*http.Response, error) {
 		if strings.HasPrefix(req.URL.Path, "/api/files/uploads") && failUpload.Load() {
-			return nil, syscall.EACCES
+			return nil, &os.PathError{Op: "write", Path: "private-upload-secret", Err: syscall.EACCES}
+		}
+		if req.URL.Path == "/api/workers/log" {
+			enteredOnce.Do(func() { close(replayEntered) })
+			select {
+			case <-unblockReplay:
+			case <-req.Context().Done():
+				return nil, req.Context().Err()
+			}
 		}
 		var submitted Result
 		if req.URL.Path == "/api/workers/complete" {
@@ -344,13 +354,48 @@ func TestAttemptReleasedResultSurvivesLostPublicationReply(t *testing.T) {
 		return resp, err
 	})}
 	ctx, cancel := context.WithCancel(t.Context())
-	first := &attemptSupervisor{store: store, job: *j, worker: w, connected: true, publication: &publicationProgress{}, done: make(chan struct{}), wake: make(chan struct{}, 1)}
+	execution := &process{job: *j, done: make(chan workerFinish, 1)}
+	var exitOnce sync.Once
+	exit := func() { exitOnce.Do(func() { execution.done <- workerFinish{result: r} }) }
+	first := &attemptSupervisor{store: store, job: *j, worker: w, recovering: execution, connected: true, publication: &publicationProgress{}, done: make(chan struct{}), wake: make(chan struct{}, 1)}
 	go first.run(ctx)
-	defer func() { cancel(); <-first.done }()
+	defer func() { exit(); cancel(); <-first.done }()
+	submitVerificationWait(t, "replay request", replayEntered)
+	if storedTestJob(t, q, j.ID).ReleaseConfirmed {
+		t.Fatal("replay did not prove the process exited")
+	}
+	exit()
+	await(t, func() bool {
+		got := storedTestJob(t, q, j.ID)
+		return got.ReleaseConfirmed && got.State == "running" && len(got.OutputRefs) == 0
+	})
+	close(unblockReplay)
 	await(t, func() bool {
 		got := storedTestJob(t, q, j.ID)
 		return got.ReleaseConfirmed && got.State == "running" && got.ExecutionCause != nil && got.ExecutionCause.Finalization != nil
 	})
+	staleUpdate := r
+	staleUpdate.Attempt++
+	staleUpdate.ReleaseOnly = true
+	staleUpdate.ExecutionCause = &RuntimeCause{Finalization: &FinalizationDetail{Step: "output_reservation"}}
+	if err := c.Call(ctx, "POST", "/api/workers/complete", staleUpdate, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.GetJob(ctx, j.ID)
+	if err != nil || got.Attempt != j.Attempt || got.ExecutionCause == nil || got.ExecutionCause.Finalization == nil {
+		t.Fatalf("finalization proof missing after stale release: %+v %v", got, err)
+	}
+	detail := got.ExecutionCause.Finalization
+	if detail.Step != "output_upload" || detail.Output != "output" || detail.CommandExitCode == nil || *detail.CommandExitCode != 0 || !strings.Contains(got.Reason, "output_upload") {
+		t.Fatalf("pending upload lost its outcome: %+v", got)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil || strings.Contains(string(encoded), "private-upload-secret") {
+		t.Fatal("private transport detail escaped", err)
+	}
+	if data, err := os.ReadFile(output); err != nil || string(data) != "released result" {
+		t.Fatal("failed upload lost local bytes", err)
+	}
 	failUpload.Store(false)
 	await(t, func() bool {
 		clock.Advance(100 * time.Millisecond)
@@ -395,6 +440,10 @@ func TestAttemptReleasedResultSurvivesLostPublicationReply(t *testing.T) {
 		t.Fatal("publication acknowledgement did not converge")
 	}
 	checkAccepted()
+	logs, err := q.Logs(j.ID, 0)
+	if err != nil || len(logs) != 1 || logs[0].Text != "finished\n" {
+		t.Fatalf("release overtook log delivery: %v %v", logs, err)
+	}
 }
 
 // Ordinary commands record delivered stop intent separately. Both their

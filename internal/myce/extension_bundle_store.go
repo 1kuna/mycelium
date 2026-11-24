@@ -290,7 +290,7 @@ func (q *Queue) hydrateReply(reply *Reply, requestContexts ...context.Context) e
 			// An older response might already have reached the worker. Preserve
 			// custody until exact release acknowledgement, using ordinary stops.
 			q.stop(j, "assignment files unavailable")
-			a := AttemptDirective{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Stop: true, Kill: expired(j.StopAt, q.clock.Now()), GraceSeconds: j.StopAt.Sub(q.clock.Now()).Seconds(), PriorityStop: priorityStop(j), UserCancel: cancelled(j)}
+			a := q.attemptStopDirective(j)
 			for i := range reply.Attempts {
 				if reply.Attempts[i].ID == a.ID && reply.Attempts[i].Attempt == a.Attempt && reply.Attempts[i].Session == a.Session {
 					reply.Attempts[i] = a

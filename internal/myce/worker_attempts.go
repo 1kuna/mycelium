@@ -39,6 +39,7 @@ type attemptSupervisor struct {
 	wake        chan struct{}
 	done        chan struct{}
 	recovering  *process
+	startupHold bool               // A recovered attempt without a live detached owner.
 	detached    bool               // Immutable for recovered actors; new actors publish under mu.
 	custodian   *attemptCustodian  // Published under mu; owns immutable snapshots.
 	preparing   context.CancelFunc // Stops preparation, never abandons a started process.
@@ -88,7 +89,7 @@ func (a *attemptSupervisor) snapshot() (AttemptReport, Machine, bool, error) {
 	return r, diagnostics, a.finished, a.err
 }
 
-func (w Worker) sampleHeartbeatMemory(ctx context.Context, m *Machine, jobs []Job, reports []AttemptReport, actors map[attemptKey]*attemptSupervisor) {
+func (w Worker) sampleHeartbeatMemory(ctx context.Context, m *Machine, reports []AttemptReport, actors map[attemptKey]*attemptSupervisor) {
 	for i := range reports {
 		// Inventory probes can outlast the original report while the actor
 		// keeps sampling. Read its latest exact-attempt memory snapshot, with
@@ -161,6 +162,13 @@ func (a *attemptSupervisor) authorizeYieldStop(ctx context.Context, w Worker) (b
 }
 func (a *attemptSupervisor) run(ctx context.Context) {
 	defer close(a.done)
+	finished, err := a.supervise(ctx)
+	a.mu.Lock()
+	a.finished, a.err = finished, err
+	a.mu.Unlock()
+}
+
+func (a *attemptSupervisor) supervise(ctx context.Context) (finished bool, runErr error) {
 	a.mu.Lock()
 	initial := a.worker
 	a.mu.Unlock()
@@ -214,11 +222,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				case <-wake.C:
 				}
 			}
-			if f.err != nil {
-				a.mu.Lock()
-				a.err = errors.Join(a.err, f.err)
-				a.mu.Unlock()
-			}
+			runErr = errors.Join(runErr, f.err)
 		}
 	}()
 	tick := time.NewTicker(min(initial.Interval, 100*time.Millisecond))
@@ -230,11 +234,11 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		case <-tick.C:
 		}
 	}
-	finish := func(err error) { a.mu.Lock(); a.err, a.finished = err, true; a.mu.Unlock() }
 	var publicationPace ClientPace
 	var publicationRetryAt time.Time
 	var preparationRetryAt time.Time
-	var releaseSent, launchRefusalLogged bool
+	var releaseSent, releaseProbeDone, launchRefusalLogged bool
+	var logReplay workerLogReplay
 	recoveryProgress := a.recovering != nil
 	for ctx.Err() == nil {
 		a.mu.Lock()
@@ -242,6 +246,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		a.mu.Unlock()
 		w.Client.Clock = w.Clock
 		w.Client = w.Client.WithProgressWatch()
+		w.Client.publication = a.publication
 		now := w.Clock.Now()
 		if p != nil {
 			if p.custodian != nil {
@@ -258,28 +263,24 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				w.control.remove(p.job)
 				p = nil
 				if f.err != nil {
-					finish(fmt.Errorf("persist command result: %w", f.err))
-					return
+					return true, fmt.Errorf("persist command result: %w", f.err)
 				}
 				if !record.ownsResult(&f.result) {
-					finish(errors.New("mismatched command result; custody retained"))
-					return
+					return true, errors.New("mismatched command result; custody retained")
 				}
 				if s.state.OperatorStopped {
 					f.result = operatorOutcome(f.result, true)
 				}
 				f.result, f.err = applyWorkerWallTime(s.dir, a.job, f.result)
 				if f.err != nil {
-					finish(f.err)
-					return
+					return true, f.err
 				}
 				s.state.Result = &f.result
 				if !f.result.ReleasePending {
 					s.state.PID = 0
 				}
 				if err := s.save(); err != nil {
-					finish(err)
-					return
+					return true, err
 				}
 			default:
 			}
@@ -288,8 +289,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		// finished actor until a worker restart. Reuse recovery's exact process
 		// identity checks; only confirmed cleanup can clear pending release.
 		if s.state.Result != nil && !record.ownsResult(s.state.Result) {
-			finish(errors.New("mismatched saved worker result; custody retained"))
-			return
+			return true, errors.New("mismatched saved worker result; custody retained")
 		}
 		if p == nil && s.state.Result != nil && s.state.Result.ReleasePending && !s.extensionFiles.inFlight() {
 			var fs memoryFS = osMemoryFS{}
@@ -298,12 +298,10 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			}
 			if s.cleanupOrphan(w.Clock, fs) == nil {
 				if err := s.recordLocalRelease(record); err != nil {
-					finish(err)
-					return
+					return true, err
 				}
 				if err := s.save(); err != nil {
-					finish(err)
-					return
+					return true, err
 				}
 			}
 		}
@@ -312,25 +310,21 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			// loss. An unstarted assignment must also remain replayable.
 			connected = false
 			if p == nil && s.state.Result == nil && s.state.Custodian == "" {
-				s.state.InputWriterPending = s.extensionFiles.inFlight() || s.nasPrepare.inFlight()
+				s.state.InputWriterPending = s.inputWriterInFlight()
 				cause := s.startFailureAt(a.job, launchRefused, context.Canceled, now)
 				result := startFailureOutcome(Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, ReleasePending: s.state.InputWriterPending, Error: "worker service stopping before command started"}, cause)
 				s.state.Result = &result
 				if err := s.save(); err != nil {
-					finish(err)
-					return
+					return true, err
 				}
 			}
 		}
 		if connected {
 			if p == nil && s.state.Result == nil {
+				var err error
 				if d.Stop && s.state.Custodian == "" {
-					cause := s.startFailureAt(a.job, launchRefused, errAssignmentWithdrawn, now)
-					r := startFailureOutcome(Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Error: cause.Error()}, cause)
-					r = withStopProvenance(r, d.PriorityStop)
-					s.state.Result = &r
+					err = s.startFailureAt(a.job, launchRefused, errAssignmentWithdrawn, now)
 				} else if s.state.Custodian != "" || !d.Hold && !admissionBlocked && !now.Before(preparationRetryAt) {
-					var err error
 					if err = persistUnadoptedCustodianStop(s, a.job, d, now); err == nil {
 						p, err = w.startAssignedAttempt(prepareCtx, s, a.job)
 					} else {
@@ -341,7 +335,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 						a.detached = true
 						a.mu.Unlock()
 					}
-					if err != nil && !s.nasPrepare.inFlight() && !s.extensionFiles.inFlight() {
+					if err != nil && !s.inputWriterInFlight() {
 						// Finished staging/restore failures must not re-walk NAS at
 						// actor speed. Pending copies still get consumed promptly;
 						// Failed NAS discovery uses the idle probe interval; this
@@ -361,28 +355,23 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					if p == nil && d.Stop && s.state.Custodian == "" && !errors.Is(err, errWorkerReleasePending) {
 						err = s.startFailureAt(a.job, launchRefused, errAssignmentWithdrawn, now)
 					}
-					if err != nil && !errors.Is(err, errWorkerCheckpoint) && !errors.Is(err, errWorkerUnavailable) {
-						if initial.serviceStop != nil && initial.serviceStop.Err() != nil && errors.Is(err, context.Canceled) {
-							// Cancellation of staging/launch belongs to installed
-							// shutdown, not a payload failure. Preserve exact helper
-							// and detached-writer custody until cleanup is confirmed.
-							err = s.startFailureAt(a.job, launchRefused, err, now)
-							if s.extensionFiles.inFlight() || s.nasPrepare.inFlight() {
-								s.state.InputWriterPending = true
-								err = errors.Join(err, errWorkerReleasePending)
-							}
-						}
-						r := startFailureOutcome(Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}, err)
-						if s.nasPrepare.inFlight() {
-							s.state.InputWriterPending, r.ReleasePending = true, true
-						}
-						r = withStopProvenance(r, d.PriorityStop)
-						s.state.Result = &r
+				}
+				if err != nil && !errors.Is(err, errWorkerCheckpoint) && !errors.Is(err, errWorkerUnavailable) {
+					if initial.serviceStop != nil && initial.serviceStop.Err() != nil && errors.Is(err, context.Canceled) {
+						// Cancellation of staging/launch belongs to installed
+						// shutdown, not a payload failure. Preserve exact helper
+						// and detached-writer custody until cleanup is confirmed.
+						err = s.startFailureAt(a.job, launchRefused, err, now)
 					}
+					r := startFailureOutcome(Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}, err)
+					if s.inputWriterInFlight() {
+						s.state.InputWriterPending, r.ReleasePending = true, true
+					}
+					r = withStopProvenance(r, d.PriorityStop)
+					s.state.Result = &r
 				}
 				if err := s.save(); err != nil {
-					finish(err)
-					return
+					return true, err
 				}
 			}
 			if p != nil && d.Stop && !d.UserCancel && scarceYieldStop(d.PriorityStop) && s.state.PriorityStop == nil {
@@ -392,15 +381,13 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			}
 			if p != nil && d.Stop {
 				if err := p.recordPriorityStop(s, d.PriorityStop); err != nil {
-					finish(err)
-					return
+					return true, err
 				}
 				p.stopDirective(now, time.Duration(max(0, d.GraceSeconds)*float64(time.Second)), d.Kill, d.UserCancel)
 			}
 		}
 		if err := enforceWorkerWallTime(s.dir, a.job, p, now); err != nil {
-			finish(err)
-			return
+			return true, err
 		}
 		if s.state.Result != nil {
 			if !launchRefusalLogged {
@@ -409,11 +396,10 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					launchRefusalLogged = true
 				}
 			}
-			if p == nil && s.nasPrepare.inFlight() {
+			if p == nil && s.inputWriterInFlight() && !s.state.InputWriterPending {
 				s.state.InputWriterPending, s.state.Result.ReleasePending = true, true
 				if err := s.save(); err != nil {
-					finish(err)
-					return
+					return true, err
 				}
 			}
 			if s.state.Result.ExecutionEvidence == nil {
@@ -421,8 +407,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			}
 			r, err := applyWorkerWallTime(s.dir, a.job, *s.state.Result)
 			if err != nil {
-				finish(err)
-				return
+				return true, err
 			}
 			s.state.Result = &r
 		}
@@ -499,7 +484,6 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		a.mu.Unlock()
 		if releasedLocally {
 			a.releaseAdmission()
-			w.Client.publication = a.publication
 		}
 		if a.job.Spec.ephemeral() && canRelease && !s.extensionFiles.inFlight() {
 			done, err := w.finishEphemeralAttempt(ioCtx, s, connected)
@@ -508,8 +492,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			}
 			if done {
 				a.releaseAdmission()
-				finish(nil)
-				return
+				return true, nil
 			}
 			wait()
 			continue
@@ -522,7 +505,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			var resultAcknowledged, discarded bool
 			if stopWithoutPublication {
 				if canRelease {
-					err = w.ackAttemptRelease(ioCtx, *s.state.Result)
+					err = w.ackAttemptRelease(ioCtx, *s.state.Result, false)
 					discarded = err == nil
 				} else if resultReady {
 					err = w.Client.Call(ioCtx, "POST", "/api/workers/complete", s.state.Result, nil)
@@ -532,19 +515,25 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					}
 				}
 			} else {
-				err = w.replayWithProgress(ioCtx, s, func() {
-					// Successful chunks are progress, not the cost of a later
-					// failed request. Otherwise a long replay makes one lost
-					// acknowledgement impose another replay-length idle pause.
+				replaying := logReplay.pending != nil
+				var progress bool
+				progress, err = logReplay.advance(ioCtx, w, s, a.wake)
+				if progress {
 					publicationStarted = w.Clock.Now()
 					publicationPace = ClientPace{}
-				})
+				}
+				if canRelease && replaying && !progress && !releaseSent && !releaseProbeDone && errors.Is(err, errLogReplayPending) {
+					// Acknowledge exact cleanup independently of the blocked log
+					// request. The ordinary completion path still owns the result.
+					releaseSent = w.ackAttemptRelease(ioCtx, *s.state.Result, true) == nil
+					releaseProbeDone = true
+				}
 			}
 			if err == nil && (!stopWithoutPublication || !resultReady) && (a.job.storedFileResults() || resultReady && scarceYieldStop(s.state.Result.PriorityStop)) {
 				w.storageObserver = s.storageObserver
 				if resultReady {
 					if canRelease && !releaseSent {
-						err = w.ackAttemptRelease(ioCtx, *s.state.Result)
+						err = w.ackAttemptRelease(ioCtx, *s.state.Result, false)
 						releaseSent = err == nil
 						if stale(err) {
 							err = nil
@@ -572,6 +561,9 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 						})
 						err = e
 						if e == nil {
+							if !record.ownsResult(&finished) {
+								return true, errors.New("mismatched publication result; custody retained")
+							}
 							s.fileError = ""
 							s.state.Result = &finished
 							err = s.save()
@@ -580,12 +572,11 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 							if record.ownsResult(&finished) && finished.ExecutionCause != nil && finished.ExecutionCause.Finalization != nil {
 								s.state.Result = &finished
 								if saveErr := s.save(); saveErr != nil {
-									finish(saveErr)
-									return
+									return true, saveErr
 								}
 								if record.readyToRelease(&finished, false) {
 									// Best effort: the saved cause replays with the next release.
-									_ = w.ackAttemptRelease(ioCtx, finished)
+									_ = w.ackAttemptRelease(ioCtx, finished, false)
 								}
 							}
 						}
@@ -604,10 +595,6 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				}
 			}
 			if !stopWithoutPublication && err == nil && resultReady {
-				if !record.ownsResult(s.state.Result) {
-					finish(errors.New("mismatched publication result; custody retained"))
-					return
-				}
 				err = w.Client.Call(ioCtx, "POST", "/api/workers/complete", s.state.Result, nil)
 				resultAcknowledged = err == nil
 			}
@@ -616,7 +603,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				// A stale log/publication reply says nothing about release. The
 				// queue may have lost this copy while staging was still running.
 				// Retain its only sender until an exact release is acknowledged.
-				err = w.ackAttemptRelease(ioCtx, *s.state.Result)
+				err = w.ackAttemptRelease(ioCtx, *s.state.Result, false)
 				discarded = err == nil
 			}
 			if canRelease && (resultAcknowledged || discarded) {
@@ -652,25 +639,22 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				// Failed launches may still carry intent or a previously reaped PID.
 				s.state.PID, s.state.LaunchPending = 0, false
 				if e := s.save(); e != nil {
-					finish(e)
-					return
+					return true, e
 				}
 				if custodian != "" {
 					cleanupCustodian(custodianDir(s.dir), custodian, *result)
 				}
 				if preparation != "" {
 					if e := os.Remove(filepath.Join(s.dir, preparation)); e != nil && !errors.Is(e, os.ErrNotExist) {
-						finish(e)
-						return
+						return true, e
 					}
 				}
-				finish(nil)
-				return
+				return true, nil
 			}
 			if stale(err) && p != nil {
 				p.stop(now, 0, true)
 			}
-			if err != nil && !errors.Is(err, errCheckpointIOPending) {
+			if err != nil && !errors.Is(err, errCheckpointIOPending) && !errors.Is(err, errLogReplayPending) {
 				a.publication.failed(err)
 				publicationPace.Observe(w.Clock.Now().Sub(publicationStarted), false)
 				publicationRetryAt = w.Clock.Now().Add(publicationPace.ServiceDelay(err, w.Client.Jitter))
@@ -678,14 +662,25 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		}
 		wait()
 	}
+	return false, nil
 }
 
-func (w Worker) ackAttemptRelease(ctx context.Context, r Result) error {
+func (w Worker) ackAttemptRelease(ctx context.Context, r Result, publishing bool) error {
 	if r.ReleasePending {
 		return errWorkerReleasePending
 	}
 	r.ReleaseOnly, r.OutputRefs = true, nil
+	if publishing {
+		return w.Client.Call(ctx, "POST", "/api/workers/complete", workerCompletion{Result: r, PublicationPending: true}, nil)
+	}
 	return w.Client.Call(ctx, "POST", "/api/workers/complete", r, nil)
+}
+
+// This envelope is only used on the wire. Older queues reject the additive
+// field, so the caller falls back to the ordinary publication order.
+type workerCompletion struct {
+	Result
+	PublicationPending bool `json:"publication_pending,omitempty"`
 }
 
 func (w Worker) currentAttemptHostMemory(p *process, j Job, cgroup string) *CurrentHostMemory {
@@ -1009,14 +1004,11 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	// Publication custody keeps the old session, but only unreleased startup
 	// executions fence admission. New assignments must not re-arm recovery.
 	recoverySession := len(stores) > 0
-	recovered := map[attemptKey]bool{}
-	for _, s := range stores {
-		recovered[jobKey(*s.state.Job)] = true
-	}
 	recovering := recoverySession
-	spawn := func(s *workerStore, p *process) {
+	spawn := func(s *workerStore, p *process, startup bool) {
 		j := *s.state.Job
 		a := &attemptSupervisor{store: s, job: j, worker: w, report: AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session}, wake: make(chan struct{}, 1), done: make(chan struct{}), recovering: p, publication: &publicationProgress{}}
+		a.startupHold = startup && (p == nil || p.custodian == nil)
 		a.admissionMu, a.worker.stopAdmission = &rt.admissionMu, a.stopAdmission
 		if p != nil && p.custodian != nil {
 			a.detached, a.custodian = true, p.custodian
@@ -1044,10 +1036,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 		if err != nil {
 			return err
 		}
-		if p != nil && p.custodian != nil {
-			delete(recovered, jobKey(*s.state.Job))
-		}
-		spawn(s, p)
+		spawn(s, p, true)
 	}
 	tick := time.NewTicker(min(w.Interval, 100*time.Millisecond))
 	defer tick.Stop()
@@ -1126,7 +1115,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			// Actors retain unacknowledged results for startup replay. Waiting
 			// for remote leave/model plans here kept an idle worker's inventory
 			// alive until systemd's SIGKILL, even with no local custody.
-			if len(jobs) == 0 || custodiansDetached(actors) {
+			if custodiansDetached(actors) {
 				return nil
 			}
 			select {
@@ -1136,13 +1125,10 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			continue
 		}
 		recovering = false
-		for key := range recovered {
-			if a := actors[key]; a != nil && !a.admissionReleased.Load() {
-				recovering = true
-			}
+		for _, a := range actors {
+			recovering = recovering || a.startupHold && !a.admissionReleased.Load()
 		}
 		if recoverySession && len(actors) == 0 {
-			recovering = false
 			recoverySession = false
 			if w.sharedInputs != nil {
 				w.sharedInputs.refreshCapacity()
@@ -1369,7 +1355,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			rt.mu.Unlock()
 
 			// Refresh memory together after inventory, then age through the reads.
-			w.sampleHeartbeatMemory(ctx, &m, jobs, reports, actors)
+			w.sampleHeartbeatMemory(ctx, &m, reports, actors)
 			if m.MemoryObservation != nil {
 				m.MemoryObservation.Quiescent = !recovering && !leaving && len(actors) == 0 && modelReportsQuiescent(modelReports) && environments.cores() == 0 && !hostPreparing(&m)
 			}
@@ -1510,8 +1496,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 						if e = s.save(); e != nil {
 							return e
 						}
-						spawn(s, nil)
-						jobs = append(jobs, j)
+						spawn(s, nil, false)
 						if e = persistIndex(); e != nil {
 							return e
 						}

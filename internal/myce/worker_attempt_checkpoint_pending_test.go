@@ -22,6 +22,7 @@ func TestAttemptPendingCheckpointScanDoesNotFenceHost(t *testing.T) {
 		}
 		defer root.close()
 		j := recoveryJob(t, []string{"true"})
+		j.Machine, j.Session = w.Machine.ID, root.state.Session
 		s, err := newAttemptStore(root, j)
 		if err != nil {
 			t.Fatal(err)
@@ -43,14 +44,18 @@ func TestAttemptPendingCheckpointScanDoesNotFenceHost(t *testing.T) {
 			t.Fatal("scan did not exceed heartbeat wait", err)
 		}
 		ctx, cancel := context.WithCancel(context.Background())
-		s.state.Result = &Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
+		r := result(&j, true)
+		s.state.Result = &r
 		a := &attemptSupervisor{store: s, job: j, worker: w, wake: make(chan struct{}, 1), done: make(chan struct{})}
 		go a.run(ctx)
 		defer func() { cancel(); <-a.done }()
 		// Keep the finalizing actor disconnected; no command or queue is
 		// needed to reproduce this diagnostic.
 		for {
-			report, diagnostic, _, _ := a.snapshot()
+			report, diagnostic, finished, err := a.snapshot()
+			if finished || err != nil {
+				t.Fatalf("actor exited during pending checkpoint observation: %v", err)
+			}
 			if report.ID == j.ID {
 				if diagnostic.CheckpointUnavailable {
 					t.Fatal("pending attempt scan marked the entire host unavailable")
@@ -62,7 +67,10 @@ func TestAttemptPendingCheckpointScanDoesNotFenceHost(t *testing.T) {
 		// A completed scan error remains a real availability failure.
 		release <- errors.New("checkpoint read failed")
 		for {
-			_, diagnostic, _, _ := a.snapshot()
+			_, diagnostic, finished, err := a.snapshot()
+			if finished || err != nil {
+				t.Fatalf("actor exited before reporting the scan failure: %v", err)
+			}
 			if diagnostic.CheckpointUnavailable {
 				break
 			}

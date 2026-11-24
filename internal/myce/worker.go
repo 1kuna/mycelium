@@ -1318,13 +1318,8 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	return p, nil
 }
 
-func (w Worker) replay(ctx context.Context, s *workerStore) error {
-	return w.replayWithProgress(ctx, s, nil)
-}
-
-// Keep the existing durable 16 KiB offset records; amortize their round trips
-// and SQLite commits over sixteen records. Worst-case JSON escaping is 6x the
-// 256 KiB text plus small record envelopes. Memory admission may split a batch.
+// Retain 16 KiB durable offsets while batching their transport. A retry
+// splits a retained batch only at its original record boundaries.
 const logReplayRecordSize = 16 << 10
 const logReplayBatchRecords = 16
 const logReplayBatchSize = logReplayRecordSize * logReplayBatchRecords
@@ -1333,74 +1328,130 @@ type logBatch struct {
 	Chunks []LogChunk `json:"chunks"`
 }
 
-func (w Worker) replayWithProgress(ctx context.Context, s *workerStore, acknowledged func()) error {
+var errLogReplayPending = errors.New("log replay pending")
+
+type logReplayAck struct {
+	bytes, records int
+	err            error
+}
+
+type workerLogReplay struct {
+	pending <-chan logReplayAck
+	records int
+}
+
+func (w Worker) replay(ctx context.Context, s *workerStore) error {
+	var replay workerLogReplay
+	_, err := replay.advance(ctx, w, s, nil)
+	return err
+}
+
+// Only the caller changes or saves the producer's cursor. With a wake channel,
+// a blocked request cannot delay observing exit or processing stop and release.
+func (l *workerLogReplay) advance(ctx context.Context, w Worker, s *workerStore, wake chan<- struct{}) (progress bool, err error) {
+	if l.records == 0 {
+		l.records = logReplayBatchRecords
+	}
+	for {
+		if l.pending != nil {
+			select {
+			case ack := <-l.pending:
+				l.pending, l.records = nil, ack.records
+				if ack.err != nil {
+					return progress, ack.err
+				}
+				s.state.Offset += int64(ack.bytes)
+				s.state.Pending -= ack.bytes
+				if err := s.save(); err != nil {
+					return progress, err
+				}
+				progress = true
+			default:
+				return progress, errLogReplayPending
+			}
+		}
+		batch, err := s.nextLogBatch(w.Machine.ID)
+		if err != nil || len(batch.Chunks) == 0 {
+			return progress, err
+		}
+		pending := make(chan logReplayAck, 1)
+		l.pending = pending
+		records := l.records
+		if wake == nil {
+			pending <- w.sendLogBatch(ctx, batch, records)
+			continue
+		}
+		go func() {
+			pending <- w.sendLogBatch(ctx, batch, records)
+			select {
+			case wake <- struct{}{}:
+			default:
+			}
+		}()
+		return progress, errLogReplayPending
+	}
+}
+
+func (s *workerStore) nextLogBatch(machine string) (logBatch, error) {
+	var batch logBatch
 	if s.state.Log == "" {
-		return nil
+		return batch, nil
 	}
 	f, err := os.Open(filepath.Join(s.dir, s.state.Log))
 	if err != nil {
-		return err
+		return batch, err
 	}
 	defer f.Close()
 	info, err := f.Stat()
-	if err != nil {
-		return err
+	if err != nil || s.state.Offset >= info.Size() {
+		return batch, err
 	}
-	// Persist each chunk boundary before upload, so lost acknowledgements
-	// replay identical bytes at the same offset even if the output grows.
-	limit := info.Size()
-	buf := make([]byte, logReplayBatchSize)
-	batchRecords, legacy := logReplayBatchRecords, false
-	for s.state.Offset < limit {
-		n := s.state.Pending
-		if n == 0 {
-			n = int(min(int64(len(buf)), limit-s.state.Offset))
-			s.state.Pending = n
-			if err = s.save(); err != nil {
-				return err
-			}
+	n := s.state.Pending
+	if n == 0 {
+		n = int(min(logReplayBatchSize, info.Size()-s.state.Offset))
+		s.state.Pending = n
+		if err := s.save(); err != nil {
+			return batch, err
 		}
-		// A retained pending batch may already be committed. Split only at its
-		// original record boundaries, never coalesce with newly appended bytes.
-		n = min(n, batchRecords*logReplayRecordSize)
-		if _, err = f.ReadAt(buf[:n], s.state.Offset); err != nil {
-			return err
-		}
-		r := Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}}
-		batch := logBatch{}
-		for at := 0; at < n; at += logReplayRecordSize {
-			end := min(n, at+logReplayRecordSize)
-			batch.Chunks = append(batch.Chunks, LogChunk{Result: r, Offset: s.state.Offset + int64(at) + 1, Text: string(buf[at:end])})
-		}
-		if legacy || n <= logReplayRecordSize {
-			err = w.Client.Call(ctx, "POST", "/api/workers/log", batch.Chunks[0], nil)
+	}
+	if n < 0 || n > logReplayBatchSize {
+		return batch, errors.New("invalid saved log replay size")
+	}
+	buf := make([]byte, n)
+	if _, err := f.ReadAt(buf, s.state.Offset); err != nil {
+		return batch, err
+	}
+	r := Result{Machine: machine, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}}
+	for at := 0; at < n; at += logReplayRecordSize {
+		end := min(n, at+logReplayRecordSize)
+		batch.Chunks = append(batch.Chunks, LogChunk{Result: r, Offset: s.state.Offset + int64(at) + 1, Text: string(buf[at:end])})
+	}
+	return batch, nil
+}
+
+func (w Worker) sendLogBatch(ctx context.Context, batch logBatch, records int) logReplayAck {
+	for {
+		chunks := batch.Chunks[:min(records, len(batch.Chunks))]
+		var err error
+		if len(chunks) == 1 {
+			err = w.Client.Call(ctx, "POST", "/api/workers/log", chunks[0], nil)
 		} else {
-			err = w.Client.Call(ctx, "POST", "/api/workers/log-batch", batch, nil)
-		}
-		var api *HTTPError
-		if errors.As(err, &api) {
-			if !legacy && api.Status == 404 {
-				legacy, batchRecords = true, 1 // Adjacent queue has no batch route.
-				continue
+			err = w.Client.Call(ctx, "POST", "/api/workers/log-batch", logBatch{Chunks: chunks}, nil)
+			var api *HTTPError
+			if errors.As(err, &api) {
+				switch {
+				case api.Status == 404:
+					records = 1 // The adjacent queue has no batch route.
+					continue
+				case api.Status == 413 && api.Code == "request_too_large":
+					records = max(1, len(chunks)/2)
+					continue
+				}
 			}
-			if api.Status == 413 && api.Code == "request_too_large" && len(batch.Chunks) > 1 {
-				batchRecords = max(1, len(batch.Chunks)/2)
-				continue // Same records/offsets, even after a previous lost ACK.
-			}
 		}
-		if err != nil {
-			return err
-		}
-		s.state.Offset += int64(n)
-		s.state.Pending -= n
-		if err = s.save(); err != nil {
-			return err
-		}
-		if acknowledged != nil {
-			acknowledged()
-		}
+		end := chunks[len(chunks)-1]
+		return logReplayAck{bytes: int(end.Offset-chunks[0].Offset) + len(end.Text), records: records, err: err}
 	}
-	return nil
 }
 func (w Worker) Run(stop context.Context) error {
 	if w.Custodian != "" {

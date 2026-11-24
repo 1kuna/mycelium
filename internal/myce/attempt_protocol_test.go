@@ -359,6 +359,13 @@ func TestAttemptProtocolExactNativeReleaseAck(t *testing.T) {
 			}
 			r := result(j, false)
 			r.ReleaseOnly = true
+			before := storedTestJob(t, q, j.ID)
+			if err := q.releaseForPublication(t.Context(), r); !errors.Is(err, ErrStale) {
+				t.Fatalf("publication-only acknowledgement overrode a stop: %v", err)
+			}
+			if got := storedTestJob(t, q, j.ID); got.State != before.State || got.ReleaseConfirmed {
+				t.Fatalf("publication-only acknowledgement altered custody: state=%s want=%s released=%t", got.State, before.State, got.ReleaseConfirmed)
+			}
 			if err = q.Complete(r); err != nil {
 				t.Fatal(err)
 			}

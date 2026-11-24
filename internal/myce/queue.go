@@ -1445,8 +1445,6 @@ func (q *Queue) maintain() {
 	q.maintainExtensionQualifications()
 	now := q.clock.Now()
 	for _, j := range q.liveJobs() {
-		if j.State == "queued" {
-		}
 		if j.State == "running" || j.State == "stopping" {
 			q.retainRelease(j)
 		}
@@ -1498,7 +1496,7 @@ func (q *Queue) maintain() {
 						}
 						for i := range j.Copies {
 							if j.Copies[i].Attempt == j.Attempt {
-								j.Copies[i].Recoverable = j.State == "running"
+								j.Copies[i].Recoverable = j.State == "running" && !j.Copies[i].ReleaseConfirmed
 							}
 						}
 						if j.State == "running" {
@@ -1701,7 +1699,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			// Only a known recoverable execution can open a resume decision.
 			// Ordinary or already rejected stale heartbeats do no share I/O.
 			for _, copy := range j.Copies {
-				if copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == c.Machine.ID && copy.Session == c.Machine.Session {
+				if copy.Recoverable && !copy.ReleaseConfirmed && copy.Attempt == report.Attempt && copy.Machine == c.Machine.ID && copy.Session == c.Machine.Session {
 					progress.path = attemptCheckpoint(*j)
 					event = fmt.Sprintf("recovery:%d:%d:%s:%d", j.Attempt, report.Attempt, report.Session, report.Progress)
 					break
@@ -2072,7 +2070,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 						q.retry(j, j.Reason)
 						continue
 					}
-					reply.Attempts = append(reply.Attempts, AttemptDirective{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Stop: true, Kill: expired(j.StopAt, q.clock.Now()), GraceSeconds: j.StopAt.Sub(q.clock.Now()).Seconds(), PriorityStop: priorityStop(j), UserCancel: cancelled(j)})
+					reply.Attempts = append(reply.Attempts, q.attemptStopDirective(j))
 				}
 			}
 			return nil
@@ -2087,7 +2085,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 				if j.State == "stopping" {
 					// Omission only finishes a keyed stop after an exact release ack.
 					if !j.ReleaseConfirmed {
-						reply.Attempts = []AttemptDirective{{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Stop: true, Kill: expired(j.StopAt, q.clock.Now()), GraceSeconds: j.StopAt.Sub(q.clock.Now()).Seconds(), PriorityStop: priorityStop(j), UserCancel: cancelled(j)}}
+						reply.Attempts = []AttemptDirective{q.attemptStopDirective(j)}
 						return nil
 					}
 					if cancelled(j) {
@@ -2154,6 +2152,38 @@ func (q *Queue) current(r Result) (*Job, error) {
 }
 func (q *Queue) Complete(r Result) error {
 	return q.CompleteContext(context.Background(), r)
+}
+
+// A released command can still owe delivery. This request settles capacity
+// only. A stop already ordered by the queue keeps its ordinary terminal path.
+func (q *Queue) releaseForPublication(ctx context.Context, r Result) error {
+	if !r.ReleaseOnly || r.ReleasePending {
+		return errors.New("publication release must confirm exact cleanup")
+	}
+	return q.updateRequest(ctx, func() error {
+		j, err := q.current(r)
+		if err != nil || j.State != "running" || j.Spec.ephemeral() {
+			return ErrStale
+		}
+		q.recordConfirmedRelease(r)
+		q.recordAttemptMemory(j, r)
+		q.retainAttemptResources(j, r.Resources)
+		return nil
+	}, nil)
+}
+
+func (q *Queue) recordConfirmedRelease(r Result) (*Job, bool) {
+	settled := q.settleRelease(r, true)
+	j := q.touchJob(r.ID)
+	if j == nil || !attemptRecordFor(j, j.Machine).ownsResult(&r) {
+		return nil, settled
+	}
+	if r.Forced {
+		j.LastStopOutcome = "forced"
+	} else if j.LastStopOutcome == "release pending" {
+		j.LastStopOutcome = "released"
+	}
+	return j, settled
 }
 
 // CompleteContext keeps bulk output verification outside the queue transaction.
@@ -2339,8 +2369,7 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 		if r.ReleasePending {
 			return errors.New("release-only acknowledgement cannot be pending")
 		}
-		q.settleRelease(r, true)
-		if j := q.touchJob(r.ID); j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+		if j, _ := q.recordConfirmedRelease(r); j != nil {
 			if cause := safeAttemptRuntimeCause(j, r.ExecutionCause); !terminal(j.State) && cause != nil && cause.Finalization != nil {
 				j.ExecutionCause = cause
 				j.CleanupCause = safeAttemptRuntimeCause(j, r.CleanupCause)
@@ -2348,12 +2377,6 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 			}
 			q.recordAttemptMemory(j, r)
 			q.retainAttemptResources(j, r.Resources)
-			j.ReleaseConfirmed = true
-			if r.Forced {
-				j.LastStopOutcome = "forced"
-			} else if j.LastStopOutcome == "release pending" {
-				j.LastStopOutcome = "released"
-			}
 			// Native kill-time reports can carry cleanup only. Advance the
 			// recorded stop on this exact acknowledgement, rather than using
 			// an omitted attempt in the next heartbeat as release evidence.
@@ -2381,29 +2404,19 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 	settled := false
 	pendingTracked := false
 	if !r.ReleasePending {
-		settled = q.settleRelease(r, true)
-		if j := q.touchJob(r.ID); j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
-			j.ReleaseConfirmed = true
-			if j.LastStopOutcome == "release pending" {
-				j.LastStopOutcome = "released"
-			}
-		}
-	}
-	if r.ReleasePending {
+		_, settled = q.recordConfirmedRelease(r)
+	} else {
 		if j := q.touchJob(r.ID); j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
 			q.retainRelease(j)
+			if r.Forced {
+				j.LastStopOutcome = "forced; release pending"
+			}
 		}
 		key := releaseKey(HostRelease{Job: r.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt})
 		if hold, ok := q.s.HostReleases[key]; ok {
 			pendingTracked = true
 			hold.CleanupFailed = true
 			q.s.HostReleases[key] = hold
-		}
-	}
-	if j := q.touchJob(r.ID); j != nil && r.Forced && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
-		j.LastStopOutcome = "forced"
-		if r.ReleasePending {
-			j.LastStopOutcome += "; release pending"
 		}
 	}
 	if settled || pendingTracked {
@@ -3183,30 +3196,35 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 	}
 	if j != nil && (j.State == "queued" || j.State == "running" || j.State == "stopping") && !cancelled(j) && (j.State == "queued" || j.Attempt != report.Attempt || j.Machine != m.ID || j.Session != m.Session) {
 		for _, copy := range j.Copies {
-			canRecover := q.machineRecoveryFits(m, j, copy)
-			if canRecover && q.placementPolicyAllowed(j, allocationMachine(m, copy.AllocatedDevices), false) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && ((!j.Spec.localFirst() && (m.CheckpointUnavailable || !q.checkpointsAvailable())) || progress.err != nil || (progress.path != "" && progress.path != attemptCheckpoint(*j))) {
-				reply.Hold = true
-				return reply
+			if !copy.Recoverable || copy.ReleaseConfirmed || copy.Attempt != report.Attempt || copy.Machine != m.ID || copy.Session != report.Session || !q.machineRecoveryFits(m, j, copy) || !q.placementPolicyAllowed(j, allocationMachine(m, copy.AllocatedDevices), false) {
+				continue
 			}
-			if canRecover && q.placementPolicyAllowed(j, allocationMachine(m, copy.AllocatedDevices), false) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && (j.State == "queued" || (j.Spec.Resumable && report.Progress > max(0, progress.durable))) {
-				for i := range j.Copies {
-					j.Copies[i].Recoverable = false
+			if j.State != "queued" {
+				if !j.Spec.localFirst() && (m.CheckpointUnavailable || !q.checkpointsAvailable()) || progress.err != nil || progress.path != "" && progress.path != attemptCheckpoint(*j) {
+					reply.Hold = true
+					return reply
 				}
-				j.StagingTimings = nil
-				j.LaunchTimings = nil
-				j.InputsStagedAt = nil // Recovery adopts a different execution.
-				j.Attempt = copy.Attempt
-				j.Machine = m.ID
-				j.Session = m.Session
-				j.AllocatedDevices = slices.Clone(copy.AllocatedDevices)
-				j.restorePoolCustody(copy)
-				j.State = "running"
-				j.ReleaseConfirmed = false
-				j.StopAt = nil
-				j.Reason = ""
-				j.Progress = report.Progress
-				break
+				if !j.Spec.Resumable || report.Progress <= max(0, progress.durable) {
+					continue
+				}
 			}
+			for i := range j.Copies {
+				j.Copies[i].Recoverable = false
+			}
+			j.StagingTimings = nil
+			j.LaunchTimings = nil
+			j.InputsStagedAt = nil // Recovery adopts a different execution.
+			j.Attempt = copy.Attempt
+			j.Machine = m.ID
+			j.Session = m.Session
+			j.AllocatedDevices = slices.Clone(copy.AllocatedDevices)
+			j.restorePoolCustody(copy)
+			j.State = "running"
+			j.ReleaseConfirmed = false
+			j.StopAt = nil
+			j.Reason = ""
+			j.Progress = report.Progress
+			break
 		}
 	}
 	if j != nil {
@@ -3244,13 +3262,14 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 	q.retainApplicationProgress(j, report, m)
 	q.retainLiveness(j, report)
 	if j.State == "stopping" {
-		reply.PriorityStop = priorityStop(j)
-		reply.UserCancel = cancelled(j)
-		reply.Stop = true
-		reply.Kill = expired(j.StopAt, q.clock.Now())
-		reply.GraceSeconds = j.StopAt.Sub(q.clock.Now()).Seconds()
+		return q.attemptStopDirective(j)
 	}
 	return reply
+}
+
+func (q *Queue) attemptStopDirective(j *Job) AttemptDirective {
+	now := q.clock.Now()
+	return AttemptDirective{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Stop: true, Kill: expired(j.StopAt, now), GraceSeconds: j.StopAt.Sub(now).Seconds(), PriorityStop: priorityStop(j), UserCancel: cancelled(j)}
 }
 
 // An attempt that is no longer its job's live execution (the job finished or
