@@ -63,7 +63,9 @@ func TestFinalizationUploadBusyQueue(t *testing.T) {
 	})}
 	w := Worker{Client: c, Clock: clock}
 	w.Client.publication = &publicationProgress{}
-	if err := w.ackAttemptRelease(context.Background(), result(j, true)); err != nil {
+	released := result(j, true)
+	released.ReleaseOnly, released.OutputRefs = true, nil
+	if err := w.Client.Call(context.Background(), "POST", "/api/workers/complete", released, nil); err != nil {
 		t.Fatal(err)
 	}
 	type outcome struct {
