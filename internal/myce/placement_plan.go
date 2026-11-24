@@ -20,6 +20,8 @@ type placementPlan struct {
 	cost             int
 	preparations     bool
 	preparationCores int
+	poolReclaim      bool
+	poolRecheck      bool
 }
 
 func (p *placementPlan) cheaper(other *placementPlan) bool {
@@ -259,7 +261,11 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool, 
 	// Mandatory/local releases already provide RAM as well as GPU memory;
 	// the host-wide plan credits them once before asking for more.
 	projected := q.cpuAfterReleases(m, p.jobs, p.slots, p.preparationCores)
-	if jobClass(j.Spec) == "production" {
+	var pooledReclaim *placementPlan
+	unifiedHost := m.UnifiedMemory || m.CapabilityProfile != nil && m.CapabilityProfile.MemoryLayout == "unified"
+	if batch && pooledMemory(j) && workerUsesMemoryPools(m) && unifiedHost && jobClass(j.Spec) == "production" {
+		pooledReclaim = p
+	} else if jobClass(j.Spec) == "production" {
 		projected.hostReservationDebtGB -= q.unifiedReleaseDebtCredit(m, p.jobs)
 	}
 	releasedJobs, releasedSlots := map[*Job]bool{}, map[*ModelSlot]bool{}
@@ -269,7 +275,7 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool, 
 	for _, s := range p.slots {
 		releasedSlots[s] = true
 	}
-	hostJobs, hostSlots, ok := q.hostReleasesWithVictims(&projected, need, host, j.Spec, releasedJobs, releasedSlots, p.preparationCores > 0, func(v *Job) bool { return q.batchPreemptible(v, j.Spec) || p.yields[v.ID] != nil })
+	hostJobs, hostSlots, ok := q.hostReleasesWithVictims(&projected, need, host, j.Spec, releasedJobs, releasedSlots, p.preparationCores > 0, pooledReclaim, func(v *Job) bool { return q.batchPreemptible(v, j.Spec) || p.yields[v.ID] != nil })
 	if !ok {
 		return nil
 	}

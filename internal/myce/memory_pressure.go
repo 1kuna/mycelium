@@ -60,13 +60,13 @@ func (q *Queue) memoryPoolShort(m *Machine, r poolAvailability) bool {
 }
 
 func (q *Queue) yieldPooledMemory() {
-	short := map[string]*Machine{}
+	short := map[string]bool{}
 	for id, r := range q.poolAvailability {
 		if m := q.s.Machines[id]; m != nil && r.at.After(q.poolLastStop[hostID(m)]) && q.memoryPoolShort(m, r) {
-			short[hostID(m)] = m
+			short[hostID(m)] = true
 		}
 	}
-	for host, machine := range short {
+	for host := range short {
 		var victim *Job
 		production, pending := 0, false
 		for _, j := range q.liveJobs() {
@@ -87,7 +87,7 @@ func (q *Queue) yieldPooledMemory() {
 			if cancelled(j) || plannedStop(j) || j.StartedAt == nil {
 				continue
 			}
-			if victim == nil || q.poolPressureBefore(j, victim, machine) {
+			if victim == nil || q.poolPressureBefore(j, victim) {
 				victim = j
 			}
 		}
@@ -102,12 +102,16 @@ func (q *Queue) yieldPooledMemory() {
 	}
 }
 
-func (q *Queue) poolPressureBefore(a, b *Job, m *Machine) bool {
+func (q *Queue) poolPressureBefore(a, b *Job) bool {
 	if tier := q.comparePriority(a.Spec, b.Spec); tier != 0 {
 		return tier > 0
 	}
 	overage := func(j *Job) float64 {
 		sample := q.hostMemorySamples[j.Machine][jobKey(*j)]
+		m := q.planningAllocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
+		if m == nil || !sample.freshAt(q.clock.Now()) {
+			return 0
+		}
 		return max(0, pooledFootprint(sample, unifiedCUDA(m))-hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB))
 	}
 	if av, bv := overage(a), overage(b); av != bv {
@@ -116,10 +120,13 @@ func (q *Queue) poolPressureBefore(a, b *Job, m *Machine) bool {
 	if a.Spec.Resumable != b.Spec.Resumable {
 		return a.Spec.Resumable
 	}
-	if a.StartedAt.Equal(*b.StartedAt) {
-		return a.ID < b.ID
+	if a.StartedAt != nil && b.StartedAt != nil && !a.StartedAt.Equal(*b.StartedAt) {
+		return a.StartedAt.After(*b.StartedAt)
 	}
-	return a.StartedAt.After(*b.StartedAt)
+	if (a.StartedAt == nil) != (b.StartedAt == nil) {
+		return a.StartedAt == nil
+	}
+	return a.ID < b.ID
 }
 
 func (q *Queue) stopForPoolPressure(victim *Job, demand string) {

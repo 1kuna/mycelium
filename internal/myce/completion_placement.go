@@ -69,6 +69,9 @@ func (q *Queue) completionBetter(j *Job, a, b *Machine, stableTie ...bool) (bett
 // Keep existing useful-victim selection and disruption costs authoritative.
 // Only otherwise equivalent release plans use completion as their tie-break.
 func (q *Queue) completionPlanBetter(j *Job, p, other *placementPlan, scans ...*placementScan) bool {
+	if other != nil && p.poolRecheck != other.poolRecheck {
+		return !p.poolRecheck
+	}
 	if other != nil && p.stops == other.stops && p.cost == other.cost {
 		// Preserve call affinity before host value: use an existing engine
 		// instead of leaving a call waiting for a cheaper host to load it.
