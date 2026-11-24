@@ -2785,18 +2785,9 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 			continue
 		}
 		if compact {
-			copy := *stored
-			copy.Spec.Class = jobClass(copy.Spec)
-			copy.PriorityPolicy = q.priorityMatch(copy.Spec)
-			if copy.State == "queued" && copy.Reason == "" {
-				copy.Reason = "waiting; use myce status JOB_ID for placement diagnostics"
-			}
-			q.projectRuntime(&copy)
-			copy = statusJobValue(&copy)
-			copy.Timing = nil
-			out.Jobs = append(out.Jobs, &copy)
+			out.Jobs = append(out.Jobs, q.projectCompactJob(stored))
 		} else {
-			j := q.projectJob(stored, order, reasons, forStatus)
+			j := q.projectJob(stored, order[stored.ID], reasons[stored.ID], forStatus)
 			j.wait = holds[stored.ID]
 			out.Jobs = append(out.Jobs, j)
 		}
@@ -2812,46 +2803,12 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 			q.projectRuntime(&copy)
 			out.Jobs = append(out.Jobs, &copy)
 		} else {
-			out.Jobs = append(out.Jobs, q.projectCall(c, order, reasons))
+			out.Jobs = append(out.Jobs, q.projectCall(c, order[c.ID], reasons[c.ID]))
 		}
 	}
 	finishJobWork()
 	for _, m := range q.s.Machines {
-		copy := cloneMachine(m)
-		copy.Suspect = q.workerSuspect(m, q.clock.Now())
-		copy.ExternalMemory = q.externalMemoryStatus(hostID(m))
-		if copy.IOPressure != nil {
-			copy.IOPressure.AgeSeconds += max(0, q.clock.Now().Sub(copy.IOPressure.ReceivedAt).Seconds())
-		}
-		for i, v := range copy.DiskVolumes {
-			copy.DiskVolumes[i] = q.currentDiskVolume(v, m.DiskReceivedAt)
-		}
-		copy.RecoveryNeedsAttention = m.Recovering && m.RecoveringSince != nil && q.clock.Now().Sub(*m.RecoveringSince) > recoveryAttentionDelay
-		q.machineDeviceStatus(&copy, m)
-		copy.AdmissionReason = q.machineLimitReason(m)
-		copy.Disabled = ""
-		copy.LastResort = q.s.HostMaintenance[hostID(m)].LastResort
-		if q.maintenanceBlocked(hostID(m)) {
-			copy.Disabled = "planned host maintenance"
-		}
-		if a := machineAvailability(m); a != nil && !a.Available {
-			copy.AdmissionReason = a.Reason
-		}
-		copy.ReservedMemoryGB, copy.MemoryUsedGB = 0, 0 // Used is total − free.
-		for _, slot := range q.s.ModelSlots {
-			if slot.Machine == m.ID && slotReservesMemory(slot) && q.slotPinned(slot) {
-				model, _ := q.model(slot.Model)
-				copy.ReservedMemoryGB += model.MemoryGB
-			}
-		}
-		copy.ModelCopySeconds = map[string]float64{}
-		if !compact {
-			for _, model := range q.models.Models {
-				if q.modelFitsMachine(model, m) {
-					copy.ModelCopySeconds[model.Name] = q.loadSeconds(model.Name, m)
-				}
-			}
-		}
+		copy := q.projectStatusMachine(m, compact)
 		out.Machines = append(out.Machines, &copy)
 	}
 	finishJobWork = projectionSample.measure()
@@ -2867,47 +2824,9 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 	return out
 }
 
-func (q *Queue) projectJob(stored *Job, order map[string]int, reasons map[string]string, forStatus bool) *Job {
-	value := *stored
-	j := &value
-	if stored.Delivery != nil {
-		d := *stored.Delivery
-		value.Delivery = &d
-	}
-	if j.State == "queued" {
-		j.Reason = reasons[j.ID]
-		if j.RequeuedByOperator {
-			j.Reason = "requeued: disabled by operator; " + j.Reason
-		}
-	}
-	if q.startupPending(j) || q.startCapacityPaused(j) {
-		j.Reason = q.startStatusReason(j)
-	}
-	if j.State == "running" && j.ReleaseConfirmed {
-		j.Reason = "execution released; awaiting final result publication"
-		if cause := safeRuntimeCause(j.ExecutionCause); cause != nil && cause.Finalization != nil {
-			j.Reason += "; " + cause.String()
-		}
-	}
-	// Eligibility/reasons need the full diagnostic inputs until redaction.
-	copy := *j
-	if !forStatus {
-		copy = cloneJob(j)
-		q.projectCancellation(&copy, stored)
-	}
-	copy.Spec.Class = jobClass(copy.Spec)
-	copy.PriorityPolicy = q.priorityMatch(copy.Spec)
-	copy.QueueOrder = order[j.ID]
-	q.projectRuntime(&copy)
-	if terminal(j.State) && j.LastStopOutcome == "release pending" {
-		copy.Reason += "; release pending"
-	}
-	return &copy
-}
-
-func (q *Queue) projectCall(c *ModelCall, order map[string]int, reasons map[string]string) *Job {
+func (q *Queue) projectCall(c *ModelCall, order int, reason string) *Job {
 	call := q.callView(c)
-	call.QueueOrder = order[c.ID]
+	call.QueueOrder = order
 	switch {
 	case c.Error != "":
 		call.State, call.Reason = "failed", c.Error
@@ -2917,7 +2836,7 @@ func (q *Queue) projectCall(c *ModelCall, order map[string]int, reasons map[stri
 		h := q.waitHold(call)
 		call.Reason, call.wait = h.Detail, h
 		// The queue-order explanation refines only the call's generic waits.
-		if reason := reasons[c.ID]; reason != "" && (h.Kind == "no_eligible_host" || h.Kind == "model_engine" || h.Kind == "waiting_for_worker") {
+		if reason != "" && (h.Kind == "no_eligible_host" || h.Kind == "model_engine" || h.Kind == "waiting_for_worker") {
 			call.Reason = reason
 		}
 	}
@@ -2987,47 +2906,6 @@ func (q *Queue) callWait(c *ModelCall) *Hold {
 		return newHold("model_engine", reason)
 	}
 	return newHold("waiting_for_worker", "waiting for model "+c.Model+" on an eligible worker")
-}
-
-func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
-	projectCommandStarted(j)
-	q.projectEfficiency(j)
-	j.YieldPlan = q.yieldProjection(j)
-	// The code is the scheduler's wait kind, never a reading of its text.
-	if j.State == "queued" && j.wait != nil {
-		if code := holdDiagnosticCodes[j.wait.Kind]; code != "" {
-			j.DiagnosticCode = code
-		}
-	}
-	if j.State != "queued" && j.ExecutionCause != nil && j.ExecutionCause.Class == cpuIsolationUnavailable {
-		j.DiagnosticCode = cpuIsolationUnavailable
-	}
-	if forStatus {
-		q.statusEligibility(j)
-		q.projectVariantEligibility(j)
-		if j.State == "queued" {
-			j.Reason = q.statusWaitingReason(j)
-		}
-		if j.State == "paused" {
-			j.Hold = pauseHold(j)
-		}
-		lock := j.EnvironmentLock
-		// Status projection owns a fully detached view. Redaction can reuse
-		// its fields without another JSON round-trip for every job.
-		*j = statusJobValue(j)
-		if !jobReply && j.Cancellation != nil {
-			ack := *j.Cancellation
-			ack.SubmissionKey = nil
-			j.Cancellation = &ack
-		}
-		if jobReply {
-			if lock != nil {
-				copied := *lock
-				copied.SHA256 = maps.Clone(lock.SHA256)
-				j.EnvironmentLock = &copied
-			}
-		}
-	}
 }
 
 func (q *Queue) AppendLog(l LogChunk, requestContexts ...context.Context) error {

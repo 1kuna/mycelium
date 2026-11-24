@@ -333,9 +333,36 @@ func TestStatusCompactOutstandingCustody(t *testing.T) {
 		t.Fatal("compact capture lost outstanding attempt/preparation custody")
 	}
 	got := readStatusOptions(t, q, "")
+	matched := false
 	for _, current := range got.Jobs {
-		if current.ID == j.ID && (len(current.Copies) != 1 || current.WallTime == nil || current.WallTime.RemainingSeconds == nil || *current.WallTime.RemainingSeconds != 59 || current.Progress != 7 || current.Spec.Logs != "keep" || current.Spec.AuthoringOrigin != OriginAdapter) {
+		if current.ID != j.ID {
+			continue
+		}
+		matched = true
+		if len(current.Copies) != 1 || current.WallTime == nil || current.WallTime.RemainingSeconds == nil || *current.WallTime.RemainingSeconds != 59 || current.Progress != 7 || current.Spec.Logs != "keep" || current.Spec.AuthoringOrigin != OriginAdapter {
 			t.Fatal("current lifecycle facts omitted or stale")
 		}
+	}
+	if !matched {
+		t.Fatal("current job omitted")
+	}
+	if err := q.update(func() error {
+		q.touchJob(j.ID).ReleaseConfirmed = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clock := q.clock.(*fakeClock)
+	clock.Advance(q.statusCache.expires.Sub(clock.Now()))
+	const waiting = "execution released; awaiting final result publication"
+	for _, path := range []string{"/api/jobs/" + j.ID, "/api/status", "/api/status?detail=full", "/?sections=jobs,machines"} {
+		body := statusViewResponse(t, q, path)
+		if !strings.Contains(body, waiting) {
+			t.Fatalf("%s omitted pending result publication", path)
+		}
+	}
+	compact := NewCompactStatus(readStatusOptions(t, q, ""))
+	if !strings.Contains(strings.Join(compact.Lines(false), "\n"), waiting) {
+		t.Fatal("compact text omitted pending result publication")
 	}
 }

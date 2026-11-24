@@ -11,11 +11,15 @@ import (
 func statusViewResponse(t *testing.T, q *Queue, path string) string {
 	t.Helper()
 	r := httptest.NewRequest("GET", path, nil)
-	r.SetBasicAuth("myce", "status-test")
+	if strings.HasPrefix(path, "/api/jobs/") {
+		r.Header.Set("Authorization", "Bearer status-test")
+	} else {
+		r.SetBasicAuth("myce", "status-test")
+	}
 	w := httptest.NewRecorder()
 	API{Queue: q, Token: "status-test"}.Handler().ServeHTTP(w, r)
 	if w.Code != 200 {
-		t.Fatalf("status HTTP %d", w.Code)
+		t.Fatalf("%s: status HTTP %d: %s", path, w.Code, w.Body.String())
 	}
 	return w.Body.String()
 }

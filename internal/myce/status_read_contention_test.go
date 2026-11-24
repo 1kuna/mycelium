@@ -17,7 +17,7 @@ import (
 // and real SQLite check-ins. Queue decisions use a fixed injected clock, so the
 // test proves the mix completes without errors or interrupting production.
 func TestStatusReadCheckinContention(t *testing.T) {
-	statusReadCheckinContention(t)
+	statusReadCheckinContention(t, false)
 }
 
 // Latency acceptance for the same mix: -run '^$' -bench StatusReadCheckinContention
@@ -25,7 +25,7 @@ func TestStatusReadCheckinContention(t *testing.T) {
 // fleet load alone exceeded it in coverage runs on unchanged main.
 func BenchmarkStatusReadCheckinContention(b *testing.B) {
 	for range b.N {
-		p99 := statusReadCheckinContention(b)
+		p99 := contentionP99(statusReadCheckinContention(b, false)["checkin"])
 		b.ReportMetric(float64(p99.Microseconds())/1000, "checkin-p99-ms")
 		if p99 >= 500*time.Millisecond {
 			b.Errorf("check-in p99 %s exceeds half the 1s heartbeat interval", p99)
@@ -33,7 +33,28 @@ func BenchmarkStatusReadCheckinContention(b *testing.B) {
 	}
 }
 
-func statusReadCheckinContention(t testing.TB) time.Duration {
+// Use the same fixture to compare check-ins, submits and both status read sizes
+// on the same host and toolchain. This run adds a concurrent submitting client.
+func BenchmarkStatusReadControlContention(b *testing.B) {
+	for range b.N {
+		samples := statusReadCheckinContention(b, true)
+		for name, durations := range samples {
+			if len(durations) == 0 {
+				b.Errorf("no %s latency samples", name)
+				continue
+			}
+			b.ReportMetric(float64(contentionP99(durations).Microseconds())/1000, name+"-p99-ms")
+			b.ReportMetric(float64(len(durations)), name+"-samples")
+		}
+	}
+}
+
+func contentionP99(samples []time.Duration) time.Duration {
+	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+	return samples[(99*len(samples)+99)/100-1]
+}
+
+func statusReadCheckinContention(t testing.TB, measureSubmit bool) map[string][]time.Duration {
 	t.Helper()
 	q, clock := fixture(t)
 	m := machine("contact", "fake")
@@ -84,7 +105,8 @@ func statusReadCheckinContention(t testing.TB) time.Duration {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	const readers = 62
-	errors := make(chan error, readers+1)
+	errors := make(chan error, readers+2)
+	var status, compact, submits []time.Duration
 	var lockedReads atomic.Int64
 	ready := make(chan struct{}, readers)
 	for i := range readers {
@@ -92,10 +114,17 @@ func statusReadCheckinContention(t testing.TB) time.Duration {
 		go func(i int) {
 			defer wg.Done()
 			ready <- struct{}{}
-			for ctx.Err() == nil {
+			for sample := 0; ctx.Err() == nil; sample++ {
 				var err error
 				if i == 0 {
-					_, err = q.statusSnapshotOptions(&statusOptions{jobs: "recent", limit: 100})
+					start := time.Now()
+					if measureSubmit && sample%2 == 1 {
+						_, err = q.statusSnapshotOptions(&statusOptions{jobs: "active"})
+						compact = append(compact, time.Since(start))
+					} else {
+						_, err = q.statusSnapshotOptions(&statusOptions{jobs: "recent", limit: 100})
+						status = append(status, time.Since(start))
+					}
 				} else {
 					span := &requestSpan{}
 					_, err = q.jobSnapshot(fmt.Sprintf("queued-%04d", i), context.WithValue(context.Background(), requestSpanKey{}, span))
@@ -115,23 +144,38 @@ func statusReadCheckinContention(t testing.TB) time.Duration {
 	for range readers {
 		<-ready
 	}
-	latencies := make([]time.Duration, 100)
-	for i := range latencies {
+	var submitDone sync.WaitGroup
+	if measureSubmit {
+		submitDone.Go(func() {
+			for i := range 100 {
+				s := spec("experiment")
+				s.SubmissionKey = fmt.Sprintf("contention-submit-%d", i)
+				start := time.Now()
+				if _, err := q.Submit(s); err != nil {
+					errors <- err
+					return
+				}
+				submits = append(submits, time.Since(start))
+			}
+		})
+	}
+	checkins := make([]time.Duration, 0, 100)
+	for range 100 {
 		start := time.Now()
 		_, err := q.Checkin(contact)
-		latencies[i] = time.Since(start)
 		if err != nil {
 			errors <- err
 			break
 		}
+		checkins = append(checkins, time.Since(start))
 	}
+	submitDone.Wait()
 	cancel()
 	wg.Wait()
 	close(errors)
 	for err := range errors {
 		t.Error(err)
 	}
-	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
 	if got := q.s.Jobs[sentinel.ID]; got.State != "running" || got.Attempt != assignment.Attempt || got.Losses != 0 {
 		t.Error("observation load interrupted the production sentinel")
 	}
@@ -140,7 +184,9 @@ func statusReadCheckinContention(t testing.TB) time.Duration {
 	if n := lockedReads.Load(); n != 0 {
 		t.Errorf("%d job reads took a queue-mutex turn during check-in contention", n)
 	}
-	p99 := latencies[98]
-	t.Logf("100 check-ins with 62 concurrent observation readers: p99=%s max=%s", p99, latencies[99])
-	return p99
+	if len(checkins) > 0 {
+		p99 := contentionP99(checkins)
+		t.Logf("%d check-ins with 62 concurrent observation readers: p99=%s max=%s", len(checkins), p99, checkins[len(checkins)-1])
+	}
+	return map[string][]time.Duration{"checkin": checkins, "submit": submits, "status": status, "compact": compact}
 }

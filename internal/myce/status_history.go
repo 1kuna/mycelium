@@ -34,10 +34,7 @@ func (q *Queue) serveStatusHistory(w http.ResponseWriter, r *http.Request, optio
 		respond(w, nil, err)
 		return
 	}
-	v.memoryPlanning = newMemoryPlanningCache()
-	v.observationScan = v.placementScan()
-	v.observationScan.observationOwner = v
-	v.observationScan.memory = v.memoryPlanning
+	v.initStatusPlanning()
 	selection := v.observationSelection
 	order, reasons, holds := v.queueProjection()
 	type row struct {
@@ -158,18 +155,11 @@ func (q *Queue) serveStatusHistory(w http.ResponseWriter, r *http.Request, optio
 		if err = chargeProjectionValue(ctx, row.job); err != nil {
 			panic(http.ErrAbortHandler)
 		}
-		var j *Job
-		if row.call != nil {
-			j = v.projectCall(row.call, order, reasons)
-		} else {
-			stored := copyObservationValue(reflect.ValueOf(row.job)).Interface().(*Job)
-			if original := selection.custody.s.Jobs[stored.ID]; original != nil {
-				selection.custody.projectCancellation(stored, original)
-			}
-			j = v.projectJob(stored, order, reasons, true)
-			j.wait = holds[j.ID]
+		job := *row.job
+		if original := selection.custody.s.Jobs[job.ID]; row.call == nil && original != nil {
+			selection.custody.projectCancellation(&job, original)
 		}
-		v.projectJobDiagnostics(j, true, false)
+		j := v.projectStatusJob(&job, row.call, row.order, reasons[job.ID], holds[job.ID], false)
 		encoded, encodeErr := json.Marshal(j)
 		if encodeErr != nil {
 			panic(http.ErrAbortHandler)
