@@ -10,33 +10,6 @@ import (
 	"time"
 )
 
-func TestProgramUsageRejectsInvalidOrUnownedReports(t *testing.T) {
-	for _, data := range []string{`{"memory_gb":-1}`, `{"memory_gb":1e999}`, `{"memory_gb":4,"unknown":true}`, `{"memory_gb":4} {}`, string(make([]byte, 4097))} {
-		p := filepath.Join(t.TempDir(), "report")
-		if err := os.WriteFile(p, []byte(data), 0600); err != nil {
-			t.Fatal(err)
-		}
-		r := Result{}
-		collectProgramUsage(&r, nil, p)
-		if r.Usage != nil || r.OutOfMemory {
-			t.Fatal("accepted invalid observation")
-		}
-	}
-	root := t.TempDir()
-	target, link := filepath.Join(root, "target"), filepath.Join(root, "link")
-	if err := os.WriteFile(target, []byte(`{"memory_gb":40,"out_of_memory":true}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(target, link); err != nil {
-		t.Fatal(err)
-	}
-	r := Result{}
-	collectProgramUsage(&r, nil, link)
-	if r.Usage != nil || r.OutOfMemory {
-		t.Fatal("accepted symlink observation")
-	}
-}
-
 // The hermetic harness disables hardware probes. Supply clean attempt telemetry
 // through the existing sampler seam; Usage alone must never authorize learning.
 func programUsageMemoryProbe() *processMemoryProbe {

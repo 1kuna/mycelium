@@ -56,7 +56,7 @@ class ShardTests(unittest.TestCase):
         import re
         hints = {'core': {f'TestCore{i}': 10 for i in range(60)},
                  'cli': {'TestCLI1': 120, 'TestCLI2': 80, 'TestCLI3': 70, 'TestCLI4': 10}}
-        with patch.object(shards.Path, 'read_text', return_value=json.dumps({'packages': hints})), \
+        with patch.object(shards.Path, 'read_text', return_value=json.dumps(hints)), \
              patch.object(shards, 'native_roots', side_effect=lambda package: list(hints[package])):
             entries = shards.plan(['core\t.*', 'cli\t.*'], 4)
         loads = []
@@ -77,12 +77,9 @@ class ShardTests(unittest.TestCase):
         # Fresh history timing dominates one old, coarsely packed chunk. Keep
         # that root whole while providing enough smaller jobs to refill slots.
         names = ['TestQueueHistoryBurst'] + [f'TestShort{i}' for i in range(120)]
-        hints = dict(packages={'core': {name: 1 for name in names}},
-                     platform_packages={'darwin': {'core': {
-                         name: 84 if name == 'TestQueueHistoryBurst' else 10 for name in names}}})
+        hints = {'core': {name: 84 if name == 'TestQueueHistoryBurst' else 10 for name in names}}
         with patch.object(shards.Path, 'read_text', return_value=json.dumps(hints)), \
-             patch.object(shards, 'native_roots', return_value=names), \
-             patch.object(shards.sys, 'platform', 'darwin'):
+             patch.object(shards, 'native_roots', return_value=names):
             entries = shards.plan(['core\t.*'], 4)
         selected = Counter()
         loads = []
@@ -90,7 +87,7 @@ class ShardTests(unittest.TestCase):
             expression = entry.split('\t')[1]
             chosen = [name for name in names if re.fullmatch(expression, name)]
             selected.update(chosen)
-            loads.append(sum(hints['platform_packages']['darwin']['core'][name] for name in chosen))
+            loads.append(sum(hints['core'][name] for name in chosen))
             if 'TestQueueHistoryBurst' in chosen:
                 self.assertEqual(chosen, ['TestQueueHistoryBurst'])
         self.assertEqual(selected, Counter(names))

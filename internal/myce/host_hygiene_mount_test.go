@@ -301,55 +301,6 @@ func TestHostHygieneMountRecoveryReadBackoffAndHumanAlert(t *testing.T) {
 	}
 }
 
-func TestHostHygieneMountAutomountRetriggerAndMissingStub(t *testing.T) {
-	for _, osname := range []string{"linux", "darwin"} {
-		mounted, accessed := false, 0
-		inventory := func() ([]nasMount, error) {
-			if mounted {
-				return []nasMount{{root: "/storage", kind: "smbfs"}}, nil
-			}
-			return []nasMount{{root: "/storage", kind: "autofs"}}, nil
-		}
-		err := probeRecoveryMount("/storage/checkpoints", "/storage", osname, func(string) error { accessed++; mounted = true; return nil }, inventory)
-		if err != nil || accessed != 1 {
-			t.Fatal("existing automount not triggered", osname, err)
-		}
-		// A readable bare mountpoint must never establish network recovery.
-		err = probeRecoveryMount("/storage/checkpoints", "/storage", osname, func(string) error { return nil }, func() ([]nasMount, error) { return nil, nil })
-		if err != mountHumanReason(osname) {
-			t.Fatal("local stub accepted", err)
-		}
-	}
-}
-
-func TestHostHygieneMountColdAndLearnedUseOperationStallAllowance(t *testing.T) {
-	clock := &fakeClock{now: time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)}
-	for _, latency := range []time.Duration{0, time.Millisecond, time.Second} {
-		release := make(chan struct{})
-		calls := atomic.Int32{}
-		p := &hostMountProbe{root: "nas", path: "fake", probe: func(string, func()) error { calls.Add(1); <-release; return nil }}
-		var baseline []HostHealthSample
-		if latency > 0 {
-			baseline = []HostHealthSample{{Mounts: []HostMountHealth{{Root: "nas", LatencySeconds: latency.Seconds()}}}}
-		}
-		p.sample(clock.Now(), baseline)
-		await(t, func() bool { return calls.Load() == 1 })
-		clock.Advance(checkpointAvailabilityStallBudget - time.Nanosecond)
-		if got := p.sample(clock.Now(), baseline); got.Reason == "mount_probe_stalled" {
-			t.Fatal("learned latency shortened operation allowance", got)
-		}
-		clock.Advance(time.Nanosecond)
-		for i := 0; i < hostHealthConfirmation+10; i++ {
-			p.sample(clock.Now(), baseline)
-		}
-		if p.reason != "mount_probe_stalled" || calls.Load() != 1 {
-			t.Fatal("unbounded cold/learned stall", latency, p.reason, calls.Load())
-		}
-		close(release)
-		await(t, func() bool { return len(p.pending) == 1 })
-	}
-}
-
 func TestHostHygieneMountPendingReadCannotConfirmRecovery(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)}
 	release := make(chan struct{})

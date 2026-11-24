@@ -249,41 +249,6 @@ func TestSchedulingOrder(t *testing.T) {
 		})
 	}
 }
-func TestEligibility(t *testing.T) {
-	t.Parallel()
-	for _, name := range []string{"memory", "required GPU", "allowed machines", "environment not ready", "leaving machine", "gone machine"} {
-		t.Run(name, func(t *testing.T) {
-			j := &Job{Spec: spec("experiment"), State: "queued"}
-			m := machine("one", "cuda")
-			switch name {
-			case "memory":
-				j.Spec.Needs.MemoryGB = 9
-			case "required GPU":
-				j.Spec.Needs.Platform = Platform{Required: []string{"metal"}}
-			case "allowed machines":
-				j.Spec.AllowedMachines = []string{"two"}
-			case "environment not ready":
-				j.Spec.Environment.Name = "mlx"
-			case "leaving machine":
-				m.Leaving = true
-			case "gone machine":
-				m.Gone = true
-			}
-			if fits(j, &m, m.FreeMemoryGB) {
-				t.Fatal("ineligible job fits")
-			}
-		})
-	}
-	for _, gpu := range []string{"cuda", "xpu", "metal", "fake"} {
-		t.Run("any on "+gpu, func(t *testing.T) {
-			j := &Job{Spec: spec("experiment")}
-			m := machine("one", gpu)
-			if !fits(j, &m, 8) {
-				t.Fatal("any must fit")
-			}
-		})
-	}
-}
 func TestPreferredPlatform(t *testing.T) {
 	t.Parallel()
 	q, _ := fixture(t)

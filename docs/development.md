@@ -295,8 +295,8 @@ uncertain custody. Both-platform elapsed time measures their overlap, rather
 than adding the two leg walls. Concurrent wall improvement is measured in the
 release-batch full, not inferred from individual peak RSS.
 
-Full-gate chunk weights use platform-specific passed-root timings when available,
-with the generic hints and a default weight for new roots. The planner targets
+Full-gate chunk weights use the largest measured duration across platforms for
+roots taking at least two seconds, and 0.1 seconds for other roots. The planner targets
 eight refill waves, stopping at the longest root's measured duration: smaller
 chunks than that cannot shorten the indivisible root and add process startup
 cost. Whole root names remain anchored exactly once, including their subtests;
@@ -641,8 +641,7 @@ one pinned predecessor under [MY-42](DECISIONS.md#my-42). The r6.20 candidate
 pairs with r6.19 (`7f10215c8bcdcb2a97c7be45c7f1fd041ccd1bc3`).
 For an additional live patch predecessor, pass its exact commit and version to
 both `prepare` and `run` with `--previous SHA --old-version VERSION`. Advance `PREVIOUS`, `OLD_VERSION` and `VERSION` together for a
-release. `internal/myce/testdata/r6.10-queue.sql` and its generator still pin
-r6.10; they prove main opens an older database.
+release.
 `prepare` fetches that exact public source before the offline gate; local gate
 snapshots carry only that predecessor archive.
 

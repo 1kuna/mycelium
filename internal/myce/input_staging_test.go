@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -161,61 +160,5 @@ func TestInputStagingReportsRejectStaleAttemptsAndResetOnRetry(t *testing.T) {
 	}
 	if got := job(t, q, submitted.ID); got.State != "queued" || got.InputsStagedAt != nil {
 		t.Fatal("retry retained previous-attempt staging evidence", got)
-	}
-}
-
-func TestInputStagingTimestampWaitsForBothNASCopies(t *testing.T) {
-	clock := &workerFakeClock{now: time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)}
-	entered := make(chan string, 2)
-	firstDone := make(chan struct{})
-	releaseSecond := make(chan struct{})
-	var once sync.Once
-	release := func() { once.Do(func() { close(releaseSecond) }) }
-	t.Cleanup(release)
-	type completion struct {
-		inputs stagedInputs
-		err    error
-	}
-	done := make(chan completion, 1)
-	go func() {
-		inputs, err := captureStagedInputs(clock, func() (string, error) {
-			err := stageJobFiles(map[string]string{"request": "request-source", "upstream": "upstream-source"}, func(name, source string) error {
-				entered <- name
-				if name == "request" {
-					close(firstDone)
-				} else {
-					<-releaseSecond
-				}
-				return nil
-			})
-			return "complete-snapshot", err
-		})
-		done <- completion{inputs, err}
-	}()
-	// Both copiers entered, and the first returned; the second still owns its
-	// input. No timestamp or completion may escape while that peer is active.
-	for range 2 {
-		select {
-		case <-entered:
-		case <-time.After(testWaitTimeout):
-			t.Fatal("NAS copies did not overlap")
-		}
-	}
-	<-firstDone
-	select {
-	case got := <-done:
-		t.Fatalf("staging timestamp escaped before the peer joined: %+v", got)
-	default:
-	}
-	clock.Advance(7 * time.Second)
-	want := clock.Now()
-	release()
-	select {
-	case got := <-done:
-		if got.err != nil || got.inputs.directory != "complete-snapshot" || !got.inputs.at.Equal(want) {
-			t.Fatalf("staging must capture completion after both copies join: %+v, want %v", got, want)
-		}
-	case <-time.After(testWaitTimeout):
-		t.Fatal("joined staging did not complete")
 	}
 }

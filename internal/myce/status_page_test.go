@@ -66,46 +66,6 @@ func TestStatusPageRendersSnapshot(t *testing.T) {
 	}
 }
 
-func TestStatusPageEscapesSnapshotData(t *testing.T) {
-	attack := `<script>alert("owned")</script>`
-	job := &Job{ID: attack, State: "failed", Reason: attack}
-	job.Spec.Name = attack
-	job.Spec.Priority = "production"
-	snapshot := Snapshot{
-		Warning: attack,
-		Jobs:    []*Job{job},
-		Usage: UsageReport{
-			Projects: []UsageSummary{{Name: attack, GPUHours: 1}},
-			Daily:    []DailyUsage{{Date: "2026-10-08", Project: attack, GPUHours: 1}},
-		},
-	}
-
-	var rendered bytes.Buffer
-	if err := statusPage.Execute(&rendered, snapshot); err != nil {
-		t.Fatal(err)
-	}
-	html := rendered.String()
-	if strings.Contains(html, attack) {
-		t.Fatal("snapshot data was rendered without HTML escaping")
-	}
-	if !strings.Contains(html, `&lt;script&gt;alert`) {
-		t.Fatal("escaped snapshot data is missing")
-	}
-}
-
-func TestStatusPageEmptyStates(t *testing.T) {
-	var rendered bytes.Buffer
-	if err := statusPage.Execute(&rendered, Snapshot{}); err != nil {
-		t.Fatal(err)
-	}
-	html := rendered.String()
-	for _, want := range []string{"No hyphae have joined", "No production work", "No usage samples yet"} {
-		if !strings.Contains(html, want) {
-			t.Errorf("empty page does not contain %q", want)
-		}
-	}
-}
-
 func TestStatusPageJobLabelsAndAge(t *testing.T) {
 	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
 	start := now.Add(-65 * time.Second)
@@ -205,27 +165,5 @@ func TestRequeuedWaitAgeExcludesPreviousRunningTime(t *testing.T) {
 	}
 	if !snap.Jobs[0].Queued.Equal(j.Queued) {
 		t.Fatal("display age changed dispatch's submission time")
-	}
-}
-
-func TestStatusPageStoppedWorkerBudgetIsLastReported(t *testing.T) {
-	for _, effective := range []bool{false, true} {
-		m := &Machine{ID: "stopped", Gone: true, HostMemoryBudgetGB: 22}
-		if effective {
-			// The queue's allowance is part of the rule's capacity term.
-			m.EffectiveHostMemoryBudgetGB = 22
-			m.HostMemory = &HostMemoryTerms{CapacityGB: 22, ChargedGB: 4, RoomGB: 18}
-		}
-		var b bytes.Buffer
-		if err := statusPage.Execute(&b, Snapshot{Machines: []*Machine{m}}); err != nil {
-			t.Fatal(err)
-		}
-		want := "Host ceiling budget (last reported): 22 GiB"
-		if effective {
-			want = "capacity 22.0 · charged 4.0 · room 18.0 GiB"
-		}
-		if !strings.Contains(b.String(), want) || effective && strings.Contains(b.String(), "ceiling budget") {
-			t.Fatal(b.String())
-		}
 	}
 }

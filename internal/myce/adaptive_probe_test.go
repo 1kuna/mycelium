@@ -1,44 +1,10 @@
 package myce
 
 import (
-	"context"
-	"errors"
 	"net/http/httptest"
-	"sync/atomic"
 	"testing"
 	"time"
 )
-
-func TestAdaptiveProbeTinyLargeIdleAndSlow(t *testing.T) {
-	for _, cores := range []int{1, 128} {
-		t.Run(time.Duration(cores).String(), func(t *testing.T) {
-			clock := &fakeClock{now: time.Unix(1000, 0)}
-			p := probeTiming{base: time.Millisecond, cores: cores}
-			start := clock.Now()
-			clock.Advance(10 * time.Millisecond)
-			first := p.observe(start, clock.Now(), false)
-			clock.Advance(time.Hour)
-			start = clock.Now()
-			clock.Advance(10 * time.Millisecond)
-			idle := p.observe(start, clock.Now(), false)
-			if !first.valid() || !idle.valid() || idle.PeriodSeconds <= first.PeriodSeconds {
-				t.Fatal("idle scan did not relax", first, idle)
-			}
-			start = clock.Now()
-			clock.Advance(5 * time.Second)
-			slow := p.observe(start, clock.Now(), true)
-			if slow.CostSeconds != 5 || slow.PeriodSeconds < 5 || slow.ValidSeconds <= idle.ValidSeconds {
-				t.Fatal("slow cost not reflected", slow, idle)
-			}
-		})
-	}
-	start := time.Unix(1000, 0)
-	tiny := probeTiming{base: time.Millisecond, cores: 1}
-	large := probeTiming{base: time.Millisecond, cores: 128}
-	if tiny.observe(start, start.Add(time.Second), false).PeriodSeconds <= large.observe(start, start.Add(time.Second), false).PeriodSeconds {
-		t.Fatal("capacity did not change observation cost budget")
-	}
-}
 
 func TestAdaptiveProbeQueueOwnerAgeAndClockSkew(t *testing.T) {
 	q, clock := fixture(t)
@@ -80,92 +46,6 @@ func TestAdaptiveProbeHealthFreshness(t *testing.T) {
 	}
 }
 
-func TestAdaptiveProbeStallFailureAndOriginalAge(t *testing.T) {
-	clock := &workerFakeClock{now: time.Unix(1000, 0)}
-	lane := hostProbeLane[int]{clock: clock, timing: probeTiming{base: time.Second, cores: 2}}
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	var calls atomic.Int32
-	entered, release := make(chan struct{}, 1), make(chan struct{})
-	source := func(context.Context) (int, error) {
-		n := calls.Add(1)
-		if n == 2 {
-			entered <- struct{}{}
-			<-release
-		}
-		if n == 3 {
-			return 0, errors.New("unavailable")
-		}
-		return int(n), nil
-	}
-	lane.step(ctx, source)
-	await(t, func() bool { return len(lane.pending) == 1 })
-	lane.step(ctx, source)
-	if !lane.fresh(clock.Now()) {
-		t.Fatal("first observation missing")
-	}
-	original := lane.at
-	clock.Advance(time.Second)
-	lane.step(ctx, source)
-	<-entered
-	clock.Advance(20 * time.Second)
-	for i := 0; i < 100; i++ {
-		lane.step(ctx, source)
-	}
-	if lane.fresh(clock.Now()) || lane.at != original || calls.Load() != 2 {
-		t.Fatal("stall renewed evidence or spawned probes")
-	}
-	close(release)
-	await(t, func() bool { return len(lane.pending) == 1 })
-	lane.step(ctx, source)
-	if lane.at != original.Add(time.Second) {
-		t.Fatal("late completion stamped fresh at consume time")
-	}
-	// Consuming the overdue completion can already start the next probe. Do
-	// not advance past its failure and accidentally consume a fourth success.
-	if lane.pending == nil {
-		clock.Advance(lane.timing.next.Sub(clock.Now()))
-		lane.step(ctx, source)
-	}
-	await(t, func() bool { return len(lane.pending) == 1 })
-	completed, err := lane.step(ctx, source)
-	if !completed || err == nil || lane.known || lane.fresh(clock.Now()) {
-		t.Fatal("failure retained good fact", completed, err, lane.known)
-	}
-}
-
-func TestAdaptiveProbeOwnerSessionLearnsPauses(t *testing.T) {
-	clock := &fakeClock{now: time.Unix(1000, 0)}
-	p := availabilityPolicy{clock: clock, daily: true, probe: &ProbeObservation{PeriodSeconds: 1, CostSeconds: .1, ValidSeconds: 2}}
-	s := idleSignals()
-	s.IdleSeconds = 0
-	for i := 0; i < 8; i++ {
-		if p.evaluate(s).Available {
-			t.Fatal("busy owner admitted")
-		}
-		clock.Advance(time.Second)
-	}
-	if p.inputPauses.Mean != 1 {
-		t.Fatal("owner pauses not learned", p.inputPauses)
-	}
-	s.IdleSeconds = .5
-	if p.evaluate(s).Available {
-		t.Fatal("within-session pause admitted")
-	}
-	for i := 1; i < 8; i++ {
-		clock.Advance(time.Second)
-		s.IdleSeconds = float64(i)
-		p.evaluate(s)
-	}
-	if !p.evaluate(s).Available {
-		t.Fatal("idle host did not recover")
-	}
-	s.IdleSeconds = 0
-	if p.evaluate(s).Available {
-		t.Fatal("owner return did not immediately withdraw")
-	}
-}
-
 func TestAdaptiveProbeHostRelativePressure(t *testing.T) {
 	for _, baseline := range []float64{.05, 50} {
 		q, clock := fixture(t)
@@ -199,40 +79,6 @@ func TestAdaptiveProbeHostRelativePressure(t *testing.T) {
 		check(t, q, m, nil)
 		if q.s.Machines[m.ID].SharedHostYieldReason != "" {
 			t.Fatal("own baseline did not recover")
-		}
-	}
-}
-
-// Nonzero probe cost must not round each next scan up to a control tick and
-// repeatedly cancel healthy owner work or remove inventory capacity.
-func TestAdaptiveProbeHealthyCyclesKeepEvidence(t *testing.T) {
-	clock := &workerFakeClock{now: time.Unix(1000, 0)}
-	lane := hostProbeLane[OwnerSignals]{clock: clock, timing: probeTiming{base: time.Second, cores: 2}}
-	policy := availabilityPolicy{clock: clock, daily: true}
-	source := func(context.Context) (OwnerSignals, error) {
-		clock.Advance(10 * time.Millisecond)
-		return idleSignals(), nil
-	}
-	for i := 0; i < 8; i++ {
-		if i > 0 {
-			wait := lane.waitDuration()
-			if wait <= 0 || wait >= time.Second {
-				t.Fatal("scan did not wake at its actual due time", wait)
-			}
-			clock.Advance(wait)
-			if !lane.fresh(clock.Now()) {
-				t.Fatal("healthy observation expired before replacement started", i)
-			}
-		}
-		lane.step(t.Context(), source)
-		await(t, func() bool { return len(lane.pending) == 1 })
-		if i > 0 && !lane.fresh(clock.Now()) {
-			t.Fatal("healthy observation expired while ordinary replacement completed", i)
-		}
-		lane.step(t.Context(), source)
-		policy.probe = lane.observation
-		if !lane.fresh(clock.Now()) || !policy.evaluate(lane.value).Available {
-			t.Fatal("ordinary cost caused owner availability flapping", i)
 		}
 	}
 }

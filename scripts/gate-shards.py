@@ -89,10 +89,7 @@ def plan(entries: list[str], cores: int, binaries=None) -> list[str]:
         raise ValueError('core allocation must be positive')
     if cores == 1:
         return entries
-    timing = json.loads(Path(__file__).with_name('gate-test-durations.json').read_text())
-    hints = {package: dict(values) for package, values in timing['packages'].items()}
-    for package, values in timing.get('platform_packages', {}).get(sys.platform, {}).items():
-        hints.setdefault(package, {}).update(values)
+    hints = json.loads(Path(__file__).with_name('gate-test-durations.json').read_text())
     inventories = {}
     for entry in entries:
         package, expression = entry.split('\t', 1)

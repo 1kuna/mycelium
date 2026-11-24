@@ -279,6 +279,8 @@ func (q *Queue) noFitDetail(j *Job, idle bool) string {
 				}
 				if pools.RAM.Alone {
 					needs = append(needs, "exclusive access to the RAM pool while its estimate is unknown")
+				} else if pools.RAM.Evidence.Level == "unknown" && pools.RAM.ChargeGB == minimumHostMemoryGB {
+					needs = append(needs, fmt.Sprintf("at least %.0f KiB host RAM to start while its estimate is unknown", pools.RAM.ChargeGB*(1<<20)))
 				} else {
 					needs = append(needs, fmt.Sprintf("%.1f GiB host RAM", pools.RAM.ChargeGB))
 				}

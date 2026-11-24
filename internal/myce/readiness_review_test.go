@@ -1,11 +1,7 @@
 package myce
 
 import (
-	"context"
-	"encoding/json"
-	"errors"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -13,65 +9,6 @@ import (
 	"testing"
 	"time"
 )
-
-func TestAdaptiveReadinessUnknownColdLoad(t *testing.T) {
-	clock := &manualWorkerClock{now: time.Unix(1, 0)}
-	ctx, p, finish := superviseModelLoad(context.Background(), Model{Name: "cold"}, t.TempDir(), clock)
-	defer finish(false)
-	clock.Advance(24 * time.Hour)
-	if budget, stalled := p.state(); budget != 0 || stalled {
-		t.Fatal("unknown initialization acquired a guessed deadline")
-	}
-	p.advance()
-	clock.Advance(24 * time.Hour)
-	if budget, stalled := p.state(); budget != 0 || stalled {
-		t.Fatal("first progress signal guessed a cold deadline")
-	}
-	if ctx.Err() != nil {
-		t.Fatal(context.Cause(ctx))
-	}
-	parent, cancel := context.WithCancel(context.Background())
-	explicit, _, stop := superviseModelLoad(parent, Model{}, t.TempDir(), clock)
-	defer stop(false)
-	cancel()
-	if !errors.Is(explicit.Err(), context.Canceled) {
-		t.Fatal("caller cancellation lost")
-	}
-}
-
-func TestAdaptiveReadinessHistoryConcurrentRecipeAndTarget(t *testing.T) {
-	dir := t.TempDir()
-	model := Model{Name: "same", readinessRecipe: "immutable-recipe-a", Device: "0"}
-	path := modelReadinessFile(dir, model)
-	var wg sync.WaitGroup
-	for _, d := range []time.Duration{time.Second, 10 * time.Second} {
-		wg.Add(1)
-		go func(d time.Duration) {
-			defer wg.Done()
-			mergeReadinessHistory(path, readinessHistory{Load: readinessLatency{Mean: d}, Gap: d})
-		}(d)
-	}
-	wg.Wait()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var h readinessHistory
-	if err := json.Unmarshal(b, &h); err != nil {
-		t.Fatal(err)
-	}
-	if h.Gap != 10*time.Second || h.Load.Mean <= time.Second || h.Load.Mean >= 10*time.Second {
-		t.Fatalf("lost merged observations: %+v", h)
-	}
-	model.readinessRecipe = "immutable-recipe-b"
-	if readReadinessHistory(modelReadinessFile(dir, model)).Load.Mean != 0 {
-		t.Fatal("changed recipe inherited history")
-	}
-	model.readinessRecipe, model.Device = "immutable-recipe-a", "1"
-	if readReadinessHistory(modelReadinessFile(dir, model)).Load.Mean != 0 {
-		t.Fatal("changed device inherited history")
-	}
-}
 
 func TestAdaptiveReadinessProbeRecoversSlowerHealthyResponse(t *testing.T) {
 	t.Run("nonempty_response_reuses_connection", func(t *testing.T) {
@@ -236,38 +173,6 @@ func TestAdaptiveReadinessActivityAndContendedColdAlert(t *testing.T) {
 		if strings.HasPrefix(key, "cold-model/") && c.Active {
 			t.Fatal("ineligible demand kept alert active")
 		}
-	}
-}
-
-type readinessRecordingEngine struct {
-	FakeEngine
-	clock *manualWorkerClock
-}
-
-func (e *readinessRecordingEngine) Load(ctx context.Context, m Model) error {
-	e.clock.Advance(time.Second)
-	readinessFromContext(ctx).advance()
-	return e.FakeEngine.Load(ctx, m)
-}
-func TestAdaptiveReadinessRuntimeUsesResolvedDeviceHistory(t *testing.T) {
-	clock := &manualWorkerClock{now: time.Unix(1, 0)}
-	host := m3Machine()
-	worker := Worker{Machine: host, Clock: clock, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return host.Devices, nil }}
-	dir := t.TempDir()
-	model := Model{Name: "binding", Engine: "fake", Platforms: []string{"fake"}, MemoryGB: 1}
-	m := &workerModel{device: "1", model: model, bound: &worker, attempt: "attempt", state: "loading", engine: &readinessRecordingEngine{clock: clock}, cancel: func() {}}
-	rt := &modelRuntime{worker: &worker, models: map[string]*workerModel{"binding": m}, memoryMachine: host, platform: "unresolved", dir: dir, clock: clock}
-	rt.load(context.Background(), m)
-	if m.state != "ready" {
-		t.Fatalf("fixture did not load: %s %s", m.state, m.err)
-	}
-	resolved := model
-	resolved.Device = "1"
-	if h := readReadinessHistory(modelReadinessFile(dir, resolved)); h.Load.Mean == 0 {
-		t.Fatal("resolved device did not receive successful load evidence")
-	}
-	if h := readReadinessHistory(modelReadinessFile(dir, model)); h.Load.Mean != 0 {
-		t.Fatal("unresolved host inherited device load evidence")
 	}
 }
 

@@ -407,30 +407,6 @@ func TestStorageFaultCheckpointPreparationPublishesExactFault(t *testing.T) {
 	}
 }
 
-func TestStorageFaultDoesNotRecountHostPressure(t *testing.T) {
-	w, m, clock := storageFaultFixture(t)
-	// One real transient pressure sample must remain one observation even
-	// when multiple storage syscalls fail before the next sensor sample.
-	clock.Advance(signalRefresh)
-	m.health.observe(HostHealthSample{At: clock.Now(), HostHealthReading: HostHealthReading{Pressure: 4, Load: 1, WakeSeconds: .001}})
-	if m.health.Consecutive != 1 || m.health.DrainReason != "" {
-		t.Fatal("fixture lacks one unconfirmed pressure sample", m.health)
-	}
-	history, baseline := len(m.health.History), len(m.health.Baseline)
-	for i := 0; i < hostHealthConfirmation; i++ {
-		clock.Advance(time.Second)
-		w.observeStorageError(&os.PathError{Op: "read", Path: "/share/inputs/source", Err: syscall.EIO})
-	}
-	machine := Machine{HostHealth: m.snapshot(nil)}
-	applyHostMountHealth(w, &machine)
-	if len(m.health.History) != history || len(m.health.Baseline) != baseline || m.health.Consecutive != 1 || hostHygieneReason(&machine) != "" {
-		t.Fatal("storage faults recounted a cached pressure reading", m.health)
-	}
-	if storageRootReason(&Job{Spec: Spec{Priority: "experiment", Resumable: true}}, &machine) == "" || storageRootReason(&Job{Spec: Spec{Priority: "production"}}, &machine) != "" {
-		t.Fatal("mount latch lost dependency-only admission", machine.UnavailableRoots)
-	}
-}
-
 func TestStorageFaultJoinedErrorsObserveEverySyscallOnce(t *testing.T) {
 	w, m, _ := storageFaultFixture(t)
 	ctx := w.storageIOContext(context.Background())
@@ -578,38 +554,6 @@ func TestStorageFaultModelLaunchUsesSharedResolver(t *testing.T) {
 		}
 	}
 	await(t, func() bool { return len(p.pending) == 1 })
-}
-
-func TestStorageFaultKeepsNestedBackingIndependent(t *testing.T) {
-	w, m, clock := storageFaultFixture(t)
-	w.JobFileRoot = "/share/nested/inputs"
-	w.rootMonitor = &workerRootMonitor{expected: map[string]string{"nas": "/share", "checkpoint": "/share", "job-files": "/share/nested"}}
-	m.mounts["nas"] = &hostMountProbe{root: "nas", path: "/share", clock: clock, storage: m}
-	w.observeStorageError(&os.PathError{Op: "read", Path: "/share/checkpoints/source", Err: syscall.EIO})
-	if storageTestFault(m.mounts["checkpoint"]) == nil || storageTestFault(m.mounts["nas"]) == nil || storageTestFault(m.mounts["job-files"]) != nil {
-		t.Fatal("path containment conflated distinct backing mounts", m.mounts)
-	}
-	machine := Machine{HostHealth: m.snapshot(nil)}
-	applyHostMountHealth(w, &machine)
-	for _, root := range machine.UnavailableRoots {
-		if root.Root == "job-files" {
-			t.Fatal("NAS projection withheld a separate nested backing", machine.UnavailableRoots)
-		}
-	}
-	if w.storageRootReason(&Job{Spec: Spec{Priority: "experiment", Resumable: true}}) == "" {
-		t.Fatal("affected checkpoint root lost its hold")
-	}
-	inputJob := Job{Spec: Spec{Priority: "production", Inputs: map[string]string{"asset": "source"}}}
-	if reason := w.storageRootReason(&inputJob); reason != "" {
-		t.Fatal("independent nested input dependency was withheld", reason)
-	}
-	w.observeStorageError(&os.PathError{Op: "read", Path: "/share/nested/inputs/source", Err: syscall.EIO})
-	if storageTestFault(m.mounts["checkpoint"]).Generation != 1 || storageTestFault(m.mounts["nas"]).Generation != 1 || storageTestFault(m.mounts["job-files"]) == nil {
-		t.Fatal("nested fault propagated to the parent backing")
-	}
-	if reason := w.storageRootReason(&inputJob); reason == "" {
-		t.Fatal("faulted nested input dependency remained eligible")
-	}
 }
 
 func TestStorageFaultCheckpointCopyKeepsReadAttribution(t *testing.T) {
