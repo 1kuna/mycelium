@@ -142,9 +142,9 @@ func TestCheckinPlanningOutcomeEquivalence(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := fmt.Sprintf("%x", sha256.Sum256(data))
-			// Pooled admission changes the available-capacity wait descriptions.
+			// Pooled admission explains exclusive access when estimates are unknown.
 			// The snapshot retains all 270 jobs and six picks.
-			want := map[bool]string{true: "80e3a367392c6882691f3933a050cc97f4fee73a47d37f907a1611a494cb41e8", false: "17772267e95779e818a5391ffebfbf5f929648a1b7660b45652c55fac48be75c"}[occupied]
+			want := map[bool]string{true: "80e3a367392c6882691f3933a050cc97f4fee73a47d37f907a1611a494cb41e8", false: "a41fb5f7810edc0a4c93a4a75730e9697c35c3d988ded3cb770e5da865fc5f8c"}[occupied]
 			t.Logf("occupied=%v jobs=%d picks=%d digest=%s", occupied, len(jobs), len(picks), got)
 			if got != want {
 				t.Logf("planning records: %s", data)

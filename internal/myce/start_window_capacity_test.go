@@ -134,7 +134,6 @@ func TestStartWindowHostBackfill(t *testing.T) {
 			}
 			j := submit(t, q, s)
 			recordedWait := false
-			var rearmed time.Time
 			for range 90 {
 				if next := assignedJob(machineCheck(t, q, m, running)); next != nil {
 					t.Fatal("fenced job dispatched", next)
@@ -143,11 +142,10 @@ func TestStartWindowHostBackfill(t *testing.T) {
 				stored := q.s.Jobs[j.ID]
 				if !absolute && stored.StartCapacityWaiting {
 					recordedWait = true
-					if !stored.Spec.StartBy.Equal(clock.Now().Add(time.Minute)) {
+					if !stored.Spec.StartBy.Equal(cutoff) {
 						q.mu.Unlock()
-						t.Fatal("fenced expiry did not re-arm budget")
+						t.Fatal("waiting rewrote the paused start budget")
 					}
-					rearmed = *stored.Spec.StartBy
 				}
 				q.mu.Unlock()
 				clock.Advance(time.Second)
@@ -160,13 +158,10 @@ func TestStartWindowHostBackfill(t *testing.T) {
 				}
 				return
 			}
-			if waiting.State != "queued" || !recordedWait || !strings.Contains(waiting.Reason, "host_capacity_accumulation") || !waiting.Spec.StartBy.After(clock.Now()) || waiting.Spec.StartBy.After(rearmed.Add(time.Second)) {
-				t.Fatal("fenced relative window expired or repeatedly re-armed", waiting.State, waiting.Reason)
+			if waiting.State != "queued" || !recordedWait || !waiting.StartCapacityWaiting || !strings.Contains(waiting.Reason, "paused for capacity") || !waiting.Spec.StartBy.Equal(cutoff) {
+				t.Fatal("relative window was not paused behind the memory reservation", waiting.State, waiting.Reason)
 			}
-			// Clear the fence with only five seconds of the renewed queued
-			// window left. Preparation must still receive a full minute.
-			clock.Advance(waiting.Spec.StartBy.Sub(clock.Now()) - 5*time.Second)
-			machineCheck(t, q, m, running)
+			// The relative cutoff is past. Preparation still gets a full minute.
 			finish(t, q, running, true)
 			next := assignedJob(machineCheck(t, q, m))
 			if next == nil || next.ID != demand.ID {

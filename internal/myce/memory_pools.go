@@ -266,7 +266,7 @@ func (q *Queue) addPoolBackfillHeads(scan *placementScan, demands []*Job, live m
 
 func (q *Queue) poolBackfillFits(j *Job, m *Machine, head *hostBackfillDemand) bool {
 	pool := memoryPools(head.job).RAM
-	if pool.Alone {
+	if pool.Alone || jobCPUCharge(j, m) > max(0, m.FreeCPUCores-jobCPUCharge(head.job, head.machine)) {
 		return false
 	}
 	capacity := *m

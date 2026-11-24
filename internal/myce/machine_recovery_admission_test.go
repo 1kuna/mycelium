@@ -180,7 +180,9 @@ func TestMachineKillPhaseCapacitySparesNeighbor(t *testing.T) {
 			if phase == "kill" {
 				clock.Advance(StopGrace + time.Second)
 			}
-			prod := submit(t, q, spec("production"))
+			production := spec("production")
+			production.Needs.HostMemoryGB = 1
+			prod := submit(t, q, production)
 			for i := 0; i < 10; i++ {
 				if next := assignedJob(machineCheck(t, q, m, a, b)); next != nil {
 					t.Fatal("replacement admitted before exact cleanup", next)

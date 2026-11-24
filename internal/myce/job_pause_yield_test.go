@@ -118,9 +118,10 @@ func TestJobPauseYieldReleaseAndResume(t *testing.T) {
 func TestJobPauseYieldLeavesOtherWorkUntouched(t *testing.T) {
 	q, _ := fixture(t)
 	a, b := machine("first-worker", "fake", "shared-host"), machine("second-worker", "fake", "shared-host")
-	submit(t, q, spec("experiment"))
-	own := check(t, q, a, nil).Job
 	s := spec("experiment")
+	s.Needs.HostMemoryGB = 1
+	submit(t, q, s)
+	own := check(t, q, a, nil).Job
 	s.Project = "different-project"
 	submit(t, q, s)
 	other := check(t, q, b, nil).Job

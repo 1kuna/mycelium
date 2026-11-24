@@ -124,10 +124,11 @@ func TestAdaptiveFairnessManyProjectsAndStatus(t *testing.T) {
 					submit(t, q, projectSpec(fmt.Sprintf("project-%02d", i)))
 				}
 			}
-			m := machine("worker", "fake")
+			m := m3Machine()
+			m.Devices = m.Devices[:1]
 			seen := map[string]bool{}
 			for range count {
-				run := check(t, q, m, nil).Job
+				run := assignedJob(machineCheck(t, q, m))
 				if run == nil || seen[run.Spec.Project] {
 					t.Fatal("project missed first service round", run)
 				}
@@ -135,7 +136,6 @@ func TestAdaptiveFairnessManyProjectsAndStatus(t *testing.T) {
 				clock.Advance(time.Second)
 				finish(t, q, run, true)
 			}
-			check(t, q, m, nil)
 			snapshot, err := q.Snapshot()
 			if err != nil {
 				t.Fatal(err)
