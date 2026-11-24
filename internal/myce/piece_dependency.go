@@ -32,6 +32,15 @@ func dependencyReady(j *Job) bool {
 	return !j.simGatherWait && (j.Spec.After == nil || j.Dependency != nil && j.Dependency.State == "ready" && j.Dependency.ReadyAt != nil)
 }
 
+func freshPipelineRoot(j *Job) bool {
+	return j.Spec.After == nil && j.Attempt == 0 && j.PreemptionPlacement == nil
+}
+
+func (q *Queue) pipelineStagePrecedes(stage, root *Job) bool {
+	return freshPipelineRoot(root) && stage.Spec.After != nil && dependencyReady(stage) &&
+		stage.Spec.Project == root.Spec.Project && q.comparePriority(stage.Spec, root.Spec) == 0
+}
+
 func validatePieceDependency(s Spec) error {
 	a := s.After
 	if a == nil {

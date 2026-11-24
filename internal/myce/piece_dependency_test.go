@@ -104,6 +104,81 @@ func TestPieceDependencyOrdinaryProducer(t *testing.T) {
 	}
 }
 
+func TestReadyPipelineStageGetsProjectTurn(t *testing.T) {
+	for _, tc := range []struct {
+		name, rootProject string
+		stageRAM          float64
+	}{
+		{"same project", "test", 4},
+		{"another project", "another-project", 4},
+		{"stage needs both releases", "test", 6},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, clock := fixture(t)
+			if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
+				t.Fatal(err)
+			}
+			m := m3Machine()
+			m.HostMemoryBudgetGB, m.HostAvailableMemoryGB = 8, 8
+			gpu := bigSpec("experiment", 8)
+			gpu.Needs.HostMemoryGB = 4
+			producer := gpu
+			producer.Outputs = map[string]string{"out": "results"}
+			producer.Files = FileManifest{"input.txt": putPieceTestFile(t, q, "producer input")}
+			parent := submit(t, q, producer)
+			first := assignedJob(machineCheck(t, q, m))
+			if first == nil || first.ID != parent.ID {
+				t.Fatal("pipeline producer was not assigned")
+			}
+			second := submit(t, q, gpu)
+			peer := assignedJob(machineCheck(t, q, m, first))
+			if peer == nil || peer.ID != second.ID {
+				t.Fatal("second GPU job was not assigned")
+			}
+			stageSpec := cpuSpec(1, tc.stageRAM)
+			stageSpec.Project = parent.Spec.Project
+			stageSpec.After = &PieceDependency{Job: parent.ID, Outputs: map[string]string{"input": "out"}}
+			stage := submit(t, q, stageSpec)
+			gpu.Project = tc.rootProject
+			root := submit(t, q, gpu)
+			if got := assignedJob(machineCheck(t, q, m, first, peer)); got != nil {
+				t.Fatalf("offered new work before release: %s", got.ID)
+			}
+			clock.Advance(time.Second)
+			r := result(first, true)
+			r.OutputRefs = FileManifest{"out": putPieceTestFile(t, q, "accepted stage output")}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			if !dependencyReady(job(t, q, stage.ID)) {
+				t.Fatal("stage did not receive the producer's accepted output")
+			}
+			if tc.stageRAM > 4 {
+				if got := assignedJob(machineCheck(t, q, m, peer)); got != nil {
+					t.Fatalf("offered new work before the stage's reservation filled: %s", got.ID)
+				}
+				finish(t, q, peer, true)
+				peer = nil
+			}
+			want := root.ID
+			if tc.rootProject == stage.Spec.Project {
+				want = stage.ID
+			}
+			var running []*Job
+			if peer != nil {
+				running = append(running, peer)
+			}
+			got := assignedJob(machineCheck(t, q, m, running...))
+			if got == nil {
+				t.Fatal("no job was offered after memory released")
+			}
+			if got.ID != want {
+				t.Fatalf("expected %s to win the freed RAM, got %s", want, got.ID)
+			}
+		})
+	}
+}
+
 func pieceConsumer(s Spec, parent, piece string) Spec {
 	s.FanOut = nil
 	s.Workload = nil

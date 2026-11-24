@@ -14,6 +14,8 @@ type hostBackfillDemand struct {
 	machine *Machine
 	order   *candidateSet
 	pooled  bool
+	// A promoted stage keeps the project's original position against other projects.
+	fairHead *hostBackfillDemand
 	// drain marks a maintenance resume's fence; start is when it is expected
 	// to fit anyway, or nil when unknown.
 	drain bool
@@ -190,7 +192,12 @@ func (q *Queue) hostBackfillBlocker(j *Job, m *Machine, fence *hostBackfillDeman
 		return nil
 	}
 	if fence.pooled {
-		if q.beforeWithFair(j, fence.job, fence.machine, fence.order.score, fence.order.active) || q.poolBackfillFits(j, m, fence) {
+		order := fence
+		if fence.fairHead != nil && j.Spec.Project != fence.job.Spec.Project {
+			order = fence.fairHead
+		}
+		before := q.pipelineStagePrecedes(j, fence.job) || !q.pipelineStagePrecedes(fence.job, j) && q.beforeWithFair(j, order.job, order.machine, fence.order.score, fence.order.active)
+		if before || q.poolBackfillFits(j, m, fence) {
 			return nil
 		}
 		return fence.job
