@@ -258,8 +258,8 @@ func TestStatusViewFloorFreeAutoMemory(t *testing.T) {
 	target.FreeHostMemoryGB = 1
 	probe := *q.s.Jobs[j.ID]
 	body = q.noFitDetail(&probe, false)
-	if !strings.Contains(body, "needs 3.0 GiB free accelerator memory and 2.0 GiB host RAM") || strings.Contains(body, "needs 0.0 GiB") {
-		t.Errorf("sized need missing: %s", body)
+	if !strings.Contains(body, "exclusive access to a card") || !strings.Contains(body, "exclusive access to the RAM pool") || strings.Contains(body, "0.0 GiB") {
+		t.Errorf("unknown estimates did not explain exclusive access: %s", body)
 	}
 	stored := q.s.Jobs[j.ID]
 	if stored.MemoryEnvelope != nil || stored.Spec.Needs.MemoryGB != 0 || stored.Spec.Needs.HostMemoryGB != 0 {

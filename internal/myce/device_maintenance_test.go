@@ -42,7 +42,9 @@ func changeDevice(t *testing.T, q *Queue, host, identity, action string) HostMai
 func TestDeviceMaintenanceDrainPreservesAttemptAndSiblingCapacity(t *testing.T) {
 	q, clock := fixture(t)
 	m := m3Machine()
-	submit(t, q, spec("experiment"))
+	s := spec("experiment")
+	s.Needs.HostMemoryGB = 1
+	submit(t, q, s)
 	a := assignedJob(machineCheck(t, q, m))
 	if a == nil || !slices.Equal(a.AllocatedDevices, []string{"0"}) {
 		t.Fatal("missing initial device-0 attempt", a)
@@ -57,8 +59,6 @@ func TestDeviceMaintenanceDrainPreservesAttemptAndSiblingCapacity(t *testing.T) 
 	}
 	// A full-budget sibling job still fits; disabling does not lower either
 	// card's reported allowance or consume extra shared CPU/RAM capacity.
-	s := spec("experiment")
-	s.Needs.MemoryGB = 8
 	b := submit(t, q, s)
 	r := machineCheck(t, q, m, a)
 	var sibling *Job
@@ -87,7 +87,7 @@ func TestDeviceMaintenanceDrainPreservesAttemptAndSiblingCapacity(t *testing.T) 
 		t.Fatal("device disable fenced CPU Started", err)
 	}
 	finish(t, q, a, true)
-	blocked := spec("experiment")
+	blocked := s
 	blocked.Needs.GPU = &GPUSelection{Devices: []string{"0"}}
 	waiting := submit(t, q, blocked)
 	machineCheck(t, q, m, sibling)

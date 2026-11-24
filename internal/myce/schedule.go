@@ -265,10 +265,24 @@ func (q *Queue) noFitDetail(j *Job, idle bool) string {
 				}
 			}
 			if n.Memory == "auto" {
-				detail := fmt.Sprintf("%s needs %.1f GiB free accelerator memory and %.1f GiB host RAM", m.ID, n.MemoryGB, hostNeed(&copy, n.MemoryGB, n.HostMemoryGB))
+				pools := memoryPools(candidate)
+				var needs []string
 				if n.cpuOnly() {
-					detail = fmt.Sprintf("%s needs %d logical cores and %.1f GiB host RAM", m.ID, n.cores(), hostNeed(&copy, n.MemoryGB, n.HostMemoryGB))
+					needs = append(needs, fmt.Sprintf("%d logical cores", n.cores()))
 				}
+				if pools.Card != nil {
+					if pools.Card.Alone {
+						needs = append(needs, "exclusive access to a card with no memory estimate")
+					} else {
+						needs = append(needs, fmt.Sprintf("%.1f GiB free accelerator memory", n.MemoryGB))
+					}
+				}
+				if pools.RAM.Alone {
+					needs = append(needs, "exclusive access to the RAM pool while its estimate is unknown")
+				} else {
+					needs = append(needs, fmt.Sprintf("%.1f GiB host RAM", pools.RAM.ChargeGB))
+				}
+				detail := m.ID + " needs " + strings.Join(needs, " and ")
 				detail += " (" + candidate.MemoryEnvelope.Origin() + ")"
 				if candidate.MemoryEnvelope.Refusal != "" {
 					detail = m.ID + ": " + candidate.MemoryEnvelope.Refusal

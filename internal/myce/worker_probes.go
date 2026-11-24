@@ -12,6 +12,9 @@ var workerOwnerSignals = LocalOwnerSignals
 var workerProcessMemory = localProcessMemory
 var workerDevProcessMemory = localDevProcessMemory
 
+// Tagged CLI tests use an isolated synthetic host in place of native containment.
+var workerSyntheticMemoryHost bool
+
 var workerMachineProbe = LocalMachineProbe
 
 // ProcessMemoryProbe exposes the existing owned-tree sensor for injected dev hosts.

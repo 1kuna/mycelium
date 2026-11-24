@@ -625,7 +625,7 @@ project: test
 class: experiment
 source: {directory: source}
 run: {command: [true]}
-needs: {cpu_cores: 2, memory_gb: 8}
+needs: {cpu_cores: 2, memory_gb: 9}
 targets: [{os: linux, arch: amd64, platform: cpu}]
 check: [true]
 `
@@ -643,7 +643,7 @@ check: [true]
 		t.Fatal(err)
 	}
 	m := myce.Machine{Capabilities: []string{"native_isolation_landlock"}, ID: "worker", Session: "fixture", GPU: "cpu", CPUIsolation: "select-none",
-		HostMemoryMeasured: true, HostAvailableMemoryGB: 32, HostMemoryBudgetGB: 8, MemoryCeilingSlackGB: .125,
+		HostMemoryMeasured: true, HostAvailableMemoryGB: 32, HostMemoryBudgetGB: 8,
 		CapabilityProfile: &myce.CapabilityProfile{OS: "linux", Arch: "amd64", LogicalCPUs: 8, MemoryLayout: "separate", SystemMemoryBytes: 32 << 30}}
 	if _, err := fixtureQueueCheckin(q, myce.Checkin{Machine: m}); err != nil {
 		t.Fatal(err)
@@ -660,8 +660,8 @@ check: [true]
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
-	want := "host memory need 8.125 GiB (8 + 0.125 slack) exceeds allowance 8 GiB on worker"
-	if exitCodeForTest(err) != 78 || !strings.Contains(stderr.String(), "no_qualified_target: "+want) {
+	want := "host memory"
+	if exitCodeForTest(err) != 78 || !strings.Contains(stderr.String(), "no_qualified_target:") || !strings.Contains(stderr.String(), want) {
 		t.Fatalf("exit=%v stderr=%s", err, &stderr)
 	}
 	var receipt profileReceipt

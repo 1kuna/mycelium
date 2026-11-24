@@ -206,6 +206,8 @@ func (q *Queue) addPoolBackfillHeads(scan *placementScan, demands []*Job, live m
 			continue
 		}
 		capacity := q.qualificationCapacity(m)
+		// Project room after holders finish, while keeping today's device eligibility.
+		capacity.InventoryProbe, capacity.MemoryError = m.InventoryProbe, m.MemoryError
 		capacity.FreeHostMemoryGB = q.sharedHostRoom(&capacity, q.poolAllowance(m), 0)
 		for _, j := range demands {
 			if !q.placementAllowed(j, m) || !q.preemptionPlacementAllows(j, m) || q.preemptionReleasesPending(j) || !q.checkpointReady(j, m) || q.environmentFailureBlocked(j, m) {
@@ -264,7 +266,7 @@ func (q *Queue) addPoolBackfillHeads(scan *placementScan, demands []*Job, live m
 
 func (q *Queue) poolBackfillFits(j *Job, m *Machine, head *hostBackfillDemand) bool {
 	pool := memoryPools(head.job).RAM
-	if pool.Alone {
+	if pool.Alone || jobCPUCharge(j, m) > max(0, m.FreeCPUCores-jobCPUCharge(head.job, head.machine)) {
 		return false
 	}
 	capacity := *m

@@ -169,23 +169,18 @@ func benchmarkCheckinCandidateCost(b *testing.B, q *Queue, workers []Machine) {
 	b.ReportMetric(float64(maximum.Nanoseconds()), "max-hold-ns")
 }
 
-// Freeze the original planner's full per-target candidate sequence, resolved
-// resource vectors and memory envelopes, not just its first winning job.
-// #806 intentionally changes these envelopes: physical cold headroom, measured
-// local uncertainty and uncalibrated transfers replace universal multipliers.
-// The refreshed digests retain all 402 decisions for each history shape.
-// The grouped fixture adds 480 decisions per shape, frozen before allocation
-// caching, and both fixtures freeze the five actual next-pull placements too.
-// ProbeFloorGB adds metadata in 180 retained-history envelopes; removing only
-// that field reproduces the prior digest with identical decisions/resources.
-// #1017 adds LaunchDriftGB/AvailableHostGB in those same 180 envelopes. Clearing
-// only those fields reproduces e7757cb9 with all 402 decisions/resources intact.
+// Freeze the full per-target order, resolved vectors and five next-pull
+// placements under pooled admission. Retired envelope history no longer
+// changes these decisions. The grouped shape also covers multi-card placement.
 func TestCandidateCostPlacementEquivalence(t *testing.T) {
 	for _, fixture := range []struct {
-		retained, grouped bool
-	}{{true, false}, {false, false}, {true, true}, {false, true}} {
-		retained := fixture.retained
-		t.Run(fmt.Sprintf("retained=%v/grouped=%v", retained, fixture.grouped), func(t *testing.T) {
+		grouped                bool
+		candidates, placements string
+	}{
+		{false, "8a952b1d8c2c29a1b5eb8d0156580dcb9b8fe8d223bf6b096c9fd688ec328f2f", "ce389b0d2821a4de16e49c18bacc985f94c6174609a03a914e9426c98750ba1f"},
+		{true, "adce7ac2431c8b22fd181d0c843381e6f577b3494da66335cb16db8ff7780218", "2ec8a187e68ad3cef019bf66d3641b92880ea944d2aed7b90d8c1295e1fa57b8"},
+	} {
+		t.Run(fmt.Sprintf("grouped=%v", fixture.grouped), func(t *testing.T) {
 			q, _ := candidateCostFixture(t)
 			q.mu.Lock()
 			defer q.mu.Unlock()
@@ -203,13 +198,6 @@ func TestCandidateCostPlacementEquivalence(t *testing.T) {
 				demand.Spec.Needs.MemoryGB = 80
 				demand.MemoryFallback = &SizeHint{MemoryGB: 80, HostMemoryGB: 4}
 				q.s.Jobs[demand.ID] = &demand
-			}
-			if !retained {
-				for id, j := range q.s.Jobs {
-					if j.State == "succeeded" {
-						delete(q.s.Jobs, id)
-					}
-				}
 			}
 			for i := range 5 {
 				delete(q.s.Jobs, fmt.Sprintf("running-%d", i))
@@ -237,14 +225,8 @@ func TestCandidateCostPlacementEquivalence(t *testing.T) {
 				t.Fatal(err)
 			}
 			digest := fmt.Sprintf("%x", sha256.Sum256(data))
-			// Guarded cold CPU candidates now carry the small startup envelope;
-			// retain every placement decision in the snapshot.
-			want := map[bool]string{true: "874cdae98a6ef7951743cb3ef6ccf5adf486552778d618b2b0887cfa98bcd774", false: "472adf65344dce4866e50bb6cc16aef571fd3f8d193664db792588063b46136f"}[retained]
-			if fixture.grouped {
-				want = map[bool]string{true: "589b417d4ca4e8740f8b0203ae48fc8d24109dd76db6e3f8f74d335f58a76dd0", false: "b98a4c2783cddf83aeb723d5e08c43341d920cdfe78157eab00a298daeb6c3b7"}[retained]
-			}
-			if digest != want {
-				t.Errorf("placement digest %s (%d decisions), want %s", digest, len(decisions), want)
+			if digest != fixture.candidates {
+				t.Errorf("placement digest %s (%d decisions), want %s", digest, len(decisions), fixture.candidates)
 			}
 			var placements []decision
 			plan := q.assignmentPlan(scan)
@@ -257,12 +239,8 @@ func TestCandidateCostPlacementEquivalence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want = "0e58086cf7cfc9238366318b9e870a41394de965f9dd3dca82bbf7b9968ce74f"
-			if fixture.grouped {
-				want = "6dcd451e0df467a2fbb1f05bac262b4280f3e074b587882c66e9e651d3160c55"
-			}
-			if digest = fmt.Sprintf("%x", sha256.Sum256(data)); digest != want {
-				t.Fatalf("assignment digest %s (%d placements), want %s", digest, len(placements), want)
+			if digest = fmt.Sprintf("%x", sha256.Sum256(data)); digest != fixture.placements {
+				t.Fatalf("assignment digest %s (%d placements), want %s", digest, len(placements), fixture.placements)
 			}
 		})
 	}

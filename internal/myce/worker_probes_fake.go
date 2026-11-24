@@ -16,6 +16,7 @@ import (
 // inherit synthetic host facts and the same fail-closed probe boundary. Normal
 // builds never include this file or expose a runtime switch for fake hardware.
 func init() {
+	workerSyntheticMemoryHost = true
 	if os.Getenv("MYCE_TEST_CUSTODIANS_DISABLED") == "1" {
 		workerCustodians = false
 		workerModelCustodians = false

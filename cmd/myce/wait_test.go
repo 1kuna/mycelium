@@ -127,7 +127,7 @@ func waitFinish(t *testing.T, q *myce.Queue, clock *waitClock, success bool) {
 	var reply myce.Reply
 	wait(t, ctx, func() bool {
 		var err error
-		reply, err = currentCLICheckin(q, clock, myce.Checkin{Machine: myce.Machine{Capabilities: []string{"native_isolation_landlock"}, CapabilityProfile: &myce.CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []myce.AcceleratorProfile{{Type: "fake", MemoryBytes: 64 << 30}}}, ID: "fake", Session: "session", GPU: "fake", FreeMemoryGB: 8}})
+		reply, err = currentCLICheckin(q, clock, myce.Checkin{Machine: waitWorker()})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -142,6 +142,16 @@ func waitFinish(t *testing.T, q *myce.Queue, clock *waitClock, success bool) {
 		t.Fatal(err)
 	}
 }
+
+func waitWorker() myce.Machine {
+	return myce.Machine{
+		ID: "fake", Session: "session", GPU: "fake", FreeMemoryGB: 8, TotalMemoryGB: 8,
+		HostMemoryMeasured: true, HostAvailableMemoryGB: 64,
+		Capabilities:      []string{"native_isolation_landlock"},
+		CapabilityProfile: &myce.CapabilityProfile{OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []myce.AcceleratorProfile{{Type: "fake", MemoryBytes: 8 << 30}}},
+	}
+}
+
 func TestWaitQueueOutcomes(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -501,7 +511,7 @@ func TestWaitUsesBatchReads(t *testing.T) {
 func TestWaitCancellationWaitsForWorkerAcknowledgement(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
 	j := waitSubmit(t, q)
-	reply, err := currentCLICheckin(q, clock, myce.Checkin{Machine: myce.Machine{Capabilities: []string{"native_isolation_landlock"}, CapabilityProfile: &myce.CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []myce.AcceleratorProfile{{Type: "fake", MemoryBytes: 64 << 30}}}, ID: "fake", Session: "session", GPU: "fake", FreeMemoryGB: 8}})
+	reply, err := currentCLICheckin(q, clock, myce.Checkin{Machine: waitWorker()})
 	if err != nil || reply.Job == nil {
 		t.Fatalf("assignment: %v %+v %s", err, reply, waitAssignmentDiagnostics(q))
 	}
