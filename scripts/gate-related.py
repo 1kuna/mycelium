@@ -263,6 +263,8 @@ def select(base):
         if path.parent == pathlib.Path('internal/myce') and not name.endswith('_test.go'):
             tests.add('TestWireSchemas')
         packages.setdefault(path.parent, set()).update(tests)
+    if any(name.startswith(('scripts/gate', '.mycelium/profiles/gate-')) for name in changed):
+        packages.setdefault(pathlib.Path('cmd/myce'), set()).add('TestDevStandaloneSmoke')
     # Fixture paths are relative to the Go package's working directory. Match
     # direct literals in test bodies, including docs/examples-only changes.
     fixtures = [name for name in changed if not name.endswith('.go')]
@@ -287,15 +289,19 @@ def select(base):
 
 
 # Always-run canaries (#1224): cheap whole-output checks that textual selection
-# missed on 2026-11-11 (planning digest, status rendering, previous-release open).
+# missed on 2026-11-11 (planning digest, status rendering, durable restart).
 # About 12 s of race test time. A canary renamed away fails test-gate-related.py.
 CANARIES = {
     'internal/statusdoc': ('TestStatusFieldsCurrent',),
     'internal/myce': ('TestCheckinPlanningOutcomeEquivalence', 'TestStatusReadPlanningEquivalence',
                       'TestStatusCompactRetainedEvidence', 'TestStatusPageRendersSnapshot',
-                      'TestQueuePersistenceOpensPreviousReleaseDatabase'),
+                      'TestPersistenceAndAssignmentRedelivery',
+                      'TestEntryCoverageResourceFailuresKeepTypeEligible',
+                      'TestInventoryObservationRestartAdmission',
+                      'TestScarceHostYieldAdvisoryDoesNotMaskMemoryRelease'),
     'cmd/myce': ('TestCompactStatusIsSmallAndKeepsWhatMatters', 'TestStatusFullIDsAndOneBasedAttempts',
-                 'TestStatusShowsProfileQualificationAndEveryWaitingReason'),
+                 'TestStatusShowsProfileQualificationAndEveryWaitingReason',
+                 'TestWaitQueueOutcomes'),
 }
 
 
