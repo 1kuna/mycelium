@@ -603,6 +603,70 @@ func TestExtensionQualificationMixedBacklog(t *testing.T) {
 	assertOffers() // A new pass immediately observes newly accepted qualification.
 }
 
+func qualificationStorageFixture(t testing.TB) (*Queue, *Machine, Extension, *Job, StorageObservation) {
+	t.Helper()
+	clock := &fakeClock{now: time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC)}
+	e := compositionExtension(t, false)
+	m := machine("worker", "fake")
+	target := e.Variants[0].Target
+	m.CapabilityProfile.OS, m.CapabilityProfile.Arch = target.OS, target.Arch
+	m.ExtensionFingerprint = "qualified-target"
+	m.DiskReceivedAt = clock.Now()
+	m.DiskVolumes = []DiskVolume{{ID: "data", Roots: []string{"data"}, TotalBytes: 1 << 30, FreeBytes: 512 << 20, SampledAt: clock.Now()}}
+	report := newExtensionReport(e, &m, "extension:"+e.Name)
+	report.Setup, report.Qualified, report.CheckID = true, true, "accepted-check"
+	m.ExtensionReports = []ExtensionReport{report}
+	j := &Job{ID: "item", State: "queued", Spec: Spec{Project: "test", Extension: extensionKey(e)}, Extensions: []Extension{e}}
+	q := &Queue{clock: clock, s: state{Jobs: map[string]*Job{j.ID: j}, Machines: map[string]*Machine{m.ID: &m}, StorageObservations: map[string]StorageObservation{}}}
+	candidates := extensionJobs(j, &m, false)
+	if len(candidates) != 1 {
+		t.Fatalf("expected one eligible extension variant, got %d", len(candidates))
+	}
+	key := q.storageKey(candidates[0], &m)
+	if key == nil {
+		t.Fatal("fixture has no qualified storage identity")
+	}
+	scratch := StorageRange{Samples: 2, Min: 1 << 20, Peak: 1 << 20}
+	observation := StorageObservation{Key: *key, Family: storageFamily(j.Spec.Project, *key), RecordedAt: clock.Now(), AllocationUnit: 1, Managed: scratch, Scratch: scratch}
+	return q, &m, e, j, observation
+}
+
+func TestExtensionQualificationDemandRefreshesStorageFamily(t *testing.T) {
+	q, m, e, _, observation := qualificationStorageFixture(t)
+	q.s.StorageObservations["prior-items"] = observation
+	if !q.extensionQualificationDemand(e, m) {
+		t.Fatal("a fitting storage family blocked qualification demand")
+	}
+	observation.Scratch.Peak = 1 << 30
+	q.s.StorageObservations["prior-items"] = observation
+	if q.extensionQualificationDemand(e, m) {
+		t.Fatal("qualification used stale storage evidence after the family outgrew the target")
+	}
+}
+
+func BenchmarkExtensionQualificationStorageBacklog(b *testing.B) {
+	q, m, e, template, observation := qualificationStorageFixture(b)
+	q.s.StorageObservations["prior-items"] = observation
+	for i := range 2000 {
+		id := fmt.Sprintf("retained-%03d", i)
+		unrelated := observation
+		unrelated.Family = id
+		q.s.StorageObservations[id] = unrelated
+	}
+	for i := range 250 {
+		id := fmt.Sprintf("queued-%03d", i)
+		j := *template
+		j.ID, j.Spec.Args = id, []string{id}
+		q.s.Jobs[id] = &j
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if !q.extensionQualificationDemands(m, nil)[e.Digest] {
+			b.Fatal("missing qualification demand")
+		}
+	}
+}
+
 // #459's post-restart queue had 149 registered extensions and 194 queued
 // plain commands, each with three shared inputs (608, 637 and 4063 bytes).
 // Qualification demand used to rehash those inputs for every catalogue entry
