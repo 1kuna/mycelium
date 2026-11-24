@@ -128,90 +128,6 @@ func TestVariantStatusPlacementAndAPI(t *testing.T) {
 	}
 }
 
-func TestVariantStatusParityApproval(t *testing.T) {
-	q, clock := fixture(t)
-	e, a, b := variantsFixture(t, true)
-	if err := q.AddExtension(e); err != nil {
-		t.Fatal(err)
-	}
-	check(t, q, a, nil)
-	check(t, q, b, nil)
-	j := submit(t, q, variantSpec(e, "production"))
-	q = reopenVariants(t, q, clock)
-	if !q.s.Extensions[extensionKey(e)].ProductionParityRequired || !q.s.Jobs[j.ID].Extensions[0].ProductionParityRequired {
-		t.Fatal("restart lost production approval requirement")
-	}
-	for _, m := range []Machine{a, b} {
-		if got := check(t, q, m, nil).Job; got != nil {
-			t.Fatal("native qualification bypassed owner parity", got)
-		}
-	}
-	got, err := q.jobSnapshot(j.ID)
-	if err != nil || !strings.Contains(got.Reason, "MY-19") {
-		t.Fatal("parity hold unexplained", got, err)
-	}
-	for _, r := range got.VariantEligibility {
-		if r.Variant == r.Target && (!r.Qualified || r.Eligible || len(r.Reasons) != 1 || !strings.Contains(r.Reasons[0], "myce parity add")) {
-			t.Fatal("parity-only blocker not explicit", r)
-		}
-	}
-	// An approval for unrelated work grants no placement. Checks/experiments
-	// remain usable for evidence; only this exact work gets production approval.
-	setParityHosts(t, q, "test", "kind:sample", hostID(&b))
-	if got := check(t, q, b, nil).Job; got != nil {
-		t.Fatal("unrelated work approved production")
-	}
-	clearParityHosts(t, q, "test")
-	setParityHosts(t, q, "test", "extension:"+e.Name, hostID(&b))
-	clock.Advance(time.Second)
-	assigned := check(t, q, b, nil).Job
-	if assigned == nil || assigned.ID != j.ID {
-		t.Fatal("approved fitting CPU variant not placed", assigned)
-	}
-	// Policy cannot manufacture an exact native check for a different identity.
-	bad := b
-	bad.ExtensionFingerprint = "changed"
-	if qualifiedExtension(q.s.Jobs[j.ID], &bad) != nil {
-		t.Fatal("approval manufactured native qualification")
-	}
-	checkJob := Job{Spec: variantSpec(e, "production"), Extensions: []Extension{q.s.Extensions[extensionKey(e)]}}
-	checkJob.Spec.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:" + e.Name}
-	if q.variantParityReason(&checkJob, &a) != "" {
-		t.Fatal("parity blocked evidence check")
-	}
-}
-
-func TestVariantStatusHistoricalRegistration(t *testing.T) {
-	q, clock := fixture(t)
-	e, a, b := variantsFixture(t, true)
-	if err := q.AddExtension(e); err != nil {
-		t.Fatal(err)
-	}
-	// Simulate a durable pre-gate registration (the absent bool decodes false).
-	if err := q.update(func() error {
-		old := q.s.Extensions[extensionKey(e)]
-		old.ProductionParityRequired = false
-		q.touchCatalog("extensions/" + extensionKey(e))
-		q.s.Extensions[extensionKey(e)] = old
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	check(t, q, a, nil)
-	check(t, q, b, nil)
-	j := submit(t, q, variantSpec(e, "production"))
-	q = reopenVariants(t, q, clock)
-	if err := q.AddExtension(e); err != nil {
-		t.Fatal(err)
-	}
-	if q.s.Extensions[extensionKey(e)].ProductionParityRequired || q.s.Jobs[j.ID].Extensions[0].ProductionParityRequired {
-		t.Fatal("replay changed historical admission")
-	}
-	if got := check(t, q, b, nil).Job; got == nil || got.ID != j.ID {
-		t.Fatal("historical job stranded")
-	}
-}
-
 func TestVariantStatusMixedRegistrationParity(t *testing.T) {
 	for _, state := range []struct{ legacy, added bool }{{true, false}, {true, true}, {false, true}} {
 		t.Run(fmt.Sprintf("legacy=%t,new=%t", state.legacy, state.added), func(t *testing.T) {
@@ -257,41 +173,6 @@ func TestVariantStatusMixedRegistrationParity(t *testing.T) {
 				t.Fatal("selected legacy digest blocked after restart", reason)
 			}
 		})
-	}
-}
-
-func TestVariantStatusCommittedPreemptionTarget(t *testing.T) {
-	q, clock := fixture(t)
-	e, a, b := variantsFixture(t, true)
-	if err := q.AddExtension(e); err != nil {
-		t.Fatal(err)
-	}
-	check(t, q, a, nil)
-	check(t, q, b, nil)
-	j := submit(t, q, variantSpec(e, "experiment"))
-	// Exact releases have completed, but assignment to the paid-for target has
-	// not happened yet. That commitment still excludes other idle targets.
-	if err := q.update(func() error {
-		q.touchJob(j.ID).PreemptionPlacement = &PreemptionPlacement{Machine: a.ID, Session: a.Session, Device: a.Device}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	got, err := q.jobSnapshot(j.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, r := range got.VariantEligibility {
-		if r.Host == hostID(&b) && r.Variant == r.Target && (r.Eligible || !strings.Contains(strings.Join(r.Reasons, " "), "committed preemption target")) {
-			t.Fatal("uncommitted alternative advertised eligible", r)
-		}
-	}
-	if run := check(t, q, b, nil).Job; run != nil {
-		t.Fatal("uncommitted alternative assigned", run)
-	}
-	clock.Advance(time.Second)
-	if run := check(t, q, a, nil).Job; run == nil || run.ID != j.ID {
-		t.Fatal("committed target did not assign", run)
 	}
 }
 

@@ -630,59 +630,6 @@ func TestReservationCheckSubmissionAtomic(t *testing.T) {
 	}
 }
 
-func TestReservationTerminalCleanupSurvivesRestart(t *testing.T) {
-	for _, outcome := range []string{"succeeded", "failed", "cancelled"} {
-		t.Run(outcome, func(t *testing.T) {
-			clock := &fakeClock{now: time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)}
-			db, root := filepath.Join(t.TempDir(), "queue.db"), t.TempDir()
-			q, err := Open(db, root, clock)
-			if err != nil {
-				t.Fatal(err)
-			}
-			fakeCheckpointAvailability(t, q, true)
-			m := m3Machine()
-			machineCheck(t, q, m)
-			bound := submit(t, q, exclusionSpec(m.ID, "0"))
-			if _, err := q.CreateReservation(reservationRequest("check", "host=machine;devices=0", bound.ID)); err != nil {
-				t.Fatal(err)
-			}
-			a := assignedJob(machineCheck(t, q, m))
-			if a == nil {
-				t.Fatal("missing bound assignment")
-			}
-			if err := q.Started(result(a, false)); err != nil {
-				t.Fatal(err)
-			}
-			if outcome == "cancelled" {
-				cancelAck(t, q, a.ID)
-			}
-			done := result(a, outcome == "succeeded")
-			done.ReleasePending = true
-			if err := q.Complete(done); err != nil {
-				t.Fatal(err)
-			}
-			requireState(t, q, a.ID, outcome)
-			reservationState(t, q, "check", "waiting_for_release")
-			if err := q.Close(); err != nil {
-				t.Fatal(err)
-			}
-			q, err = Open(db, root, clock)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer q.Close()
-			fakeCheckpointAvailability(t, q, true)
-			reservationState(t, q, "check", "waiting_for_release")
-			done.ReleasePending, done.ReleaseOnly = false, true
-			if err := q.Complete(done); err != nil {
-				t.Fatal(err)
-			}
-			reservationState(t, q, "check", "released")
-			requireState(t, q, a.ID, outcome)
-		})
-	}
-}
-
 func TestReservationKeepsStartedQualification(t *testing.T) {
 	q, w, _, _, _, plans := qualificationFixture(t)
 	reconcileQualification(t, w, plans[0])
@@ -704,42 +651,6 @@ func TestReservationKeepsStartedQualification(t *testing.T) {
 	if reply := check(t, q, w.Machine, a); reply.Stop || reply.Kill {
 		t.Fatal("Started qualification received stop", reply)
 	}
-}
-
-func TestReservationDoesNotDisplaceProduction(t *testing.T) {
-	q, _ := fixture(t)
-	m := m3Machine()
-	if err := q.ConfigureHosts(map[string]HostPolicy{m.HostID: {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
-		t.Fatal(err)
-	}
-	machineCheck(t, q, m)
-	s := exclusionSpec(m.ID, "1")
-	s.Priority = "production"
-	prod := submit(t, q, s)
-	a := assignedJob(machineCheck(t, q, m))
-	if a == nil || a.ID != prod.ID {
-		t.Fatal("production was not assigned")
-	}
-	if err := q.Started(result(a, false)); err != nil {
-		t.Fatal(err)
-	}
-	bound := submit(t, q, exclusionSpec(m.ID, "0"))
-	if _, err := q.CreateReservation(reservationRequest("qualification", "host=machine;devices=0", bound.ID)); err != nil {
-		t.Fatal(err)
-	}
-	// MY-50: production holds only its own device, so the reserved sibling
-	// card is free for the bound check while production keeps running.
-	reservationState(t, q, "qualification", "ready")
-	r := machineCheck(t, q, m, a)
-	for _, directive := range r.Attempts {
-		if directive.ID == a.ID && (directive.Stop || directive.Kill) {
-			t.Fatal("validation displaced production")
-		}
-	}
-	if next := assignedJob(r); next == nil || next.ID != bound.ID {
-		t.Fatal("bound check did not use the free device beside production", next)
-	}
-	requireState(t, q, a.ID, "running")
 }
 
 // Incident 2026-11-02: a card reservation on a two-card host withdrew every

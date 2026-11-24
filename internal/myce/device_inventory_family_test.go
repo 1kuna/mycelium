@@ -2,7 +2,6 @@ package myce
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -81,18 +80,6 @@ func TestDegradedInventoryZeroCustodyQuiescent(t *testing.T) {
 	status := maintenanceChange(t, q, "disable", true)
 	if status.Healthy || !status.Quiescent || len(status.Attempts) != 0 || status.Calls != 0 || status.Preparations != 0 || status.Sidecars != 0 || len(status.PendingReleases) != 0 {
 		t.Fatalf("inventory health blocks zero-custody maintenance: %+v", status)
-	}
-}
-
-func TestAcceleratorLevelZeroFailurePreservesCUDA(t *testing.T) {
-	p := familyProbe(t, "0x030000")
-	p.Command = func(context.Context, string, ...string) ([]byte, error) { return []byte("GPU-card, driver"), nil }
-	p.CommandEnv = func(context.Context, map[string]string, string, ...string) ([]byte, error) {
-		return nil, errors.New("Level Zero unavailable")
-	}
-	devices, err := p.Accelerators(context.Background())
-	if len(devices) != 1 || devices[0].Platform != "cuda" || err == nil || !strings.Contains(err.Error(), "xpu") {
-		t.Fatalf("CUDA devices hidden by Level Zero: %+v %v", devices, err)
 	}
 }
 

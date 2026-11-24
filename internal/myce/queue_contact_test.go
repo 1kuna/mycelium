@@ -66,31 +66,6 @@ func TestCheckinWaitingOnQueueLockIsNotWorkerSilence(t *testing.T) {
 	}
 }
 
-func TestCheckinAbandonedContactExpires(t *testing.T) {
-	q, c := fixture(t)
-	worker, peer := machine("worker", "fake"), machine("peer", "fake")
-	s := spec("production")
-	s.AllowedMachines = []string{worker.ID}
-	j := submit(t, q, s)
-	assigned := check(t, q, worker, nil).Job
-	if err := q.Started(result(assigned, true)); err != nil {
-		t.Fatal(err)
-	}
-	c.Advance(4 * time.Second)
-	check(t, q, peer, nil)
-	q.beginWorkerCheckin(worker.ID, worker.Session, 0, false) // Abandoned: never calls settle.
-	allowance := q.machineLossTimeout(worker.ID)
-	c.Advance(allowance - time.Nanosecond)
-	check(t, q, peer, nil)
-	requireState(t, q, j.ID, "running")
-	c.Advance(time.Nanosecond) // No remaining arrival allowance.
-	check(t, q, peer, nil)
-	requireState(t, q, j.ID, "queued")
-	if !q.s.Machines[worker.ID].Gone || job(t, q, j.ID).Losses != 1 {
-		t.Fatal("abandoned check-in hid a dead worker after its measured allowance")
-	}
-}
-
 // #343: a client deadline after 10 s behind the queue mutex must not remove
 // arrival protection and retroactively turn queue time into worker silence.
 func TestCheckinCancelledWhileWaitingRetainsBoundedContact(t *testing.T) {

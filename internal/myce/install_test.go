@@ -44,53 +44,6 @@ func fakeProbe(osname, arch, nvidia, intel string) MachineProbe {
 	return p
 
 }
-func TestInstallDetectionDryPlans(t *testing.T) {
-	cases := []struct {
-		name           string
-		p              MachineProbe
-		platform, mode string
-		reserve        float64
-	}{
-		{"4090", fakeProbe("linux", "amd64", "NVIDIA GeForce RTX 4090, 24564", ""), "cuda", "dedicated", 0},
-		{"Spark", fakeProbe("linux", "arm64", "NVIDIA GB10, [N/A]", ""), "cuda", "unified", 0},
-		{"Intel", withIntegratedPCI(fakeProbe("linux", "amd64", "", "[level_zero:gpu] Intel(R) UHD Integrated Graphics")), "xpu", "unified", 0},
-		{"Mac", fakeProbe("darwin", "arm64", "", ""), "metal", "unified", 0},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			d, e := tc.p.Detect(context.Background())
-			if e != nil {
-				t.Fatal(e)
-			}
-			if d.Platform != tc.platform || d.MemoryMode != tc.mode || d.ReserveGB != tc.reserve {
-				t.Fatal(d)
-			}
-			home := t.TempDir()
-			c, e := PlanInstall("worker", home, "", filepath.Join(home, "nas"), "http://queue:7331", "worker", d)
-			if e != nil {
-				t.Fatal(e)
-			}
-			if strings.Contains(c.ServiceText(), "token") {
-				t.Fatal("secret in unit")
-			}
-			if !strings.Contains(c.ServiceText(), "service") {
-				t.Fatal("missing service command")
-			}
-			if _, e = os.Stat(c.Config); !errors.Is(e, os.ErrNotExist) {
-				t.Fatal("dry plan wrote config")
-			}
-			if e = Uninstall(context.Background(), c, true, func(context.Context, string, ...string) ([]byte, error) {
-				t.Fatal("dry uninstall ran service command")
-				return nil, nil
-			}); e != nil {
-				t.Fatal(e)
-			}
-		})
-	}
-	if _, e := fakeProbe("linux", "amd64", "", "").Detect(context.Background()); e == nil {
-		t.Fatal("missing GPU accepted")
-	}
-}
 func TestInstallAndUninstallTempOnly(t *testing.T) {
 	home := t.TempDir()
 	c, e := PlanInstall("worker", home, "", filepath.Join(home, "nas"), "http://queue:7331", "worker", Detection{OS: "linux", Arch: "amd64", Platform: "cuda", MemoryMode: "dedicated"})

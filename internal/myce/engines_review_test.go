@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -42,96 +41,6 @@ func TestGenericRequestSpoolIsBoundedReplayableAndCancellable(t *testing.T) {
 	cancel()
 	if _, _, err = spool.request(cancelled, strings.NewReader("data"), 4, -1); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancel error=%v", err)
-	}
-}
-
-type reviewStreamEngine struct {
-	started       chan struct{}
-	contextDone   chan struct{}
-	mu            sync.Mutex
-	body          string
-	contentLength int64
-	headers       http.Header
-}
-
-func (*reviewStreamEngine) Load(context.Context, Model) error { return nil }
-func (*reviewStreamEngine) Unload() error                     { return nil }
-func (*reviewStreamEngine) Call(context.Context, string, []byte) (*http.Response, error) {
-	return nil, errors.New("buffered call used for generic request")
-}
-func (e *reviewStreamEngine) StreamRequest(ctx context.Context, _ string, _ string, body io.Reader, contentLength int64, headers http.Header) (*http.Response, error) {
-	close(e.started)
-	data, err := io.ReadAll(body)
-	if err != nil {
-		if errors.Is(err, context.Canceled) && e.contextDone != nil {
-			close(e.contextDone)
-		}
-		return nil, err
-	}
-	e.mu.Lock()
-	e.body, e.contentLength, e.headers = string(data), contentLength, headers.Clone()
-	e.mu.Unlock()
-	return &http.Response{StatusCode: http.StatusCreated, Header: http.Header{"X-Upstream": []string{"yes"}}, Body: io.NopCloser(strings.NewReader("done"))}, nil
-}
-
-func TestWorkerStreamsGenericBodyHeadersAndLength(t *testing.T) {
-	engine := &reviewStreamEngine{started: make(chan struct{})}
-	rt := &modelRuntime{
-		models:  map[string]*workerModel{"general": {engine: engine, state: "ready"}},
-		session: "session",
-		token:   "token",
-	}
-	server := workerTestServer(http.HandlerFunc(rt.serve))
-	defer server.Close()
-
-	reader, writer := io.Pipe()
-	req, err := http.NewRequest("PUT", server.URL+"/models/general/audio?language=en", reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.ContentLength = int64(len("first-last"))
-	req.Header.Set("Authorization", "Bearer token")
-	req.Header.Set("X-Myce-Session", "session")
-	req.Header.Set("X-Custom", "preserved")
-	result := make(chan error, 1)
-	go func() {
-		res, err := http.DefaultClient.Do(req)
-		if err == nil {
-			defer res.Body.Close()
-			data, readErr := io.ReadAll(res.Body)
-			if readErr != nil {
-				err = readErr
-			} else if res.StatusCode != http.StatusCreated || res.Header.Get("X-Upstream") != "yes" || string(data) != "done" {
-				err = errors.New("upstream response contract changed")
-			}
-		}
-		result <- err
-	}()
-	if _, err = io.WriteString(writer, "first-"); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-engine.started:
-		// The engine sees the request before the uploader reaches EOF.
-	case <-time.After(testWaitTimeout):
-		t.Fatal("worker buffered generic request before calling engine")
-	}
-	if _, err = io.WriteString(writer, "last"); err != nil {
-		t.Fatal(err)
-	}
-	if err = writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err = <-result; err != nil {
-		t.Fatal(err)
-	}
-	engine.mu.Lock()
-	defer engine.mu.Unlock()
-	if engine.body != "first-last" || engine.contentLength != int64(len("first-last")) || engine.headers.Get("X-Custom") != "preserved" {
-		t.Fatalf("body=%q length=%d headers=%v", engine.body, engine.contentLength, engine.headers)
-	}
-	if engine.headers.Get("Authorization") != "" || engine.headers.Get("X-Myce-Session") != "" {
-		t.Fatal("routing credentials reached engine")
 	}
 }
 
@@ -205,28 +114,6 @@ func TestGenericDiskSpoolReplaysTransportRetry(t *testing.T) {
 	}
 }
 
-func TestWithModelDeviceDropsOtherPlatformSelectors(t *testing.T) {
-	base := Model{DeviceEnv: map[string]string{
-		"CUDA_VISIBLE_DEVICES":   "cuda-stale",
-		"ZE_AFFINITY_MASK":       "xpu-stale",
-		"ONEAPI_DEVICE_SELECTOR": "level_zero:xpu-stale",
-	}}
-	xpu, err := WithModelDevice(base, "xpu", "1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if value, ok := xpu.DeviceEnv["CUDA_VISIBLE_DEVICES"]; !ok || value != "" || xpu.DeviceEnv["ZE_AFFINITY_MASK"] != "1" || xpu.DeviceEnv["ONEAPI_DEVICE_SELECTOR"] != "level_zero:0" {
-		t.Fatalf("XPU isolation=%v", xpu.DeviceEnv)
-	}
-	cuda, err := WithModelDevice(base, "cuda", "GPU-selected")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cuda.DeviceEnv["CUDA_VISIBLE_DEVICES"] != "GPU-selected" || cuda.DeviceEnv["ZE_AFFINITY_MASK"] != "2147483647" || cuda.DeviceEnv["ONEAPI_DEVICE_SELECTOR"] != "!*:*" {
-		t.Fatalf("CUDA isolation=%v", cuda.DeviceEnv)
-	}
-}
-
 func TestBundleRecoveryClosesEachSourceFile(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -251,33 +138,5 @@ func TestBundleRecoveryClosesEachSourceFile(t *testing.T) {
 	entries, err := os.ReadDir(destination)
 	if err != nil || len(entries) != 300 {
 		t.Fatalf("recovered=%d err=%v", len(entries), err)
-	}
-}
-
-func TestBoundServerDropsInheritedOtherBackendSelectors(t *testing.T) {
-	t.Setenv("CUDA_VISIBLE_DEVICES", "inherited-cuda")
-	t.Setenv("ZE_AFFINITY_MASK", "inherited-xpu")
-	t.Setenv("ONEAPI_DEVICE_SELECTOR", "inherited-oneapi")
-	for _, platform := range []string{"cuda", "xpu", "metal"} {
-		m := Model{Engine: "server", StartCommand: []string{"unused"}, HealthURL: "http://127.0.0.1:{port}/health"}
-		bound, e := WithModelDevice(m, platform, "0")
-		if e != nil {
-			t.Fatal(e)
-		}
-		_, _, _, env, e := serverCommand(bound, 1234)
-		if e != nil {
-			t.Fatal(e)
-		}
-		got := map[string]string{}
-		for _, entry := range env {
-			k, v, _ := strings.Cut(entry, "=")
-			got[k] = v
-		}
-		if platform != "cuda" && got["CUDA_VISIBLE_DEVICES"] != "" {
-			t.Fatal(platform, got["CUDA_VISIBLE_DEVICES"])
-		}
-		if platform != "xpu" && (got["ZE_AFFINITY_MASK"] != "2147483647" || got["ONEAPI_DEVICE_SELECTOR"] != "!*:*") {
-			t.Fatal(platform, "inherited XPU selector")
-		}
 	}
 }

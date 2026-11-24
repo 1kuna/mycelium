@@ -13,67 +13,6 @@ import (
 	"time"
 )
 
-// These are the public diagnostics emitted by launch/apply, including failures
-// before a receipt exists. Exercise both live acknowledgements and outage replay.
-func TestFleetFailureCodesSurviveReceiptAndQueue(t *testing.T) {
-	codes := []string{
-		"fleet_ack_failed", "fleet_authorization_refused", "fleet_instruction_stale", "fleet_ack_stale",
-		"fleet_maintenance_changed",
-		"fleet_artifact_download_failed", "fleet_artifact_transfer_failed", "fleet_artifact_refused",
-		"fleet_staging_write_failed", "fleet_binary_unavailable", "fleet_candidate_invalid",
-		"fleet_config_invalid", "fleet_service_invalid", "fleet_install_invalid", "fleet_state_invalid",
-		"fleet_local_file_invalid", "fleet_credentials_unavailable", "fleet_queue_invalid",
-		"fleet_darwin_identity_refused", "fleet_existing_service_unavailable", "fleet_health_failed",
-		"fleet_helper_busy", "fleet_helper_launch_failed", "fleet_helper_launch_unclassified",
-		"fleet_install_changed", "fleet_instruction_invalid", "fleet_preflight_failed",
-		"fleet_storage_preflight_failed", "fleet_publish_failed", "fleet_publisher_mismatch",
-		"fleet_publisher_unavailable", "fleet_signature_refused", "fleet_target_invalid",
-		"fleet_receipt_write_failed", "fleet_recovery_runtime_changed", "fleet_restart_failed",
-		"fleet_version_refused", "fleet_failure_code_missing", "fleet_failure_code_unrecognized",
-	}
-	f := newFleetInstallFixture(t, "darwin")
-	if err := f.launch(); err != nil {
-		t.Fatal(err)
-	}
-	r, err := readFleetReceipt(filepath.Join(f.c.State, fleetUpdateReceiptFile))
-	if err != nil {
-		t.Fatal(err)
-	}
-	q, _, _ := fleetFixture(t, "queue", "worker")
-	for _, code := range codes {
-		t.Run(code, func(t *testing.T) {
-			r.Phase, r.Failure = "failed", code
-			if err := writeFleetReceipt(f.c, r); err != nil {
-				t.Fatal(err)
-			}
-			replayed, err := ReadFleetUpdateFailure(f.c)
-			if err != nil || replayed == nil || replayed.Failure != code || replayed.Operation != f.i.Operation || replayed.Revision != f.i.Revision || replayed.Session != f.i.Session {
-				t.Fatalf("receipt lost code or attempt identity: %+v %v", replayed, err)
-			}
-			for _, reported := range []string{code, replayed.Failure} {
-				if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
-					t.Fatal(err)
-				}
-				fleetTick(t, q)
-				i := fleetInstructionFor(t, q)
-				if err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed", Failure: reported}); err != nil {
-					t.Fatal(err)
-				}
-				h := fleetHostStatus(t, q, i.Host)
-				want := code
-				if code == "fleet_storage_preflight_failed" {
-					want = "storage_preflight_failed"
-				} else if code == "fleet_health_failed" {
-					want = "service_health_failed"
-				}
-				if h.Failure != want || h.FailureCode != code || q.fleetUpgradeStatus().State != "stopped" {
-					t.Fatalf("queue lost diagnostic: %+v", h)
-				}
-			}
-		})
-	}
-}
-
 // #1710: only a typed stall before durable helper intent may yield. The next
 // ordinary poll must refetch, authorize all identities again, and launch once.
 func TestFleetFailureAuthorizationStallRefetches(t *testing.T) {

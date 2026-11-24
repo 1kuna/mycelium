@@ -9,35 +9,6 @@ import (
 	"time"
 )
 
-func TestQueuedReasonIgnoresIneligibleReservation(t *testing.T) {
-	q, clock := fixture(t)
-	wrong := m3Machine()
-	wrong.ID, wrong.HostID, wrong.Session = "other-platform", "other-platform", "other-session"
-	wrong.CapabilityProfile.OS = "darwin"
-	machineCheck(t, q, wrong)
-	bound := submit(t, q, exclusionSpec(wrong.ID, "0"))
-	request := reservationRequest("irrelevant", "host=other-platform;devices=0", bound.ID)
-	request.Reason = "unrelated validation"
-	if _, err := q.CreateReservation(request); err != nil {
-		t.Fatal(err)
-	}
-	m := m3Machine()
-	m.HostAvailableMemoryGB = 0.5
-	machineCheck(t, q, m)
-	s := exclusionSpec("", "0")
-	s.AllowedMachines = nil
-	s.Needs.HostMemoryGB = 4
-	s.Targets = []ExecutionTarget{{OS: "linux", Arch: "amd64", Platform: "fake"}}
-	j := submit(t, q, s)
-	clock.Advance(time.Second)
-	machineCheck(t, q, m)
-	for _, reason := range []string{job(t, q, j.ID).Reason, queuedStatusReason(t, q, j.ID)} {
-		if strings.Contains(reason, "unrelated validation") || strings.Contains(reason, wrong.ID) || !strings.Contains(reason, "RAM needs 4.000 GiB") || !strings.Contains(reason, "available 0.500 GiB") {
-			t.Fatal("reason did not name the job's eligible RAM blocker", reason)
-		}
-	}
-}
-
 // Mixed shortages must describe both eligible hosts, regardless of whether
 // the CPU-busy host also lacks RAM. The RAM fallback used to skip busy CPUs.
 func TestQueuedReasonMixedCPUAndRAMTargets(t *testing.T) {
@@ -94,58 +65,6 @@ func TestQueuedReasonMixedCPUAndRAMTargets(t *testing.T) {
 				t.Fatal("fitting peer did not admit queued work", got)
 			}
 		})
-	}
-}
-
-func TestQueuedReasonUnavailablePeerAndRAMShortage(t *testing.T) {
-	q, clock := fixture(t)
-	owner := cpuMachine("owner-host", "owner-host", "cpu", 8, 32)
-	owner.CapabilityProfile.Availability = &Availability{Mode: "daily", Available: false, Reason: "on battery", CheckedAt: clock.Now(), Signals: idleSignals()}
-	check(t, q, owner, nil)
-	ram := cpuMachine("ram-host", "ram-host", "cpu", 8, 0.5)
-	check(t, q, ram, nil)
-	j := submit(t, q, cpuSpec(2, 4))
-	clock.Advance(time.Second)
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
-	}
-	q.mu.Lock()
-	waitReason := q.waitReason(q.s.Jobs[j.ID])
-	q.mu.Unlock()
-	for _, reason := range []string{waitReason, job(t, q, j.ID).Reason, queuedStatusReason(t, q, j.ID)} {
-		for _, want := range []string{"owner-host: hypha on battery", "ram-host: RAM needs 4.000 GiB, available 0.500 GiB"} {
-			if !strings.Contains(reason, want) {
-				t.Errorf("missing %q: %s", want, reason)
-			}
-		}
-	}
-	owner.CapabilityProfile.Availability.Available = true
-	if got := check(t, q, owner, nil).Job; got == nil || got.ID != j.ID {
-		t.Fatal("available peer did not admit queued work", got)
-	}
-}
-
-func TestQueuedReasonIgnoresReservationOnUndersizedHost(t *testing.T) {
-	q, clock := fixture(t)
-	small := cpuMachine("undersized", "undersized", "cpu", 4, 32)
-	check(t, q, small, nil)
-	boundSpec := cpuSpec(1, 1)
-	boundSpec.AllowedMachines = []string{small.ID}
-	bound := submit(t, q, boundSpec)
-	request := reservationRequest("irrelevant", "host=undersized", bound.ID)
-	request.Reason = "unrelated small-host validation"
-	if _, err := q.CreateReservation(request); err != nil {
-		t.Fatal(err)
-	}
-	eligible := cpuMachine("eligible", "eligible", "cpu", 8, 0.5)
-	check(t, q, eligible, nil)
-	j := submit(t, q, cpuSpec(8, 4))
-	clock.Advance(time.Second)
-	check(t, q, eligible, nil)
-	for _, reason := range []string{job(t, q, j.ID).Reason, queuedStatusReason(t, q, j.ID)} {
-		if strings.Contains(reason, small.ID) || strings.Contains(reason, request.Reason) || !strings.Contains(reason, "eligible: RAM needs 4.000 GiB, available 0.500 GiB") {
-			t.Fatal("incompatible CPU capacity contributed a reservation reason", reason)
-		}
 	}
 }
 

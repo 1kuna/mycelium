@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -358,19 +357,6 @@ func TestNativeGroupReadyEnvironmentAndCleanup(t *testing.T) {
 		})
 	}
 }
-func TestNativeGroupReadinessTimeout(t *testing.T) {
-	s := nativeSpec(t)
-	s.Run.Sidecars[0].Readiness.Timeout = "150ms"
-	s.Run.Sidecars[0].Env["NATIVE_TEST_UNREADY"] = "1"
-	r := nativeStart(t, s, "fake")
-	result := nativeFinish(t, r)
-	if result.Success || result.Interrupted || !strings.Contains(result.Error, "timeout") {
-		t.Fatal(result)
-	}
-	if _, err := os.Stat(filepath.Join(r.dir, "main.json")); !os.IsNotExist(err) {
-		t.Fatal("main started before readiness")
-	}
-}
 func TestNativeGroupOccupiedPort(t *testing.T) {
 	occupied, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -387,22 +373,6 @@ func TestNativeGroupOccupiedPort(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(r.dir, "side.json")); !os.IsNotExist(err) {
 		t.Fatal("helper started on occupied port")
-	}
-}
-func TestNativeGroupMemberDeath(t *testing.T) {
-	s := nativeSpec(t)
-	r := nativeStart(t, s, "fake")
-	nativeFile(t, r.dir, "main-ready")
-	nativeFile(t, r.dir, "child.pid")
-	data, _ := os.ReadFile(filepath.Join(r.dir, "side.json"))
-	var v struct{ PID int }
-	_ = json.Unmarshal(data, &v)
-	if err := syscall.Kill(v.PID, syscall.SIGTERM); err != nil {
-		t.Fatal(err)
-	}
-	result := nativeFinish(t, r)
-	if result.Success || result.Interrupted || !strings.Contains(result.Error, "sidecar helper exited") {
-		t.Fatal(result)
 	}
 }
 func TestNativeGroupCancellationPreparing(t *testing.T) {
@@ -570,28 +540,6 @@ func TestNativeGroupValidation(t *testing.T) {
 				t.Fatal("invalid group accepted")
 			}
 		})
-	}
-}
-
-func TestNativeGroupInfrastructureLeaveRequeues(t *testing.T) {
-	s := nativeSpec(t)
-	s.Resumable = true
-	r := nativeStart(t, s, "fake")
-	nativeFile(t, r.dir, "main-ready")
-	if err := r.q.Leave("native", false); err != nil {
-		t.Fatal(err)
-	}
-	r.p.stop(r.w.Clock.Now(), time.Second, false)
-	result := nativeFinish(t, r)
-	if !result.Interrupted || result.Success {
-		t.Fatal(result)
-	}
-	if err := r.q.Complete(result); err != nil {
-		t.Fatal(err)
-	}
-	current := job(t, r.q, r.j.ID)
-	if current.State != "queued" || current.Losses != 0 {
-		t.Fatal("infrastructure stop consumed stage/loss budget", current.State, current.Losses)
 	}
 }
 

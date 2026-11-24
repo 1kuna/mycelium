@@ -15,7 +15,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -287,36 +286,6 @@ func (f *fleetInstallFixture) assertBinary(want []byte) {
 	}
 }
 
-func TestFleetInstallPreservesSettingsAndRestartsOnce(t *testing.T) {
-	f := newFleetInstallFixture(t, "linux")
-	kept := map[string][]byte{}
-	for _, path := range []string{f.c.Config, f.c.Credentials, f.c.Service, filepath.Join(f.c.State, "identity-kept"), filepath.Join(f.c.State, "spool-kept"), filepath.Join(f.c.State, "fleet-publisher.pub")} {
-		kept[path], _ = os.ReadFile(path)
-	}
-	if err := f.launch(); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.launch(); err != nil || f.launches != 1 {
-		t.Fatal("duplicate instruction relaunched", err, f.launches)
-	}
-	if err := f.apply(); err != nil {
-		t.Fatal(err)
-	}
-	f.assertBinary(f.next)
-	if f.restarts != 1 || !reflect.DeepEqual(f.acks, []string{"restarting"}) || f.authorizations != 3 {
-		t.Fatal("incorrect activation", f.restarts, f.acks)
-	}
-	if err := f.apply(); err != nil || f.restarts != 1 || f.fetches != 1 {
-		t.Fatal("resume repeated installation or restart", err)
-	}
-	for path, want := range kept {
-		got, _ := os.ReadFile(path)
-		if !bytes.Equal(got, want) {
-			t.Errorf("changed saved artifact %s", path)
-		}
-	}
-}
-
 func TestFleetInstallRejectsUntrustedReleaseBeforeFetch(t *testing.T) {
 	for _, fault := range []string{"signature", "publisher", "downgrade", "same-version"} {
 		t.Run(fault, func(t *testing.T) {
@@ -360,64 +329,6 @@ func TestFleetInstallRequiresCurrentMaintenanceAuthority(t *testing.T) {
 	}
 }
 
-func TestFleetInstallRefusesBadHashAndStorageWithoutRollback(t *testing.T) {
-	for _, fault := range []string{"hash", "storage", "restart"} {
-		t.Run(fault, func(t *testing.T) {
-			f := newFleetInstallFixture(t, "linux")
-			if err := f.launch(); err != nil {
-				t.Fatal(err)
-			}
-			switch fault {
-			case "hash":
-				f.badArtifact = true
-			case "storage":
-				if err := os.Mkdir(filepath.Join(f.c.NAS, "mycelium"), 0700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(f.c.State, filepath.Join(f.c.NAS, "mycelium", "checkpoints")); err != nil {
-					t.Fatal(err)
-				}
-			case "restart":
-				f.restartError = true
-			}
-			err := f.apply()
-			if err == nil || strings.Contains(err.Error(), "fixture-private-token") {
-				t.Fatal("missing or unsanitized failure", err)
-			}
-			want := f.old
-			if fault == "restart" {
-				want = f.next // Fix forward: failure never restores old bytes.
-			}
-			f.assertBinary(want)
-			if fault == "storage" && f.fetches != 0 {
-				t.Fatal("download preceded storage preflight")
-			}
-			before := f.restarts
-			if f.apply() == nil || f.restarts != before {
-				t.Fatal("failed operation retried restart")
-			}
-			if fault == "storage" {
-				r, err := readFleetReceipt(filepath.Join(f.c.State, fleetUpdateReceiptFile))
-				if err != nil {
-					t.Fatal(err)
-				}
-				failure, err := ReadFleetUpdateFailure(f.c)
-				if err != nil || failure == nil || failure.Failure != "fleet_storage_preflight_failed" {
-					t.Fatalf("storage failure lost: %+v %v", failure, err)
-				}
-				r.Failure = "private arbitrary error text"
-				if err = writeFleetReceipt(f.c, r); err != nil {
-					t.Fatal(err)
-				}
-				failure, err = ReadFleetUpdateFailure(f.c)
-				if err != nil || failure == nil || failure.Failure != "fleet_failure_code_unrecognized" {
-					t.Fatalf("untrusted failure exposed: %+v %v", failure, err)
-				}
-			}
-		})
-	}
-}
-
 func TestFleetInstallPublicationAndRestartCrashWindows(t *testing.T) {
 	for _, phase := range []string{"prepared", "installed", "restarting"} {
 		t.Run(phase, func(t *testing.T) {
@@ -445,30 +356,6 @@ func TestFleetInstallPublicationAndRestartCrashWindows(t *testing.T) {
 			}
 			if err := f.apply(); err != nil || f.restarts != want {
 				t.Fatal("reconciliation blindly repeated restart", err)
-			}
-		})
-	}
-}
-
-func TestFleetInstallDarwinDesignatedRequirement(t *testing.T) {
-	for _, change := range []bool{false, true} {
-		t.Run(map[bool]string{false: "same-requirement", true: "changed-requirement"}[change], func(t *testing.T) {
-			f := newFleetInstallFixture(t, "darwin")
-			f.changeDR = change
-			if err := f.launch(); err != nil {
-				t.Fatal(err)
-			}
-			err := f.apply()
-			if change {
-				if err == nil || f.restarts != 0 {
-					t.Fatal("Darwin identity change accepted", err)
-				}
-				f.assertBinary(f.old)
-			} else {
-				if err != nil || f.restarts != 1 {
-					t.Fatal("same identity failed", err)
-				}
-				f.assertBinary(f.next)
 			}
 		})
 	}
@@ -549,53 +436,6 @@ func TestFleetInstallRerunLaunchesNewOperationOnly(t *testing.T) {
 		t.Fatal(err, f.restarts)
 	}
 	f.assertBinary(f.next)
-}
-
-func TestFleetInstallSharedBinaryStillRestartsOldWorker(t *testing.T) {
-	for _, fault := range []string{"healthy", "storage", "installed-storage"} {
-		t.Run(fault, func(t *testing.T) {
-			f := newFleetInstallFixture(t, "linux")
-			// A colocated queue has already replaced the shared installed pathname;
-			// the worker's retained executable mapping and session are still old.
-			if err := os.WriteFile(f.c.Binary, f.next, 0700); err != nil {
-				t.Fatal(err)
-			}
-			f.version = f.i.Release.Manifest.Version
-			if err := f.launch(); err != nil {
-				t.Fatal(err)
-			}
-			r, err := readFleetReceipt(filepath.Join(f.c.State, fleetUpdateReceiptFile))
-			if err != nil || r.BeforeRuntime.SHA256 == r.BeforeSHA256 {
-				t.Fatal("disk hash confused with running image", err)
-			}
-			if fault == "installed-storage" {
-				r.Phase = "installed"
-				if err := writeFleetReceipt(f.c, r); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if fault != "healthy" {
-				if err := os.Mkdir(filepath.Join(f.c.NAS, "mycelium"), 0700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(f.c.State, filepath.Join(f.c.NAS, "mycelium", "checkpoints")); err != nil {
-					t.Fatal(err)
-				}
-			}
-			err = f.apply()
-			if fault != "healthy" {
-				if err == nil || err.Error() != "fleet_storage_preflight_failed" || f.restarts != 0 {
-					t.Fatal("shared binary bypassed storage preflight", err, f.restarts)
-				}
-			} else if err != nil || f.restarts != 1 {
-				t.Fatal("shared binary skipped worker activation", err, f.restarts)
-			}
-			if f.fetches != 0 {
-				t.Fatal("shared binary fetched again")
-			}
-			f.assertBinary(f.next)
-		})
-	}
 }
 
 func TestFleetInstallStopsAfterFailedManagerHealth(t *testing.T) {

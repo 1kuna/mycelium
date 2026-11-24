@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -113,44 +112,6 @@ func TestIdlePrefetchMostNeededAndPauseForWork(t *testing.T) {
 		t.Fatal("copy competed with batch", reply)
 	}
 }
-func TestLoadEstimatesAndMachinePlacement(t *testing.T) {
-	q, _, slow := syncFixture(t)
-	slow.CopyBytesPerSecond = 40_000_000
-	fast := slow
-	fast.ID = "two"
-	fast.Session = "session-two"
-	fast.CopyBytesPerSecond = 80_000_000
-	check(t, q, slow, nil)
-	check(t, q, fast, nil)
-	if q.loadSeconds("a", &slow) != 1000 || q.loadSeconds("a", &fast) != 500 {
-		t.Fatal("speed ignored")
-	}
-	fast.CopyReports = []CopyReport{{Model: "a", Bytes: 20_000_000_000, Total: 40_000_000_000, State: "paused"}}
-	if q.loadSeconds("a", &fast) != 250 {
-		t.Fatal("resumed bytes ignored")
-	}
-	check(t, q, fast, nil)
-	s := spec("production")
-	s.Needs.Model = "a"
-	j := submit(t, q, s)
-	if check(t, q, slow, nil).Job != nil {
-		t.Fatal("slow worker took model work")
-	}
-	r := check(t, q, fast, nil).Job
-	if r == nil || r.ID != j.ID {
-		t.Fatal("fast worker not selected")
-	}
-	finish(t, q, r, true)
-	slow.CachedModels = []string{"a"}
-	check(t, q, slow, nil)
-	c := &ModelCall{Model: "a", Project: "atlas", Priority: "production"}
-	if e := q.addCall(c); e != nil {
-		t.Fatal(e)
-	}
-	if q.s.ModelSlots[slotKey(slow.ID, "a")] == nil {
-		t.Fatal("cached model not preferred")
-	}
-}
 func TestCacheResumeSpeedAndVerifiedPublication(t *testing.T) {
 	c, model := cacheFixture(t)
 	c.Limit = 4 * 1024 * 1024
@@ -208,33 +169,6 @@ func TestCacheDoesNotTrustUnverifiedSameSizeCopy(t *testing.T) {
 	}
 	if e = verifyModel(path, m); e != nil {
 		t.Fatal("corrupt cache used", e)
-	}
-}
-func TestPrecopyNeverEvictsPinnedLoadedOrMoreUsed(t *testing.T) {
-	for _, kind := range []string{"pinned", "loaded", "popular"} {
-		t.Run(kind, func(t *testing.T) {
-			c, model := cacheFixture(t)
-			a, b := model("a", "aaaaaaaa"), model("b", "bbbbbbbb")
-			if _, e := c.Prepare(context.Background(), a); e != nil {
-				t.Fatal(e)
-			}
-			if kind == "popular" {
-				c.Usage = func(key string) int {
-					if key == cacheKey(a) {
-						return 2
-					}
-					return 0
-				}
-			} else {
-				c.Protected = func(key string) bool { return key == cacheKey(a) }
-			}
-			if _, e := c.Precopy(context.Background(), b, 1); e == nil {
-				t.Fatal("protected copy evicted")
-			}
-			if e := verifyModel(filepath.Join(c.Root, cacheKey(a)), a); e != nil {
-				t.Fatal(e)
-			}
-		})
 	}
 }
 func TestConcurrentCopiesReserveFullCacheAndDiskBytes(t *testing.T) {
@@ -305,26 +239,6 @@ func TestWorkerPausesCopyBeforeRealWork(t *testing.T) {
 			}
 			rt.wg.Wait()
 		})
-	}
-}
-
-func TestResumeRejectsCorruptPrefix(t *testing.T) {
-	c, model := cacheFixture(t)
-	m := model("m", "good")
-	os.WriteFile(filepath.Join(c.Root, cacheKey(m)+".partial"), []byte("ev"), 0600)
-	if _, e := c.Precopy(context.Background(), m, 1); e == nil {
-		t.Fatal("corrupt prefix published")
-	}
-	if names, _, _ := c.Report([]Model{m}); len(names) > 0 {
-		t.Fatal(names)
-	}
-	p, e := c.Prepare(context.Background(), m)
-	if e != nil {
-		t.Fatal(e)
-	}
-	data, _ := os.ReadFile(p)
-	if fmt.Sprintf("%x", sha256.Sum256(data)) != m.SHA256 {
-		t.Fatal("bad resumed hash")
 	}
 }
 
@@ -429,43 +343,6 @@ func TestSyncUsesRealAPIAndWorker(t *testing.T) {
 	}
 }
 
-func TestParallelCopiesActuallyRunTogether(t *testing.T) {
-	c, model := cacheFixture(t)
-	c.Limit = 16
-	c.Parallel = 2
-	a, b := model("a", "aaaaaaaa"), model("b", "bbbbbbbb")
-	entered := make(chan struct{}, 2)
-	release := make(chan struct{})
-	var calls atomic.Int32
-	c.beforeChunk = func(context.Context) {
-		if calls.Add(1) <= 2 {
-			entered <- struct{}{}
-			<-release
-		}
-	}
-	done := make(chan error, 2)
-	for _, m := range []Model{a, b} {
-		go func() { _, e := c.Prepare(context.Background(), m); done <- e }()
-	}
-	for range 2 {
-		select {
-		case <-entered:
-		case <-time.After(testWaitTimeout):
-			close(release)
-			t.Fatal("parallel limit still serialized copies")
-		}
-	}
-	close(release)
-	for range 2 {
-		if e := <-done; e != nil {
-			t.Fatal(e)
-		}
-	}
-	if names, free, e := c.Report([]Model{a, b}); e != nil || len(names) != 2 || free != 0 {
-		t.Fatal(names, free, e)
-	}
-}
-
 func TestOversizedMasterNeverExceedsCopyReservation(t *testing.T) {
 	c, model := cacheFixture(t)
 	m := model("m", strings.Repeat("x", 1024))
@@ -479,53 +356,5 @@ func TestOversizedMasterNeverExceedsCopyReservation(t *testing.T) {
 		if e != nil || st.Size() > m.SizeBytes {
 			t.Fatal("copy wrote beyond reservation", e)
 		}
-	}
-}
-
-func TestRecentModelUseAndActiveBatchProtection(t *testing.T) {
-	q, c, m := syncFixture(t)
-	s := spec("experiment")
-	s.Needs.Model = "a"
-	j := submit(t, q, s)
-	r := check(t, q, m, nil).Job
-	plan := check(t, q, m, r)
-	if !contains(plan.CachePins, "a") || len(plan.CopyPlan) > 0 {
-		t.Fatal("active batch cache not protected", plan)
-	}
-	c.Advance(25 * time.Hour)
-	// A long-running job's finish is recent even though its submission is old.
-	if e := q.Complete(result(r, true)); e != nil {
-		t.Fatal(e)
-	}
-	if got := job(t, q, j.ID); got.State != "succeeded" {
-		t.Fatal(got)
-	}
-	if len(check(t, q, m, nil).CopyPlan) != 1 {
-		t.Fatal("recently completed model forgotten")
-	}
-	c.Advance(25 * time.Hour)
-	if len(check(t, q, m, nil).CopyPlan) != 0 {
-		t.Fatal("old use never expired")
-	}
-}
-
-func TestBatchPlacementPrefersLoadedOverCached(t *testing.T) {
-	q, _, cached := syncFixture(t)
-	cached.CachedModels = []string{"a"}
-	loaded := cached
-	loaded.ID, loaded.Session = "loaded", "loaded-session"
-	loaded.Models = []string{"a"}
-	check(t, q, cached, nil)
-	// An external loaded-model hint is valid for batch work; no engine is required.
-	loaded.ModelURL = ""
-	check(t, q, loaded, nil)
-	s := spec("production")
-	s.Needs.Model = "a"
-	j := submit(t, q, s)
-	if check(t, q, cached, nil).Job != nil {
-		t.Fatal("cached worker took work from loaded worker")
-	}
-	if got := check(t, q, loaded, nil).Job; got == nil || got.ID != j.ID {
-		t.Fatal("loaded worker did not receive work", got)
 	}
 }

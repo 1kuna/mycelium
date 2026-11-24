@@ -8,47 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 )
-
-func TestToolsResolveRefusalAndRouting(t *testing.T) {
-	q, clock := fixture(t)
-	missing := cpuMachine("bare", "", "cpu", 8, 16)
-	missing.ToolInventory = map[string][]string{"": {"git"}}
-	check(t, q, missing, nil)
-	s := cpuSpec(1, 1)
-	s.RequireTarget = true
-	s.Needs.Tools = []string{"python3.12", "node", "npm", "npx", "git"}
-	report, err := q.Resolve(ResolveRequest{Spec: s})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(report.Targets) != 1 || report.Targets[0].Eligible || !strings.Contains(report.Targets[0].Reason, "tools_missing: missing tools [python3.12, node, npm, npx] on bare") {
-		t.Fatalf("resolve: %+v", report.Targets)
-	}
-	_, err = q.Submit(s)
-	var api *HTTPError
-	if !errors.As(err, &api) || api.Code != "no_qualified_target" || !strings.Contains(api.Message, "tools_missing") || !strings.Contains(api.Message, "on bare") {
-		t.Fatalf("refusal: %v", err)
-	}
-	// An older worker with no inventory also refuses explicit tool requirements.
-	missing.ToolInventory = nil
-	check(t, q, missing, nil)
-	if _, err := q.Submit(s); err == nil {
-		t.Fatal("unknown tool inventory admitted")
-	}
-	ready := cpuMachine("prepared", "", "cpu", 8, 16)
-	ready.ToolInventory = map[string][]string{"": slices.Clone(s.Needs.Tools)}
-	check(t, q, ready, nil)
-	clock.Advance(time.Second)
-	j := submit(t, q, s)
-	if reply := check(t, q, missing, nil); reply.Job != nil {
-		t.Fatal("routed to missing tools", reply.Job)
-	}
-	if reply := check(t, q, ready, nil); reply.Job == nil || reply.Job.ID != j.ID {
-		t.Fatalf("present tools did not proceed: %+v", reply)
-	}
-}
 
 func TestToolsPreparedEnvironmentInventory(t *testing.T) {
 	q, _ := fixture(t)

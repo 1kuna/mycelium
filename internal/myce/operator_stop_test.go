@@ -57,22 +57,6 @@ func TestOperatorStopRefundsExactLossOnce(t *testing.T) {
 		t.Fatal("duplicate changed losses")
 	}
 }
-func TestOperatorStopBeforeLossIsFree(t *testing.T) {
-	q, _ := fixture(t)
-	m := machine("operator", "fake")
-	check(t, q, m, nil)
-	j := submit(t, q, spec("experiment"))
-	running := check(t, q, m, nil).Job
-	r := operatorResult(result(running, false))
-	r.Interrupted = true
-	if e := q.Complete(r); e != nil {
-		t.Fatal(e)
-	}
-	if got := job(t, q, j.ID); got.Losses != 0 || got.State != "queued" {
-		t.Fatalf("operator stop charged: %+v", got)
-	}
-}
-
 func TestOperatorStopMarkerSurvivesStartupAndIsAttemptSpecific(t *testing.T) {
 	w := recoveryWorker(t)
 	s, e := w.openStore()

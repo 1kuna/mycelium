@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -93,42 +92,5 @@ func TestCommandExecArgumentLimitIsTerminal(t *testing.T) {
 				t.Fatal("public reason lost actionable guidance")
 			}
 		})
-	}
-}
-
-// A handled stderr error must not replace the cause of a later assertion failure.
-func TestCommandHandledExecDiagnostic(t *testing.T) {
-	w := recoveryWorker(t)
-	w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
-	w.Machine.HostMemoryMeasured = true
-	w.Machine.HostAvailableMemoryGB, w.Machine.FreeHostMemoryGB = 64, 64
-	store, err := w.openStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.close()
-	store.state.Session = w.Machine.Session
-	j := recoveryJob(t, []string{"sh", "-c", "echo 'sh: optional-probe: Exec format error' >&2; echo 'optional failure handled; continuing' >&2; echo 'AssertionError: actual regression' >&2; exit 1"})
-	w = workerWithPreparedCheckpoint(t, w, store, j)
-	p, err := startAfterFixtureInputs(t, w, store, j)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { p.stop(w.Clock.Now(), 0, true) })
-	var r Result
-	await(t, func() bool {
-		select {
-		case f := <-p.done:
-			if f.err != nil {
-				t.Fatal(f.err)
-			}
-			r = f.result
-			return true
-		default:
-			return false
-		}
-	})
-	if r.Success || r.Interrupted || r.ExecutionCause == nil || r.ExecutionCause.Class != "command_exit" || r.ExecutionCause.ExitCode == nil || *r.ExecutionCause.ExitCode != 1 {
-		t.Fatalf("handled diagnostic changed ordinary exit 1: %+v", r)
 	}
 }

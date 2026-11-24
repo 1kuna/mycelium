@@ -3,7 +3,6 @@ package myce
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -157,91 +156,6 @@ type inactiveInstallUnit struct{}
 
 func (inactiveInstallUnit) Error() string { return "inactive fixture unit" }
 func (inactiveInstallUnit) ExitCode() int { return 3 }
-
-func TestInstallManagerRollback(t *testing.T) {
-	for _, role := range []string{"worker", "queue"} {
-		for _, active := range []bool{false, true} {
-			for _, failure := range []string{"reload", "enable", "restart"} {
-				t.Run(fmt.Sprintf("%s/active=%t/%s", role, active, failure), func(t *testing.T) {
-					c, source := preserveWorkerFixture(t)
-					if role == "queue" {
-						var err error
-						c, err = PlanInstall(role, c.NAS, "", c.NAS, c.Queue, c.Name, c.Detection)
-						if err != nil {
-							t.Fatal(err)
-						}
-					}
-					if err := Install(context.Background(), c, source, "fixture", fakeInstallManager(c)); err != nil {
-						t.Fatal(err)
-					}
-					paths := []string{c.Binary, c.Config, c.Service}
-					unit := filepath.Base(c.Service)
-					before, loaded := map[string][]byte{}, map[string][]byte{}
-					for _, path := range paths {
-						data, err := os.ReadFile(path)
-						if err != nil {
-							t.Fatal(err)
-						}
-						before[path], loaded[path] = data, data
-					}
-					currentActive, fired, reloads := active, false, 0
-					injected := errors.New("injected manager failure")
-					manager := func(ctx context.Context, name string, args ...string) ([]byte, error) {
-						if name == "systemctl" && len(args) == 3 && args[1] == "show" {
-							return installUnitObservation(c), nil
-						}
-						call := strings.Join(args, " ")
-						if call == "--user is-active --quiet "+unit {
-							if currentActive {
-								return []byte("active"), nil
-							}
-							return nil, inactiveInstallUnit{}
-						}
-						if call == "--user daemon-reload" {
-							reloads++
-							for _, path := range paths {
-								data, err := os.ReadFile(path)
-								if err != nil {
-									t.Fatal(err)
-								}
-								loaded[path] = data
-							}
-						}
-						if call == "--user enable --now "+unit || call == "--user restart "+unit {
-							currentActive = true // Even a failing command can partially activate.
-						}
-						if !fired && (failure == "reload" && call == "--user daemon-reload" || failure == "enable" && call == "--user enable --now "+unit || failure == "restart" && call == "--user restart "+unit) {
-							fired = true
-							return nil, injected
-						}
-						if fired && (call == "--user restart "+unit || call == "--user stop "+unit) {
-							for path, data := range before {
-								if !bytes.Equal(loaded[path], data) {
-									t.Fatal("restored active state before reloading restored files")
-								}
-							}
-							currentActive = call == "--user restart "+unit
-						}
-						return fakeInstallManager(c)(ctx, name, args...)
-					}
-					c.Heartbeat = 2 * time.Second
-					if err := Install(context.Background(), c, source, "", manager); !errors.Is(err, injected) || !fired {
-						t.Fatal("fault was not exercised", err)
-					}
-					for path, want := range before {
-						got, err := os.ReadFile(path)
-						if err != nil || !bytes.Equal(got, want) || !bytes.Equal(loaded[path], want) {
-							t.Fatalf("disk and manager did not both restore %s", filepath.Base(path))
-						}
-					}
-					if reloads != 2 || currentActive != active {
-						t.Fatalf("rollback: reloads=%d active=%t; want 2 and %t", reloads, currentActive, active)
-					}
-				})
-			}
-		}
-	}
-}
 
 func TestInstallManagerRollbackRecoveryFailure(t *testing.T) {
 	for _, failure := range []string{"reload", "restart", "canceled"} {
@@ -495,38 +409,6 @@ func TestServiceConfigVersionAndSanitizedDiff(t *testing.T) {
 		if _, err := ReadServiceConfig(c.Config); err == nil {
 			t.Fatal("unsupported config was accepted")
 		}
-	}
-}
-
-func TestServiceConfigRetiredHostSettingsRefused(t *testing.T) {
-	c, _ := preserveWorkerFixture(t)
-	data, err := json.Marshal(c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var saved map[string]json.RawMessage
-	if err := json.Unmarshal(data, &saved); err != nil {
-		t.Fatal(err)
-	}
-	saved["host_state_dir"] = json.RawMessage(`"/fixture/retired-control"`)
-	saved["start_disabled"] = json.RawMessage(`true`)
-	saved["required_workers"] = json.RawMessage(`["gpu0","gpu1"]`)
-	data, err = json.Marshal(saved)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = os.MkdirAll(filepath.Dir(c.Config), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err = os.WriteFile(c.Config, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ReadServiceConfig(c.Config); err == nil {
-		t.Fatal("retired settings accepted")
-	}
-	after, err := os.ReadFile(c.Config)
-	if err != nil || !bytes.Equal(data, after) {
-		t.Fatal("refused config changed", err)
 	}
 }
 

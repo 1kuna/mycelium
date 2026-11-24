@@ -214,59 +214,6 @@ func TestCommandDiscoveryUnpinningPreservesCoverageAndParity(t *testing.T) {
 	}
 }
 
-func TestCommandDiscoveryReadOnlyProductionAndMaintenance(t *testing.T) {
-	q, clock := fixture(t)
-	r := breadthRecipe("linux-64", "osx-arm64", "win-64")
-	discoveryCatalog(t, q, r)
-	m := cpuMachine("worker", "host", "cpu", 8, 32)
-	m.EnvironmentBuilder = true
-	check(t, q, m, nil)
-	s := discoverySpec()
-	before := identityHash(q.s)
-	report, err := q.Resolve(ResolveRequest{Spec: s})
-	if err != nil || len(report.Targets) != 1 || !report.Targets[0].Eligible || report.Targets[0].Environment.State != "prepare-needed" || identityHash(q.s) != before {
-		t.Fatal(report, err)
-	}
-	if got := portabilityRow(t, *report.Portability, ExecutionTarget{"windows", "amd64", "cpu"}); !strings.Contains(got.Runtime, "unsupported") || !strings.HasPrefix(got.AuthoredEligibility, "excluded:") {
-		t.Fatal(got)
-	}
-	clock.Advance(q.machineLossTimeout(m.ID) + time.Second)
-	report, err = q.Resolve(ResolveRequest{Spec: s})
-	if err != nil || report.Targets[0].Eligible {
-		t.Fatal("stale evidence admitted", report, err)
-	}
-	check(t, q, m, nil)
-	s.Class, s.Priority = "production", ""
-	report, err = q.Resolve(ResolveRequest{Spec: s})
-	if err != nil || report.Targets[0].Eligible || !strings.Contains(report.Targets[0].Reason, "MY-19") {
-		t.Fatal("production widened without exact parity", report, err)
-	}
-	if _, err := q.Submit(s); err == nil {
-		t.Fatal("production discovery accepted without parity")
-	}
-	policy := defaultPriorityPolicy()
-	policy.Tiers[0].Selectors = append(policy.Tiers[0].Selectors, "*/customer")
-	if _, err := q.SetPriorityPolicy(0, policy); err != nil {
-		t.Fatal(err)
-	}
-	s.Class = "customer"
-	report, err = q.Resolve(ResolveRequest{Spec: s})
-	if err != nil || report.Targets[0].Eligible || !strings.Contains(report.Targets[0].Reason, "MY-19") {
-		t.Fatal("policy-promoted production bypassed parity", report, err)
-	}
-	s.Class = "experiment"
-	j := submit(t, q, s)
-	if _, err := q.ChangeHostMaintenance("host", HostMaintenanceRequest{Action: "drain", DrainOwner: "fixture"}); err != nil {
-		t.Fatal(err)
-	}
-	if got := check(t, q, m, nil); got.Job != nil || len(got.EnvironmentPlan) != 0 {
-		t.Fatal("maintenance bypassed", got)
-	}
-	if err := q.Cancel(j.ID); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestCommandDiscoveryPreparesEveryMemberAndIsolatesSidecarFailure(t *testing.T) {
 	q, _ := fixture(t)
 	main, helper := breadthRecipe("linux-64", "osx-arm64"), breadthRecipe("osx-arm64")

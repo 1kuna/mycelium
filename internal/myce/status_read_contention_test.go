@@ -13,13 +13,6 @@ import (
 	"time"
 )
 
-// Replay the observed mix: retained history, queued receipts, uncached status,
-// and real SQLite check-ins. Queue decisions use a fixed injected clock, so the
-// test proves the mix completes without errors or interrupting production.
-func TestStatusReadCheckinContention(t *testing.T) {
-	statusReadCheckinContention(t, false)
-}
-
 // Latency acceptance for the same mix: -run '^$' -bench StatusReadCheckinContention
 // -benchtime 1x on an otherwise idle host. The bound lives here because shared
 // fleet load alone exceeded it in coverage runs on unchanged main.

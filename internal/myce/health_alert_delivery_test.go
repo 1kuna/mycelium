@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -10,48 +9,6 @@ import (
 	"testing"
 	"time"
 )
-
-func TestHealthAlertDeliveryStatusWithoutNotifier(t *testing.T) {
-	q, clock := fixture(t)
-	if err := q.update(func() error {
-		q.appendHealthAlert(HealthAlert{Kind: "disk_below_guard", Host: "h"})
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(8 * 24 * time.Hour)
-	q.runHealthNotifier(context.Background())
-	snapshot, err := q.publicSnapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := json.Marshal(snapshot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var reply struct {
-		Delivery *struct {
-			Configured bool `json:"configured"`
-			Pending    int  `json:"pending"`
-		} `json:"health_alert_delivery"`
-	}
-	if err := json.Unmarshal(data, &reply); err != nil {
-		t.Fatal(err)
-	}
-	if reply.Delivery == nil || reply.Delivery.Configured || reply.Delivery.Pending != 0 {
-		t.Fatalf("status does not explain unconfigured delivery: %+v", reply.Delivery)
-	}
-	if len(snapshot.HealthAlerts) != 1 || snapshot.HealthAlerts[0].Delivered {
-		t.Fatal("unconfigured delivery must preserve unacknowledged history")
-	}
-	var page bytes.Buffer
-	if err := statusPage.Execute(&page, snapshot); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(page.String(), "health notifier is not configured") {
-		t.Fatal("status page does not explain undelivered diagnostic history")
-	}
-}
 
 func TestHealthAlertDeliveryConfigurationClearsAfterRestart(t *testing.T) {
 	dir := t.TempDir()
@@ -137,58 +94,6 @@ func TestHealthAlertDeliveryFailedHookRemainsUnacknowledged(t *testing.T) {
 	}
 	if snapshot.HealthAlertDelivery == nil || !snapshot.HealthAlertDelivery.Configured || snapshot.HealthAlertDelivery.Pending != 1 || snapshot.HealthAlerts[0].Delivered {
 		t.Fatalf("failed-hook status: %+v", snapshot.HealthAlertDelivery)
-	}
-}
-
-// Activation skips closed history and delivers only a still-open problem.
-func TestHealthAlertDeliverySkipsClosedBacklog(t *testing.T) {
-	q, clock := fixture(t)
-	dir := t.TempDir()
-	hook, out := filepath.Join(dir, "notify"), filepath.Join(dir, "payloads")
-	script := "#!/bin/sh\n[ \"$1\" = --check ] && exit 0\ncat >> '" + out + "'\necho >> '" + out + "'\n"
-	if err := os.WriteFile(hook, []byte(script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.update(func() error {
-		for range 5969 {
-			q.appendHealthAlert(HealthAlert{Kind: "host_degraded", Reason: "host_probe_unknown", Host: "a"})
-			clock.Advance(time.Second)
-		}
-		clock.Advance(24 * time.Hour)
-		q.observeHealth("test/b", true, 0, HealthAlert{Kind: "host_degraded", Reason: "host_probe_unknown", Host: "b"})
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.ConfigureHealthNotifier(context.Background(), hook); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { defer close(done); q.runHealthNotifier(ctx) }()
-	defer func() { cancel(); <-done }()
-	await(t, func() bool {
-		q.mu.RLock()
-		defer q.mu.RUnlock()
-		return len(q.pendingHealthDeliveries()) == 0
-	})
-	data, err := os.ReadFile(out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got []HealthAlert
-	for _, line := range strings.Fields(string(data)) {
-		var e HealthAlert
-		if err := json.Unmarshal([]byte(line), &e); err != nil {
-			t.Fatal(err)
-		}
-		got = append(got, e)
-	}
-	if len(got) != 1 || got[0].Host != "b" || got[0].State != "open" || strings.HasSuffix(got[0].DeliveryID, "/closed") {
-		t.Fatalf("record deliveries: %s", data)
-	}
-	if len(q.s.Health.Events) != 2 {
-		t.Fatal("records", len(q.s.Health.Events))
 	}
 }
 

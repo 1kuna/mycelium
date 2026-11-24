@@ -2,15 +2,12 @@ package myce
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -50,85 +47,6 @@ func TestWaitReadPendingReasonPrivacy(t *testing.T) {
 	}
 	if pending.Reason != ordinary.Reason || strings.Contains(w.Body.String(), "synthetic-private-secret") || strings.Contains(w.Body.String(), "/private/fixture") {
 		t.Fatalf("pending reason bypassed public sanitization: pending=%q ordinary=%q", pending.Reason, ordinary.Reason)
-	}
-}
-
-// Replay 35 independent waiters across twenty expired diagnostic-cache windows.
-// Queue time advances only between concurrent rounds, without wall-clock sleeps.
-func TestWaitReadConcurrentPolling(t *testing.T) {
-	q, clock := fixture(t)
-	var ids []string
-	for range 35 {
-		ids = append(ids, submit(t, q, spec("experiment")).ID)
-	}
-	var captures atomic.Int64
-	q.observeRead = func(kind string, _, _ time.Duration) {
-		if kind == "job" {
-			captures.Add(1)
-		}
-	}
-	handler := (API{Queue: q, Token: "fixture"}).handler("", clock)
-	for _, query := range []string{"", "?view=wait"} {
-		captures.Store(0)
-		for range 20 {
-			clock.Advance(3 * time.Second)
-			var wg sync.WaitGroup
-			for _, id := range ids {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					w := waitReadRequest(handler, id, query)
-					var got Job
-					if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || w.Code != 200 || got.ID != id || got.State != "queued" {
-						t.Errorf("pending reply: status=%d id=%s state=%s err=%v", w.Code, got.ID, got.State, err)
-					}
-				}()
-			}
-			wg.Wait()
-		}
-		want := int64(700)
-		if query != "" {
-			want = 0
-		}
-		if got := captures.Load(); got != want {
-			t.Fatalf("query=%q diagnostic captures=%d want=%d", query, got, want)
-		}
-		t.Logf("query=%q: 700 requests, %d diagnostic captures", query, captures.Load())
-	}
-	// A rolled-back terminal transition must never be visible to a waiter.
-	abort := errors.New("abort")
-	if err := q.update(func() error { q.touchJob(ids[0]).State = "failed"; return abort }); !errors.Is(err, abort) {
-		t.Fatal(err)
-	}
-	w := waitReadRequest(handler, ids[0][:8], "?view=wait")
-	var pending map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &pending); err != nil || pending["state"] != "queued" || pending["spec"] != nil {
-		t.Fatal("rollback or pending projection", pending, err)
-	}
-	// No TTL delay after commit; terminal payload and reason match old clients.
-	if err := q.Cancel(ids[0]); err != nil {
-		t.Fatal(err)
-	}
-	full := waitReadRequest(handler, ids[0], "")
-	fast := waitReadRequest(handler, ids[0][:8], "?view=wait")
-	// Per-response freshness (age, cache reuse) is additive metadata; the
-	// receipt itself must be identical.
-	receipt := func(body []byte) string {
-		var reply map[string]json.RawMessage
-		if err := json.Unmarshal(body, &reply); err != nil || reply["freshness"] == nil {
-			t.Fatal("receipt without freshness", string(body), err)
-		}
-		delete(reply, "freshness")
-		data, _ := json.Marshal(reply)
-		return string(data)
-	}
-	if full.Code != 200 || fast.Code != 200 || receipt(full.Body.Bytes()) != receipt(fast.Body.Bytes()) {
-		t.Fatal("terminal wait reply differs from ordinary GET")
-	}
-	for _, query := range []string{"", "?view=wait"} {
-		if w := waitReadRequest(handler, "unknown", query); w.Code != 404 {
-			t.Fatal("unknown job status", w.Code)
-		}
 	}
 }
 

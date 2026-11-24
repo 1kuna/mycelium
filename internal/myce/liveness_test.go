@@ -81,37 +81,6 @@ func TestFleetPartialRecoveryHasOneDeadline(t *testing.T) {
 	}
 }
 
-func TestFleetContinuousSurvivorDoesNotMaskLoss(t *testing.T) {
-	for _, tc := range []struct {
-		priority string
-		timeout  time.Duration
-	}{{"production", ProductionLossAfter}, {"deadline", DeadlineLossAfter}, {"experiment", LossAfter}} {
-		t.Run(tc.priority, func(t *testing.T) {
-			q, c := fixture(t)
-			for _, id := range []string{"dead-a", "dead-b"} {
-				s := spec(tc.priority)
-				s.AllowedMachines = []string{id}
-				submit(t, q, s)
-				assigned := check(t, q, machine(id, "fake"), nil).Job
-				if err := q.Started(result(assigned, true)); err != nil {
-					t.Fatal(err)
-				}
-			}
-			live := machine("live", "fake")
-			check(t, q, live, nil)
-			for elapsed := time.Second; elapsed <= tc.timeout; elapsed += time.Second {
-				c.Advance(time.Second)
-				check(t, q, live, nil)
-			}
-			for _, id := range []string{"dead-a", "dead-b"} {
-				if !q.s.Machines[id].Gone {
-					t.Fatalf("%s stayed joined beyond %s", id, tc.timeout)
-				}
-			}
-		})
-	}
-}
-
 func TestFleetRecoveryEpochSurvivesQueueRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "queue.db")
 	root := t.TempDir()

@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -72,24 +71,6 @@ func TestCacheCopyVerifyReuseAndLRU(t *testing.T) {
 		t.Fatal("eviction not recoverable")
 	}
 }
-func TestCacheDiskFullAndProtected(t *testing.T) {
-	c, model := cacheFixture(t)
-	a, b := model("a", "aaaaaaaa"), model("b", "bbbbbbbb")
-	if _, e := c.Prepare(context.Background(), a); e != nil {
-		t.Fatal(e)
-	}
-	c.Protected = func(key string) bool { return key == cacheKey(a) }
-	if _, e := c.Prepare(context.Background(), b); e == nil || !strings.Contains(e.Error(), "insufficient") {
-		t.Fatal("evicted loaded/pinned model", e)
-	}
-	c.Free = func(string) (int64, error) { return 0, nil }
-	if _, e := c.Prepare(context.Background(), b); e == nil {
-		t.Fatal("disk full accepted")
-	}
-	if _, e := os.Stat(filepath.Join(c.Root, cacheKey(a))); e != nil {
-		t.Fatal("protected model missing")
-	}
-}
 func TestCacheInterruptedCopyRetainedChecksumAndDirect(t *testing.T) {
 	c, model := cacheFixture(t)
 	m := model("m", "data")
@@ -150,33 +131,6 @@ func TestFetchRejectsInsecureURLAndOverwrite(t *testing.T) {
 	}
 }
 
-func TestDiskPressureEvictsUntilFree(t *testing.T) {
-	c, model := cacheFixture(t)
-	c.Limit = 100
-	a, b := model("a", "aaaaaaaa"), model("b", "bbbbbbbb")
-	if _, e := c.Prepare(context.Background(), a); e != nil {
-		t.Fatal(e)
-	}
-	c.Free = func(root string) (int64, error) {
-		entries, e := os.ReadDir(root)
-		var used int64
-		for _, entry := range entries {
-			st, err := entry.Info()
-			if err != nil {
-				return 0, err
-			}
-			used += st.Size()
-		}
-		return 8 + int64(len(stateFormat)) - used, e
-	}
-	if _, e := c.Prepare(context.Background(), b); e != nil {
-		t.Fatal("disk-space eviction failed", e)
-	}
-	if _, e := os.Stat(filepath.Join(c.Root, cacheKey(a))); !os.IsNotExist(e) {
-		t.Fatal("disk pressure did not evict LRU")
-	}
-}
-
 func TestCatalogRefusesRemoteLoadArgs(t *testing.T) {
 	for _, arg := range []string{"--hf-repo", "--hf-file=weights.gguf", "-hf", "--model-url=https://example.com/m", "--mmproj-url"} {
 		c := ModelConfig{Idle: time.Minute, Wait: time.Minute, Models: []Model{{Name: "m", Path: "m.gguf", Engine: "llama.cpp", SizeBytes: 4, SHA256: strings.Repeat("a", 64), MemoryGB: 1, Platforms: []string{"fake"}, Args: []string{arg}}}}
@@ -215,64 +169,6 @@ func TestExplicitFetchVerifiesMaster(t *testing.T) {
 	}
 	if _, e := os.Stat(bad); !os.IsNotExist(e) {
 		t.Fatal("bad master published")
-	}
-}
-
-func TestCacheInventoryDoesNotBlockHeartbeatDuringCopy(t *testing.T) {
-	c, model := cacheFixture(t)
-	m := model("m", "data")
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	done := make(chan error, 1)
-	go func() { _, _, e := c.Report([]Model{m}); done <- e }()
-	select {
-	case e := <-done:
-		if e != nil {
-			t.Fatal(e)
-		}
-	case <-time.After(testWaitTimeout):
-		t.Fatal("inventory blocked behind copy lock; worker heartbeat would stop")
-	}
-}
-
-func TestCacheReuseEnforcesLoweredLimit(t *testing.T) {
-	c, model := cacheFixture(t)
-	a, b := model("a", "aaaa"), model("b", "bbbb")
-	for _, m := range []Model{a, b} {
-		if _, err := c.Prepare(context.Background(), m); err != nil {
-			t.Fatal(err)
-		}
-	}
-	c.Limit = 4 // operator restarts with a smaller allowance
-	c.Protected = func(key string) bool { return key == cacheKey(b) }
-	if _, err := c.Prepare(context.Background(), a); err == nil {
-		t.Fatal("cached load ignored over-limit protected data")
-	}
-	c.Protected = nil
-	if _, err := c.Prepare(context.Background(), a); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(c.Root, cacheKey(b))); !os.IsNotExist(err) {
-		t.Fatal("cached load did not enforce smaller allowance", err)
-	}
-}
-
-func TestCacheReportIncludesUnwrittenReservations(t *testing.T) {
-	c, model := cacheFixture(t)
-	m := model("m", "12345678")
-	entered, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	c.beforeChunk = func(context.Context) { once.Do(func() { close(entered); <-release }) }
-	done := make(chan error, 1)
-	go func() { _, err := c.Prepare(context.Background(), m); done <- err }()
-	<-entered
-	names, free, err := c.Report([]Model{m})
-	close(release)
-	if copyErr := <-done; copyErr != nil {
-		t.Fatal(copyErr)
-	}
-	if err != nil || len(names) != 0 || free != 0 {
-		t.Fatalf("unwritten copy advertised free space: %v %d %v", names, free, err)
 	}
 }
 

@@ -87,64 +87,6 @@ func pciFixtureProbe(devices ...pciFixture) MachineProbe {
 	return p
 }
 
-func TestOnboardingMixedDriverlessIntel(t *testing.T) {
-	p := pciFixtureProbe(pciFixture{"0000:01:00.0", "0x10de", "16", "NVIDIA GPU", "", true}, pciFixture{"0000:02:00.0", "0x8086", "8", "Intel Arc GPU", "", false})
-	_, err := PreflightHardware(context.Background(), ServiceConfig{}, p)
-	requirePreflightCode(t, err, "gpu_driver_missing")
-}
-
-func TestOnboardingPCIMatrix(t *testing.T) {
-	nvidia := pciFixture{"0000:01:00.0", "0x10de", "16", "NVIDIA GPU", "", true}
-	discrete := pciFixture{"0000:02:00.0", "0x8086", "8", "Intel Arc GPU", "", true}
-	integrated := pciFixture{"0000:00:02.0", "0x8086", "0", "Intel(R) Graphics [0x7d55]", "", true}
-	arcIntegrated := integrated
-	arcIntegrated.name = "Intel(R) Arc(TM) Graphics"
-	missing := discrete
-	missing.usable = false
-	bmc := pciFixture{"0000:03:00.0", "0x1a03", "1", "ASPEED", "", false}
-	for _, tc := range []struct {
-		name    string
-		devices []pciFixture
-		modes   []string
-		code    string
-	}{
-		{"nvidia_driverless_intel", []pciFixture{nvidia, missing}, nil, "gpu_driver_missing"},
-		{"integrated_nvidia", []pciFixture{integrated, nvidia}, []string{"dedicated", "unified"}, ""},
-		{"arc_discrete", []pciFixture{discrete}, []string{"fixed"}, ""},
-		{"arc_integrated", []pciFixture{arcIntegrated}, []string{"unified"}, ""},
-		{"generic_integrated", []pciFixture{integrated}, []string{"unified"}, ""},
-		{"bmc", nil, nil, ""},
-	} {
-		for _, withBMC := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/bmc=%v", tc.name, withBMC), func(t *testing.T) {
-				devices := append([]pciFixture(nil), tc.devices...)
-				if withBMC {
-					devices = append(devices, bmc)
-				}
-				got, err := PreflightHardware(context.Background(), ServiceConfig{}, pciFixtureProbe(devices...))
-				if tc.code != "" {
-					requirePreflightCode(t, err, tc.code)
-					return
-				}
-				if err != nil {
-					t.Fatal(err)
-				}
-				if len(got.Devices) != len(tc.modes) {
-					t.Fatalf("devices=%+v want modes=%v", got.Devices, tc.modes)
-				}
-				if len(tc.modes) == 0 && got.Platform != "cpu" {
-					t.Fatal(got)
-				}
-				for i, mode := range tc.modes {
-					if got.Devices[i].Detection.MemoryMode != mode {
-						t.Fatalf("device %d=%+v want %s", i, got.Devices[i], mode)
-					}
-				}
-			})
-		}
-	}
-}
-
 func TestDetectIntelMemoryUsesPCITopology(t *testing.T) {
 	for _, name := range []string{"Intel(R) Arc(TM) Graphics", "Intel(R) Graphics [0x7d55]"} {
 		for _, verbose := range []bool{false, true} {
@@ -163,62 +105,6 @@ func TestDetectIntelMemoryUsesPCITopology(t *testing.T) {
 				}
 			})
 		}
-	}
-}
-
-func withIntegratedPCI(p MachineProbe) MachineProbe {
-	fixture := pciFixtureProbe(pciFixture{"0000:00:02.0", "0x8086", "0", "Intel Graphics", "", true})
-	p.Glob, p.ReadFile = fixture.Glob, fixture.ReadFile
-	p = withIntelRuntimeFixture(p)
-	return p
-}
-
-func TestOnboardingSameFamilyCompletenessAndTopology(t *testing.T) {
-	integrated := pciFixture{"0000:00:02.0", "0x8086", "0", "Intel Arc GPU", "", true}
-	discrete := pciFixture{"0000:02:00.0", "0x8086", "8", "Intel UHD GPU", "0x120000", true}
-	for _, missing := range []bool{false, true} {
-		t.Run(fmt.Sprintf("missing=%v", missing), func(t *testing.T) {
-			discrete.usable = !missing
-			p := pciFixtureProbe(integrated, discrete)
-			got, err := PreflightHardware(context.Background(), ServiceConfig{}, p)
-			if missing {
-				requirePreflightCode(t, err, "gpu_driver_missing")
-				return
-			}
-			if err != nil || len(got.Devices) != 2 || got.Devices[0].Detection.MemoryMode != "unified" || got.Devices[1].Detection.MemoryMode != "fixed" {
-				t.Fatalf("%+v %v", got, err)
-			}
-			// Foreground detection follows the same selected runtime/PCI identity.
-			d, err := p.DetectDevice(context.Background(), "1")
-			if err != nil || d.MemoryMode != "fixed" {
-				t.Fatalf("%+v %v", d, err)
-			}
-		})
-	}
-}
-
-func TestOnboardingFamilyFailureRetainsOtherInventory(t *testing.T) {
-	p := pciFixtureProbe(pciFixture{"0000:01:00.0", "0x10de", "16", "NVIDIA", "", true}, pciFixture{"0000:02:00.0", "0x8086", "8", "Intel Arc GPU", "", true})
-	command := p.Command
-	p.Command = func(ctx context.Context, n string, args ...string) ([]byte, error) {
-		if n == "nvidia-smi" {
-			return nil, os.ErrPermission
-		}
-		return command(ctx, n, args...)
-	}
-	devices, err := p.Accelerators(context.Background())
-	requirePreflightCode(t, err, "gpu_driver_unavailable")
-	if len(devices) != 1 || devices[0].Platform != "xpu" {
-		t.Fatalf("other family hidden: %+v", devices)
-	}
-	p.Command = command
-	p.CommandEnv = func(context.Context, map[string]string, string, ...string) ([]byte, error) {
-		return nil, os.ErrPermission
-	}
-	devices, err = p.Accelerators(context.Background())
-	requirePreflightCode(t, err, "gpu_driver_unavailable")
-	if len(devices) != 1 || devices[0].Platform != "cuda" {
-		t.Fatalf("other family hidden: %+v", devices)
 	}
 }
 

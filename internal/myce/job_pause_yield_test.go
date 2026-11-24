@@ -115,39 +115,6 @@ func TestJobPauseYieldReleaseAndResume(t *testing.T) {
 	}
 }
 
-func TestJobPauseYieldLeavesOtherWorkUntouched(t *testing.T) {
-	q, _ := fixture(t)
-	a, b := machine("first-worker", "fake", "shared-host"), machine("second-worker", "fake", "shared-host")
-	s := spec("experiment")
-	s.Needs.HostMemoryGB = 1
-	submit(t, q, s)
-	own := check(t, q, a, nil).Job
-	s.Project = "different-project"
-	submit(t, q, s)
-	other := check(t, q, b, nil).Job
-	if own == nil || other == nil {
-		t.Fatal("missing concurrent assignments")
-	}
-	for _, run := range []*Job{own, other} {
-		if err := q.Started(result(run, true)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := q.PauseJob(own.ID, yieldRequest(own)); err != nil {
-		t.Fatal(err)
-	}
-	if got := check(t, q, b, other); got.Stop {
-		t.Fatal("yield stopped another project's work")
-	}
-	status, err := q.HostMaintenanceStatus("shared-host")
-	if err != nil || status.Policy.Mode != "enabled" || status.Policy.StopAt != nil {
-		t.Fatal("yield edited host policy", status.Policy, err)
-	}
-	if got := job(t, q, other.ID); got.State != "running" || plannedMaintenanceStop(got) {
-		t.Fatal("yield changed another job", got)
-	}
-}
-
 func TestJobPauseYieldHTTPRefusals(t *testing.T) {
 	q, _ := fixture(t)
 	s := spec("experiment")

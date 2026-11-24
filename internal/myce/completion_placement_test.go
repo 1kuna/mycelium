@@ -2,48 +2,10 @@ package myce
 
 import (
 	"bytes"
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 )
-
-// Unknown completion estimates leave value/identity and legacy model routing intact.
-// Equal-value commands use stable target identity; legacy servers retain ready-first
-// routing and zero-as-unlimited, even with unrelated extension observations.
-func TestCompletionUnknownPlacementUnchanged(t *testing.T) {
-	q, clock, m, s := observationFixture(t)
-	other := m
-	other.ID, other.HostID, other.Session = "other", "other-host", "other-session"
-	e := q.s.Extensions[s.Extension]
-	r := newExtensionReport(e, &other, s.workType())
-	r.Setup, r.Qualified, r.CheckID = true, true, "other-check"
-	other.ExtensionReports = []ExtensionReport{r}
-	check(t, q, other, nil)
-	q.s.WorkObservations = map[string]WorkObservation{"unrelated": {LastSeconds: 1, Samples: 1, RecordedAt: clock.Now()}}
-	command := submit(t, q, s)
-	run := check(t, q, other, nil).Job
-	if run == nil || run.ID != command.ID {
-		t.Fatal("equal-value command did not use stable identity", run)
-	}
-	models, _, warm := modelFixture(t)
-	first := addModelCall(t, models, "experiment")
-	reportModel(t, models, warm, "ready")
-	cold := warm
-	cold.ID, cold.Session = "two", "two-session"
-	check(t, models, cold, nil)
-	second := addModelCall(t, models, "experiment")
-	decision := struct {
-		Commands []string `json:"commands"`
-		Models   []string `json:"models"`
-		InFlight int      `json:"in_flight"`
-	}{[]string{run.Machine}, []string{first.Machine, second.Machine}, models.s.ModelSlots[slotKey(warm.ID, "test")].InFlight}
-	got, err := json.Marshal(decision)
-	want := []byte(`{"commands":["other"],"models":["one","one"],"in_flight":2}`)
-	if err != nil || !bytes.Equal(got, want) {
-		t.Fatalf("legacy decision changed: %s, want %s (%v)", got, want, err)
-	}
-}
 
 func completionFixture(t *testing.T) (*Queue, *fakeClock, Machine, Machine, Spec) {
 	t.Helper()

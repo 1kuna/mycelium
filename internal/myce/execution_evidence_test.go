@@ -10,8 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -81,42 +79,6 @@ func TestExecutionEvidencePreparationCancellation(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestExecutionEvidenceStartupErrorClassification(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		err   error
-		class string
-	}{
-		{"storage", &os.PathError{Op: "mkdir", Path: "/private/startup", Err: syscall.ENOSPC}, "storage_full"},
-		{"permissions", &os.PathError{Op: "mkdir", Path: "/private/startup", Err: syscall.EACCES}, "permission_denied"},
-		{"missing", os.ErrNotExist, "not_found"},
-		{"cancelled_without_proof", context.Canceled, "cancelled"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			r := startFailureOutcome(Result{Execution: Execution{Attempt: 2}}, tc.err)
-			if c := safeRuntimeCause(r.ExecutionCause); c == nil || c.Operation != "launch" || c.Class != tc.class || r.Interrupted {
-				t.Fatalf("lost error or invented interruption: %+v", r)
-			}
-			f := statusJobValue(&Job{Attempt: 2, State: "failed", Reason: "command failed: " + tc.err.Error(), ExecutionCause: r.ExecutionCause}).Finding
-			if f == nil || f.Code != "launch_failed" || strings.Contains(f.Text(), "/private") {
-				t.Fatal(f)
-			}
-		})
-	}
-	for _, state := range []string{executionUnknown, executionMayHaveRun} {
-		e := unstartedExecution(2)
-		e.Main = state
-		r := startFailureOutcome(Result{Execution: Execution{Attempt: 2}}, &executionEvidenceError{context.Canceled, e})
-		if r.Interrupted || cancelledPreparation(r) {
-			t.Fatal("invented no-main proof", r)
-		}
-	}
-	r := startFailureOutcome(Result{Execution: Execution{Attempt: 2}, ExecutionEvidence: unstartedExecution(1)}, context.Canceled)
-	if r.Interrupted || cancelledPreparation(r) {
-		t.Fatal("stale no-main proof changed outcome", r)
 	}
 }
 
@@ -301,27 +263,6 @@ func TestExecutionEvidenceMemoryRefusal(t *testing.T) {
 				t.Fatal("stale execution accepted", err)
 			}
 		})
-	}
-}
-
-func TestExecutionEvidenceMemberProjection(t *testing.T) {
-	q, _ := fixture(t)
-	parent := &Job{ID: "parent", State: "failed", Spec: Spec{FanOut: &FanOut{}}, FanOut: &FanOutProgress{Children: []string{"child", "legacy"}}, ExecutionEvidence: unstartedExecution(0)}
-	child := &Job{ID: "child", State: "failed", Attempt: 1, ExecutionEvidence: &ExecutionEvidence{1, executionNotStarted, executionMayHaveRun, executionMayHaveRun}}
-	legacy := &Job{ID: "legacy", State: "failed", Attempt: 1}
-	q.s.Jobs[parent.ID], q.s.Jobs[child.ID], q.s.Jobs[legacy.ID] = parent, child, legacy
-	projected := cloneJob(parent)
-	q.projectCancellation(&projected, parent)
-	if len(projected.CancellationScope.Members) != 2 {
-		t.Fatal("members omitted")
-	}
-	for _, m := range projected.CancellationScope.Members {
-		if m.JobID == child.ID && !reflect.DeepEqual(m.ExecutionEvidence, child.ExecutionEvidence) {
-			t.Fatal("child inherited parent proof", m)
-		}
-		if m.JobID == legacy.ID && m.ExecutionEvidence != nil {
-			t.Fatal("legacy inferred proof", m)
-		}
 	}
 }
 

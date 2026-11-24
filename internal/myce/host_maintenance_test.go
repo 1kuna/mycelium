@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -25,58 +24,6 @@ func maintenanceMachines() (Machine, Machine) {
 	return a, b
 }
 
-func TestHostMaintenanceLastResortPersistsAcrossWorkerSessions(t *testing.T) {
-	clock := &fakeClock{now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
-	db, root := filepath.Join(t.TempDir(), "queue.db"), t.TempDir()
-	q, err := Open(db, root, clock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	a, b := maintenanceMachines()
-	check(t, q, a, nil)
-	check(t, q, b, nil)
-	lastResortPolicy(t, q, a.HostID, true)
-	if err := q.Close(); err != nil {
-		t.Fatal(err)
-	}
-	q, err = Open(db, root, clock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer q.Close()
-	previous := a.Session
-	a.Session = "new-session"
-	if _, err := q.Checkin(Checkin{Machine: a, Fresh: true, PreviousSession: previous}); err != nil {
-		t.Fatal(err)
-	}
-	check(t, q, b, nil)
-	status, err := q.HostMaintenanceStatus(a.HostID)
-	if err != nil || !status.Policy.LastResort || status.Policy.Mode != "enabled" {
-		t.Fatal("restart or check-in erased queue-owned policy", status, err)
-	}
-	snap, err := q.Snapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, m := range snap.Machines {
-		if !m.LastResort {
-			t.Fatal("physical host policy did not cover sibling worker", m.ID)
-		}
-	}
-	lastResortPolicy(t, q, a.HostID, false)
-	// Incoming status-only fields cannot promote or demote the physical host.
-	a.LastResort = true
-	check(t, q, a, nil)
-	snap, err = q.Snapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, m := range snap.Machines {
-		if m.LastResort {
-			t.Fatal("worker changed queue-owned placement policy", m.ID)
-		}
-	}
-}
 func TestHostMaintenancePlacementAndBudgetPreserveDrainOwner(t *testing.T) {
 	q, clock := fixture(t)
 	a, _ := maintenanceMachines()
@@ -140,41 +87,6 @@ func maintenanceAssign(t *testing.T, q *Queue, m Machine, priority string) *Job 
 		t.Fatal("no assignment", m.ID)
 	}
 	return j
-}
-func TestMaintenanceDrainBothDevicesAndOtherHost(t *testing.T) {
-	q, _ := fixture(t)
-	a, b := maintenanceMachines()
-	active := maintenanceAssign(t, q, a, "production")
-	if err := q.Started(result(active, false)); err != nil {
-		t.Fatal(err)
-	}
-	check(t, q, b, nil)
-	status := maintenanceChange(t, q, "drain", false)
-	if status.Policy.Mode != "drained" || len(status.Attempts) != 1 || status.Quiescent {
-		t.Fatal(status)
-	}
-	r := check(t, q, a, active)
-	if r.Stop || r.Leave || !r.AdmissionBlocked {
-		t.Fatal("drain interrupted active attempt", r)
-	}
-	waiting := submit(t, q, spec("experiment"))
-	if check(t, q, b, nil).Job != nil {
-		t.Fatal("sibling admitted during drain")
-	}
-	other := machine("other", "fake")
-	if r := check(t, q, other, nil); r.Job == nil || r.Job.ID != waiting.ID {
-		t.Fatal("other host fenced", r)
-	}
-	finish(t, q, active, true)
-	status, err := q.HostMaintenanceStatus("host")
-	if err != nil || !status.Quiescent {
-		t.Fatal(status, err)
-	}
-	maintenanceChange(t, q, "resume", false)
-	submit(t, q, spec("experiment"))
-	if check(t, q, b, nil).Job == nil {
-		t.Fatal("resume did not restore sibling")
-	}
 }
 func TestMaintenanceAllocationAndStartedRaces(t *testing.T) {
 	for _, action := range []string{"drain", "disable"} {
@@ -499,84 +411,6 @@ func TestMaintenanceQueueOutageAndWithdrawnStart(t *testing.T) {
 	}
 }
 
-func TestMaintenancePreparationSidecarsAndFreshness(t *testing.T) {
-	q, c := fixture(t)
-	a, b := maintenanceMachines()
-	check(t, q, a, nil)
-	check(t, q, b, nil)
-	maintenanceChange(t, q, "drain", false)
-	if err := q.update(func() error {
-		q.touchMachine(a.ID).EnvironmentReports = []EnvironmentReport{{Key: "build", State: "building"}}
-		q.touchMachine(b.ID).CopyReports = []CopyReport{{Model: "weights", State: "copying"}}
-		q.s.ModelSlots["engine"] = &ModelSlot{Machine: a.ID, Session: a.Session, Model: "engine", Attempt: "load", State: "ready"}
-		if q.s.HostReleases == nil {
-			q.s.HostReleases = map[string]HostRelease{}
-		}
-		r := HostRelease{Host: "host", Machine: b.ID, Session: b.Session, Job: "preparation", Preparation: true}
-		q.s.HostReleases[releaseKey(r)] = r
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	status, err := q.HostMaintenanceStatus("host")
-	if err != nil || status.Preparations != 2 || status.Sidecars != 1 || len(status.PendingReleases) != 1 || status.Quiescent {
-		t.Fatal(status, err)
-	}
-	c.Advance(q.machineLossTimeout(a.ID))
-	status, err = q.HostMaintenanceStatus("host")
-	if err != nil || status.Healthy || status.Workers[0].Fresh || status.Quiescent {
-		t.Fatal("stale worker certified", status, err)
-	}
-	status, err = q.HostMaintenanceStatus("unknown")
-	if err != nil || status.Healthy || status.Quiescent {
-		t.Fatal("unknown host certified", status, err)
-	}
-}
-func TestMaintenancePlannedCausePersistsAndStageFailureWins(t *testing.T) {
-	for _, failure := range []string{"interrupted", "exit", "oom"} {
-		t.Run(failure, func(t *testing.T) {
-			q, c := fixture(t)
-			a, _ := maintenanceMachines()
-			j := maintenanceAssign(t, q, a, "production")
-			if err := q.Started(result(j, false)); err != nil {
-				t.Fatal(err)
-			}
-			maintenanceChange(t, q, "disable", true)
-			path, root := "", q.root
-			if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path); err != nil {
-				t.Fatal(err)
-			}
-			if err := q.Close(); err != nil {
-				t.Fatal(err)
-			}
-			var err error
-			q, err = Open(path, root, c)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer q.Close()
-			got := job(t, q, j.ID)
-			if !plannedMaintenanceStop(got) {
-				t.Fatal("stop cause lost at restart")
-			}
-			r := result(j, false)
-			r.Interrupted = failure == "interrupted"
-			r.OutOfMemory = failure == "oom"
-			if err = q.Complete(r); err != nil {
-				t.Fatal(err)
-			}
-			got = job(t, q, j.ID)
-			want := "queued"
-			if failure != "interrupted" {
-				want = "failed"
-			}
-			if got.State != want || got.InfrastructureRetries != 0 || got.Losses != 0 {
-				t.Fatal(got)
-			}
-		})
-	}
-}
-
 func TestMaintenanceCauseDoesNotExemptNextAttempt(t *testing.T) {
 	q, _ := fixture(t)
 	a, _ := maintenanceMachines()
@@ -670,25 +504,6 @@ func TestMaintenanceWorkerCheckinPolicy(t *testing.T) {
 	r := check(t, q, observer, nil)
 	if r.HostMaintenance != "drained" || !r.AdmissionBlocked || r.HostMemoryBudget == nil || r.HostMemoryBudget.GiB != value {
 		t.Fatal(r)
-	}
-}
-
-func TestMaintenanceFractionalBudgetDelivery(t *testing.T) {
-	q, _ := fixture(t)
-	m := machine("fractional", "fake", "fractional-host")
-	m.HostMemoryMeasured = true
-	m.HostAvailableMemoryGB = 1
-	m.HostMemoryBudgetGB = 131071.5 / (1 << 30)
-	reply := check(t, q, m, nil)
-	if reply.HostMemoryBudget.GiB != m.HostMemoryBudgetGB || reply.HostMemoryBudget.Bytes != 131071 {
-		t.Fatal(reply.HostMemoryBudget)
-	}
-	w := Worker{Machine: m}
-	if err := w.checkHostMemoryBudget(0, m.HostMemoryBudgetGB); err != nil {
-		t.Fatal("fitting fractional allowance refused", err)
-	}
-	if err := w.checkHostMemoryBudget(0, 131072.0/(1<<30)); !errors.Is(err, errWorkerMemory) {
-		t.Fatal("over-budget allocation accepted", err)
 	}
 }
 

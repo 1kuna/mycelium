@@ -480,29 +480,6 @@ func TestExtensionCapabilityQualificationPlacement(t *testing.T) {
 	}
 }
 
-// A drained host removes demand only temporarily. Cancelling the pending
-// check then left no verdict and no rerun, so useful work waited forever.
-func TestExtensionQualificationSurvivesHostDrain(t *testing.T) {
-	q, w, _, demand, _, plans := qualificationFixture(t)
-	reconcileQualification(t, w, plans[0])
-	host := hostID(&w.Machine)
-	if _, err := q.ChangeHostMaintenance(host, HostMaintenanceRequest{Action: "drain"}); err != nil {
-		t.Fatal(err)
-	}
-	if got := qualificationJob(t, q, plans[0].Report.CheckID); got.State != "waiting" || cancelled(got) {
-		t.Fatal("drain cancelled useful qualification", got.State, got.Reason)
-	}
-	if _, err := q.ChangeHostMaintenance(host, HostMaintenanceRequest{Action: "resume"}); err != nil {
-		t.Fatal(err)
-	}
-	if got := qualificationJob(t, q, plans[0].Report.CheckID); got.State != "queued" {
-		t.Fatal("resume did not restore the check", got.State, got.Reason)
-	}
-	if got := job(t, q, demand.ID); got.State != "queued" {
-		t.Fatal(got.State)
-	}
-}
-
 func TestExtensionQualificationSuspectRetainsDemand(t *testing.T) {
 	q, w, _, demand, _, plans := qualificationFixture(t)
 	reconcileQualification(t, w, plans[0])

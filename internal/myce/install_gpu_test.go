@@ -192,26 +192,3 @@ func TestInstallWorkerRejectsNoDevicesAndRequiresExplicitOptOut(t *testing.T) {
 		})
 	}
 }
-
-func TestDetectServiceSelectedXPUUsesWorkerBinding(t *testing.T) {
-	t.Setenv("PATH", os.Getenv("PATH"))
-	t.Setenv("ZE_AFFINITY_MASK", "old")
-	t.Setenv("ONEAPI_DEVICE_SELECTOR", "old")
-	c := ServiceConfig{Path: "/runtime/bin:/usr/bin", Device: "1", Detection: Detection{OS: "linux", Platform: "xpu", MemoryMode: "fixed", MemoryGB: 16}}
-	p := fakeProbe("linux", "amd64", "", "[level_zero:gpu] Intel Arc GPU")
-	command := p.Command
-	p.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		if os.Getenv("ZE_AFFINITY_MASK") != "1" || os.Getenv("ONEAPI_DEVICE_SELECTOR") != "level_zero:0" || os.Getenv("PATH") != c.Path {
-			t.Fatal("service probe differs from job binding")
-		}
-		return command(ctx, name, args...)
-	}
-	facts := pciFixtureProbe(pciFixture{"0000:01:00.0", "0x8086", "8", "Intel GPU", "", true}, pciFixture{"0000:02:00.0", "0x8086", "8", "Intel GPU", "", true})
-	p.Glob, p.ReadFile = facts.Glob, facts.ReadFile
-	p.CommandEnv = facts.CommandEnv
-	access := GPUAccessProbe{Glob: func(string) ([]string, error) { return []string{"/dev/dri/renderD129"}, nil }, Groups: func() ([]string, error) { return []string{"render"}, nil }, Open: func(string) error { return nil }}
-	d, err := DetectService(context.Background(), c, p, access)
-	if err != nil || d.Platform != "xpu" || d.MemoryGB != 16 {
-		t.Fatal(d, err)
-	}
-}

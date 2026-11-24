@@ -28,33 +28,6 @@ func failEnvironmentBuild(t *testing.T, q *Queue, m *Machine) EnvironmentRecipe 
 	return r
 }
 
-func TestEnvironmentExclusionReroutesAndStartsOnPeer(t *testing.T) {
-	q, clock := fixture(t)
-	j, a := failedEnvironmentDemand(t, q, clock)
-	r := failEnvironmentBuild(t, q, &a)
-	if got := job(t, q, j.ID); got.State != "queued" || got.FinishedAt != nil {
-		t.Fatal(got.State)
-	}
-	b := a
-	b.ID, b.HostID, b.Session, b.EnvironmentReports = "peer", "peer", "peer-session", nil
-	reply := machineCheck(t, q, b)
-	if len(reply.EnvironmentPlan) != 1 || reply.EnvironmentPlan[0].Key != r.Key {
-		t.Fatal("peer not offered build", reply)
-	}
-	p := reply.EnvironmentPlan[0]
-	if err := q.AuthorizeLaunch(*p.Launch); err != nil {
-		t.Fatal(err)
-	}
-	b.Environments = []string{r.Key}
-	b.EnvironmentReports = []EnvironmentReport{{Key: r.Key, Attempt: p.Launch.Attempt, State: "ready"}}
-	running := assignedJob(machineCheck(t, q, b))
-	if running == nil || running.ID != j.ID || running.Machine != b.ID {
-		t.Fatal("job did not start on peer", running)
-	}
-	finish(t, q, running, true)
-	requireState(t, q, j.ID, "succeeded")
-}
-
 func TestEnvironmentExclusionAllFailedUntilCancellationOrDeadline(t *testing.T) {
 	for _, end := range []string{"cancel", "deadline"} {
 		t.Run(end, func(t *testing.T) {

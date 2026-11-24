@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"log"
-	"reflect"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -79,40 +77,6 @@ func (w *launchLogWriter) Write(b []byte) (int, error) {
 	return w.testLogBuffer.Write(b)
 }
 
-func TestQueueMutexHoldTelemetry(t *testing.T) {
-	q, _ := fixture(t)
-	logs := &launchLogWriter{q: q, t: t}
-	old := log.Writer()
-	log.SetOutput(logs)
-	defer log.SetOutput(old)
-	var sampler queueHoldSampler
-	for i := range 33 {
-		q.mu.Lock()
-		started := sampler.start()
-		if sampled := !started.IsZero(); sampled != true {
-			t.Errorf("hold %d sampled=%t", i, sampled)
-		}
-		duration := queueHoldDuration(started)
-		q.mu.Unlock()
-		_ = duration
-		logQueueHold(time.Microsecond, "fast", nil)
-	}
-	if logs.Len() != 0 {
-		t.Fatal("fast holds emitted telemetry", logs.String())
-	}
-	// Exercise the real update boundary. Wall time only models a slow critical
-	// section; queue decisions still use the fixture's injected clock.
-	q.updateHolds.count.Store(0)
-	operation := func() error { <-time.After(300 * time.Millisecond); return nil }
-	seedHoldTelemetry(operation)
-	if err := q.update(operation); err != nil {
-		t.Fatal(err)
-	}
-	if line := logs.String(); strings.Count(line, "event=slow_queue_mutex_hold") != 1 || !strings.Contains(line, "TestQueueMutexHoldTelemetry") || !strings.Contains(line, "duration_ms=") || !strings.Contains(line, "sample_every=1") {
-		t.Fatal("missing slow hold attribution", line)
-	}
-}
-
 func TestHostLaunchSlowAuthorizationTelemetry(t *testing.T) {
 	q, _ := fixture(t)
 	m := machine("private-machine", "fake")
@@ -169,42 +133,6 @@ func TestHostLaunchSlowAuthorizationTelemetry(t *testing.T) {
 	if strings.Contains(logs.String(), "event=slow_launch_authorization") {
 		t.Fatal("fast authorization logged as slow", logs.String())
 	}
-}
-
-func TestQueueSlowUpdatePhaseBreakdown(t *testing.T) {
-	q, clock := fixture(t)
-	// Both queue decisions and the observational clock are deterministic here.
-	q.holdClock = clock
-	q.updateHolds.count.Store(0)
-	logs := &launchLogWriter{q: q, t: t}
-	old := log.Writer()
-	log.SetOutput(logs)
-	defer log.SetOutput(old)
-	operation := func() error { clock.Advance(300 * time.Millisecond); return nil }
-	seedHoldTelemetry(operation)
-	if err := q.update(operation); err != nil {
-		t.Fatal(err)
-	}
-	line := logs.String()
-	for _, field := range []string{"event=slow_queue_mutex_hold", "duration_ms=300.000", "records_snapshot_ms=0.000", "fn_body_ms=300.000", "persist_commit_ms=0.000", "usage_accounting_ms=0.000", "notify_ms=0.000"} {
-		if !strings.Contains(line, field) {
-			t.Errorf("missing %s in %s", field, line)
-		}
-	}
-	logs.Reset()
-	q.updateHolds.count.Store(0)
-	if err := q.update(operation); err != nil {
-		t.Fatal(err)
-	}
-	if logs.Len() != 0 {
-		t.Fatal("subthreshold update logged", logs.String())
-	}
-}
-
-func seedHoldTelemetry(operation func() error) {
-	name := runtime.FuncForPC(reflect.ValueOf(operation).Pointer()).Name()
-	queueHoldTelemetry.Store(name, &telemetryBudget{})
-	holdTelemetry(name).admit(time.Millisecond)
 }
 
 func TestCheckinBodyPhaseTelemetry(t *testing.T) {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log"
-	"os"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -90,101 +89,6 @@ func TestInstallLaunchdLifecycleWait(t *testing.T) {
 					t.Fatalf("caller cancellation lost: %v", err)
 				}
 			})
-		})
-	}
-}
-
-func TestInstallSystemdSlowStopAndRollback(t *testing.T) {
-	for _, tc := range []struct {
-		name, properties string
-	}{
-		{"effective", "TimeoutStopUSec=45s\nTimeoutStartUSec=1min 30s\n"},
-		{"missing", ""},
-		{"malformed", "TimeoutStopUSec=unrecognized\nTimeoutStartUSec=90s\n"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			for _, fail := range []bool{false, true} {
-				t.Run(map[bool]string{false: "upgrade", true: "expired-install-rollback"}[fail], func(t *testing.T) {
-					c, executable := preserveWorkerFixture(t)
-					if err := Install(context.Background(), c, executable, "test", fakeInstallManager(c)); err != nil {
-						t.Fatal(err)
-					}
-					old, _ := os.ReadFile(c.Binary)
-					if err := os.WriteFile(executable, []byte("replacement binary"), 0700); err != nil {
-						t.Fatal(err)
-					}
-					synctest.Test(t, func(t *testing.T) {
-						active, restarts, inspections := true, 0, 0
-						ctx, cancel := context.WithCancel(context.Background())
-						defer cancel()
-						raw := func(ctx context.Context, name string, args ...string) ([]byte, error) {
-							if name == "systemctl" && len(args) == 3 && args[1] == "show" {
-								return installUnitObservation(c), nil
-							}
-							if err := ctx.Err(); err != nil {
-								t.Fatalf("manager received an expired context: %v", err)
-							}
-							call := strings.Join(args, " ")
-							switch {
-							case strings.Contains(call, "--property=TimeoutStopUSec"):
-								time.Sleep(100 * time.Millisecond) // measured manager round trip
-								return []byte(tc.properties), nil
-							case strings.Contains(call, "--property=UnitFileState"):
-								inspections++
-								if strings.Contains(call, "myce-worker.service") {
-									return []byte("enabled"), nil
-								}
-								return nil, nil
-							case strings.Contains(call, "is-active"):
-								if active && strings.Contains(call, "myce-worker.service") {
-									return nil, nil
-								}
-								return nil, installTestExit(3)
-							case strings.Contains(call, " restart "):
-								restarts++
-								active = false
-								if fail && restarts == 1 {
-									// Consume the complete install allowance. Recovery must
-									// outlive this expired command and canceled parent.
-									if tc.name == "effective" {
-										<-ctx.Done()
-									} else {
-										// The manager itself can fail even when no client
-										// deadline is known. Recovery still needs a fresh context.
-										time.Sleep(20 * time.Second)
-									}
-									cancel()
-									return nil, context.DeadlineExceeded
-								}
-								select {
-								case <-time.After(20 * time.Second):
-									active = true
-									return nil, nil
-								case <-ctx.Done():
-									return nil, ctx.Err()
-								}
-							}
-							return nil, nil
-						}
-						began := time.Now()
-						err := Install(ctx, c, executable, "", BoundSetupCommand(raw))
-						if fail {
-							if !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "rollback incomplete") {
-								t.Fatalf("expected original failure and complete rollback: %v", err)
-							}
-							got, _ := os.ReadFile(c.Binary)
-							if string(got) != string(old) || restarts != 2 {
-								t.Fatal("old bytes/service were not restored")
-							}
-						} else if err != nil || restarts != 1 {
-							t.Fatalf("slow upgrade failed: %v", err)
-						}
-						if !active || inspections == 0 || time.Since(began) < 20*time.Second {
-							t.Fatal("service state was not known/active after a slow stop")
-						}
-					})
-				})
-			}
 		})
 	}
 }

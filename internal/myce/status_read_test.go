@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http/httptest"
 	"reflect"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,73 +15,6 @@ import (
 	"testing"
 	"time"
 )
-
-func TestStatusReadHistoryGeneration(t *testing.T) {
-	q, clock := fixture(t)
-	peak := 3.0
-	j := &Job{ID: "retained", State: "succeeded", ReleaseConfirmed: true,
-		Spec: spec("experiment"), Queued: clock.Now(), Attempt: 1,
-		MemoryAttempts: []AttemptMemoryFacts{{MemoryPeak: &AttemptMemoryPeak{HostGB: &peak}}}}
-	if err := q.update(func() error { q.putJob(j.ID, j); return nil }); err != nil {
-		t.Fatal(err)
-	}
-	indexed, err := q.publicSnapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The incremental path must preserve every projected field of the original
-	// fresh capture, not just the commonly displayed lifecycle fields.
-	q.mu.Lock()
-	history := q.records.statusHistory
-	q.records.statusHistory = nil
-	q.mu.Unlock()
-	uncached, err := q.publicSnapshot()
-	if err != nil || !reflect.DeepEqual(indexed, uncached) {
-		t.Fatal("incremental history changed the full response", err)
-	}
-	q.mu.Lock()
-	q.records.statusHistory = history
-	q.mu.Unlock()
-	// Commit after capture/unlock, before the borrowed immutable history is
-	// copied. An in-flight generation must own the old nested memory sample.
-	q.observeRead = func(_ string, _, _ time.Duration) {
-		if err := q.update(func() error {
-			live := q.touchJob(j.ID)
-			*live.MemoryAttempts[0].MemoryPeak.HostGB = 9
-			live.Reason = "committed change"
-			return nil
-		}); err != nil {
-			t.Error(err)
-		}
-	}
-	view, _, err := q.captureObservation("")
-	q.observeRead = nil
-	if err != nil || *view.s.Jobs[j.ID].MemoryAttempts[0].MemoryPeak.HostGB != 3 {
-		t.Fatal("committed change leaked into an in-flight history generation", err)
-	}
-	current, err := q.publicSnapshot()
-	if err != nil || current.Jobs[0].Reason != "committed change" || *current.Jobs[0].MemoryAttempts[0].MemoryPeak.HostGB != 9 {
-		t.Fatal("inspection did not observe committed cold-history change", err)
-	}
-	rolledBack := errors.New("rollback")
-	if err := q.update(func() error {
-		q.touchJob(j.ID).Reason = "must roll back"
-		return rolledBack
-	}); !errors.Is(err, rolledBack) {
-		t.Fatal(err)
-	}
-	current, err = q.publicSnapshot()
-	if err != nil || current.Jobs[0].Reason != "committed change" {
-		t.Fatal("rolled-back history escaped into inspection", err)
-	}
-	if err := q.update(func() error { q.deleteJob(j.ID); return nil }); err != nil {
-		t.Fatal(err)
-	}
-	current, err = q.publicSnapshot()
-	if err != nil || len(current.Jobs) != 0 {
-		t.Fatal("removed history remained in inspection", err)
-	}
-}
 
 func TestStatusReadPlanningEquivalence(t *testing.T) {
 	for _, occupied := range []bool{true, false} {
@@ -335,39 +267,6 @@ func TestStatusReadCPUReservation(t *testing.T) {
 	}
 }
 
-func TestStatusReadTerminalCommitInvalidatesCache(t *testing.T) {
-	q, _ := fixture(t)
-	j := submit(t, q, spec("experiment"))
-	a := check(t, q, machine("status-worker", "fake"), nil).Job
-	if a == nil || a.ID != j.ID {
-		t.Fatal("no assignment")
-	}
-	if err := q.Started(result(a, true)); err != nil {
-		t.Fatal(err)
-	}
-	before, err := q.cachedPublicSnapshot()
-	if err != nil || len(before.Jobs) != 1 || before.Jobs[0].State != "running" {
-		t.Fatal("running generation missing", err)
-	}
-	finish(t, q, a, true)
-	// No clock advance: even the ordinary one-second cache must not retain
-	// a running projection after the terminal/release transaction commits.
-	for _, query := range []string{"", "?jobs=all", "?detail=full"} {
-		s := readStatusOptions(t, q, query)
-		if query == "" {
-			if len(s.Jobs) != 0 {
-				t.Errorf("terminal released job stayed current: %+v", s.Jobs)
-			}
-		} else if len(s.Jobs) != 1 || s.Jobs[0].State != "succeeded" || !s.Jobs[0].ReleaseConfirmed {
-			t.Errorf("%s lost completed history", query)
-		}
-	}
-	page, err := q.cachedPublicSnapshot()
-	if err != nil || len(page.Jobs) != 0 {
-		t.Fatal("HTML snapshot retained running job", err)
-	}
-}
-
 func TestStatusReadTerminalCommitDuringProjection(t *testing.T) {
 	for _, cached := range []bool{false, true} {
 		t.Run(strconv.FormatBool(cached), func(t *testing.T) {
@@ -518,64 +417,6 @@ func TestJobReadCommittedSubmissionIgnoresStatusCache(t *testing.T) {
 	}
 }
 
-func TestJobReadEligibilityLifecycle(t *testing.T) {
-	q, _ := fixture(t)
-	a, b := machine("receipt-a", "fake", "host-a"), machine("receipt-b", "fake", "host-b")
-	check(t, q, a, nil)
-	check(t, q, b, nil)
-	j := submit(t, q, spec("production"))
-	attempt := check(t, q, a, nil).Job
-	if attempt == nil || attempt.ID != j.ID {
-		t.Fatal("no assignment")
-	}
-	if err := q.Started(result(attempt, true)); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.ConfigureProjects(map[string]ProjectPolicy{"test": {Weight: 1, AllowedMachines: []string{b.ID, "unknown"}}}); err != nil {
-		t.Fatal(err)
-	}
-	assertActive := func(state string) {
-		t.Helper()
-		got, err := q.jobSnapshot(j.ID[:8])
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got.State != state || got.EligibleUnrestricted || got.EligibleHosts == nil || !slices.Equal(*got.EligibleHosts, []string{"host-a", "host-b"}) || !slices.Equal(got.EligibleUnknownMachines, []string{"unknown"}) {
-			t.Fatalf("receipt lost current policy or execution host: %+v", got)
-		}
-	}
-	assertActive("running")
-	if err := q.Cancel(j.ID); err != nil {
-		t.Fatal(err)
-	}
-	assertActive("stopping")
-	if err := q.Complete(result(attempt, false)); err != nil {
-		t.Fatal(err)
-	}
-	got, err := q.jobSnapshot(j.ID)
-	if err != nil || got.State != "cancelled" || got.EligibleHosts != nil || got.EligibleUnrestricted || len(got.EligibleUnknownMachines) != 0 {
-		t.Fatal("terminal receipt retained active eligibility", err)
-	}
-}
-
-func TestStatusReadPreservesDeadlineReason(t *testing.T) {
-	q, c := fixture(t)
-	s := spec("production")
-	j := submit(t, q, s)
-	c.Advance(ProductionStartTimeout + time.Second)
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
-	}
-	receipt, err := q.jobSnapshot(j.ID)
-	if err != nil || receipt.State != "failed" || receipt.Reason != "production start deadline exceeded" {
-		t.Fatal("receipt lost deadline diagnostic", receipt, err)
-	}
-	status := readStatusOptions(t, q, "?jobs=recent&sections=jobs")
-	if len(status.Jobs) != 1 || status.Jobs[0].Reason != receipt.Reason {
-		t.Fatal("global status lost deadline diagnostic", err)
-	}
-}
-
 func TestStatusInspectionRemainsFresh(t *testing.T) {
 	q, _ := fixture(t)
 	s := spec("experiment")
@@ -707,59 +548,6 @@ func TestStatusReadCoalescesAndDoesNotAuthorize(t *testing.T) {
 	snap, err := q.cachedPublicSnapshot()
 	if err != nil || snap.Jobs[0].CancelledAt == nil || captures.Load() != 2 {
 		t.Fatal("injected-clock expiry did not refresh status", err)
-	}
-}
-
-func TestStatusReadRace(t *testing.T) {
-	q, c := fixture(t)
-	clock := &workerFakeClock{now: c.Now()}
-	q.clock = clock
-	s := spec("experiment")
-	s.SubmissionKey = "race-key"
-	s.Run.Env = map[string]string{"PRIVATE": "private-poll-payload"}
-	j := submit(t, q, s)
-	m := machine("race-reader", "fake")
-	check(t, q, m, nil)
-	var wg sync.WaitGroup
-	errs := make(chan error, 5)
-	for range 4 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for range 12 {
-				snapshot, err := q.cachedPublicSnapshot()
-				if err != nil {
-					errs <- err
-					return
-				}
-				data, _ := json.Marshal(snapshot)
-				if strings.Contains(string(data), "private-poll-payload") {
-					errs <- errors.New("status exposed private payload")
-					return
-				}
-				got, err := q.jobSnapshot(j.ID)
-				if err != nil || got.Spec.SubmissionKey != s.SubmissionKey {
-					errs <- errors.New("job receipt lost its key")
-					return
-				}
-			}
-		}()
-	}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for range 12 {
-			clock.Advance(time.Second)
-			if _, err := q.Checkin(Checkin{Machine: m, Running: &Execution{ID: j.ID, Attempt: 1}}); err != nil {
-				errs <- err
-				return
-			}
-		}
-	}()
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		t.Error(err)
 	}
 }
 

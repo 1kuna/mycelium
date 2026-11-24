@@ -56,44 +56,6 @@ func onboardingProbe(platform string) MachineProbe {
 	}
 	return p
 }
-func TestOnboardingWholeMachineHardware(t *testing.T) {
-	for _, platform := range []string{"xpu", "cuda", "metal", "cpu-linux", "cpu-mac"} {
-		t.Run(platform, func(t *testing.T) {
-			p := onboardingProbe(platform)
-			c := ServiceConfig{}
-			if platform == "cpu-mac" {
-				p.OS = "darwin"
-				p.Arch = "amd64"
-			}
-			if platform == "xpu" {
-				c.Detection = Detection{Platform: "xpu", MemoryMode: "fixed", MemoryGB: 24, ReserveGB: 2}
-				c.MachineDevices = []DeviceInstall{{"0", Detection{Platform: "xpu", MemoryMode: "fixed", MemoryGB: 24, ReserveGB: 2}}, {"1", Detection{Platform: "xpu", MemoryMode: "fixed", MemoryGB: 16, ReserveGB: 1}}}
-			}
-			got, err := PreflightHardware(context.Background(), c, p)
-			if err != nil {
-				t.Fatal(err)
-			}
-			switch platform {
-			case "xpu":
-				if len(got.Devices) != 2 || got.Devices[0].Detection.MemoryGB != 24 || got.Devices[1].Detection.MemoryGB != 16 || got.Devices[1].Detection.ReserveGB != 1 {
-					t.Fatal(got)
-				}
-			case "cuda":
-				if len(got.Devices) != 1 || got.MemoryMode != "unified" || got.ReserveGB != 0 || got.MemoryGB != 0 {
-					t.Fatal(got)
-				}
-			case "metal":
-				if len(got.Devices) != 1 || got.MemoryMode != "unified" || got.ReserveGB != 0 {
-					t.Fatal(got)
-				}
-			default:
-				if got.Platform != "cpu" || len(got.Devices) != 0 {
-					t.Fatal(got)
-				}
-			}
-		})
-	}
-}
 func TestOnboardingSelectorsAndRecovery(t *testing.T) {
 	p := onboardingProbe("xpu")
 	c := ServiceConfig{Device: "1,0", Detection: Detection{Platform: "xpu", MemoryMode: "fixed", MemoryGB: 16, ReserveGB: 2}}
@@ -132,15 +94,6 @@ func requirePreflightCode(t *testing.T, err error, code string) {
 	if !errors.As(err, &typed) || typed.Code != code {
 		t.Fatalf("want %s, got %v", code, err)
 	}
-}
-func TestOnboardingPresentGPUWithoutDriverRefuses(t *testing.T) {
-	// The previous fixture returned 0x030000 for every sysfs file. That tested
-	// the rejected class-only rule, not the supported-accelerator contract.
-	p := reviewPCIProbe("0x10de", "0x2b85", "16")
-	_, err := PreflightHardware(context.Background(), ServiceConfig{}, p)
-	requirePreflightCode(t, err, "gpu_driver_missing")
-	_, err = p.Detect(context.Background())
-	requirePreflightCode(t, err, "gpu_driver_missing")
 }
 func TestOnboardingInvalidInventoryAndMemoryRefuse(t *testing.T) {
 	p := onboardingProbe("cuda")

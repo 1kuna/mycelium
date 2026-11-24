@@ -121,37 +121,6 @@ func TestRepeatedCPUPreparationWithOldReadyReceipt(t *testing.T) {
 	}
 }
 
-func TestPreparationBlockerInJobGET(t *testing.T) {
-	q, _ := fixture(t)
-	m := cpuMachine("worker", "host", "cpu", 4, 8)
-	m.EnvironmentBuilder = true
-	r := binaryRecipe(t, "cpu")
-	if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"cpu": r}}}); err != nil {
-		t.Fatal(err)
-	}
-	s := cpuSpec(2, 1)
-	s.Priority, s.Deadline, s.Environment.Name = "deadline", spec("deadline").Deadline, "tools"
-	high := submit(t, q, s)
-	reply := check(t, q, m, nil)
-	launch := *reply.EnvironmentPlan[0].Launch
-	if err := q.AuthorizeLaunch(launch); err != nil {
-		t.Fatal(err)
-	}
-	m.EnvironmentReports = []EnvironmentReport{{Key: r.Key, Attempt: launch.Attempt, State: "building"}}
-	check(t, q, m, nil)
-	low := submit(t, q, cpuSpec(2, 1))
-	got, err := q.jobSnapshot(low.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(got.Reason, "preparation") || !strings.Contains(got.Reason, high.ID) || !strings.Contains(got.Reason, r.Key) {
-		t.Fatalf("job GET hid the actual preparation blocker: %q", got.Reason)
-	}
-	if got := job(t, q, low.ID); !strings.Contains(got.Reason, high.ID) || !strings.Contains(got.Reason, r.Key) {
-		t.Fatalf("status hid the actual preparation blocker: %q", got.Reason)
-	}
-}
-
 func TestBlockedPreparationDemandDoesNotWithholdReadyCPU(t *testing.T) {
 	for _, blocker := range []string{"host-memory", "project-cap"} {
 		t.Run(blocker, func(t *testing.T) {

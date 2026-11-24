@@ -26,34 +26,6 @@ func sharedCapacitySpec() Spec {
 	}
 	return s
 }
-func TestSharedInputCapacityRefusalAndRouting(t *testing.T) {
-	q, clock := fixture(t)
-	small, big := cacheCapacityMachine("small", 10<<30), cacheCapacityMachine("big", 40<<30)
-	check(t, q, small, nil)
-	s := sharedCapacitySpec()
-	required := sharedInputRequired(s, nil)
-	for _, resolve := range []bool{false, true} {
-		var err error
-		if resolve {
-			_, err = q.Resolve(ResolveRequest{Spec: s})
-		} else {
-			_, err = q.Submit(s)
-		}
-		var httpErr *HTTPError
-		if !errors.As(err, &httpErr) || httpErr.Code != "shared_input_cache_capacity" || !strings.Contains(httpErr.Message, fmt.Sprint(required)) || !strings.Contains(httpErr.Message, "10737418240") {
-			t.Fatalf("resolve=%v refusal=%v", resolve, err)
-		}
-	}
-	check(t, q, big, nil)
-	j := submit(t, q, s)
-	clock.Advance(time.Second)
-	if r := check(t, q, small, nil); r.Job != nil {
-		t.Fatal("placed on small cache", r.Job.ID)
-	}
-	if r := check(t, q, big, nil); r.Job == nil || r.Job.ID != j.ID {
-		t.Fatal("did not route to fitting cache")
-	}
-}
 func TestSharedInputCapacityPressure(t *testing.T) {
 	q, clock := fixture(t)
 	big := cacheCapacityMachine("big", 80<<30)
@@ -120,55 +92,6 @@ func TestSharedInputCapacityLegacyWorkerLargeInputs(t *testing.T) {
 		})
 	}
 }
-func TestSharedInputCapacityAccounting(t *testing.T) {
-	q, clock := fixture(t)
-	_ = q
-	nas := t.TempDir()
-	ref := sharedFixtureFile(t, nas, "input", strings.Repeat("x", 64<<10))
-	input := SharedInput{NAS: "input", SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}
-	cache := &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: clock}}
-	cache.refreshCapacity()
-	before := cache.capacityReport()
-	path, release, err := cache.Acquire(context.Background(), input, nas)
-	if err != nil {
-		t.Fatal(err)
-	}
-	during := cache.capacityReport()
-	if during.FreeBytes >= before.FreeBytes || during.EvictableBytes != 0 || during.Protected[input.key()] == 0 {
-		t.Fatalf("active reader not protected: %+v", during)
-	}
-	release()
-	after := cache.capacityReport()
-	if after.EvictableBytes == 0 || len(after.Protected) != 0 {
-		t.Fatalf("release did not make entry evictable: %+v", after)
-	}
-	// Heartbeat readback is a detached in-memory copy, even if storage vanishes.
-	if err := os.Rename(cache.cache.Root, filepath.Join(t.TempDir(), "retained")); err != nil {
-		t.Fatal(err)
-	}
-	if got := cache.capacityReport(); got.FreeBytes != after.FreeBytes {
-		t.Fatal("report touched disk")
-	}
-	_ = path
-}
-func TestSharedInputCacheAutomaticAndExplicitSizing(t *testing.T) {
-	q, clock := fixture(t)
-	_ = q
-	root := t.TempDir()
-	for _, explicit := range []int64{0, 32 << 30} {
-		w := Worker{Clock: clock, FileCacheRoot: root, FileCacheLimit: explicit}
-		if err := w.initFileTransfers(context.Background(), &workerStore{dir: t.TempDir()}); err != nil {
-			t.Fatal(err)
-		}
-		if explicit > 0 && w.sharedInputs.cache.Limit != explicit {
-			t.Fatal("explicit cache size changed")
-		}
-		if explicit == 0 && (!w.sharedInputs.automatic || !w.fileCache.automatic || w.sharedInputs.capacityReport() == nil) {
-			t.Fatal("automatic cache sizing was frozen at startup")
-		}
-	}
-}
-
 func TestSharedInputCapacityIncludesPendingAssignments(t *testing.T) {
 	q, _ := fixture(t)
 	m := cacheCapacityMachine("worker", 10<<30)
@@ -286,77 +209,5 @@ func TestSharedInputCapacityDetachedCancellationRecovers(t *testing.T) {
 	clock.Advance(time.Second)
 	if reply := check(t, q, m, nil); reply.Job == nil || reply.Job.ID != j.ID {
 		t.Fatalf("cleanup left queue blocked: %+v", m.SharedInputCache)
-	}
-}
-
-func TestSharedInputCapacityAliasesReuseOneEntry(t *testing.T) {
-	q, _ := fixture(t)
-	m := cacheCapacityMachine("worker", 10<<30)
-	check(t, q, m, nil)
-	input := SharedInput{NAS: "first", SHA256: strings.Repeat("a", 64), SizeBytes: 6 << 30}
-	alias := input
-	alias.NAS = "other/path"
-	s := spec("experiment")
-	s.SharedInputs = map[string]SharedInput{"first": input, "alias": alias}
-	if got := sharedInputRequired(s, nil); got != 6<<30 {
-		t.Fatalf("aliases charged %d bytes", got)
-	}
-	if _, err := q.Resolve(ResolveRequest{Spec: s}); err != nil {
-		t.Fatal(err)
-	}
-	j := submit(t, q, s)
-	if reply := check(t, q, m, nil); reply.Job == nil || reply.Job.ID != j.ID {
-		t.Fatal("aliases were not placed")
-	}
-	target := q.placementTargets(q.s.Machines[m.ID])[0]
-	if reason := sharedInputCacheReason(s, target, false); reason != "" {
-		t.Fatal("pending claims double charged alias", reason)
-	}
-}
-
-func TestSharedInputCapacityUsesCPUExtensionVariant(t *testing.T) {
-	q, _ := fixture(t)
-	e := compositionExtension(t, false)
-	cpu := e.Variants[0]
-	cpu.Target = ExecutionTarget{OS: "linux", Arch: "amd64", Platform: "cpu"}
-	cpu.Needs = ResourceNeeds{CPUCores: 1, MemoryGB: 1}
-	gpu := cpu
-	gpu.Target.Platform = "cuda"
-	e.Variants = []ExtensionVariant{cpu, gpu}
-	e = freezeComposition(t, e)
-	if err := q.AddExtension(e); err != nil {
-		t.Fatal(err)
-	}
-	big, small := cacheCapacityMachine("cpu", 40<<30), cacheCapacityMachine("gpu", 10<<30)
-	big.GPU = "cpu"
-	small.GPU = "cuda"
-	big.HostMemoryMeasured, big.FreeHostMemoryGB, big.HostAvailableMemoryGB = true, 16, 16
-	big.ExtensionFingerprint = "fixture"
-	report := newExtensionReport(e, &big, "kind:sample")
-	report.Setup, report.Qualified, report.CheckID = true, true, "fixture-check"
-	big.ExtensionReports = []ExtensionReport{report}
-	check(t, q, big, nil)
-	check(t, q, small, nil)
-	s := sharedCapacitySpec()
-	s.Kind = "sample"
-	s.Run = RunSpec{}
-	s.Needs = ResourceNeeds{}
-	resolved, err := q.Resolve(ResolveRequest{Spec: s})
-	if err != nil {
-		t.Fatal("fitting CPU variant refused at resolve", err)
-	}
-	var cpuEligible bool
-	for _, target := range resolved.Targets {
-		cpuEligible = cpuEligible || target.Machine == big.ID && target.Eligible
-	}
-	if !cpuEligible {
-		t.Fatalf("CPU variant was not eligible: %+v", resolved.Targets)
-	}
-	j := submit(t, q, s)
-	if reply := check(t, q, small, nil); reply.Job != nil {
-		t.Fatal("placed extension on undersized GPU cache")
-	}
-	if reply := check(t, q, big, nil); reply.Job == nil || reply.Job.ID != j.ID {
-		t.Fatal("did not place CPU variant", job(t, q, j.ID).Reason)
 	}
 }

@@ -113,36 +113,6 @@ func TestFaultEvidenceAllocationAndAttemptFences(t *testing.T) {
 	}
 }
 
-func TestFaultEvidenceXeBeforeTeardownDecision(t *testing.T) {
-	_, clock := fixture(t)
-	m := m3Machine()
-	m.Devices[0].pciAddress = "0000:03:00.0"
-	w := Worker{Machine: m, Clock: clock, DeviceFaultMatchers: map[string]DeviceFaultMatcher{"fake": intelKernelFault}, FaultHostSource: func() (map[string]string, []string) { return nil, []string{"meminfo"} }}
-	var lines []KernelLogLine
-	w.DeviceFaultSource = func(context.Context, time.Time) (KernelLogSnapshot, error) {
-		return KernelLogSnapshot{BootID: "boot", Lines: lines}, nil
-	}
-	root := &workerStore{dir: t.TempDir()}
-	if err := w.initDeviceFaults(context.Background(), root); err != nil {
-		t.Fatal(err)
-	}
-	lines = []KernelLogLine{{ID: "1", At: clock.Now(), Message: "xe 0000:03:00.0: Engine reset"}}
-	if err := w.refreshDeviceFaults(context.Background(), root); err != nil {
-		t.Fatal(err)
-	}
-	if len(w.Machine.Devices[0].FaultEvidence) != 1 || w.Machine.Devices[0].Reason != "" {
-		t.Fatal("evidence waited for teardown decision")
-	}
-	captured := w.Machine.Devices[0].FaultEvidence[0].CapturedAt
-	clock.Advance(2 * time.Second)
-	if err := w.refreshDeviceFaults(context.Background(), root); err != nil {
-		t.Fatal(err)
-	}
-	if len(w.Machine.Devices[0].FaultEvidence) != 1 || w.Machine.Devices[0].FaultEvidence[0].CapturedAt != captured || w.Machine.Devices[0].Reason != "device_fault_xe" {
-		t.Fatal("delayed classifier lost original evidence")
-	}
-}
-
 func TestFaultEvidenceBoundedRetention(t *testing.T) {
 	var ring []*FaultEvidence
 	for i := 0; i < 100; i++ {

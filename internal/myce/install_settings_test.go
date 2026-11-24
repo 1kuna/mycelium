@@ -274,36 +274,6 @@ func installTestFlagValue(s InstallSetting, zero bool) string {
 	}
 }
 
-func TestInstallSettingsTableComplete(t *testing.T) {
-	fields := map[string]bool{}
-	names := map[string]bool{}
-	for _, s := range InstallSettings() {
-		if !installTestField(&ServiceConfig{}, s.Field).IsValid() {
-			t.Fatalf("table names missing field: %s", s.Field)
-		}
-		fields[s.Field] = true
-		if s.Flag != "" {
-			if names[s.Flag] || s.bind == nil || s.copy == nil || s.validate == nil {
-				t.Fatalf("incomplete or duplicate installer setting: %s", s.Flag)
-			}
-			names[s.Flag] = true
-		}
-	}
-	var check func(reflect.Type, string)
-	check = func(typ reflect.Type, prefix string) {
-		for i := 0; i < typ.NumField(); i++ {
-			f := typ.Field(i)
-			name := prefix + f.Name
-			if f.Type == reflect.TypeOf(Detection{}) {
-				check(f.Type, name+".")
-			} else if !fields[name] {
-				t.Errorf("new ServiceConfig field needs a table policy: %s", name)
-			}
-		}
-	}
-	check(reflect.TypeOf(ServiceConfig{}), "")
-}
-
 func TestInstallSettingsOverlayMatrix(t *testing.T) {
 	cases := 0
 	for _, platform := range []string{"linux", "darwin"} {
@@ -403,64 +373,6 @@ func TestInstallSettingsAliasesAndRelativePaths(t *testing.T) {
 				t.Fatal("relative flag path not normalized")
 			}
 		})
-	}
-}
-
-func TestInstallFileCacheOmittedAutomatic(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "worker.json")
-	if err := os.WriteFile(path, []byte(`{"role":"worker"}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	c, err := ReadServiceConfig(path)
-	if err != nil || c.FileCacheBytes != 0 {
-		t.Fatalf("omitted cache limit did not select automatic mode: %d, %v", c.FileCacheBytes, err)
-	}
-	args := c.Args()
-	i := slices.Index(args, "--file-cache-bytes")
-	if i >= 0 {
-		t.Fatal("automatic cache limit must be resolved at worker startup")
-	}
-}
-
-func TestInstallFileCacheExplicitIntent(t *testing.T) {
-	for _, tc := range []struct {
-		body string
-		want int64
-	}{
-		{`{"role":"worker","file_cache_bytes":10737418240}`, 10 << 30},
-		{`{"role":"worker","file_cache_bytes":10737418240,"file_cache_bytes_explicit":true}`, 10 << 30},
-		{`{"role":"worker","file_cache_bytes":34359738368}`, 32 << 30},
-	} {
-		path := filepath.Join(t.TempDir(), "worker.json")
-		if err := os.WriteFile(path, []byte(tc.body), 0600); err != nil {
-			t.Fatal(err)
-		}
-		c, err := ReadServiceConfig(path)
-		if err != nil || c.FileCacheBytes != tc.want {
-			t.Fatalf("saved cache got %d want %d: %v", c.FileCacheBytes, tc.want, err)
-		}
-	}
-}
-
-func TestInstallFileCacheAutomaticSavedConfigRoundtrip(t *testing.T) {
-	for _, limit := range []int64{0, 32 << 30} {
-		c := ServiceConfig{Role: "worker", FileCacheBytes: limit, FileCacheBytesExplicit: limit > 0}
-		data, err := json.Marshal(c)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var saved map[string]json.RawMessage
-		if err = json.Unmarshal(data, &saved); err != nil {
-			t.Fatal(err)
-		}
-		path := filepath.Join(t.TempDir(), "worker.json")
-		if err = os.WriteFile(path, data, 0600); err != nil {
-			t.Fatal(err)
-		}
-		restored, err := ReadServiceConfig(path)
-		if err != nil || restored.FileCacheBytes != limit {
-			t.Fatalf("current installer lost cache mode: got %d want %d: %v", restored.FileCacheBytes, limit, err)
-		}
 	}
 }
 

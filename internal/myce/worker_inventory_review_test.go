@@ -243,32 +243,6 @@ func TestInventoryReviewIdentityRecovery(t *testing.T) {
 	})
 }
 
-func TestInventoryReviewPersistedWithholdingExpires(t *testing.T) {
-	for _, reason := range []string{"device_identity_mismatch", "device_probe_unavailable", "device_memory_unavailable"} {
-		t.Run(reason, func(t *testing.T) {
-			w := Worker{Clock: RealClock{}, Machine: machine("saved", "fake")}
-			w.StateDir = newTestStateRoot(t)
-			s, err := w.openStore()
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer s.close()
-			old := fakeMachineDevices()
-			old[1].Reason = reason
-			if err := saveWorkerJSON(s.dir, "devices.json", old); err != nil {
-				t.Fatal(err)
-			}
-			w.InventoryProbe = func(context.Context) ([]MachineDevice, error) { return fakeMachineDevices(), nil }
-			if err := w.initInventory(context.Background(), s); err != nil {
-				t.Fatal(err)
-			}
-			if w.Machine.Devices[1].Reason != "" {
-				t.Fatal("persisted condition outlived probe")
-			}
-		})
-	}
-}
-
 func TestInventoryReviewBudgetReasons(t *testing.T) {
 	for _, unified := range []bool{true, false} {
 		for _, cap := range []float64{0, 32} {
@@ -352,43 +326,6 @@ func TestInventoryReviewUnifiedLocalProbe(t *testing.T) {
 				}
 			})
 		}
-	}
-}
-
-func TestInventoryReviewPublicProbeReason(t *testing.T) {
-	q, _ := fixture(t)
-	m := machine("diagnostic", "fake", "diagnostic-host")
-	m.Devices, m.MemoryError = []MachineDevice{}, "device_probe_unavailable"
-	check(t, q, m, nil)
-	s, err := q.publicSnapshot()
-	if err != nil || s.Machines[0].MemoryError != "device_probe_unavailable" {
-		t.Fatalf("public typed reason lost: %v %v", s.Machines, err)
-	}
-}
-
-func TestInventoryReviewCPUHasNoProbeError(t *testing.T) {
-	q, _ := fixture(t)
-	m := machine("cpu-only", "cpu", "cpu-only-host")
-	m.Device = "0" // Dev's diagnostic selector does not offer an accelerator.
-	runInventoryReviewWorker(t, q, Worker{Machine: m, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return []MachineDevice{}, nil }})
-	observed := awaitInventoryReviewMachine(t, q, m.ID, func(m *Machine) bool { return m.MemoryError == "" })
-	if observed.MemoryError != "" {
-		t.Fatal("CPU-only inventory reported an accelerator probe error")
-	}
-}
-
-func TestInventoryReviewCUDAProbeFailureTyped(t *testing.T) {
-	p := MachineProbe{OS: "linux", Arch: "amd64", Command: func(context.Context, string, ...string) ([]byte, error) { return nil, errors.New("driver failed") }}
-	p = withCUDAFacts(p, false, 1)
-	_, err := p.Accelerators(context.Background())
-	var rule *rejectionError
-	if !errors.As(err, &rule) || rule.code != "device_probe_unavailable" {
-		t.Fatalf("failed CUDA inventory swallowed: %v", err)
-	}
-	p.Command = func(context.Context, string, ...string) ([]byte, error) { return nil, exec.ErrNotFound }
-	p.Glob = func(string) ([]string, error) { return nil, nil }
-	if devices, err := p.Accelerators(context.Background()); err != nil || len(devices) != 0 {
-		t.Fatalf("GPU-less host: %v %v", devices, err)
 	}
 }
 

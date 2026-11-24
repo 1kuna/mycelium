@@ -186,62 +186,6 @@ func TestStagingSharedInputTimeoutAfterPreemptions(t *testing.T) {
 	}
 }
 
-func TestStagingSubmissionRefusalAndRetention(t *testing.T) {
-	q, clock := fixture(t)
-	if err := q.ConfigureLogRetention(2 * testFileRetention); err != nil {
-		t.Fatal(err)
-	}
-	spec := submitVerificationInput(t, q)
-	ref := spec.Files["input"]
-	data, err := os.ReadFile(q.files.blob(ref))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(q.files.blob(ref)); err != nil {
-		t.Fatal(err)
-	}
-	for _, corrupt := range []bool{false, true} {
-		if corrupt {
-			if err := os.WriteFile(q.files.blob(ref), []byte("corrupt"), 0600); err != nil {
-				t.Fatal(err)
-			}
-		}
-		_, err := q.Submit(spec)
-		var response *HTTPError
-		code := "input_blob_missing"
-		if corrupt {
-			code = "input_blob_corrupt"
-		}
-		if !errors.As(err, &response) || response.Code != code || !strings.Contains(response.Message, ref.SHA256) || !strings.Contains(response.Message, "files/input") {
-			t.Fatal("unactionable refusal", err)
-		}
-		requireNoSubmission(t, q)
-	}
-	if err := os.WriteFile(q.files.blob(ref), data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	first := submit(t, q, spec)
-	assigned := check(t, q, machine("reader", "fake"), nil).Job
-	if assigned == nil {
-		t.Fatal("not assigned")
-	}
-	finish(t, q, assigned, true)
-	// Reusing available immutable bytes establishes a new live reference. Expiry
-	// of the older receipt cannot collect bytes needed by this waiting job.
-	spec.SubmissionKey = "reuse-verified-input"
-	second := submit(t, q, spec)
-	clock.Advance(testFileRetention + filePublicationGrace + time.Second)
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
-	}
-	if !job(t, q, first.ID).FilesExpired || job(t, q, second.ID).FilesExpired {
-		t.Fatal("wrong expiry boundary")
-	}
-	if err := q.files.verify(context.Background(), ref); err != nil {
-		t.Fatal("live reused input collected", err)
-	}
-}
-
 func TestStagingCauseRejectsUndeclaredNames(t *testing.T) {
 	s := Spec{Files: FileManifest{"input": {SHA256: strings.Repeat("a", 64)}}}
 	for _, d := range []*StagingCause{

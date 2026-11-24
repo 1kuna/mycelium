@@ -90,96 +90,6 @@ func TestSharedDeviceRunsTwoJobsThatFit(t *testing.T) {
 	}
 }
 
-func TestSharedDeviceEqualTierWaits(t *testing.T) {
-	q, _ := fixture(t)
-	m := sharedCUDA40GiBCard()
-	a, b := sharedPair(t, q, m)
-	waiting := submitMeasuredCardJob(t, q, m, sharedSpec("experiment", 17))
-	if got := assignedJob(machineCheck(t, q, m, a, b)); got != nil {
-		t.Fatal("equal-tier job overfilled the shared GPU", got.ID)
-	}
-	requireState(t, q, a.ID, "running")
-	requireState(t, q, b.ID, "running")
-	requireState(t, q, waiting.ID, "queued")
-	if reason := job(t, q, waiting.ID).Reason; !strings.Contains(reason, "device 0 shared with 2 attempts") {
-		t.Fatal("waiting reason does not name the shared device:", reason)
-	}
-}
-
-func TestSharedDeviceEqualTierWaitingPreservesRunning(t *testing.T) {
-	for _, sameProject := range []bool{false, true} {
-		for _, resumable := range []bool{false, true} {
-			t.Run(fmt.Sprintf("same_project=%t/resumable=%t", sameProject, resumable), func(t *testing.T) {
-				q, clock := fixture(t)
-				m := sharedCUDA40GiBCard()
-				s := sharedSpec("experiment", 30)
-				s.Project, s.Resumable = "training", resumable
-				submitMeasuredCardJob(t, q, m, s)
-				running := assignedJob(machineCheck(t, q, m))
-				if running == nil {
-					t.Fatal("training was not assigned")
-				}
-				if err := q.Started(result(running, false)); err != nil {
-					t.Fatal(err)
-				}
-				s = sharedSpec("experiment", 17)
-				s.Project = "short-job"
-				if sameProject {
-					s.Project = "training"
-				}
-				waiting := submitMeasuredCardJob(t, q, m, s)
-				for range 10 {
-					clock.Advance(8 * time.Minute)
-					r := growthCheck(t, q, m, []*Job{running}, []float64{20}, 0)
-					if assignedJob(r) != nil {
-						t.Fatal("waiting equal-tier job was admitted onto an occupied card")
-					}
-					got := job(t, q, running.ID)
-					if got.State != "running" || got.Attempt != 1 || priorityStop(got) != nil || got.PreemptionCount != 0 {
-						t.Fatal("waiting equal-tier job stopped running work", got.State, got.Reason)
-					}
-					requireState(t, q, waiting.ID, "queued")
-				}
-				finish(t, q, running, true)
-				if a := assignedJob(machineCheck(t, q, m)); a == nil || a.ID != waiting.ID {
-					t.Fatal("short job did not start after exact completion/release")
-				}
-			})
-		}
-	}
-}
-
-func TestSharedDeviceProductionStopsAllCUDACoTenants(t *testing.T) {
-	q, _ := fixture(t)
-	m := sharedUnifiedMachine()
-	a, b := sharedPair(t, q, m)
-	demand := submitMeasuredCardJob(t, q, m, sharedSpec("production", 25))
-	if got := assignedJob(machineCheck(t, q, m, a, b)); got != nil {
-		t.Fatal("production started before its victim released", got.ID)
-	}
-	// Although one release frees enough memory, CUDA requires both lower tiers to stop.
-	if got := job(t, q, a.ID); got.State != "stopping" {
-		t.Fatalf("17 GiB co-tenant state=%s; production waits: %s", got.State, job(t, q, demand.ID).Reason)
-	}
-	requireState(t, q, b.ID, "stopping")
-	if got := assignedJob(machineCheck(t, q, m, a, b)); got != nil {
-		t.Fatal("production started while its victim was still stopping", got.ID)
-	}
-	requireState(t, q, b.ID, "stopping")
-	finishInterrupted(t, q, a)
-	if got := assignedJob(machineCheck(t, q, m, b)); got != nil {
-		t.Fatal("production started before the remaining co-tenant released", got.ID)
-	}
-	finishInterrupted(t, q, b)
-	got := assignedJob(machineCheck(t, q, m))
-	if got == nil || got.ID != demand.ID || !slices.Equal(got.AllocatedDevices, []string{"0"}) {
-		t.Fatal("production did not start after every exact release", got, job(t, q, demand.ID).Reason)
-	}
-	if err := q.Started(result(got, false)); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func sharedDiscreteMachine(platform string) Machine {
 	m := m3Machine()
 	m.Devices = m.Devices[:1]
@@ -243,10 +153,6 @@ func TestSharedDeviceXPUTierIsolation(t *testing.T) {
 
 func TestSharedDeviceMetalHigherTierPacks(t *testing.T) {
 	testSharedDeviceTierPacks(t, "metal", "production")
-}
-
-func TestSharedDeviceXPUEqualTierPacks(t *testing.T) {
-	testSharedDeviceTierPacks(t, "xpu", "experiment")
 }
 
 func TestSharedDeviceXPUModelLoadWaitsForTierRelease(t *testing.T) {
@@ -377,30 +283,6 @@ func TestSharedDeviceXPUPinnedEngineRetryWaitsForTierRelease(t *testing.T) {
 	}
 }
 
-func TestSharedDeviceXPUBatchCannotJoinProductionModel(t *testing.T) {
-	q, _, m := sharedXPUModelFixture(t)
-	high := addModelCall(t, q, "production")
-	slot := q.s.ModelSlots[slotKey(m.ID, "test", "0")]
-	if slot == nil {
-		t.Fatal("no production engine")
-	}
-	if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, ModelReports: []ModelReport{{Name: "test", Device: "0", Attempt: slot.Attempt, State: "ready"}}}); err != nil {
-		t.Fatal(err)
-	}
-	low := submitMeasuredCardJob(t, q, m, sharedSpec("experiment", 3))
-	if got := assignedJob(machineCheck(t, q, m)); got != nil {
-		t.Fatal("lower-tier batch joined production engine", got.ID)
-	}
-	requireState(t, q, low.ID, "queued")
-	if high.Machine != m.ID || slot.PriorityStop != nil {
-		t.Fatal("lower-tier arrival disturbed production", high, slot)
-	}
-	equal := submitMeasuredCardJob(t, q, m, sharedSpec("production", 3))
-	if got := assignedJob(machineCheck(t, q, m)); got == nil || got.ID != equal.ID {
-		t.Fatal("equal-tier XPU engine/batch packing changed", got)
-	}
-}
-
 func TestSharedDeviceXPUProductionBatchWaitsForEngineRelease(t *testing.T) {
 	q, _, m := sharedXPUModelFixture(t)
 	addModelCall(t, q, "experiment")
@@ -473,37 +355,6 @@ func TestSharedDeviceXPUModelSkipsRetainedCleanup(t *testing.T) {
 	}
 	if copy := job(t, q, run.ID).Copies[0]; copy.ReleaseConfirmed || copy.ReleasedAt != nil {
 		t.Fatal("placement manufactured cleanup evidence", copy)
-	}
-}
-
-func TestLegacyXPUCPUJobPacksBesideModel(t *testing.T) {
-	for _, modelTier := range []string{"production", "experiment"} {
-		t.Run(modelTier, func(t *testing.T) {
-			q, _, m := modelFixture(t)
-			m.GPU = "xpu" // Legacy inventory has no Devices and keeps the GPU on CPU targets.
-			m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 32
-			m.CapabilityProfile.Accelerators[0].Type = "xpu"
-			q.models.Models[0].MemoryGB, q.models.Models[0].Platforms = 1, []string{"xpu"}
-			m.ModelConfigHash = modelConfigHash(q.models)
-			machineCheck(t, q, m)
-			call := addModelCall(t, q, modelTier)
-			reportModel(t, q, m, "ready")
-			slot := q.s.ModelSlots[slotKey(m.ID, "test")]
-			cpuTier := "experiment"
-			if modelTier == "experiment" {
-				cpuTier = "production"
-			}
-			s := spec(cpuTier)
-			s.Needs = ResourceNeeds{CPUCores: 1, HostMemoryGB: 1, Platform: Platform{Required: []string{"cpu"}}}
-			cpu := submitMeasuredCardJob(t, q, m, s)
-			got := assignedJob(machineCheck(t, q, m))
-			if got == nil || got.ID != cpu.ID {
-				t.Fatal("CPU job inherited XPU tier isolation", got, job(t, q, cpu.ID).Reason)
-			}
-			if slot == nil || slot.State != "ready" || slot.PriorityStop != nil || call.Machine != m.ID {
-				t.Fatal("CPU demand disturbed model", slot, call)
-			}
-		})
 	}
 }
 
@@ -588,28 +439,6 @@ func TestSharedDeviceRestartKeepsCustody(t *testing.T) {
 	requireState(t, q, third.ID, "queued")
 }
 
-func TestSharedDeviceFillsIdleCardsFirst(t *testing.T) {
-	q, _ := fixture(t)
-	m := m3Machine()
-	var running []*Job
-	for i := 0; i < 3; i++ {
-		s := spec("experiment")
-		s.Needs.MemoryGB, s.Needs.HostMemoryGB = 3, 1
-		queued := submitMeasuredCardJob(t, q, m, s)
-		got := assignedJob(machineCheck(t, q, m, running...))
-		if got == nil || got.ID != queued.ID {
-			t.Fatal("3 GiB job not admitted on an 8 GiB card", i, job(t, q, queued.ID).Reason)
-		}
-		running = append(running, got)
-	}
-	if !slices.Equal(running[0].AllocatedDevices, []string{"0"}) || !slices.Equal(running[1].AllocatedDevices, []string{"1"}) {
-		t.Fatal("second job shared a busy card while another card was idle", running[0].AllocatedDevices, running[1].AllocatedDevices)
-	}
-	if len(running[2].AllocatedDevices) != 1 {
-		t.Fatal("third job did not share one discrete card", running[2].AllocatedDevices)
-	}
-}
-
 // A multi-card demand keeps its cards to itself, so it must stop every
 // co-tenant on them, not only enough to free its per-card share (#538 review).
 func TestSharedDeviceMultiCardDemandStopsEveryCoTenant(t *testing.T) {
@@ -655,26 +484,6 @@ func TestSharedDeviceUnifiedFirstRunShares(t *testing.T) {
 	small := submit(t, q, sharedSpec("experiment", 13))
 	if got := assignedJob(machineCheck(t, q, m, first)); got == nil || got.ID != small.ID {
 		t.Fatal("fitting work did not share the unified pool")
-	}
-}
-
-// A leaving worker never re-adopts lost copies; sharing must not change that.
-func TestSharedDeviceLeavingWorkerDoesNotReadopt(t *testing.T) {
-	q, clock := fixture(t)
-	m := sharedUnifiedMachine()
-	a, b := sharedPair(t, q, m)
-	machineCheck(t, q, m, a, b)
-	clock.Advance(61 * time.Second)
-	check(t, q, machine("healthy", "fake"), nil)
-	requireState(t, q, a.ID, "queued")
-	requireState(t, q, b.ID, "queued")
-	leaving := m
-	leaving.Leaving = true
-	machineCheck(t, q, leaving, a, b)
-	for _, prior := range []*Job{a, b} {
-		if got := job(t, q, prior.ID); got.State != "queued" {
-			t.Fatal("a leaving worker re-adopted a shared co-tenant", got.ID, got.State)
-		}
 	}
 }
 

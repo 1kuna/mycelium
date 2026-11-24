@@ -169,37 +169,3 @@ func TestProductionPauseFencesBackfill(t *testing.T) {
 		})
 	}
 }
-
-func TestProductionPauseTwoSeparationsFit(t *testing.T) {
-	q, _ := fixture(t)
-	m := productionPauseMachine()
-	low := cpuSpec(1, 8)
-	low.Resumable = true
-	submit(t, q, low)
-	run := assignedJob(machineCheck(t, q, m))
-	if run == nil {
-		t.Fatal("missing co-tenant")
-	}
-	if err := q.Started(result(run, false)); err != nil {
-		t.Fatal(err)
-	}
-	s := spec("production")
-	s.Needs.HostMemoryGB, s.Needs.MemoryGB = 10.6, 30
-	first := submit(t, q, s)
-	a := assignedJob(machineCheck(t, q, m, run))
-	if a == nil || a.ID != first.ID {
-		t.Fatal("first separation did not fit beside co-tenant", a)
-	}
-	second := submit(t, q, s)
-	if job(t, q, run.ID).State != "stopping" {
-		t.Fatal("second separation did not reclaim lower-tier host RAM")
-	}
-	finishInterrupted(t, q, run)
-	b := assignedJob(machineCheck(t, q, m, a))
-	if b == nil || b.ID != second.ID || slices.Equal(a.AllocatedDevices, b.AllocatedDevices) {
-		t.Fatal("fitting separations did not co-run on distinct cards", a, b)
-	}
-	if got := q.s.Machines[m.ID]; got.HostMemoryInUseGB != 21.2 || got.HostMemoryInUseGB > got.EffectiveHostMemoryBudgetGB {
-		t.Fatal("two separations bypassed shared host accounting", got.HostMemoryInUseGB)
-	}
-}

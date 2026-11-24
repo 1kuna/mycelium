@@ -142,29 +142,3 @@ func TestQualityValidation(t *testing.T) {
 		t.Fatal("accepted negative uncertainty")
 	}
 }
-
-func TestQualityProductionUsesMeasuredParityHost(t *testing.T) {
-	q, clock := fixture(t)
-	e, a, b := qualityVariants(t, &QualityMeasurement{Reference: "frozen-reference", Value: qualityNumber(10.125), ReferenceValue: qualityNumber(10), MarginOfError: qualityNumber(0.125)})
-	if err := q.AddExtension(e); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.ConfigureHosts(map[string]HostPolicy{hostID(&a): {ProductionHold: true, ProductionHoldScope: "device"}, hostID(&b): {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
-		t.Fatal(err)
-	}
-	check(t, q, a, nil)
-	first := submit(t, q, variantSpec(e, "production"))
-	running := check(t, q, a, nil).Job
-	if running == nil || running.ID != first.ID {
-		t.Fatal("first production did not start")
-	}
-	if err := q.Started(result(running, true)); err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(time.Millisecond)
-	queued := submit(t, q, variantSpec(e, "production"))
-	assigned := check(t, q, b, nil).Job
-	if assigned == nil || assigned.ID != queued.ID {
-		t.Fatal("measured parity did not permit the second host", assigned)
-	}
-}

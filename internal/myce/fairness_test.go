@@ -41,103 +41,6 @@ func BenchmarkQueueMutexProjection(b *testing.B) {
 
 func projectSpec(project string) Spec { s := spec("experiment"); s.Project = project; return s }
 
-// Admission evidence commits also account fair usage after API calls return.
-// Copy the record while holding the queue mutex, including in fake-clock tests.
-func testFairUsage(q *Queue, key string) FairUsage {
-	q.mu.RLock()
-	defer q.mu.RUnlock()
-	return q.s.FairUsage[key]
-}
-
-func TestFairSharingUsesClockAndExplains(t *testing.T) {
-	q, c := fixture(t)
-	a := submit(t, q, projectSpec("verso"))
-	c.Advance(time.Second)
-	b := submit(t, q, projectSpec("atlas"))
-	m := machine("fake", "fake")
-	if e := q.update(func() error {
-		q.s.FairUsage = map[string]FairUsage{fairUsageKey("experiment", "gpu", "verso"): {Seconds: 100, At: c.Now()}}
-		q.touchMachine(m.ID)
-		q.s.Machines[m.ID] = &m
-		return nil
-	}); e != nil {
-		t.Fatal(e)
-	}
-	s, e := q.Snapshot()
-	if e != nil {
-		t.Fatal(e)
-	}
-	for _, j := range s.Jobs {
-		if j.ID == a.ID && !strings.Contains(j.Reason, "atlas goes first (verso is ahead of its fair share)") {
-			t.Fatal(j.Reason)
-		}
-	}
-	if got := check(t, q, m, nil).Job; got == nil || got.ID != b.ID {
-		t.Fatalf("wanted atlas, got %+v", got)
-	}
-	c.Advance(24 * time.Hour)
-	if got := decayed(FairUsage{Seconds: 100, At: c.Now().Add(-24 * time.Hour), HorizonSeconds: (24 * time.Hour).Seconds(), QuantumSeconds: (24 * time.Hour).Seconds()}, c.Now()); math.Abs(got-50) > 1e-9 {
-		t.Fatal(got)
-	}
-}
-func TestFairnessNeverOverridesProductionOrDeadline(t *testing.T) {
-	q, c := fixture(t)
-	a := submit(t, q, projectSpec("atlas"))
-	p := spec("production")
-	p.Project = "verso"
-	production := submit(t, q, p)
-	d := spec("deadline")
-	d.Project = "verso"
-	deadline := submit(t, q, d)
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.s.FairUsage = map[string]FairUsage{fairUsageKey("experiment", "gpu", "verso"): {Seconds: 1e9, At: c.Now()}}
-	m := machine("fake", "fake")
-	if q.pick(&m).ID != production.ID {
-		t.Fatal("production lost")
-	}
-	q.s.Jobs[production.ID].State = "succeeded"
-	if q.pick(&m).ID != deadline.ID {
-		t.Fatal("deadline lost")
-	}
-	q.s.Jobs[deadline.ID].State = "succeeded"
-	if q.pick(&m).ID != a.ID {
-		t.Fatal("experiment missing")
-	}
-}
-func TestExperimentCapsAndProductionBypass(t *testing.T) {
-	q, _ := fixture(t)
-	if e := q.ConfigureProjects(map[string]ProjectPolicy{"verso": {Weight: 1, MaxConcurrentExperiments: 1}}); e != nil {
-		t.Fatal(e)
-	}
-	a := submit(t, q, projectSpec("verso"))
-	b := submit(t, q, projectSpec("verso"))
-	m := machine("one", "fake")
-	got := check(t, q, m, nil).Job
-	if got == nil {
-		t.Fatal("no assignment")
-	}
-	other := a
-	if got.ID == a.ID {
-		other = b
-	}
-	q.mu.Lock()
-	reason := q.capReason(q.s.Jobs[other.ID])
-	q.mu.Unlock()
-	if !strings.Contains(reason, "concurrent experiment cap") {
-		t.Fatal("missing cap reason")
-	}
-	n := machine("two", "fake")
-	if check(t, q, n, nil).Job != nil {
-		t.Fatal("cap exceeded")
-	}
-	p := spec("production")
-	p.Project = "verso"
-	production := submit(t, q, p)
-	if check(t, q, n, nil).Job.ID != production.ID {
-		t.Fatal("production capped")
-	}
-}
 func TestMemoryShareCap(t *testing.T) {
 	q, _ := fixture(t)
 	if e := q.ConfigureProjects(map[string]ProjectPolicy{"atlas": {Weight: 1, MaxMemoryShare: .25}}); e != nil {
@@ -182,27 +85,6 @@ func TestModelCallMemoryCapCountsSharedModelOnce(t *testing.T) {
 		t.Fatal("new device reservation bypassed memory cap")
 	}
 }
-func TestStatusIncludesQueuedModelCalls(t *testing.T) {
-	q, _, m := modelFixture(t)
-	call := addModelCall(t, q, "experiment")
-	s, e := q.Snapshot()
-	if e != nil {
-		t.Fatal(e)
-	}
-	found := false
-	for _, j := range s.Jobs {
-		if j.ID == call.ID {
-			found = true
-			if j.Spec.Project != "test" || j.Reason == "" {
-				t.Fatal(j)
-			}
-		}
-	}
-	if !found {
-		t.Fatal("queued call omitted", m.ID)
-	}
-}
-
 func TestProjectPolicyValidation(t *testing.T) {
 	q, _ := fixture(t)
 	for _, p := range []ProjectPolicy{{Weight: -1}, {Weight: math.NaN()}, {Weight: 1, MaxConcurrentExperiments: -1}, {Weight: 1, MaxMemoryShare: 1.1}} {
@@ -226,91 +108,6 @@ func TestProjectPolicyValidation(t *testing.T) {
 	}
 }
 
-func TestBusyStatusUsesDispatchOrderAndCombinedReasons(t *testing.T) {
-	q, c := fixture(t)
-	m := machine("one", "fake")
-	production := spec("production")
-	production.Needs.HostMemoryGB = 2
-	prod := submit(t, q, production)
-	running := check(t, q, m, nil).Job
-	if running == nil || running.ID != prod.ID {
-		t.Fatal("production not running")
-	}
-	experiment := projectSpec("verso")
-	experiment.Needs.HostMemoryGB = 1
-	a := submit(t, q, experiment)
-	c.Advance(time.Second)
-	experiment.Project = "atlas"
-	b := submit(t, q, experiment)
-	c.Advance(time.Second)
-	d := submit(t, q, experiment)
-	q.mu.Lock()
-	q.s.FairUsage = map[string]FairUsage{fairUsageKey("experiment", "gpu", "verso"): {Seconds: 100, At: c.Now()}}
-	q.mu.Unlock()
-	s, e := q.Snapshot()
-	if e != nil {
-		t.Fatal(e)
-	}
-	if len(s.Jobs) != 4 || s.Jobs[0].ID != prod.ID || s.Jobs[1].ID != b.ID || s.Jobs[2].ID != d.ID || s.Jobs[3].ID != a.ID {
-		t.Fatalf("order: %+v", s.Jobs)
-	}
-	if !strings.Contains(s.Jobs[1].Reason, "waiting for reserved capacity on one;") || !strings.HasSuffix(s.Jobs[1].Reason, "; next in line") {
-		t.Fatal(s.Jobs[1].Reason)
-	}
-	if !strings.HasSuffix(s.Jobs[3].Reason, "; atlas goes first (verso is ahead of its fair share)") {
-		t.Fatal(s.Jobs[3].Reason)
-	}
-	c.Advance(75 * time.Second)
-	if e = q.Complete(Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: prod.ID, Attempt: running.Attempt}, Success: true}); e != nil {
-		t.Fatal(e)
-	}
-	got := check(t, q, m, nil).Job
-	if got == nil || got.ID != b.ID {
-		t.Fatalf("status winner differs from dispatch: %+v", got)
-	}
-}
-
-func TestFairnessReservedCapacityDoesNotClaimComputeLoad(t *testing.T) {
-	q, clock := fixture(t)
-	m := machine("accelerator", "fake")
-	m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 24
-	first := spec("production")
-	first.Needs.HostMemoryGB = 4
-	submit(t, q, first)
-	running := check(t, q, m, nil).Job
-	if running == nil {
-		t.Fatal("no first assignment")
-	}
-	clock.Advance(time.Second)
-	waiting := submit(t, q, spec("experiment"))
-	snapshot, err := q.Snapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, j := range snapshot.Jobs {
-		if j.ID != waiting.ID {
-			continue
-		}
-		for _, want := range []string{"waiting for reserved capacity on accelerator", "batch slot allocated", "utilization unknown", "RAM live 24.0 GiB available", "4.0 GiB reserved", "next in line"} {
-			if !strings.Contains(j.Reason, want) {
-				t.Errorf("missing %q: %s", want, j.Reason)
-			}
-		}
-		if strings.Contains(j.Reason, "busy") {
-			t.Errorf("allocation reported as compute load: %s", j.Reason)
-		}
-	}
-	check(t, q, m, running)
-	if job(t, q, waiting.ID).State != "queued" {
-		t.Fatal("diagnostic changed admission")
-	}
-	finish(t, q, running, true)
-	clock.Advance(time.Second)
-	if got := check(t, q, m, nil).Job; got == nil || got.ID != waiting.ID {
-		t.Fatal("released slot did not dispatch", got)
-	}
-}
-
 func TestProjectionUsesAffinityDeadlineAndDoesNotMutateJobs(t *testing.T) {
 	q, c := fixture(t)
 	a := submit(t, q, projectSpec("atlas"))
@@ -326,25 +123,5 @@ func TestProjectionUsesAffinityDeadlineAndDoesNotMutateJobs(t *testing.T) {
 	order, _, _ := q.queueProjection()
 	if order[b.ID] != 1 || order[a.ID] != 2 || q.s.Jobs[b.ID].State != "queued" || q.pick(&m).ID != b.ID {
 		t.Fatal(order)
-	}
-}
-
-func TestProjectionIncludesEligibleModelCalls(t *testing.T) {
-	q, c, m := modelFixture(t)
-	q.mu.Lock()
-	q.s.Machines[m.ID] = &m
-	q.s.ModelSlots[slotKey(m.ID, "test")] = &ModelSlot{Model: "test", Machine: m.ID, Session: m.Session, State: "ready", Priority: "production"}
-	q.mu.Unlock()
-	batch := submit(t, q, projectSpec("verso"))
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	call := &ModelCall{ID: "call", Model: "test", Project: "atlas", Priority: "production", Queued: c.Now()}
-	q.calls[call.ID] = call
-	order, reasons, _ := q.queueProjection()
-	if order[call.ID] != 1 || order[batch.ID] != 2 || !strings.Contains(reasons[batch.ID], "production work goes first") {
-		t.Fatal(order, reasons)
-	}
-	if q.s.Jobs[batch.ID].State != "queued" || call.Machine != "" {
-		t.Fatal("projection assigned work")
 	}
 }

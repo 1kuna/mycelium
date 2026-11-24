@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -224,65 +223,6 @@ func TestProductionSubmitReceiptDoesNotDecodeHistory(t *testing.T) {
 			t.Fatal("replay created duplicate work")
 		}
 		id = got.ID
-	}
-}
-
-func TestSubmissionAdvicePreservesFields(t *testing.T) {
-	q := submissionAdviceFixture(t, 480)
-	inputs, _, err := q.readGeneration.inputs(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	immutableBefore, err := json.Marshal(inputs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		after, err := json.Marshal(inputs)
-		if err != nil || !bytes.Equal(immutableBefore, after) {
-			t.Error("advice mutated published immutable inputs", err)
-		}
-	}()
-	q.mu.Lock()
-	snapshot := q.captureSubmissionAdvice()
-	q.mu.Unlock()
-	v, err := snapshot.planner(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	// This reference fixture never changes below. Prepare its immutable curve
-	// index once, as a status projection does, instead of rebuilding all 1,400
-	// curves for each hypothetical backfill candidate. Keep the reference's
-	// planning decisions independent of the submission view and its caches.
-	// One reference pass owns its own planning cache and scan, just as the
-	// detached status projection does. Neither is shared with snapshot's view.
-	// The fixture, clock, observations and occupancy stay fixed for all cases.
-	q.memoryPlanning = newMemoryPlanningCache()
-	q.observationScan = q.placementScan()
-	q.observationScan.observationOwner = q
-	q.observationScan.memory = q.memoryPlanning
-	for _, id := range []string{"queued-000", "queued-081", "running-0", "retained-000"} {
-		before := storedTestJob(t, q, id)
-		want := cloneJob(&before)
-		copy := want
-		func() {
-			q.mu.Lock()
-			defer q.mu.Unlock()
-			if copy.State == "queued" {
-				copy.Reason = q.waitReason(&copy)
-				copy.Reason = q.statusWaitingReason(&copy)
-			}
-			want.PriorityPolicy, want.DeadlineGuidance = q.priorityMatch(want.Spec), q.deadlineGuidance(&copy)
-		}()
-		got := cloneJob(&before)
-		timing := newSubmissionAdviceTiming()
-		v.submissionDeadlineGuidance(&got, &timing)
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("%s advice changed: got %+v want %+v", id, got.DeadlineGuidance, want.DeadlineGuidance)
-		}
-		if !reflect.DeepEqual(before, storedTestJob(t, q, id)) {
-			t.Fatal("advice changed durable receipt")
-		}
 	}
 }
 

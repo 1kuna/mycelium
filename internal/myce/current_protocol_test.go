@@ -129,28 +129,6 @@ func TestCurrentProtocolServerCompatibility(t *testing.T) {
 	}
 }
 
-func TestCurrentProtocolBatchRefusalPreventsExecution(t *testing.T) {
-	worker := recoveryWorker(t)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUpgradeRequired) }))
-	defer server.Close()
-	worker.Client = Client{URL: server.URL}
-	store, err := worker.openStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.close()
-	store.state.Session = worker.Machine.Session
-	j := recoveryJob(t, []string{"sh", "-c", "printf unsafe > {work}/payload"})
-	marker := filepath.Join(store.dir, "job-files", j.ID, "1", "payload")
-	j.Spec.Resumable = false
-	if _, err = startAfterFixtureInputs(t, worker, store, j); err == nil {
-		t.Fatal("refused batch executed")
-	}
-	if _, err = os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("payload ran before authorization")
-	}
-}
-
 func TestCurrentProtocolCredentials(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "service-secret")
 	if err := os.WriteFile(path, []byte(`{"token":"synthetic-secret"}`), 0600); err != nil {

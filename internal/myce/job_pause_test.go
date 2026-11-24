@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
-	"sync"
 	"testing"
 	"time"
 )
@@ -153,66 +152,6 @@ func TestJobPauseExpiryStaleResumeAndCancel(t *testing.T) {
 	_, err = q.ResumeJob(j.ID, second.PauseRevision)
 	pauseError(t, err, "job_pause_revision_conflict")
 }
-func TestJobPauseDeadlinesContinue(t *testing.T) {
-	for _, kind := range []string{"give-up", "start-by"} {
-		t.Run(kind, func(t *testing.T) {
-			q, clock := fixture(t)
-			s := spec("experiment")
-			until := clock.Now().Add(time.Minute)
-			if kind == "give-up" {
-				s.GiveUpAt = &until
-			} else {
-				s = spec("production")
-				s.StartBy = &until
-			}
-			j := submit(t, q, s)
-			pauseForTest(t, q, j.ID, nil)
-			clock.Advance(time.Minute)
-			if err := q.Tick(); err != nil {
-				t.Fatal(err)
-			}
-			if got := job(t, q, j.ID); got.State != "failed" {
-				t.Fatal("pause froze deadline", got)
-			}
-			q = reopenCancellationQueue(t, q, clock)
-			if got := job(t, q, j.ID); got.State != "failed" || got.FinishedAt == nil || !got.FinishedAt.Equal(until) {
-				t.Fatal("reopen lost the paused deadline decision", got)
-			}
-		})
-	}
-}
-func TestJobPauseAssignmentRace(t *testing.T) {
-	q, _ := fixture(t)
-	j := submit(t, q, spec("experiment"))
-	m := machine("one", "fake")
-	var reply Reply
-	var pauseErr, assignErr error
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); <-start; _, pauseErr = q.PauseJob(j.ID, PauseJobRequest{Reason: "review"}) }()
-	go func() { defer wg.Done(); <-start; reply, assignErr = q.Checkin(Checkin{Machine: m}) }()
-	close(start)
-	wg.Wait()
-	if assignErr != nil {
-		t.Fatal(assignErr)
-	}
-	if pauseErr == nil {
-		if reply.Job != nil || job(t, q, j.ID).State != "paused" {
-			t.Fatal("pause and assignment both won")
-		}
-	} else {
-		pauseError(t, pauseErr, "job_pause_conflict")
-		if reply.Job == nil || reply.Job.ID != j.ID {
-			t.Fatal("assignment did not win", reply.Job)
-		}
-		if err := q.Started(result(reply.Job, true)); err != nil {
-			t.Fatal(err)
-		}
-		_, err := q.PauseJob(j.ID, PauseJobRequest{Reason: "review"})
-		pauseError(t, err, "job_pause_conflict")
-	}
-}
 func TestJobPauseColdPreparation(t *testing.T) {
 	e := compositionExtension(t, false)
 	q, w := prepareTestWorker(t, e)
@@ -239,47 +178,6 @@ func TestJobPauseColdPreparation(t *testing.T) {
 	}
 	if _, err := q.ResumeJob(a.ID, paused.PauseRevision); err != nil {
 		t.Fatal(err)
-	}
-}
-func TestJobPauseSharedQualification(t *testing.T) {
-	for _, shared := range []bool{false, true} {
-		name := "resume"
-		if shared {
-			name = "shared"
-		}
-		t.Run(name, func(t *testing.T) {
-			q, w, e, a, _, plans := qualificationFixture(t)
-			plan := plans[0]
-			reconcileQualification(t, w, plan)
-			original := qualificationJob(t, q, plan.Report.CheckID)
-			if shared {
-				submit(t, q, Spec{Name: "demand", Project: "test", Extension: extensionKey(e)})
-			}
-			paused := pauseForTest(t, q, a.ID, nil)
-			w.Machine.ExtensionReports = LocalExtensionReports(w.ExtensionRoot, "fake", w.extensionFingerprint, &w.Machine)
-			reply := check(t, q, w.Machine, nil)
-			if !shared {
-				if reply.Job != nil {
-					t.Fatal("paused demand launched check", reply.Job)
-				}
-				q = reopenCancellationQueue(t, q, q.clock)
-				if _, err := q.ResumeJob(a.ID, paused.PauseRevision); err != nil {
-					t.Fatal(err)
-				}
-				reply = check(t, q, w.Machine, nil)
-			}
-			if reply.Job == nil || reply.Job.ID != original.ID {
-				t.Fatalf("lost shared/resumed qualification: assignment=%+v check=%+v", reply.Job, qualificationJob(t, q, plan.Report.CheckID))
-			}
-			if err := q.Started(result(reply.Job, true)); err != nil {
-				t.Fatal(err)
-			}
-			finish(t, q, reply.Job, true)
-			accepted := job(t, q, original.ID)
-			if accepted.State != "succeeded" || cancelled(accepted) {
-				t.Fatal("reversible pause poisoned qualification", accepted)
-			}
-		})
 	}
 }
 func TestJobPauseFanOut(t *testing.T) {

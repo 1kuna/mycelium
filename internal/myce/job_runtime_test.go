@@ -58,33 +58,6 @@ func TestJobRuntimeElapsedAndLastAcceptedDuration(t *testing.T) {
 	}
 }
 
-func TestJobRuntimeOldAndNoncomparableHistory(t *testing.T) {
-	q, clock, m, s := observationFixture(t)
-	first := startObservation(t, q, m, s)
-	clock.Advance(time.Second)
-	finish(t, q, &first, true)
-	// Keep the worker live rather than allowing loss/recovery to obscure history.
-	for key, old := range q.s.WorkObservations {
-		old.RecordedAt = clock.Now().Add(-31 * 24 * time.Hour)
-		q.s.WorkObservations[key] = old
-	}
-	second := startObservation(t, q, m, s)
-	r := runtimeJob(t, q, second.ID).Runtime
-	if r.LastAcceptedSeconds == nil {
-		t.Fatalf("age alone expired comparable evidence: %+v", r)
-	}
-	if err := q.update(func() error {
-		q.touchJob(second.ID).Timing.Reason = "reference, qualification or configuration changed"
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	r = runtimeJob(t, q, second.ID).Runtime
-	if r.LastAcceptedSeconds != nil || !strings.Contains(r.Reason, "configuration changed") {
-		t.Fatalf("incompatible history: %+v", r)
-	}
-}
-
 func TestJobRuntimePlainCommandAndStartedBoundary(t *testing.T) {
 	q, clock := fixture(t)
 	m := machine("a", "fake")

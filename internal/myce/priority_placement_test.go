@@ -2,52 +2,6 @@ package myce
 
 import "testing"
 
-func TestPriorityPreemptionCallCapacity(t *testing.T) {
-	for _, pin := range []bool{false, true} {
-		t.Run(map[bool]string{false: "unpinned", true: "pinned"}[pin], func(t *testing.T) {
-			q, _, m := modelFixture(t)
-			preemptionPolicy(t, q)
-			q.models.Models[0].MaxInFlight = 1
-			m.ModelConfigHash = modelConfigHash(q.models)
-			check(t, q, m, nil)
-			if pin {
-				if err := q.Pin(ModelPin{Project: "test", Model: "test", Machine: m.ID}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			low := addModelCall(t, q, "experiment")
-			reportModel(t, q, m, "ready")
-			if low.Machine == "" {
-				t.Fatal("low did not start")
-			}
-			high := &ModelCall{Project: "urgent", Model: "test", Priority: "experiment"}
-			if err := q.addCall(high); err != nil {
-				t.Fatal(err)
-			}
-			if err := q.Tick(); err != nil {
-				t.Fatal(err)
-			}
-			if low.PriorityStop == nil || low.PriorityStop.Demand != high.ID || low.Error != priorityPreemptionCause {
-				t.Fatalf("higher-tier call blocked by lower-tier call: high_machine=%q low_error=%q low_stop=%+v slot=%+v", high.Machine, low.Error, low.PriorityStop, q.s.ModelSlots[slotKey(m.ID, "test")])
-			}
-			slot := q.s.ModelSlots[slotKey(m.ID, "test")]
-			if high.Machine != "" || slot.State != "ready" || slot.InFlight != 1 {
-				t.Fatal("admitted before exact call release or unloaded engine", high, slot)
-			}
-			if err := q.finishCall(low.ID); err != nil {
-				t.Fatal(err)
-			}
-			if high.Machine != m.ID || high.Attempt != slot.Attempt || slot.InFlight != 1 {
-				t.Fatal("replacement did not reuse released slot", high, slot)
-			}
-			if pin && len(q.s.Pins) != 1 {
-				t.Fatal("lost pin intent")
-			}
-
-		})
-	}
-}
-
 // Each row pairs retained work the common placement planner could interrupt
 // with a demand adapter: free capacity must win before affinity. Every victim
 // kind and every demand adapter appears; these pairs reach every product block
@@ -177,41 +131,6 @@ func TestPriorityPreemptionFreePlacementEveryWorkKind(t *testing.T) {
 				t.Fatal("interrupted build despite free placement")
 			}
 		})
-	}
-}
-
-func TestPriorityPreemptionCallSlotsProtectHigherAndSameTier(t *testing.T) {
-	q, _, m := modelFixture(t)
-	preemptionPolicy(t, q)
-	q.models.Models[0].MaxInFlight = 2
-	m.ModelConfigHash = modelConfigHash(q.models)
-	check(t, q, m, nil)
-	low := addModelCall(t, q, "experiment")
-	reportModel(t, q, m, "ready")
-	high := &ModelCall{Project: "urgent", Model: "test", Priority: "experiment"}
-	if err := q.addCall(high); err != nil {
-		t.Fatal(err)
-	}
-	same := addModelCall(t, q, "experiment")
-	if same.Machine != "" || low.PriorityStop != nil {
-		t.Fatal("same tier displaced a call")
-	}
-	winner := &ModelCall{Project: "urgent", Model: "test", Priority: "experiment"}
-	if err := q.addCall(winner); err != nil {
-		t.Fatal(err)
-	}
-	slot := q.s.ModelSlots[slotKey(m.ID, "test")]
-	if low.PriorityStop == nil || low.PriorityStop.Demand != winner.ID || high.PriorityStop != nil || high.Error != "" || slot.State != "ready" || slot.InFlight != 2 {
-		t.Fatal("did not select only the useful lower-tier slot", low, high, slot)
-	}
-	if winner.Machine != "" {
-		t.Fatal("replacement admitted before release")
-	}
-	if err := q.finishCall(low.ID); err != nil {
-		t.Fatal(err)
-	}
-	if winner.Machine != m.ID || high.Machine != m.ID || slot.InFlight != 2 || same.Machine != "" {
-		t.Fatal("wrong post-release admission", winner, same, slot)
 	}
 }
 

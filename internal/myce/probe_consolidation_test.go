@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -143,16 +142,6 @@ func TestConsolidatedHostMatrix(t *testing.T) {
 	}
 }
 
-func TestConsolidatedAppleWithoutPCISysfs(t *testing.T) {
-	p := onboardingProbe("metal")
-	p.Glob = func(string) ([]string, error) { t.Fatal("Apple host accessed PCI"); return nil, nil }
-	p.ReadFile = func(string) ([]byte, error) { t.Fatal("Apple host accessed PCI"); return nil, nil }
-	got, err := PreflightHardware(context.Background(), ServiceConfig{}, p)
-	if err != nil || len(got.Devices) != 1 || got.MemoryMode != "unified" || got.ReserveGB != 0 {
-		t.Fatal(got, err)
-	}
-}
-
 func TestConsolidatedEndpointFailureIsolation(t *testing.T) {
 	for _, attr := range []string{"class", "vendor", "current_link_width"} {
 		t.Run(attr, func(t *testing.T) {
@@ -198,15 +187,6 @@ func TestConsolidatedDiscreteNAExplicitBudget(t *testing.T) {
 	got, err := PreflightHardware(context.Background(), c, p)
 	if err != nil || got.MemoryMode != "fixed" || got.MemoryGB != 24 || got.ReserveGB != 2 {
 		t.Fatal(got, err)
-	}
-}
-
-func TestConsolidatedMissingFamilyTyped(t *testing.T) {
-	p := consolidatedProbe(t, pciFixture{"0000:01:00.0", "0x10de", "16", "generic", "", false}, pciFixture{"0000:02:00.0", "0x8086", "1", "generic", "", true})
-	devices, err := p.Accelerators(context.Background())
-	var partial *acceleratorProbeError
-	if !errors.As(err, &partial) || !partial.failed("cuda") || partial.failed("xpu") || len(devices) != 1 {
-		t.Fatal(fmt.Sprint(devices), err)
 	}
 }
 

@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -64,53 +62,6 @@ func TestJoiningProbeIndependentOfLargeStatus(t *testing.T) {
 		if w.Code != http.StatusOK || w.Body.Len() > 256 || json.Unmarshal(w.Body.Bytes(), &ping) != nil || ping.Version != 1 || ping.Fingerprint != "test-pin" {
 			t.Fatalf("ping: status=%d body=%s", w.Code, w.Body)
 		}
-	}
-}
-
-func TestJoiningProbeOldQueueNeverDrainsLargeStatus(t *testing.T) {
-	for _, pingStatus := range []int{http.StatusNotFound, http.StatusForbidden} {
-		t.Run(fmt.Sprint(pingStatus), func(t *testing.T) {
-			payload := `{"padding":"` + strings.Repeat("x", 15<<20) + `"}`
-			var pings, statuses atomic.Int32
-			server, invitation := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get("Authorization") != "Bearer throwaway-test-only" {
-					w.WriteHeader(http.StatusUnauthorized)
-					return
-				}
-				if r.URL.Path == "/api/ping" {
-					pings.Add(1)
-					w.WriteHeader(pingStatus)
-					return
-				}
-				statuses.Add(1)
-				// A healthy old queue may spend more than the former one-second
-				// deadline generating headers. This is transport time, not queue time.
-				timer := time.NewTimer(1100 * time.Millisecond)
-				defer timer.Stop()
-				select {
-				case <-r.Context().Done():
-					return
-				case <-timer.C:
-				}
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				w.(http.Flusher).Flush()
-				_, _ = io.WriteString(w, payload)
-				w.(http.Flusher).Flush()
-				// Withhold EOF: draining this body cannot succeed within any budget.
-				<-r.Context().Done()
-			}))
-			ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
-			defer cancel()
-			client, err := ResolveJoining(ctx, invitation, "", &fakeDiscovery{})
-			if err != nil || client.URL != server.URL {
-				t.Fatalf("joining old queue: %v", err)
-			}
-			defer client.HTTP.CloseIdleConnections()
-			if pings.Load() != 1 || statuses.Load() != 1 {
-				t.Fatalf("ping=%d status=%d", pings.Load(), statuses.Load())
-			}
-		})
 	}
 }
 

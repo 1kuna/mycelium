@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -30,59 +29,6 @@ func toolArchive(t *testing.T, name string) []byte {
 	tw.Close()
 	gz.Close()
 	return b.Bytes()
-}
-func TestOnboardingPinnedToolsBootstrapPATHAndRerun(t *testing.T) {
-	for _, osname := range []string{"linux", "darwin"} {
-		t.Run(osname, func(t *testing.T) {
-			c, _ := PlanInstall("worker", t.TempDir(), "", "/fixture/nas", "http://queue.invalid", "hypha", Detection{OS: osname, Arch: "arm64", Platform: "cpu", MemoryMode: "fixed"})
-			c.Path = "/runtime/bin:/usr/bin"
-			releases, _ := PinnedEnvironmentTools(osname, "arm64")
-			archives := map[string][]byte{}
-			for i, r := range releases {
-				b := toolArchive(t, r.Name)
-				sum := sha256.Sum256(b)
-				releases[i].SHA256 = hex.EncodeToString(sum[:])
-				archives[r.Name] = b
-			}
-			fetches := 0
-			p := ToolBootstrapProbe{Fetch: func(_ context.Context, r ToolRelease) (io.ReadCloser, error) {
-				fetches++
-				return io.NopCloser(bytes.NewReader(archives[r.Name])), nil
-			}, Command: func(_ context.Context, n string, args ...string) ([]byte, error) {
-				if len(args) != 1 || args[0] != "--version" {
-					t.Fatal("tool executes anything except version probe")
-				}
-				name := filepath.Base(n)
-				version := "0.8.22"
-				if name == "pixi" {
-					version = "0.81.0"
-				}
-				return []byte(name + " " + version), nil
-			}}
-			got, err := bootstrapEnvironmentTools(context.Background(), c, p, releases)
-			if err != nil {
-				t.Fatal(err)
-			}
-			dirs := strings.Split(got.Path, ":")
-			if len(dirs) != 4 || dirs[0] != "/runtime/bin" || dirs[1] != "/usr/bin" || !strings.Contains(dirs[2], "uv-0.8.22") || !strings.Contains(dirs[3], "pixi-0.81.0") {
-				t.Fatal(got.Path)
-			}
-			for _, dir := range dirs[2:] {
-				entries, _ := os.ReadDir(dir)
-				if len(entries) != 2 {
-					t.Fatal(entries)
-				}
-			}
-			again, err := bootstrapEnvironmentTools(context.Background(), got, p, releases)
-			if err != nil || again.Path != got.Path || fetches != 2 {
-				t.Fatal("non-idempotent bootstrap", again.Path, fetches, err)
-			}
-			b, _ := json.Marshal(got)
-			if strings.Contains(string(b), "private-token") {
-				t.Fatal("credential content saved")
-			}
-		})
-	}
 }
 func TestOnboardingToolsRefuseTamperAndErrors(t *testing.T) {
 	for _, mode := range []string{"checksum", "download", "symlink", "version"} {

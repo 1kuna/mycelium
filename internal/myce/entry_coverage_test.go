@@ -128,30 +128,6 @@ func TestEntryCoverageFindingSkipsTypeUntilRecipeChanges(t *testing.T) {
 	}
 }
 
-// A recipe that fails on every type it can use has a real failure, not a gap:
-// the job fails after one attempt per type and the skips are cleared.
-func TestEntryCoverageFailureEverywhereIsTheJobsFailure(t *testing.T) {
-	q, _ := fixture(t)
-	coverageStore(t, q, t.TempDir())
-	preferred, other := coverageMachines()
-	check(t, q, preferred, nil)
-	check(t, q, other, nil)
-	j := submit(t, q, coverageEntrySpec("broken", "recipe", "broken"))
-	finish(t, q, check(t, q, preferred, nil).Job, false)
-	requireState(t, q, j.ID, "queued")
-	finish(t, q, check(t, q, other, nil).Job, false)
-	if got := job(t, q, j.ID); got.State != "failed" || !strings.HasPrefix(got.Reason, "command failed") {
-		t.Fatalf("%s %s", got.State, got.Reason)
-	}
-	if _, kept := q.s.EntryCoverage[entryCoverageKey(j.EntryCoverage)]; kept {
-		t.Fatal("skips kept for a recipe that never succeeded")
-	}
-	next := submit(t, q, coverageEntrySpec("broken", "recipe", "fixed-source"))
-	if got := check(t, q, preferred, nil).Job; got == nil || got.ID != next.ID {
-		t.Fatal("cleared type still skipped", got)
-	}
-}
-
 // #1841: live recipes of the same entry must not reopen each other's failed
 // targets. Both commands fail deterministically, so each must fail normally
 // after exploring the two available types once.

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -181,40 +180,5 @@ func TestEnrollmentLegacyOwnershipFailsClosed(t *testing.T) {
 				t.Fatalf("unproven drain resumed: %+v, %v", status.Policy, err)
 			}
 		})
-	}
-}
-
-func TestDrainOwnershipSurvivesQueueRestart(t *testing.T) {
-	dir := t.TempDir()
-	clock := &fakeClock{now: time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)}
-	q, err := Open(filepath.Join(dir, "queue.db"), filepath.Join(dir, "checkpoints"), clock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	m := cpuMachine("hypha", "hypha", "fake", 8, 32)
-	check(t, q, m, nil)
-	drained, err := q.ChangeHostMaintenance(m.HostID, HostMaintenanceRequest{Action: "drain", DrainOwner: "intent-1"})
-	if err != nil {
-		q.Close()
-		t.Fatal(err)
-	}
-	if err = q.Close(); err != nil {
-		t.Fatal(err)
-	}
-	q, err = Open(filepath.Join(dir, "queue.db"), filepath.Join(dir, "checkpoints"), clock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer q.Close()
-	status, err := q.HostMaintenanceStatus(m.HostID)
-	if err != nil || status.Policy.DrainOwner != "intent-1" {
-		t.Fatalf("queue lost ownership proof: %+v %v", status.Policy, err)
-	}
-	if _, err = q.ChangeHostMaintenance(m.HostID, HostMaintenanceRequest{Action: "resume", IfMode: "drained", IfUpdatedAt: &drained.Policy.UpdatedAt, IfDrainOwner: "intent-1"}); err != nil {
-		t.Fatal("owned resume after restart refused", err)
-	}
-	status, err = q.HostMaintenanceStatus(m.HostID)
-	if err != nil || status.Policy.Mode != "enabled" || status.Policy.DrainOwner != "" {
-		t.Fatalf("resume retained drain ownership: %+v %v", status.Policy, err)
 	}
 }

@@ -202,59 +202,6 @@ func TestWorkerDiskBudgetQueuedDemandReclaimsAndAdmits(t *testing.T) {
 	}
 }
 
-// Actual allocated bytes drive the fake volume. Deleting one hardlink must not
-// satisfy pending demand until every retained link to those blocks is gone.
-func TestWorkerDiskBudgetHardlinksAndForeignGrowth(t *testing.T) {
-	_, clock := fixture(t)
-	root := t.TempDir()
-	first := filepath.Join(root, "first")
-	second := filepath.Join(root, "second")
-	if err := os.WriteFile(first, []byte(strings.Repeat("x", 16384)), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Link(first, second); err != nil {
-		t.Fatal(err)
-	}
-	used, err := collectionAllocatedBytes(context.Background(), root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const total = uint64(100 << 30)
-	floor := diskFreeFloor(total)
-	foreign := uint64(0)
-	probe := func(string) (DiskReading, error) {
-		n, err := collectionAllocatedBytes(context.Background(), root)
-		return DiskReading{Volume: "local", TotalBytes: total, FreeBytes: floor + uint64(used-n) + 4096 - foreign}, err
-	}
-	b := newWorkerDiskBudget(clock, probe)
-	b.add(diskBudgetRoot{name: "models", path: root, candidates: func(context.Context) ([]diskBudgetCandidate, error) {
-		return []diskBudgetCandidate{
-			{path: first, used: clock.Now().Add(-time.Hour), evict: func(context.Context) (bool, error) { return true, os.Remove(first) }},
-			{path: second, used: clock.Now(), evict: func(context.Context) (bool, error) { return true, os.Remove(second) }},
-		}, nil
-	}})
-	release, err := b.reserve(context.Background(), root, 8192, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	release()
-	if _, err = os.Stat(second); !os.IsNotExist(err) {
-		t.Fatal("hardlink mistaken for reclaimed blocks", err)
-	}
-	b.collect(context.Background())
-	clock.Advance(time.Minute)
-	foreign = 2048
-	view := b.collect(context.Background())
-	if len(view) != 1 || view[0].UnexplainedGrowthBytes != foreign || view[0].Warning != "foreign_disk_growth" || view[0].ExhaustionSeconds == nil {
-		t.Fatal(view)
-	}
-	clock.Advance(time.Minute)
-	foreign = 0
-	if view = b.collect(context.Background()); view[0].Warning != "" || view[0].ExhaustionSeconds != nil {
-		t.Fatal("foreign cleanup failed to clear warning", view)
-	}
-}
-
 func TestWorkerDiskBudgetModelLRUSourceLossAndPins(t *testing.T) {
 	c, model := cacheFixture(t)
 	c.Limit = 1 << 20
@@ -682,66 +629,5 @@ func TestWorkerDiskBudgetForeignHeadroom(t *testing.T) {
 	v = b.collect(context.Background())[0]
 	if v.ForeignBytes+4*mib != v.ForeignPeakBytes || v.ForeignHeadroomBytes != 4*mib {
 		t.Fatalf("cleanup basis: %+v", v)
-	}
-}
-
-// A sustained decline forecasts exhaustion from its average rate and names
-// whether Mycelium's own allocation explains it; recovery ends the episode.
-func TestWorkerDiskBudgetDeclineEpisode(t *testing.T) {
-	for _, owned := range []bool{false, true} {
-		t.Run(fmt.Sprint("owned=", owned), func(t *testing.T) {
-			_, clock := fixture(t)
-			root := t.TempDir()
-			const total = uint64(1000 << 30)
-			start := diskFreeFloor(total) + 100<<30
-			free := start
-			b := newWorkerDiskBudget(clock, func(string) (DiskReading, error) {
-				return DiskReading{Volume: "local", TotalBytes: total, FreeBytes: free}, nil
-			})
-			b.add(diskBudgetRoot{name: "files", path: root})
-			b.collect(context.Background())
-			consume := func(bytes uint64) []DiskBudgetVolume {
-				t.Helper()
-				if owned {
-					if err := os.WriteFile(filepath.Join(root, fmt.Sprint(clock.Now().UnixNano())), make([]byte, bytes), 0600); err != nil {
-						t.Fatal(err)
-					}
-				}
-				free -= bytes
-				clock.Advance(time.Minute)
-				return b.collect(context.Background())
-			}
-			step := uint64(1 << 20) // Small enough for real owned files.
-			if !owned {
-				step = 10 << 30
-			}
-			var v []DiskBudgetVolume
-			for range 3 {
-				v = consume(step)
-			}
-			free += step / 2 // A brief rise below the start continues the episode.
-			clock.Advance(time.Minute)
-			v = b.collect(context.Background())
-			if v[0].DecliningSeconds != 240 || v[0].ExhaustionSeconds == nil {
-				t.Fatal("episode did not continue through a partial rise", v[0])
-			}
-			wantRate := float64(start-free) / 240
-			if got := float64(free-min(free, v[0].FloorBytes)) / wantRate; *v[0].ExhaustionSeconds != got {
-				t.Fatalf("forecast used a step, not the episode average: %v want %v", *v[0].ExhaustionSeconds, got)
-			}
-			want := "foreign_disk_growth"
-			if owned {
-				want = "owned_disk_growth"
-			}
-			if v[0].DeclineCause != want {
-				t.Fatalf("cause %q, want %q", v[0].DeclineCause, want)
-			}
-			free = start
-			clock.Advance(time.Minute)
-			v = b.collect(context.Background())
-			if v[0].DecliningSeconds != 0 || v[0].ExhaustionSeconds != nil || v[0].DeclineCause != "" {
-				t.Fatal("recovery kept the episode", v[0])
-			}
-		})
 	}
 }

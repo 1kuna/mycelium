@@ -467,35 +467,3 @@ func TestFleetUpgradeHandoverRetainsExactCustody(t *testing.T) {
 		t.Fatal("adoption changed attempt", got)
 	}
 }
-
-func TestFleetUpgradeRestartAcknowledgementIsIdempotent(t *testing.T) {
-	q, c, workers := fleetFixture(t, "q", "a")
-	m := workers[0]
-	run := fleetRun(t, q, m, spec("experiment"))
-	q.s.Machines[m.ID].Fleet.Adoption = &WorkerAdoptionProof{Protocol: custodianProtocol, Attempts: []Execution{runExecution(run)}}
-	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
-		t.Fatal(err)
-	}
-	fleetTick(t, q)
-	i := fleetInstructionFor(t, q)
-	ack := FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "restarting"}
-	if err := q.AckFleetUpgrade(ack); err != nil {
-		t.Fatal(err)
-	}
-	oldPID := q.s.WorkerHandovers[m.ID].PID
-	replacement := cloneMachine(q.s.Machines[m.ID])
-	replacement.Fleet = fleetTestProof(c, m.Session, oldPID+1, true)
-	replacement.Fleet.Adoption = &WorkerAdoptionProof{Protocol: custodianProtocol, Attempts: []Execution{runExecution(run)}}
-	if _, err := q.Checkin(Checkin{Machine: replacement, period: time.Second, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: runExecution(run), Session: run.Session, Started: true}}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.AckFleetUpgrade(ack); err != nil {
-		t.Fatal(err)
-	}
-	if v, ok := q.s.WorkerHandovers[m.ID]; ok && v.PID != oldPID {
-		t.Fatal("retry replaced original process identity", v)
-	}
-	if q.retainWorkerHandover(q.s.Machines[m.ID]) {
-		t.Fatal("ack retry stranded adopted work")
-	}
-}

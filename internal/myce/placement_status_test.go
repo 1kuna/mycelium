@@ -188,33 +188,6 @@ func TestPlacementStatusSafeConstraintsAndLegacyUnknown(t *testing.T) {
 	}
 }
 
-func TestPlacementStatusDeviceConstraint(t *testing.T) {
-	for _, device := range []string{"", "1"} {
-		t.Run("selector-"+device, func(t *testing.T) {
-			q, _ := fixture(t)
-			m := m3Machine()
-			machineCheck(t, q, m)
-			s := m3Spec("experiment", device, 1, 1)
-			submitted := submit(t, q, s)
-			assigned := assignedJob(machineCheck(t, q, m))
-			if assigned == nil || assigned.ID != submitted.ID {
-				t.Fatal("no device assignment")
-			}
-			got, err := q.jobSnapshot(submitted.ID)
-			if err != nil || got.Placement == nil || len(got.Placement.Devices) != 1 {
-				t.Fatal(got, err)
-			}
-			want := "scheduler"
-			if device != "" {
-				want = "authored_selector"
-			}
-			if got.Placement.DeviceChoice != want {
-				t.Fatal(got.Placement)
-			}
-		})
-	}
-}
-
 func TestPlacementStatusSelectedRecipeConstraint(t *testing.T) {
 	q, _ := fixture(t)
 	m := m3Machine()

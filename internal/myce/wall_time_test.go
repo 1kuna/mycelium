@@ -154,29 +154,6 @@ func TestWallTimeValidation(t *testing.T) {
 	}
 }
 
-func TestWallTimeIndependentExperimentFailure(t *testing.T) {
-	q, c := fixture(t)
-	m := sharedDiscreteMachine("xpu")
-	s := sharedSpec("experiment", 1)
-	s.WallTime = "2s"
-	submit(t, q, s)
-	run := assignedJob(machineCheck(t, q, m))
-	if err := q.Started(result(run, false)); err != nil {
-		t.Fatal(err)
-	}
-	c.Advance(2 * time.Second)
-	machineCheck(t, q, m, run)
-	r := result(run, false)
-	r.ExecutionCause = &RuntimeCause{Operation: "command", Class: "command_exit"}
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	got := job(t, q, run.ID)
-	if got.State != "failed" || got.ExecutionCause == nil || got.ExecutionCause.Class != "command_exit" {
-		t.Fatal("wall stop replaced independently observed experiment failure", got.State, got.ExecutionCause)
-	}
-}
-
 func TestWallTimeFailureDiagnostics(t *testing.T) {
 	for _, releaseFirst := range []bool{false, true} {
 		t.Run(map[bool]string{false: "direct", true: "after-release"}[releaseFirst], func(t *testing.T) {

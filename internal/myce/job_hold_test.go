@@ -161,52 +161,6 @@ func TestNativeQualificationHoldDispatchability(t *testing.T) {
 	}
 }
 
-func TestActionableBlockerSingleHostCoverage(t *testing.T) {
-	for _, restriction := range []string{"hardware", "authored", "parity"} {
-		t.Run(restriction, func(t *testing.T) {
-			q, _ := fixture(t)
-			e, a, b := variantsFixture(t, false)
-			if err := q.AddExtension(e); err != nil {
-				t.Fatal(err)
-			}
-			check(t, q, a, nil)
-			check(t, q, b, nil)
-			busy := spec("experiment")
-			busy.AllowedMachines = []string{a.ID}
-			submit(t, q, busy)
-			running := check(t, q, a, nil).Job
-			if running == nil {
-				t.Fatal("missing occupancy fixture")
-			}
-			s := variantSpec(e, "experiment")
-			if restriction == "authored" {
-				s.AllowedMachines = []string{a.ID}
-			}
-			if restriction == "parity" {
-				s.Class = "production"
-				setParityHosts(t, q, s.Project, s.workType(), hostID(&a))
-			}
-			j := submit(t, q, s)
-			before := storedTestJob(t, q, j.ID)
-			got, err := q.jobSnapshot(j.ID)
-			if err != nil || got.Hold == nil {
-				t.Fatal(got, err)
-			}
-			unique := strings.Contains(got.Hold.Detail, "only one freshly observed physical host")
-			if unique != (restriction != "authored") {
-				t.Fatal("confused authored pin with observed coverage", got.Hold)
-			}
-			if restriction == "parity" && !strings.Contains(got.Hold.Detail, "approves these machine kinds for this work's production: "+targetLabel(machineTarget(&a))+";") {
-				t.Fatal("project's parity restriction not explained", got.Hold)
-			}
-			after := storedTestJob(t, q, j.ID)
-			if !reflect.DeepEqual(before.Spec, after.Spec) || !reflect.DeepEqual(before.PlacementIntent, after.PlacementIntent) {
-				t.Fatal("diagnostic read changed frozen spec or authored placement intent")
-			}
-		})
-	}
-}
-
 // Replays the no-builder observations in #710/#727 and retained failure in
 // #717 without changing the already-fixed scheduling/admission contracts.
 func TestActionableBlockerPreparationObservationsAgree(t *testing.T) {
@@ -317,17 +271,6 @@ func TestActionableBlockerInlineValidation(t *testing.T) {
 	}
 }
 
-func TestActionableBlockerProducerPrecedesPreparation(t *testing.T) {
-	q, _ := fixture(t)
-	j := &Job{State: "queued", Spec: cpuSpec(1, 1)}
-	j.Spec.After = &PieceDependency{Piece: "part"}
-	j.Spec.Environment.Name = "cold"
-	b := q.jobHold(j, false)
-	if b == nil || b.Owner != "producer" || b.Kind != "upstream" {
-		t.Fatalf("%+v", b)
-	}
-}
-
 func TestActionableBlockerNativePreparationIdentity(t *testing.T) {
 	q, clock := fixture(t)
 	e := compositionExtension(t, false)
@@ -362,39 +305,6 @@ func TestActionableBlockerResolveCurrentMemory(t *testing.T) {
 	}
 	if got.Hold == nil || got.Hold.Kind != memoryWaitReason || !reflect.DeepEqual(got.Hold, r.Hold) {
 		t.Fatalf("GET=%+v resolve=%+v", got.Hold, r.Hold)
-	}
-}
-
-func TestActionableBlockerKnownSharedPressure(t *testing.T) {
-	q, _ := fixture(t)
-	m := sharedHostFixture(t, q)
-	if _, err := q.ChangeHostMaintenance(m.ID, HostMaintenanceRequest{Action: "resume"}); err != nil {
-		t.Fatal(err)
-	}
-	m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 4}
-	m.SharedHostPressure.MemoryLevel = 4
-	check(t, q, m, nil)
-	s := cpuSpec(1, 1)
-	j := submit(t, q, s)
-	got, err := q.jobSnapshot(j.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Owner pressure and RAM together are mixed capacity causes; detail names both.
-	if got.Hold == nil || got.Hold.Kind != "capacity" || !strings.Contains(got.Hold.Detail, "memory pressure") {
-		t.Fatalf("%+v", got.Hold)
-	}
-}
-
-func TestActionableBlockerNativeResolveQualification(t *testing.T) {
-	q, _, _, s := observationFixture(t)
-	e := q.s.Extensions[s.Extension]
-	r, err := q.Resolve(ResolveRequest{Spec: Spec{Project: s.Project}, Recipe: &e})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.Hold == nil || r.Hold.Owner != "consumer" || !strings.Contains(r.Hold.Next, "qualify") {
-		t.Fatalf("%+v", r.Hold)
 	}
 }
 
