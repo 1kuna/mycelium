@@ -67,10 +67,6 @@ func (p *queuePressure) release() {
 	}
 }
 
-func (p *queuePressure) pressure() (bool, time.Duration) {
-	pressure, delay, _ := p.measurement()
-	return pressure, delay
-}
 func (p *queuePressure) measurement() (bool, time.Duration, uint64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

@@ -365,23 +365,6 @@ type MemoryPeakRange struct {
 	MaxGB   float64 `json:"max_gb"`
 }
 
-func (r *MemoryPeakRange) valid() bool {
-	return r != nil && r.Samples > 0 && validRate(r.MinGB) && validRate(r.MaxGB) && r.MinGB <= r.MaxGB
-}
-
-func mergeMemoryPeakRanges(a, b *MemoryPeakRange) *MemoryPeakRange {
-	if !b.valid() {
-		return a
-	}
-	r := *b
-	if a.valid() {
-		r.MinGB, r.MaxGB = min(a.MinGB, b.MinGB), max(a.MaxGB, b.MaxGB)
-		// Saturate rather than wrap after indefinitely repeated observations.
-		r.Samples = a.Samples + min(b.Samples, ^uint64(0)-a.Samples)
-	}
-	return &r
-}
-
 func hostMemoryPeakGB(p *AttemptMemoryPeak) float64 {
 	host := *p.HostGB
 	if p.NonreclaimableGB != nil && validMemoryValue(*p.NonreclaimableGB) {

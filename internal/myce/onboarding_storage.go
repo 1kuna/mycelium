@@ -340,11 +340,6 @@ func validateOnboardingStorageFS(ctx context.Context, abort context.CancelCauseF
 	return ctx.Err()
 }
 
-func probeNASDirectory(dir string) error {
-	ctx, abort := context.WithCancelCause(context.Background())
-	defer abort(nil)
-	return probeNASDirectoryContext(ctx, abort, dir)
-}
 func probeNASDirectoryContext(ctx context.Context, abort context.CancelCauseFunc, dir string) error {
 	// Each operation keeps its own stall bound. The fixed per-host file is
 	// rewritten in place and its marker renamed and back; neither is deleted (#1545).

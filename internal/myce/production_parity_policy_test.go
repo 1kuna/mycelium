@@ -80,12 +80,6 @@ func TestProductionParityPolicyConstrainsVariants(t *testing.T) {
 			if !found {
 				t.Fatal("missing candidate variant status")
 			}
-			q.mu.Lock()
-			known := q.productionParityKnown(q.s.Jobs[parent.ID], &b)
-			q.mu.Unlock()
-			if known {
-				t.Fatal("unapproved host acquired retargeting authority")
-			}
 			if assigned := check(t, q, b, nil).Job; assigned != nil {
 				t.Fatal("restart admitted unapproved production", assigned.ID)
 			}

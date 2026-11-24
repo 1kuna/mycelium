@@ -127,13 +127,6 @@ func (q *Queue) touchJobReason(j *Job) {
 		}
 	}
 }
-func (q *Queue) touchCurveLabel(id string) {
-	if q.records != nil && q.records.updating {
-		if _, touched := q.records.staleness[id]; !touched {
-			q.records.staleness[id] = q.s.WorkObservations[id].StaleReason
-		}
-	}
-}
 
 // The small global control record is always dirty: usage accounting advances
 // its transaction anchor. Jobs, inventories and catalogs have separate journals.

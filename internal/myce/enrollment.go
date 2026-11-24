@@ -128,9 +128,6 @@ func ReadEnrollmentReceipt(dir string) (EnrollmentReceipt, error) {
 	}
 	return r, nil
 }
-func EvaluateEnrollment(receipt EnrollmentReceipt, o EnrollmentObservation) (string, error) {
-	return evaluateEnrollmentVersion(receipt, o, BuildVersion)
-}
 func evaluateEnrollmentVersion(receipt EnrollmentReceipt, o EnrollmentObservation, version string) (string, error) {
 	incomplete := func(reason string) (string, error) { return "", fmt.Errorf("enrollment incomplete: %s", reason) }
 	m := o.Machine

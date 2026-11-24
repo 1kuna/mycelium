@@ -150,15 +150,6 @@ func (q *Queue) coldResidentModel(j *Job, m *Machine) *Model {
 	return &r.Engine.Model
 }
 
-// The incremental host charge in residentPlanningJob includes the engine's
-// device reservation on unified workers and one extra ceiling slack.
-func (q *Queue) coldResidentHostCharge(j *Job, m *Machine) float64 {
-	if model := q.coldResidentModel(j, m); model != nil {
-		return hostNeed(m, model.MemoryGB, 0) + model.HostMemoryGB + m.MemoryCeilingSlackGB
-	}
-	return 0
-}
-
 // Cold residency and the driver are admitted together. A batch of staged
 // drivers must never consume the room needed to load their common engine.
 func (q *Queue) residentPlanningJob(j *Job, m *Machine) *Job {

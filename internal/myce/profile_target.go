@@ -232,14 +232,6 @@ func executionTargetMatches(s Spec, m *Machine) bool {
 	})
 }
 
-// Submission checks qualification and total admitted capacity, not free slots.
-// Busy qualified hosts can queue work. Dispatch and launch still check live
-// admission through fitsResources; this check grants no capacity reservation.
-func (q *Queue) hasQualifiedTarget(j *Job) bool {
-	ok, _ := q.qualifiedTarget(j)
-	return ok
-}
-
 func (q *Queue) qualifiedTarget(j *Job) (bool, string) {
 	return q.qualifiedTargetSized(j)
 }

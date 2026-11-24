@@ -261,13 +261,6 @@ func sharedProfileAuthority(reg sharedProfileRegistration) string {
 	return profileHash(struct{ Queue, Config, Joining, Token string }{reg.Observer.Queue, reg.Observer.Config, reg.Observer.Joining, reg.Token})
 }
 
-// The coordinator owns receipts and their fences. Each authority has one
-// independent, cancellable network operation; a silent server cannot withhold
-// another authority's completion or an owner's deadline.
-func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock myce.Clock, pause func(context.Context, time.Duration) error, events ...<-chan struct{}) error {
-	return runSharedProfileLoopStarted(ctx, root, lock, clock, pause, nil, events...)
-}
-
 func runSharedProfileLoopStarted(ctx context.Context, root string, lock *os.File, clock myce.Clock, pause func(context.Context, time.Duration) error, startup func() error, events ...<-chan struct{}) error {
 	ctx, cancelAll := context.WithCancel(ctx)
 	var workers sync.WaitGroup

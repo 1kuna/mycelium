@@ -1142,10 +1142,6 @@ func fileResponse(res *http.Response, want int, now ...time.Time) error {
 	_, err := io.Copy(io.Discard, res.Body)
 	return err
 }
-func setUploadHeaders(req *http.Request, ref FileRef) {
-	req.Header.Set("Upload-Length", strconv.FormatInt(ref.SizeBytes, 10))
-	req.Header.Set("Upload-Metadata", "sha256 "+base64.StdEncoding.EncodeToString([]byte(ref.SHA256)))
-}
 func (c Client) HasFile(ctx context.Context, ref FileRef) error {
 	return c.hasFile(ctx, ref, "")
 }

@@ -186,16 +186,6 @@ func newAvailabilityMonitor(clock Clock, daily, laptop, desktop bool) *availabil
 	}
 	return m
 }
-func (m *availabilityMonitor) sample(s OwnerSignals) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.current = m.policy.evaluate(s)
-	if !m.current.Available {
-		m.cancel()
-	} else if m.work.Err() != nil {
-		m.work, m.cancel = context.WithCancel(context.Background())
-	}
-}
 func (m *availabilityMonitor) snapshot() Availability {
 	m.mu.Lock()
 	defer m.mu.Unlock()

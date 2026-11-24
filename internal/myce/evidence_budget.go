@@ -106,13 +106,6 @@ func (e *evidenceExpiries) set(key string, at time.Time) {
 
 var queueHostMemorySource = NewHostMemorySource
 
-// SetQueueHostMemorySource supplies the queue process's own host-memory probe
-// during embedded process setup. It must not run concurrently with queue reads.
-// Worker inventory overrides do not change this source.
-func SetQueueHostMemorySource(source func(float64) (MemorySource, error)) {
-	queueHostMemorySource = source
-}
-
 func queueRetentionCapacity(ctx context.Context, dir string) (RetentionCapacity, error) {
 	source, err := queueHostMemorySource(0)
 	if err != nil {
