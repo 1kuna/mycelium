@@ -11,11 +11,7 @@ import (
 const workerUnitMigrationFile = "worker-unit-migration.json"
 const workerUnitMigrationDropIn = "50-myce-memory-containment.conf"
 
-func (c ServiceConfig) workerContainmentSettings() string {
-	return "OOMScoreAdjust=0\nSlice=" + c.workerSlice() + "\n"
-}
-
-// StageWorkerUnitMigration changes only the next invocation's placement. It
+// StageWorkerUnitMigration stages the historical drop-in for custody fixtures. It
 // deliberately never stops, restarts or moves a process. Activation is the
 // existing fleet upgrade's MY-55 takeover, with its queue custody fences; an
 // install rerun or an uncoordinated systemctl restart is not an activation path.
@@ -138,16 +134,4 @@ func StageWorkerUnitMigration(ctx context.Context, c ServiceConfig, command func
 		return finish("worker_unit_migration_placement_ready", "verify worker memory_containment is available after runtime MemoryMax readback", nil)
 	}
 	return finish("worker_unit_migration_staged", "activate through a normal myce fleet upgrade; the existing MY-55 takeover preserves running work", nil)
-}
-
-func (w Worker) unmigratedContainmentStatus() *MemoryContainment {
-	status := unmigratedMemoryContainment()
-	if w.ServiceConfig == nil {
-		return status
-	}
-	var saved MemoryContainment
-	if readCustodianJSON(w.ServiceConfig.State, workerUnitMigrationFile, &saved) == nil && saved.State == "unavailable" && strings.HasPrefix(saved.Reason, "worker_unit_migration_") {
-		return &saved
-	}
-	return status
 }

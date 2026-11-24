@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -121,8 +122,12 @@ func TestUpgradeCompatProcess(t *testing.T) {
 			t.Fatal(err)
 		}
 		if mode == "queue-rollback-previous" {
-			if limit := fields["memory_limit_gb"]; len(limit) != 0 {
-				t.Fatalf("previous source unexpectedly recognizes RAM limit: %s", limit)
+			want := ""
+			if _, known := reflect.TypeFor[Spec]().FieldByName("MemoryLimitGB"); known {
+				want = "2.5"
+			}
+			if limit := string(fields["memory_limit_gb"]); limit != want {
+				t.Fatalf("previous source read RAM limit %q, want %q", limit, want)
 			}
 			if err := q.update(func() error {
 				q.touchJob("rollback-paused").Reason = "updated by rollback release"

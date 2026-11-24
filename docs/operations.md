@@ -825,60 +825,11 @@ To upgrade one machine with a printed invitation line, or to replace a
 
 ## Rolling fleet upgrades
 
-### Stage Linux worker containment migration
-
-For a worker reporting `memory_containment.state: unavailable` because its
-service is outside the configured slice, use the CLI from a release supporting
-this command, on that worker's host as its service account:
-
-```sh
-myce migrate worker-unit --config INSTALLED_WORKER_CONFIG
-```
-
-This stages `50-myce-memory-containment.conf` beside the existing unit and
-reloads the user manager. It does not restart the worker, move processes, read
-fleet credentials, or rewrite the unit, config, environment files or operator
-drop-ins. The settings match fresh installs: the configured `Slice` (default
-`myce.slice`) and requested `OOMScoreAdjust=0`. A privileged inherited minimum
-from the user manager may still bound actual process scores; existing tier-score
-handling respects that floor, and retained scopes keep their existing policy.
-The predecessor's base `app.slice` and
-score `200` can be migrated; conflicting operator placement/score overrides or
-an unrecognized file at the reserved drop-in name refuse with a typed reason.
-Other overrides and all environment settings remain intact. Rerunning is safe,
-including after interrupted publication or a failed daemon reload.
-
-`myce install worker` and its `--dry-run` plan report generated-unit changes
-beside the saved-config diff, including effective systemd properties and unit
-and drop-in definition changes. A catalog/config-only change can therefore also
-show a slice or OOM-score change. An existing active worker outside the generated
-slice, or with a different OOM score, refuses installation with
-`worker_unit_migration_required` before publishing files or restarting services.
-The dry run prints the same refusal and proposed changes without applying them.
-Stage with `myce migrate worker-unit` and activate through a newer normal fleet
-upgrade as described below. A staged definition still refuses an install rerun
-while its running control group remains in the old slice.
-
-Staging returns and reports `unavailable`, reason
-`worker_unit_migration_staged`. Activate the staged unit through the **next
-normal `myce fleet upgrade` to a newer approved release**, below. Use its existing
-MY-55 takeover proof and custody fences; do not use an install rerun or manual
-service restart to activate it. A service's slice cannot be changed in place;
-the replacement invocation joins the configured slice. Detached attempts and
-resident models already live in independent scopes under the configured
-`-jobs.slice`, outside the worker's stop/kill tree. They retain their exact
-process birth, session, attempt, open streams and release custody through the
-existing takeover machinery. Unproved takeover waits for natural completion.
-
-The replacement worker applies and reads back runtime slice `MemoryMax` and
-`MemorySwapMax` before reporting `memory_containment.state: available`.
-Placement alone does not claim enforcement. Refused or unconfirmed staging
-persists an `unavailable` reason and next step while the old worker keeps
-serving with its existing per-attempt controls. An unconfirmed reload may
-leave the owned drop-in staged: resolve its typed reason and rerun before
-authorizing any upgrade. Ordinary fleet upgrades never stage this migration
-implicitly. Rollout of an explicitly staged migration can use a normal upgrade;
-no critical interruption authority is needed.
+Linux workers already running in the configured slice can use the normal upgrade
+below. If an older installation reports `worker_unit_migration_required`, use
+the [r6.36 containment migration procedure](https://github.com/1kuna/mycelium/blob/9fda0cf1c2d972ce96add11ab7abb02e74b803bd/docs/operations.md#stage-linux-worker-containment-migration)
+before activating the replacement. Install reruns still refuse to change the
+active worker's slice or OOM score.
 
 ### Upgrade the approved release
 

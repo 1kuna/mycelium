@@ -179,7 +179,7 @@ func InstallUnitPlan(ctx context.Context, c ServiceConfig, command func(context.
 	}
 	if slice != c.workerSlice() || score != "0" || placementErr != nil || after["[Service] Slice"] != c.workerSlice() || after["[Service] OOMScoreAdjust"] != "0" {
 		lines = append(lines, fmt.Sprintf("Active ControlGroup: %q; generated Slice=%s OOMScoreAdjust=0", group, c.workerSlice()))
-		refusal = fmt.Errorf("%w: stage with myce migrate worker-unit --config INSTALLED_WORKER_CONFIG; activate through the next normal myce fleet upgrade to a newer approved release (MY-55)", ErrWorkerUnitMigrationRequired)
+		refusal = fmt.Errorf("%w: use the r6.36 CLI with myce migrate worker-unit --config INSTALLED_WORKER_CONFIG; activate through the next normal myce fleet upgrade (MY-55)", ErrWorkerUnitMigrationRequired)
 	}
 	if len(lines) == 0 {
 		lines = append(lines, "none")

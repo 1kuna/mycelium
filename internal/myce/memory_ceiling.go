@@ -516,7 +516,7 @@ func (w *Worker) syncJointMemoryCeiling(ctx context.Context, budget HostMemoryBu
 	if err != nil {
 		// Binary upgrades preserve older service units. Keep their per-attempt
 		// controls and serving behavior; only the common slice cap is unavailable.
-		w.Machine.MemoryContainment = w.unmigratedContainmentStatus()
+		w.Machine.MemoryContainment = unmigratedMemoryContainment()
 		return nil
 	}
 	command := w.jointMemoryCommand
