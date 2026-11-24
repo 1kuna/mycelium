@@ -454,7 +454,7 @@ func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, prog
 		} else if !recovering && j.State == "running" && !j.ReleaseConfirmed && !q.maintenanceBlocked(hostID(m)) && logPolicyFits(j.Spec.Logs, m) && sharedInputsFit(j.Spec, m) && q.checkpointReady(j, m) {
 			out := cloneJob(j)
 			out.LedgerEntries = nil
-			reply.Attempts = append(reply.Attempts, AttemptDirective{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Job: &out})
+			reply.Attempts = append(reply.Attempts, attemptOffer(&out))
 		}
 	}
 	// Let supervisors drain immediate-cleanup reports before offering more work.
@@ -499,7 +499,7 @@ func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, prog
 	if best != nil {
 		q.recordAdmissionSelection(best, target)
 		out := q.assign(best, target, scan)
-		reply.Attempts = append(reply.Attempts, AttemptDirective{Execution: Execution{ID: out.ID, Attempt: out.Attempt}, Session: out.Session, Job: &out})
+		reply.Attempts = append(reply.Attempts, attemptOffer(&out))
 	}
 }
 

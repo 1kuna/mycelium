@@ -80,7 +80,7 @@ func TestWorkerHeartbeatAfterLateCheckpointMount(t *testing.T) {
 		if heartbeats > 2 && !c.Machine.CheckpointUnavailable {
 			recovered = true
 		}
-		if err := json.NewEncoder(rw).Encode(attemptReply(c, Reply{Leave: recovered})); err != nil {
+		if err := json.NewEncoder(rw).Encode(Reply{AttemptProtocol: keyedAttemptProtocol, Leave: recovered}); err != nil {
 			t.Error(err)
 		}
 	}))

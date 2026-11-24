@@ -604,7 +604,7 @@ func TestProductionStartDeadlineWorkerSendsRejectedResultCleanup(t *testing.T) {
 				t.Error(err)
 				return
 			}
-			reply := Reply{CheckpointRoot: filepath.Dir(j.Checkpoint)}
+			reply := Reply{AttemptProtocol: keyedAttemptProtocol, CheckpointRoot: filepath.Dir(j.Checkpoint)}
 			if len(c.Attempts) == 0 {
 				cancel()
 			} else {
@@ -615,7 +615,7 @@ func TestProductionStartDeadlineWorkerSendsRejectedResultCleanup(t *testing.T) {
 				a := c.Attempts[0]
 				reply.Attempts = []AttemptDirective{{Execution: a.Execution, Session: a.Session, Stop: true, Kill: true}}
 			}
-			json.NewEncoder(rw).Encode(attemptReply(c, reply))
+			json.NewEncoder(rw).Encode(reply)
 		case "/api/workers/complete":
 			var got Result
 			json.NewDecoder(req.Body).Decode(&got)

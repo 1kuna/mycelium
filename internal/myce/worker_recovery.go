@@ -253,7 +253,11 @@ func (a attemptRecord) ownsState(s workerState) bool {
 }
 
 func (a attemptRecord) ownsResult(r *Result) bool {
-	return a.key.job != "" && r != nil && r.ID == a.key.job && r.Attempt == a.key.attempt && r.Session == a.key.session && r.Machine == a.machine
+	return r != nil && a.key.job != "" && a.key.matches(r.Execution) && a.sameWorker(r.Machine, r.Session)
+}
+
+func (a attemptRecord) sameWorker(machine, session string) bool {
+	return machine == a.machine && session == a.key.session
 }
 
 func (a attemptRecord) readyToRelease(r *Result, processOwned bool) bool {
