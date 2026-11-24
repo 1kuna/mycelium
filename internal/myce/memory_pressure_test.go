@@ -6,6 +6,51 @@ import (
 	"time"
 )
 
+func TestMemoryPoolPressureRequiresSustainedDeclineWithHeadroom(t *testing.T) {
+	q, clock := fixture(t)
+	const total, keep, recovered = 31.206165313720703, 4.0, 23.25
+	m := cpuMachine("pressure-replay", "pressure-replay", "cpu", 8, recovered-keep)
+	m.Devices = []MachineDevice{}
+	m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
+	m.HostMemoryBudgetGB = 24
+	setReading := func(free float64) {
+		m.MemoryObservation = &HostMemoryObservation{TotalGB: total, UsedGB: total - free, ReserveGB: keep}
+		m.HostAvailableMemoryGB = free - keep
+	}
+	setReading(recovered)
+	queued := submit(t, q, cpuSpec(1, 8.116))
+	run := assignedJob(machineCheck(t, q, m))
+	if run == nil || run.ID != queued.ID {
+		t.Fatal("fixture did not assign the pressure-test attempt")
+	}
+	if err := q.Started(result(run, true)); err != nil {
+		t.Fatal(err)
+	}
+	checkRoom := func(free float64) *Job {
+		t.Helper()
+		clock.Advance(time.Second)
+		setReading(free)
+		machineCheck(t, q, m, run)
+		return job(t, q, run.ID)
+	}
+	// Replay the five retained physical headroom readings. The preceding
+	// readings were not retained, so supply a repeatable recovery between
+	// drops to model a series of isolated losses at the recorded levels.
+	for _, free := range []float64{18.27295684814453, 20.666767120361328, 17.45999526977539, 19.596416473388672, 21.033782958984375} {
+		for _, reading := range []float64{free, recovered} {
+			if got := checkRoom(reading); got.State != "running" || got.Attempt != 1 {
+				t.Fatalf("isolated drop at %.3f GiB stopped attempt %d: %s %s", reading, got.Attempt, got.State, got.Reason)
+			}
+		}
+	}
+	if got := checkRoom(recovered - 2); got.State != "running" {
+		t.Fatal("first interval of a high-room decline stopped the attempt", got.Reason)
+	}
+	if got := checkRoom(recovered - 4); got.State != "stopping" || got.Reason != memoryPressureCause {
+		t.Fatalf("sustained decline failed to trigger a protective stop: %s %s", got.State, got.Reason)
+	}
+}
+
 func TestMemoryPoolShortageStopsLowestTierOverrun(t *testing.T) {
 	q, clock := fixture(t)
 	m := machine("pooled-safety", "cpu")
