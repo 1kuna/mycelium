@@ -320,12 +320,7 @@ func (q *Queue) memoryCandidates(j *Job, m *Machine) []*Job {
 		if candidate.State == "running" || candidate.State == "stopping" {
 			continue
 		}
-		if candidate == j {
-			candidates[i] = q.memoryCandidate(candidate, m)
-		} else {
-			// Extension lowering already owns a target-specific Job copy.
-			candidates[i] = q.memoryCandidateOwned(candidate, m)
-		}
+		candidates[i] = q.sizeQualifiedCandidate(j, candidate, m, i)
 	}
 	return candidates
 }
@@ -340,11 +335,19 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 	return q.memoryCandidateOwned(&copy, m)
 }
 
-// The caller owns this candidate. Resolve against its original needs and only
-// install the result after all evidence reads, avoiding another full Job copy.
+// The variant index is in the target's qualified extension order. Lowering
+// already owns its target-specific copy, so only copy the original job.
+func (q *Queue) sizeQualifiedCandidate(j, candidate *Job, m *Machine, variant int) *Job {
+	if candidate == j {
+		copy := *j
+		candidate = &copy
+	}
+	return q.applyPooledSize(candidate, m, q.pooledSize(j, candidate, m, variant))
+}
 
+// The caller owns this candidate. A modified copy gets its own memory estimate.
 func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
-	return q.pooledMemoryCandidate(j, m)
+	return q.applyPooledSize(j, m, q.resolvePooledSize(j, m))
 }
 
 func memoryConfiguration(needs ResourceNeeds, args []string, program *Program) string {
