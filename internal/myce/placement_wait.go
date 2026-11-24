@@ -10,6 +10,12 @@ import (
 // resolved envelopes as placement. Network and preparation failures are useful
 // diagnostics; unrelated platforms, devices and qualifications are not.
 func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
+	if j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next < len(j.Spec.FanOut.Pieces) {
+		// Dispatch adds the piece arguments before looking up its exact estimate.
+		piece := *j
+		piece.Spec.Args = append(slices.Clone(j.Spec.Args), j.Spec.FanOut.Pieces[j.FanOut.Next].Args...)
+		j = &piece
+	}
 	var reasons []string
 	var memoryCapacity []string
 	var ephemeralRefusals []string
@@ -179,6 +185,19 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 		}
 	}
 	return newHold(kind, reason)
+}
+
+// A fully dispatched parent is an aggregate. Its pieces own any remaining
+// placement waits, including when one of them holds an accelerator card.
+func fanOutDispatchedHold(j *Job) *Hold {
+	if j.Spec.FanOut == nil || j.FanOut == nil || len(j.FanOut.Children) == 0 || j.FanOut.Next < len(j.Spec.FanOut.Pieces) {
+		return nil
+	}
+	detail := fmt.Sprintf("%d/%d pieces accepted", len(j.FanOut.Results), len(j.Spec.FanOut.Pieces))
+	if len(j.FanOut.Children) == 1 {
+		detail += "; dispatched job " + j.FanOut.Children[0]
+	}
+	return newHold("fan_out_dispatched", detail)
 }
 
 // Occupancy is not RAM pressure. Explain the same sharing/release gate used by

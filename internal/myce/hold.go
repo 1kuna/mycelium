@@ -78,6 +78,7 @@ var holdKinds = map[string]holdKind{
 	"paused":                      {ownerConsumer, "paused", "resumed, or the pause's until time passes", "myce resume JOB_ID when it should run"},
 	hostMaintenanceJobHold:        {ownerOperator, "eligible hosts are in maintenance", "an eligible host resumes admission", "wait for the applicable maintenance owner to resume admission"},
 	"fan_out_cap":                 {ownerConsumer, "at its declared max_concurrency", "a running piece of the same parent finishes", "wait, or resubmit with a higher max_concurrency"},
+	"fan_out_dispatched":          {ownerQueue, "waiting for dispatched pieces", "the dispatched pieces settle", "wait; inspect a piece's status for its execution or hold"},
 	"upstream":                    {ownerProducer, "waiting for an upstream result", "the required upstream job succeeds and publishes its result", "complete and publish the required upstream result"},
 	deviceFaultRetryHold:          {ownerQueue, "waiting for healthy accelerator capacity after a driver fault", "another healthy device or host fits, or the quarantined device proves healthy", "wait; Mycelium retries on healthy capacity automatically"},
 	"launch_capacity":             {ownerQueue, "waiting for launch capacity or an exact release", "exact cleanup is confirmed and capacity permits a new offer", "wait; nothing to do"},

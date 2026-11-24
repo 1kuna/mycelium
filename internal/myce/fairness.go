@@ -672,6 +672,9 @@ func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
 	if h := q.fanOutCapHold(j); h != nil {
 		return h
 	}
+	if h := fanOutDispatchedHold(j); h != nil {
+		return h
+	}
 	if h := q.variantParityWait(j); h != nil {
 		return h
 	}

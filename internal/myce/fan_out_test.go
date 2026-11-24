@@ -32,13 +32,19 @@ func TestFanOutShortDailyAndGather(t *testing.T) {
 	if run := q.fanOutCandidate(q.s.Jobs[parent.ID], &busy); run != nil {
 		t.Fatal("busy daily host contributed capacity", run)
 	}
-	for range 3 {
+	for i := range 3 {
 		run := check(t, q, m, nil).Job
 		if run == nil || run.Batch == nil || run.Batch.Concurrency != 1 || len(run.Batch.Pieces) != 1 || run.Spec.Needs.CPUCores != 1 {
 			t.Fatalf("wrong piece: batch=%+v needs=%+v", run.Batch, run.Spec.Needs)
 		}
 		if err := q.Started(result(run, true)); err != nil {
 			t.Fatal(err)
+		}
+		if i == 2 {
+			got, err := q.jobSnapshot(parent.ID)
+			if err != nil || got.Hold == nil || got.Hold.Kind != "fan_out_dispatched" || !strings.Contains(got.Hold.Detail, "2/3 pieces accepted") {
+				t.Fatalf("parent status after its last piece starts = %+v, %v", got, err)
+			}
 		}
 		clock.Advance(time.Second)
 		finish(t, q, run, true)
