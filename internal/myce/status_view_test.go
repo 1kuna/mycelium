@@ -89,10 +89,18 @@ func TestStatusViewReadOnlyAndTokenProtected(t *testing.T) {
 	s.Run.Workdir = "/private/example"
 	j := submit(t, q, s)
 	if err := q.update(func() error {
-		q.touchJob(j.ID).Spec.Environment = Environment{LockFile: "/private/example", Python: "3.11"}
+		job := q.touchJob(j.ID)
+		job.Spec.Environment = Environment{LockFile: "/private/example", Python: "3.11"}
+		job.Reason = "environment not ready: " + job.Spec.Environment.Key()
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+	for _, path := range []string{"/api/status", "/api/status?view=snapshot"} {
+		body := statusViewResponse(t, q, path)
+		if strings.Contains(body, "/private/example") || !strings.Contains(body, "software not ready: required software") {
+			t.Errorf("%s must word the committed software wait without its private key", path)
+		}
 	}
 	for _, path := range []string{"/?sections=jobs,machines", "/api/status?sections=jobs,machines"} {
 		body := statusViewResponse(t, q, path)
