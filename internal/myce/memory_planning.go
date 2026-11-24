@@ -8,6 +8,7 @@ type memoryPlanningCache struct {
 	// Storage observations grouped by family for this pass.
 	storageFamilies map[string][]StorageObservation
 	storagePrograms map[string]bool
+	hostObligations map[string][]HostObligation
 }
 
 type memoryComponentKey struct {

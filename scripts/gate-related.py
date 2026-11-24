@@ -28,6 +28,7 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/memory_learning.go'] = ('storage_envelope_
 
 # Compatibility guidance is exercised through the existing shared hold fixtures.
 SUPPLEMENTAL_CONSUMERS['internal/myce/compatibility_hold.go'] = ('job_hold_test.go',)
+SUPPLEMENTAL_CONSUMERS['internal/myce/host_obligations.go'] = ('host_backfill_test.go',)
 
 # The owned-session sampler is shared by Darwin and foreground Linux dev.
 SUPPLEMENTAL_CONSUMERS['internal/myce/process_memory_owned.go'] = (

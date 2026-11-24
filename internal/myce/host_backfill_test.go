@@ -105,6 +105,16 @@ func TestHostBackfillExtensionCheckRespectsRetainedCardCustody(t *testing.T) {
 		t.Fatal("check ran before exact card release", got.ID)
 	}
 	pending.ReleasePending, pending.ReleaseOnly = false, true
+	stale := pending
+	stale.Session += "-stale"
+	// An unrelated session's report must leave the retained holder in the
+	// next candidate pass, even though the terminal result already exists.
+	if err := q.Complete(stale); err != nil {
+		t.Fatal(err)
+	}
+	if got := assignedJob(machineCheck(t, q, m)); got != nil {
+		t.Fatal("check ran after a release from the wrong session", got.ID)
+	}
 	if err := q.Complete(pending); err != nil {
 		t.Fatal(err)
 	}

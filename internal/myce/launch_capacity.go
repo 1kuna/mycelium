@@ -175,7 +175,8 @@ func (q *Queue) queuedCapacityStatus(j *Job, scans ...*placementScan) (waiting, 
 	if !dependencyReady(j) || cancelled(j) {
 		return false, false
 	}
-	for _, m := range q.plannerMachines() {
+	scan := q.placementScan(scans...)
+	for _, m := range scan.machines {
 		drained := q.s.HostMaintenance[hostID(m)].Mode == "drained"
 		if !q.jobAllowsMachine(j, m.ID) || q.s.HostMaintenance[hostID(m)].Mode == "disabled" || !drained && (m.Gone || m.Leaving) {
 			continue
@@ -193,7 +194,7 @@ func (q *Queue) queuedCapacityStatus(j *Job, scans ...*placementScan) (waiting, 
 			}
 			if drained || !hostFits(m, c.Spec.Needs.MemoryGB, c.Spec.Needs.HostMemoryGB) || !cpuFits(c, m) || !q.batchSlotFree(m, c) || m.FreeMemoryGB < c.Spec.Needs.MemoryGB || !q.poolCustodyAllows(c, m) {
 				waiting = true
-			} else if pooledMemory(c) && !q.hostBackfillAllows(c, m, q.hostBackfillFences(q.placementScan(scans...))[hostID(m)]) {
+			} else if pooledMemory(c) && !q.hostBackfillAllows(c, m, q.hostBackfillFences(scan)[hostID(m)]) {
 				waiting = true
 			} else {
 				ready = true
