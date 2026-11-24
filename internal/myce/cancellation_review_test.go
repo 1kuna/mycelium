@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -323,12 +324,15 @@ func cancellationPreparingWorker(t *testing.T, q *Queue, c Clock, m Machine, id 
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	t.Cleanup(server.Close)
 	prepared := t.TempDir()
-	return Worker{StateDir: newTestStateRoot(t), Machine: m, Clock: c, Client: Client{URL: server.URL, Token: "test"}, checkpointPrepare: func(Job) (string, error) {
-		if a := cancelAck(t, q, id); a.State != "stopping" || ackRelease(a) != "pending" {
-			t.Fatal("preparing cancellation", a)
-		}
-		return prepared, nil
-	}}
+	return Worker{StateDir: newTestStateRoot(t), Machine: m, Clock: c, Client: Client{URL: server.URL, Token: "test"},
+		HostMemorySource: func(context.Context) (float64, error) { return m.HostAvailableMemoryGB, nil },
+		MemorySource:     func(context.Context) (float64, error) { return m.FreeMemoryGB, nil },
+		checkpointPrepare: func(Job) (string, error) {
+			if a := cancelAck(t, q, id); a.State != "stopping" || ackRelease(a) != "pending" {
+				t.Fatal("preparing cancellation", a)
+			}
+			return prepared, nil
+		}}
 }
 
 func TestCancellationPlacementPreemption(t *testing.T) {

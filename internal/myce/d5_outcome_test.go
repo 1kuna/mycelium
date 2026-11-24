@@ -158,8 +158,15 @@ func testOutcomeRuntime(t *testing.T, runtime string) {
 			if (r.PriorityStop != nil) != (tc.priority && tc.interrupted) {
 				t.Fatalf("priority stop provenance: %+v", r)
 			}
-			if r.Success != tc.success || r.Interrupted != tc.interrupted || r.OutOfMemory != tc.oom || r.OperatorStop != tc.operator {
-				t.Fatalf("got %+v; want success=%v interruption=%v oom=%v", r, tc.success, tc.interrupted, tc.oom)
+			// The plain command has no explicit cap. Its OOM is a pool
+			// interruption. The group fixture gives its main member a hard cap.
+			poolOOM := tc.oom && runtime == "native"
+			interrupted, oom := tc.interrupted || poolOOM, tc.oom && !poolOOM
+			if r.Success != tc.success || r.Interrupted != interrupted || r.OutOfMemory != oom || r.OperatorStop != tc.operator {
+				t.Fatalf("got %+v; want success=%v interruption=%v oom=%v", r, tc.success, interrupted, oom)
+			}
+			if poolOOM && (r.ExecutionCause == nil || r.ExecutionCause.Class != memoryPressureCause) {
+				t.Fatalf("pool OOM lost its memory pressure cause: %+v", r)
 			}
 		})
 	}

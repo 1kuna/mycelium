@@ -203,7 +203,9 @@ func TestPerMachineJobLimit(t *testing.T) {
 	b.MaxJobs = 1
 	check(t, q, a, nil)
 	check(t, q, b, nil)
-	first, second := submit(t, q, spec("production")), submit(t, q, spec("experiment"))
+	production, experiment := spec("production"), spec("experiment")
+	production.Needs.HostMemoryGB, experiment.Needs.HostMemoryGB = 1, 1
+	first, second := submit(t, q, production), submit(t, q, experiment)
 	r := check(t, q, a, nil)
 	if r.Job == nil || r.Job.ID != first.ID {
 		t.Fatal(r)
@@ -226,8 +228,8 @@ func TestPerMachineJobLimit(t *testing.T) {
 	q2, _ := fixture(t)
 	a.MaxJobs = 0
 	b.MaxJobs = 0
-	submit(t, q2, spec("experiment"))
-	submit(t, q2, spec("experiment"))
+	submit(t, q2, experiment)
+	submit(t, q2, experiment)
 	if check(t, q2, a, nil).Job == nil || check(t, q2, b, nil).Job == nil {
 		t.Fatal("default filling changed")
 	}
