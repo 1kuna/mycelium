@@ -1137,12 +1137,18 @@ Use the same directory arguments, if any, for install and status.
   "$myce_bin" skill install
 ```
 
-The ordinary install fills missing folders and refreshes stale managed copies.
-For a symlink, edited copy or unmanaged copy, inspect `skill install --replace
---dry-run` with the same verified binary and directories. The account owner or
-operator can then run `skill install --replace` to replace those copies. Rerun
-the check after repair. Claim a skill update in the release notes only when the
-check passes for every account and directory agents use. Keep the output private
+The ordinary install fills missing folders, repairs malformed skill markers
+and advances older, unedited managed copies. Automatic refresh advances by
+release version and leaves equal or newer copies in place. Development builds
+skip automatic refresh.
+
+For a deliberate rollback, same-release reinstall, or replacement of a symlink,
+edited or unmanaged copy, inspect `skill install --replace --dry-run` with the
+same verified binary and directories. The account owner or operator can then run
+`skill install --replace`. Upgrade or retire executables that predate the
+refresh guard because they can still overwrite a newer skill. Rerun the check
+after repair. Claim a skill update in the release notes only when the check
+passes for every account and directory agents use. Keep the output private
 because it includes local paths.
 
 ## Production leases

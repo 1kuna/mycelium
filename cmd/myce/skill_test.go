@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -19,7 +20,9 @@ func TestSkillInstallMatchesEmbeddedAndUpgradeRefreshes(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(t.TempDir(), "skills", "mycelium")
-	old := skillInstaller{Version: "v3.1.0", Out: io.Discard}
+	const oldVersion = "v3.1.0-rc.20261124.s094r6.9"
+	const newVersion = "v3.1.0-rc.20261124.s094r6.10"
+	old := skillInstaller{Version: oldVersion, Out: io.Discard}
 	if err := old.install([]string{dir}, false, false); err != nil {
 		t.Fatal(err)
 	}
@@ -33,26 +36,31 @@ func TestSkillInstallMatchesEmbeddedAndUpgradeRefreshes(t *testing.T) {
 			t.Fatalf("state = %+v, %v; want current %s", r, err, version)
 		}
 	}
-	assertSkillCopy("v3.1.0")
+	assertSkillCopy(oldVersion)
 
 	// A development build never rewrites a release's copy.
 	skillInstaller{Version: "development", Out: io.Discard}.refresh([]string{dir})
-	assertSkillCopy("v3.1.0")
+	assertSkillCopy(oldVersion)
 
 	// Simulate a release whose guide changed: the next command refreshes it.
 	if err := os.WriteFile(filepath.Join(dir, "references", "submit.md"), []byte("old guidance"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	marker := `{"version":"v3.1.0","sha256":"` + skillDigest(mustReadSkill(t, dir)) + `"}`
+	marker := `{"version":"` + oldVersion + `","sha256":"` + skillDigest(mustReadSkill(t, dir)) + `"}`
 	if err := os.WriteFile(filepath.Join(dir, skillMarker), []byte(marker), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	var out strings.Builder
-	skillInstaller{Version: "v3.2.0", Out: &out}.refresh([]string{dir})
-	assertSkillCopy("v3.2.0")
-	if !strings.Contains(out.String(), "from v3.1.0 to v3.2.0") {
+	skillInstaller{Version: newVersion, Out: &out}.refresh([]string{dir})
+	assertSkillCopy(newVersion)
+	if !strings.Contains(out.String(), "from "+oldVersion+" to "+newVersion) {
 		t.Fatalf("refresh output = %q", out.String())
 	}
+	old.refresh([]string{dir})
+	assertSkillCopy(newVersion)
+	equal := skillInstaller{Version: newVersion + "+other-build", Out: io.Discard}
+	equal.refresh([]string{dir})
+	assertSkillCopy(newVersion)
 	entries, _ := os.ReadDir(filepath.Dir(dir))
 	if len(entries) != 1 {
 		t.Fatalf("staging left behind in skills folder: %v", entries)
@@ -65,6 +73,78 @@ func TestSkillInstallMatchesEmbeddedAndUpgradeRefreshes(t *testing.T) {
 	skillInstaller{Version: "v3.3.0", Out: io.Discard}.refresh([]string{dir})
 	if r, _ := inspectSkill(dir, "v3.3.0", digest); r.State != skillModified {
 		t.Fatalf("edited copy state = %s, want modified", r.State)
+	}
+}
+
+func TestSkillRefreshRepairsMissingAndCorruptCopies(t *testing.T) {
+	s := skillInstaller{Version: "v3.2.0", Out: io.Discard}
+	root := t.TempDir()
+	missing, corrupt, manual := filepath.Join(root, "missing"), filepath.Join(root, "corrupt"), filepath.Join(root, "manual")
+	if err := s.install([]string{corrupt}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(corrupt, skillMarker), []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(manual, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s.refresh([]string{missing, corrupt, manual})
+	_, digest, _ := embeddedSkill()
+	for _, dir := range []string{missing, corrupt} {
+		if r, err := inspectSkill(dir, s.Version, digest); err != nil || r.State != skillCurrent {
+			t.Fatalf("%s state = %+v, %v; want current", dir, r, err)
+		}
+	}
+	if r, err := inspectSkill(manual, s.Version, digest); err != nil || r.State != skillUnmanaged {
+		t.Fatalf("manual state = %+v, %v; want unmanaged", r, err)
+	}
+}
+
+func TestSkillConcurrentRefreshKeepsNewest(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "skills", "mycelium")
+	old := skillInstaller{Version: "v3.1.0", Out: io.Discard}
+	if err := old.install([]string{dir}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	var writers sync.WaitGroup
+	for _, version := range []string{"v3.4.0", "v3.3.0", "v3.2.0", "v3.4.0", "v3.3.0", "v3.2.0"} {
+		writers.Go(func() {
+			<-start
+			skillInstaller{Version: version, Out: io.Discard}.refresh([]string{dir})
+		})
+	}
+	close(start)
+	writers.Wait()
+	_, digest, _ := embeddedSkill()
+	if r, err := inspectSkill(dir, "v3.4.0", digest); err != nil || r.State != skillCurrent {
+		t.Fatalf("final state = %+v, %v; want current v3.4.0", r, err)
+	}
+}
+
+func TestSkillInstallRequiresReplaceForDowngrade(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "skills", "mycelium")
+	release := skillInstaller{Version: "v3.2.0", Out: io.Discard}
+	if err := release.install([]string{dir}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	_, digest, _ := embeddedSkill()
+	for _, version := range []string{"v3.1.0", "v3.2.0+other-build", "development"} {
+		s := skillInstaller{Version: version, Out: io.Discard}
+		if err := s.install([]string{dir}, false, false); err != nil {
+			t.Fatal(err)
+		}
+		if r, err := inspectSkill(dir, release.Version, digest); err != nil || r.State != skillCurrent {
+			t.Fatalf("after install %s: state = %+v, %v; want current %s", version, r, err, release.Version)
+		}
+	}
+	dev := skillInstaller{Version: "development", Out: io.Discard}
+	if err := dev.install([]string{dir}, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := inspectSkill(dir, dev.Version, digest); err != nil || r.State != skillCurrent {
+		t.Fatalf("after install --replace: state = %+v, %v; want current %s", r, err, dev.Version)
 	}
 }
 
