@@ -307,63 +307,43 @@ func (q *Queue) validateWorkTiming(j *Job) {
 }
 
 // recordWorkObservation records an accepted attempt's duration and hands its
-// eligible memory sample to recordWorkMemory. Accepted whole extension workload
-// runs refresh their record's provenance and identity, as they always have, and so
-// does a memory sample on a new or invalidated record; any other work adds
-// only its duration and leaves memory evidence untouched.
-func (q *Queue) recordWorkObservation(j *Job, r Result, sample *eligibleMemorySample) {
+
+func (q *Queue) putWorkObservation(id string, point WorkObservation) {
+	if q.s.WorkObservations == nil {
+		q.s.WorkObservations = map[string]WorkObservation{}
+	}
+	q.touchCatalog("work_observations/" + id)
+	q.s.WorkObservations[id] = point
+}
+
+func (q *Queue) recordWorkObservation(j *Job, r Result, _ ...any) {
 	t := j.Timing
-	if t == nil || t.Key == nil || j.StartedAt == nil || r.ReleasePending || j.State != "running" || r.Interrupted || r.OutOfMemory || r.Forced {
+	if t == nil || t.Key == nil || j.StartedAt == nil || r.ReleasePending ||
+		j.State != "running" || r.Interrupted || r.OutOfMemory || r.Forced || j.Spec.ExtensionCheck != nil {
 		return
 	}
 	q.validateWorkTiming(j)
 	seconds := q.clock.Now().Sub(*j.StartedAt).Seconds()
-	// Whole extension workload runs refresh provenance; pieces never have.
-	workload := t.Reason == "" && j.Spec.Workload != nil && j.Spec.ExtensionCheck == nil && j.Batch == nil
-	if workload && !validRate(seconds) {
-		return // An unmeasurable workload run teaches nothing, memory included.
-	}
-	// A qualification check learns memory, never a duration (#618).
-	duration := t.Reason == "" && j.Spec.ExtensionCheck == nil && validRate(seconds)
-	memory := sample != nil && sample.work
-	if !duration && !memory {
+	if t.Reason != "" || !validRate(seconds) {
 		return
 	}
-	if duration {
-		q.touchJob(j.ID)
-		t.ActualSeconds = &seconds
-	}
+	q.touchJob(j.ID)
+	t.ActualSeconds = &seconds
 	key := identityHash(t.Key)
 	old, exists := q.s.WorkObservations[key]
 	point := old
-	if !workload && !memory {
-		if !exists {
-			point = WorkObservation{Key: *t.Key, Source: "accepted work", RecordedAt: q.clock.Now(), Job: j.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt}
-		}
-		point.LastSeconds = seconds
-		q.putWorkObservation(key, point)
-		q.recordWorkLearning(j, old, exists, point)
-		return
-	}
-	if workload || !exists || old.StaleReason != "" {
-		if old.StaleReason != "" {
-			point.LastSeconds = 0
-		}
+	if j.Spec.Workload != nil && j.Batch == nil || !exists {
 		point.Key, point.StaleReason, point.Source = *t.Key, "", "accepted work"
 		point.RecordedAt, point.Job, point.Machine, point.Session, point.Attempt = q.clock.Now(), j.ID, r.Machine, r.Session, r.Attempt
+		if j.Spec.Workload != nil && j.Batch == nil {
+			point.Samples++
+		}
 	}
-	point.Samples = old.Samples + 1
-	if duration {
-		point.LastSeconds = seconds
-	}
-	if memory {
-		q.recordWorkMemory(*sample, old, &point)
-	}
+	point.LastSeconds = seconds
 	q.putWorkObservation(key, point)
 	q.recordWorkLearning(j, old, exists, point)
 }
 
-// Shared by the CLI and HTML status. A missing old field is explicitly unknown.
 func JobTiming(j *Job) string {
 	envelope := ""
 	if j.StorageEnvelope != nil {

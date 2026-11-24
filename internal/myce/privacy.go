@@ -233,7 +233,7 @@ func statusJobValue(job *Job) Job {
 			// Fixed exec failure guidance contains no payload or machine paths.
 		case j.ExecutionCause != nil && j.ExecutionCause.Class == cpuIsolationUnavailable:
 			j.Reason = cpuIsolationUnavailable + ": " + rejectionMessages[cpuIsolationUnavailable]
-		case j.Reason == "infrastructure_retries_exhausted", j.Reason == "out of memory after one retry on a larger hypha", j.Reason == "out of memory; previous capability unavailable":
+		case j.Reason == "command exceeded explicit memory limit", j.Reason == "infrastructure_retries_exhausted", j.Reason == "out of memory after one retry on a larger hypha", j.Reason == "out of memory; previous capability unavailable":
 			// Fixed scheduler diagnostics contain no payload or machine paths.
 		case strings.HasPrefix(j.Reason, "production start deadline exceeded:"):
 			j.Reason = "production start deadline exceeded"

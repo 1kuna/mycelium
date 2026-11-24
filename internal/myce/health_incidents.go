@@ -173,41 +173,11 @@ func (q *Queue) learnedEnvelopeOversized(j *Job) bool {
 			return true
 		}
 		eligible = true
-		envelope := candidate.MemoryEnvelope
-		oversized := false
-		if candidate.Spec.Needs.Memory == "auto" && envelope != nil && (envelope.Basis == "learned" || envelope.Basis == "exploratory") {
-			// Assignment's existing comparison excludes declared member caps,
-			// hints and retry floors. Only accepted learning is this incident.
-			learnedProbe := *candidate
-			capacity := Queue{clock: q.clock, s: q.s, memoryOrigin: q, memoryPlanning: newMemoryPlanningCache()}
-			if q.memoryPlanning != nil {
-				// This view removes occupancy, but retained evidence still uses
-				// the enclosing immutable pass's origin and identity fences.
-				// Keep admission-dependent estimates private to this view.
-				capacity.memoryPlanning.history = q.memoryPlanning.history
-			}
-			capacity.s.Jobs, capacity.s.ModelSlots, capacity.s.HostReleases = nil, nil, nil
-			capacity.s.Machines = map[string]*Machine{m.ID: m}
-			capacity.recordLearnedMemory(&learnedProbe, m)
-			learned := learnedProbe.MemoryEnvelope.Learned
-			if learned == nil && candidate.Spec.Needs.cpuOnly() {
-				estimate := capacity.memoryEstimate(&learnedProbe, m)
-				if estimate.uncalibrated && estimate.samples > 0 && estimate.host != nil {
-					// Unknown transfer error does not prove a smaller CPU need.
-					// Admission retains the accepted source prior; diagnose that
-					// same conservative requirement even for an offline peer.
-					// Physical probe room itself is not learned demand.
-					learned = &LearnedMemory{HostGB: hostMemoryPeakGB(estimate.host)}
-				}
-			}
-			if learned != nil {
-				probe.Spec.Needs.HostMemoryGB, probe.Spec.Needs.MemoryGB = learned.HostGB, 0
-				if learned.DeviceGB != nil {
-					probe.Spec.Needs.MemoryGB = *learned.DeviceGB
-				}
-				oversized = !hostFits(m, probe.Spec.Needs.MemoryGB, probe.Spec.Needs.HostMemoryGB) || probe.Spec.Needs.MemoryGB > m.TotalMemoryGB || !capabilityFits(&probe, m)
-			}
-		}
+
+		pool := memoryPools(candidate)
+		learned := pool.RAM.Evidence.Runs > 0 || pool.Card != nil && pool.Card.Evidence.Runs > 0
+		oversized := learned && (!hostFits(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) ||
+			candidate.Spec.Needs.MemoryGB > m.TotalMemoryGB || !capabilityFits(candidate, m))
 		allOversized = allOversized && oversized
 		return allOversized
 	})

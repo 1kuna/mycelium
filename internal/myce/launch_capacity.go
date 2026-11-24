@@ -74,94 +74,28 @@ func (q *Queue) recordLaunchCapacityWait(j *Job, r Result) {
 		key := targetKey(m)
 		wait := LaunchCapacityWait{Machine: j.Machine, Session: j.Session, Attempt: j.Attempt,
 			Admission: safeAdmissionDetail(r.ExecutionCause.Admission)}
-		if prior := j.LaunchCapacityWait[key]; prior.Session == wait.Session && prior.Attempt == wait.Attempt && prior.LiveGrowthSurplusGB != nil {
-			// Completion can retain the same result on both sides of diagnostic
-			// verification. Do not move the required room with later reports.
-			return
+
+		if prior := j.LaunchCapacityWait[key]; prior.Session == wait.Session && prior.Attempt == wait.Attempt {
+			return // A repeated result must not move the baseline to a newer reading.
 		}
-		// A restored machine holds no capacity telemetry until its first
-		// check-in (#1399). Leave the evidence empty; that report becomes the
-		// baseline, so an unchanged reading is still not new capacity.
 		if !q.unreported[m.ID] {
 			wait.Evidence = q.launchCapacityEvidence(j, m)
-			if deficit := liveGrowthDeficit(wait.Admission); deficit > 0 {
-				// Build from current accounting here. A result can arrive between
-				// scheduling passes, including after an exact sibling release.
-				capacity, _, known, _ := q.hostLiveCapacity(m)
-				if known {
-					ledger := q.hostMemoryLedger(m)
-					ledger.CapacityGB = capacity
-					charge := hostNeed(m, j.Spec.Needs.MemoryGB, chargedHostGB(j))
-					wait.LiveGrowthSurplusGB = growthWaitSurplus(j, ledger, charge, deficit)
-				}
-			}
 		}
 		j.LaunchCapacityWait[key] = wait
 	}
 }
 
-func liveGrowthDeficit(d *AdmissionDetail) float64 {
-	if d == nil || d.Subcheck != "live_host_growth" || d.Unavailable || d.Available == nil {
-		return 0
-	}
-	return max(0, d.Required-*d.Available)
-}
-
-func growthWaitSurplus(j *Job, ledger *HostMemoryLedger, charge, deficit float64) *float64 {
-	surplus := launchGrowthRoom(j, ledger) - charge + deficit
-	return &surplus
-}
-
-// Account for every competing pending byte on this host. The refunded helper
-// cannot justify relaunching itself. Its exact release is checked separately.
-func launchGrowthRoom(j *Job, ledger *HostMemoryLedger) float64 {
-	room := ledger.CapacityGB - ledger.GrowthGB
-	for _, owner := range ledger.Owners {
-		if owner.Execution != nil && owner.Execution.ID == j.ID {
-			room += owner.GrowthGB
-		}
-	}
-	return room
-}
-
-// The worker compares host-wide growth on every card. Keep the latest refusal
-// in its exact session applicable to any target on that worker.
-func launchGrowthWait(j *Job, m *Machine) (string, LaunchCapacityWait) {
-	var key string
-	var latest LaunchCapacityWait
-	for target, h := range j.LaunchCapacityWait {
-		if h.LiveGrowthSurplusGB == nil && target != targetKey(m) {
-			continue // Anchor older records using the refused target's sizing.
-		}
-		if h.Machine == m.ID && h.Session == m.Session && h.Attempt > latest.Attempt && liveGrowthDeficit(h.Admission) > 0 {
-			key, latest = target, h
-		}
-	}
-	return key, latest
-}
-
-func (q *Queue) liveGrowthShortfall(j *Job, m *Machine, key string, h LaunchCapacityWait) (float64, bool) {
-	ledger := q.hostMemoryLedgers[m.ID]
-	if q.unreported[m.ID] || ledger == nil || !ledger.AvailableKnown {
-		return 0, false
-	}
-	if h.LiveGrowthSurplusGB == nil {
-		// Older records and refusals received before inventory was restored
-		// take their baseline from the first measured ledger in a writer pass.
-		if q.records == nil || !q.records.updating || q.s.Jobs[j.ID] == nil {
-			return 0, false
-		}
-		charge := hostNeed(m, h.Admission.EnvelopeDeviceGB, h.Admission.EnvelopeHostGB)
-		h.LiveGrowthSurplusGB = growthWaitSurplus(j, ledger, charge, liveGrowthDeficit(h.Admission))
-		q.touchJob(j.ID).LaunchCapacityWait[key] = h
-	}
-	surplus := launchGrowthRoom(j, ledger) - hostNeed(m, j.Spec.Needs.MemoryGB, chargedHostGB(j))
-	return *h.LiveGrowthSurplusGB - surplus, true
-}
-
 func (q *Queue) waitLaunchCapacity(j *Job, r Result) {
 	q.recordLaunchCapacityWait(j, r)
 	q.requeueLaunchCapacity(j)
+	if j.State == "queued" && r.ExecutionCause.Admission != nil && r.ExecutionCause.Admission.Subcheck == memoryWaitReason {
+		j.Reason = memoryWaitReason
+		j.StartCapacityWaiting = !absoluteStartBy(j)
+		if j.Starts > 0 {
+			j.Starts--
+			j.AdmissionRequeues++
+		}
+	}
 }
 
 func (q *Queue) requeueLaunchCapacity(j *Job) {
@@ -186,13 +120,8 @@ func (q *Queue) launchCapacityBlocked(j *Job, m *Machine) bool {
 			return true
 		}
 	}
-	if key, h := launchGrowthWait(j, m); key != "" {
-		if shortfall, known := q.liveGrowthShortfall(j, m, key, h); !known || shortfall > 0 {
-			return true
-		}
-	}
 	h, ok := j.LaunchCapacityWait[targetKey(m)]
-	if !ok || liveGrowthDeficit(h.Admission) > 0 {
+	if !ok {
 		return false
 	}
 	if h.Evidence == "" {
@@ -212,22 +141,17 @@ func (q *Queue) launchCapacityBlocked(j *Job, m *Machine) bool {
 // measured helper charge beyond its reservation is its own kind.
 func launchCapacityHold(j *Job) *Hold {
 	detail := "waiting for launch capacity or exact release; unchanged capacity evidence is not re-offered"
-	helper := 0.0
 	for _, w := range j.LaunchCapacityWait {
 		if w.Attempt != j.Attempt || w.Admission == nil {
 			continue
 		}
-		if liveGrowthDeficit(w.Admission) > 0 {
-			detail = "waiting for enough live host RAM to cover the launch shortfall and for exact release"
-		}
-		for _, c := range w.Admission.Contributors {
-			if c.Launching {
-				helper = max(helper, c.HelperGB)
+		if d := w.Admission; d.Subcheck == memoryWaitReason {
+			available := "unknown"
+			if d.Available != nil {
+				available = fmt.Sprintf("%.3f GiB", *d.Available)
 			}
+			return newHold(memoryWaitReason, fmt.Sprintf("needs %.3f GiB, available %s, keep %.3f GiB, outstanding reservations %.3f GiB", d.Required, available, d.KeepGB, d.HeldGB))
 		}
-	}
-	if helper > 0 {
-		return newHold("helper_charge", detail+fmt.Sprintf("; launch helpers charged %.3f GiB beyond the reservation", helper))
 	}
 	return newHold("launch_capacity", detail)
 }
@@ -247,7 +171,7 @@ func (q *Queue) launchCapacityPending(j *Job) bool {
 // A qualified route with occupied resources is capacity waiting even before its
 // first offer. Missing/incompatible/disabled hosts retain their existing startup
 // diagnosis. This uses the existing fit checks with only resources released.
-func (q *Queue) queuedCapacityStatus(j *Job) (waiting, ready bool) {
+func (q *Queue) queuedCapacityStatus(j *Job, scans ...*placementScan) (waiting, ready bool) {
 	if !dependencyReady(j) || cancelled(j) {
 		return false, false
 	}
@@ -264,23 +188,12 @@ func (q *Queue) queuedCapacityStatus(j *Job) (waiting, ready bool) {
 		}
 		room.FreeCPUCores, room.CPUInUseCores = room.EffectiveCPUCores, 0
 		for _, c := range q.memoryCandidates(j, m) {
-			temporary := false
-			if c.MemoryEnvelope != nil && c.MemoryEnvelope.Refusal != "" {
-				_, why, capacity := q.exploratoryMemoryStatus(j, m)
-				if capacity && c.MemoryEnvelope.Refusal == why || c.MemoryEnvelope.Refusal == boundedMemoryCapacityWait {
-					// Keep resolved demand and every structural fit check. Only
-					// this known physical wait is ignored for route eligibility.
-					copy := *c
-					envelope := *c.MemoryEnvelope
-					envelope.Refusal = ""
-					copy.MemoryEnvelope = &envelope
-					c, temporary = &copy, true
-				}
-			}
 			if !fitsResources(c, &room, room.TotalMemoryGB) {
 				continue
 			}
-			if drained || temporary || !hostFits(m, c.Spec.Needs.MemoryGB, c.Spec.Needs.HostMemoryGB) || !cpuFits(c, m) || !q.batchSlotFree(m, c) || m.FreeMemoryGB < c.Spec.Needs.MemoryGB {
+			if drained || !hostFits(m, c.Spec.Needs.MemoryGB, c.Spec.Needs.HostMemoryGB) || !cpuFits(c, m) || !q.batchSlotFree(m, c) || m.FreeMemoryGB < c.Spec.Needs.MemoryGB || !q.poolCustodyAllows(c, m) {
+				waiting = true
+			} else if pooledMemory(c) && !q.hostBackfillAllows(c, m, q.hostBackfillFences(q.placementScan(scans...))[hostID(m)]) {
 				waiting = true
 			} else {
 				ready = true
@@ -295,28 +208,18 @@ func (q *Queue) queuedCapacityStatus(j *Job) (waiting, ready bool) {
 // planner chooses lower tiers; same-tier work remains protected. Exact releases
 // and a changed capacity snapshot are still required by dispatch.
 func (q *Queue) launchCapacityProjection(j *Job, m *Machine) *Machine {
-	if key, h := launchGrowthWait(j, m); key != "" {
-		if deficit, known := q.liveGrowthShortfall(j, m, key, h); known {
-			if deficit <= 0 {
-				return m
-			}
-			copy := *m
-			copy.FreeHostMemoryGB = min(copy.FreeHostMemoryGB, hostNeed(m, j.Spec.Needs.MemoryGB, chargedHostGB(j))-deficit)
-			return &copy
-		}
-	}
 	h, ok := j.LaunchCapacityWait[targetKey(m)]
 	if !ok || h.Evidence != q.launchCapacityEvidence(j, m) || h.Admission == nil {
 		return m
 	}
 	d := h.Admission
-	if d.Unavailable || d.Available == nil || d.Required <= *d.Available {
+	if d.Unavailable || d.Available == nil || d.Required+d.HeldGB+d.KeepGB <= *d.Available {
 		return m
 	}
 	copy := *m
-	deficit := d.Required - *d.Available
+	deficit := d.Required + d.HeldGB + d.KeepGB - *d.Available
 	switch d.Subcheck {
-	case "live_host_ram", "live_host_growth", "aggregate_host_allowance", "configured_host_allowance":
+	case memoryWaitReason, "live_host_ram", "live_host_growth", "aggregate_host_allowance", "configured_host_allowance":
 		copy.FreeHostMemoryGB = min(copy.FreeHostMemoryGB, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)-deficit)
 	case "aggregate_cpu_allowance":
 		copy.EffectiveCPUCores -= max(0, copy.FreeCPUCores-j.Spec.Needs.cores()+int(deficit))

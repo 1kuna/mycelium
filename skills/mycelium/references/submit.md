@@ -29,23 +29,12 @@ Describe needs and class. For a plain CPU spec or entry, set
 `needs.memory_gb` to host RAM in GiB (the queue normalizes it to
 `host_memory_gb`). You can also set `needs.host_memory_gb` directly. For GPU work, `needs.memory_gb` is device memory and
 `needs.host_memory_gb` is additional host RAM. Leaving memory unspecified
-allows automatic sizing. On a supporting worker the declared limit is the
-ceiling and comparable accepted observations can lower the admission charge.
-Use `advanced.size_hint` only for extension jobs. For an exploratory extension
-measurement, use `needs: {memory: auto}` with `advanced.size_hint.host_memory_gb`
-or `advanced.size_hint.memory_gb` as appropriate. Preview the resulting needs
-with `myce spec check --resolve FILE`. Physical capacity, measured floors and
-member needs still bind. See [memory envelopes](https://github.com/1kuna/mycelium/blob/main/docs/reference/memory-mechanisms.md#job-memory-envelopes).
-
-Production keeps its typed figure as the charge. A CPU entry's first run, with nothing learned, is
-charged a physical accounting floor (one maximum supported kernel page plus
-existing launch slack), raised by any known member or measured floors.
-Supporting workers let it grow into measured room; protected/shared or older
-workers retain strict containment, with a measured 5.75 MiB shell startup
-minimum including launch slack. A memory stop reruns the
-same job at its measured peak without spending infrastructure losses or
-retries. Keep the job and key; no resubmission is needed. Admission-only hosts
-cannot run unknown CPU work. GPU first runs retain their separate accounting.
+allows automatic sizing. Typed figures seed Mycelium's estimate. It
+updates the charge as it learns from runs. Set `advanced.memory_limit_gb`
+only when the payload needs an explicit RAM cap. Extension jobs can also
+supply `advanced.size_hint`. To inspect target-specific admission, use
+`myce spec check --resolve FILE`. During `memory_wait`, keep the existing
+job and key. [Memory admission](https://github.com/1kuna/mycelium/blob/main/docs/reference/memory-mechanisms.md)
 
 A non-production entry without `targets` runs on any machine type its platform,
 lock and `needs.tools` fit. A first failure on a type the recipe never succeeded

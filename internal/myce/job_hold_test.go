@@ -360,7 +360,7 @@ func TestActionableBlockerResolveCurrentMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Hold == nil || got.Hold.Kind != "host_memory_headroom" || !reflect.DeepEqual(got.Hold, r.Hold) {
+	if got.Hold == nil || got.Hold.Kind != memoryWaitReason || !reflect.DeepEqual(got.Hold, r.Hold) {
 		t.Fatalf("GET=%+v resolve=%+v", got.Hold, r.Hold)
 	}
 }
@@ -599,7 +599,7 @@ func TestDeviceCapacityHoldUsesAdvertisedCapacity(t *testing.T) {
 		next   string
 	}{
 		{"unmeasured with known holder", 0, true, true, "capacity", "queue", "wait; keep other work moving"},
-		{"unattributed occupancy", 12, false, false, "capacity", "queue", "wait; keep other work moving"},
+		{"unattributed occupancy", 12, false, false, memoryWaitReason, "queue", "wait; Mycelium retries admission automatically"},
 		{"over capacity", 17, true, false, "no_eligible_host", "consumer", "check the job's needs and allowed machines"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -654,9 +654,9 @@ func TestDeviceCapacityHoldUsesAdvertisedCapacity(t *testing.T) {
 				if strings.Contains(got.Reason, "can run this job right now") {
 					t.Errorf("status reason contradicted capacity hold: %s", got.Reason)
 				}
-				if running == nil && !strings.Contains(got.Hold.Detail, "12.0 GiB accelerator memory needed, 8.0 GiB free of 16.0 GiB capacity") {
-					t.Errorf("capacity hold omitted the live and advertised figures: %+v", got.Hold)
-				}
+			}
+			if tc.kind == memoryWaitReason && !strings.Contains(got.Hold.Detail, "card needs 12.000 GiB, available 8.000 GiB") {
+				t.Errorf("memory wait omitted the need and available figures: %+v", got.Hold)
 			}
 
 			clock.Advance(time.Second)

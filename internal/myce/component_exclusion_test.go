@@ -85,6 +85,7 @@ func changeExclusion(t *testing.T, q *Queue, selector, action string) ComponentE
 
 func exclusionSpec(host, device string) Spec {
 	s := spec("experiment")
+	s.Needs.HostMemoryGB = 1
 	s.AllowedMachines = []string{host}
 	s.Needs.GPU = &GPUSelection{Devices: []string{device}}
 	return s

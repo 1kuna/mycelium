@@ -54,7 +54,12 @@ func liveHistories(q *Queue) EfficiencyHost {
 // recovery preserves coverage and bounds integral error by the unwritten spread.
 // First-run sizing no longer depends on a separate launch history.
 func TestMeasurementHistoriesResumeAfterCrash(t *testing.T) {
-	q, clock, m, s := coldProbeAdmissionFixture(t, true)
+	q, clock := fixture(t)
+	m := cpuMachine("worker", "host", "fake", 16, 19.49)
+	m.HostMemoryBudgetGB = 24
+	m.CapabilityProfile.SystemMemoryBytes = 32 << 30
+	m.Devices = []MachineDevice{}
+	s := cpuSpec(1, 0)
 	m.MemoryObservation = &HostMemoryObservation{TotalGB: 32, UsedGB: 10, MyceliumGB: 2}
 	step := func(available, mycelium float64) {
 		t.Helper()

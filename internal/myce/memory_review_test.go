@@ -1,57 +1,11 @@
 package myce
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
-
-func TestMemoryReviewLegacyObservationKey(t *testing.T) {
-	q, clock, m, s := observationFixture(t)
-	j := startObservation(t, q, m, s)
-	key, why := q.workObservationKey(&j)
-	if key == nil {
-		t.Fatal(why)
-	}
-	// This is the persisted pre-146 field order, including its OOM fence.
-	var legacy struct {
-		Allowance       string          `json:"allowance,omitempty"`
-		Work            string          `json:"work"`
-		ExtensionDigest string          `json:"extension_digest"`
-		Target          ExecutionTarget `json:"target"`
-		Reference       WorkReference   `json:"reference"`
-		Host            string          `json:"host"`
-		Component       string          `json:"component"`
-		Hardware        string          `json:"hardware"`
-		Fingerprint     string          `json:"fingerprint"`
-		Environment     string          `json:"environment"`
-		Configuration   string          `json:"configuration"`
-		Concurrency     int             `json:"concurrency"`
-		BatchSize       int             `json:"batch_size"`
-	}
-	b, _ := json.Marshal(key)
-	if err := json.Unmarshal(b, &legacy); err != nil {
-		t.Fatal(err)
-	}
-	b, _ = json.Marshal(legacy)
-	var restored ObservationKey
-	if err := json.Unmarshal(b, &restored); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.update(func() error {
-		q.touchCatalog("work_observations/" + identityHash(legacy))
-		q.s.WorkObservations = map[string]WorkObservation{identityHash(legacy): {Key: restored, Forbidden: true, RecordedAt: clock.Now()}}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if !q.s.WorkObservations[identityHash(key)].Forbidden {
-		t.Fatal("persisted pre-146 Forbidden observation no longer resolves")
-	}
-}
 
 func TestMemoryReviewNativeMemberOOM(t *testing.T) {
 	_, clock := fixture(t)
@@ -112,90 +66,4 @@ func TestMemoryReviewNativeMemberOOM(t *testing.T) {
 		t.Fatalf("recovery lost parent OOM attribution: %+v", s.state.Result)
 	}
 	t.Cleanup(func() { _ = parent.cleanup(clock) })
-}
-
-func TestMemoryReviewReclaimableCache(t *testing.T) {
-	a, err := fakeCeilings(t).create("attempt-cache", 8<<30, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, value := range map[string]string{
-		"memory.peak":   "8589934592",
-		"memory.stat":   "anon 1073741824\nkernel 536870912\nshmem 536870912\nfile 6442450944\npgscan_file 100\n",
-		"memory.events": "max 100\noom 0\noom_kill 0\n",
-	} {
-		if err := os.WriteFile(filepath.Join(a.path, name), []byte(value), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	p := a.peak()
-	// #303 supersedes the low-resident cache exception: total pressure can
-	// hide a file-backed working set even though the resident counter stays low.
-	if p == nil || p.HostGB == nil || *p.HostGB != 2 || !p.Constrained {
-		t.Fatalf("resident counter changed or file-backed pressure was accepted: %+v", p)
-	}
-	if err := os.WriteFile(filepath.Join(a.path, "memory.events"), []byte("max 0\noom 0\noom_kill 0\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(a.path, "memory.stat"), []byte("anon 1073741824\nkernel 0\nshmem 0\nworkingset_refault_anon 1\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if p := a.peak(); p == nil || !p.Constrained {
-		t.Fatal("anonymous reclaim was learned as unconstrained")
-	}
-}
-
-func TestMemoryReviewResumedEstimateAndOOMFloor(t *testing.T) {
-	q, clock, m, s := observationFixture(t)
-	first := startObservation(t, q, m, s)
-	clock.Advance(time.Second)
-	r := result(&first, true)
-	host := 2.0
-	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	// A retry may use complete-input history even though it cannot record it.
-	func() {
-		q.mu.Lock()
-		defer q.mu.Unlock()
-		probe := *q.s.Jobs[first.ID]
-		probe.State, probe.Attempt, probe.Spec.Resumable, probe.Spec.Needs.Memory = "queued", 2, true, "auto"
-		for id, point := range q.s.WorkObservations {
-			point.Forbidden = true
-			q.s.WorkObservations[id] = point
-		}
-		estimate := q.memoryCandidate(&probe, q.s.Machines[m.ID])
-		if estimate.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
-			t.Fatal("resumed or Forbidden performance point lost its accepted memory peak")
-		}
-	}()
-	s.Needs.Memory, s.Resumable = "auto", true
-	second := startObservation(t, q, m, s)
-	clock.Advance(time.Second)
-	r = result(&second, false)
-	r.OutOfMemory, r.Error = true, "host memory ceiling exceeded"
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	queued := job(t, q, second.ID)
-	if queued.State != "queued" || queued.OOMCapacity != nil || queued.MemoryEnvelope != nil {
-		t.Fatalf("auto OOM requires a larger hypha: %+v", queued)
-	}
-	next := check(t, q, m, nil).Job
-	if next == nil || next.Spec.Needs.HostMemoryGB <= second.Spec.Needs.HostMemoryGB || next.Spec.Needs.HostMemoryGB < queued.MemoryOOMFloor.HostMemoryGB {
-		t.Fatalf("same-host retry lost OOM lower bound: %+v; %s", next, job(t, q, second.ID).Reason)
-	}
-	if next != nil {
-		if err := q.Started(result(next, false)); err != nil {
-			t.Fatal(err)
-		}
-		clock.Advance(time.Second)
-		finish(t, q, next, true)
-		for _, point := range q.s.WorkObservations {
-			if point.Job == second.ID && point.Attempt > 1 {
-				t.Fatal("resumed attempt trained a full-input observation")
-			}
-		}
-	}
 }

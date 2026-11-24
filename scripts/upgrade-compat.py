@@ -276,7 +276,8 @@ def run(args):
             ("candidate queue + candidate worker", lambda: pairing("same-source suffix", candidate[0], candidate[0], scratch / "same", tools, large=True)),
             ("candidate queue + previous worker", lambda: pairing("previous worker", candidate[0], previous[0], scratch / "old-worker", tools)),
             ("previous queue + candidate worker", lambda: pairing("previous queue", previous[0], candidate[0], scratch / "previous-queue", tools, allow_additive_retry=True)),
-            ("previous worker completes current work", lambda: first_work(candidate[0], previous[0], scratch / "previous-work", tools)),
+            # Workers upgrade first. Previous workers can check in for custody,
+            # and the queue refuses to give them fresh assignments.
             ("current worker completes previous work", lambda: first_work(previous[0], candidate[0], scratch / "current-work", tools, allow_additive_retry=True)),
             ("saved config downgrade", lambda: downgrade(previous, candidate, scratch, tools)),
             ("worker + current/previous queue restarts", lambda: inventory_restarts(candidate, previous, scratch, tools)),
@@ -403,14 +404,14 @@ def queue_rollback(candidate, previous, scratch):
     with sqlite3.connect(database) as db:
         marker, = db.execute("SELECT data FROM queue WHERE id=1").fetchone()
         assert json.loads(marker) == "myce-normalized-state-v3", "rollback seed did not write v3"
-    with process(previous[0], "queue-rollback-open", root) as child:
+    with process(previous[0], "queue-rollback-previous", root) as child:
         if child.wait(timeout=20):
             raise RuntimeError("previous release did not preserve IDs, decisions and custody")
     # A rollback remains reversible: current startup can consume previous writes.
     with process(candidate[0], "queue-rollback-open", root) as child:
         if child.wait(timeout=20):
             raise RuntimeError("re-upgrade did not preserve IDs, decisions and custody")
-    print("upgrade-compat: PASS candidate v3 -> exact previous Open -> current Open; queued/paused/running/terminal IDs and pending custody intact", flush=True)
+    print("upgrade-compat: PASS candidate v3 -> exact previous read/write -> current reopen; job states, pending custody and untouched explicit RAM limit intact", flush=True)
 
 
 def inspect_queue(binary, root):

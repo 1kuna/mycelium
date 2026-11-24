@@ -538,6 +538,7 @@ type modelRuntime struct {
 	admissionMu            sync.Mutex // Coherent stop publication and final accounting; no I/O.
 	batchHostMemorySamples map[attemptKey]hostMemorySample
 	hostLedger             atomic.Pointer[hostLedger]
+	poolHostMemorySource   MemorySource
 	verifyDevice           func() error
 	deviceEnv              map[string]string
 	authorize              func(context.Context, HostLaunch) error
@@ -647,6 +648,12 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	rt.environmentSourceRoot = w.EnvironmentSourceRoot
 	rt.memoryCeilings, rt.memoryMachine, rt.memorySwapMaxBytes = w.memoryCeilings, w.Machine, w.MemorySwapMaxBytes
 	rt.requireMemoryCeilings = w.RequireMemoryCeilings
+	if w.HostMemorySource != nil || w.hostRawMemorySource != nil {
+		rt.poolHostMemorySource = func(ctx context.Context) (float64, error) {
+			_, raw, err := w.sampleHostMemory(ctx)
+			return raw, err
+		}
+	}
 	if w.HostMemorySource != nil {
 		rt.hostMemorySource = func(ctx context.Context) (float64, error) {
 			rt.mu.Lock()
@@ -1132,114 +1139,55 @@ func (rt *modelRuntime) memoryStopGrace() time.Duration {
 // All blocking sensors run before this exact-attempt accounting snapshot.
 // Call with rt.mu and rt.admissionMu held. Stop publication shares this ledger;
 // actor reads never acquire process/control locks or perform receipt I/O.
-func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured bool, samples map[attemptKey]hostMemorySample, launching ...attemptKey) error {
-	cores, ram, growth := 0, 0.0, 0.0
-	ownResident, ownCharge, ownAnon, ownForecast, ownPending := 0.0, 0.0, 0.0, 0.0, 0.0
-	ownDevicePending := 0.0
-	var contributors []HostGrowthContributor
-	ownContributor := -1
+
+func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured bool, samples map[attemptKey]hostMemorySample) error {
+	cores, charge, pending := 0, 0.0, 0.0
 	now := time.Time{}
 	if rt.clock != nil {
 		now = rt.clock.Now()
 	}
-	union := rt.deviceResidentUnionLocked(samples, now, launching...)
 	for _, j := range rt.batchJobs {
-		// Preparation can outlast a heartbeat or receive an out-of-band stop.
-		// Consult the exact actor at launch time, not its original running job.
 		if a := rt.batchSupervisors[jobKey(j)]; a != nil {
 			j = a.admissionJob()
 		}
 		if j.ReleaseConfirmed {
 			continue
 		}
-		helper := 0.0
 		cores += j.Spec.Needs.cores()
 		owner := allocationMachine(&rt.memoryMachine, j.AllocatedDevices)
-		extra := union.credit(jobKey(j))
-		if slices.Contains(launching, jobKey(j)) {
-			extra = 0
-		}
-		charge, pending := memoryChargeForGrace(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), samples[jobKey(j)], now, rt.memoryStopGrace(), extra)
-		if slices.Contains(launching, jobKey(j)) && adaptiveMemoryCeilingGB(&j, owner) > 0 && j.MemoryEnvelope.ProbeFloorGB > 0 {
-			// This cold command has not executed yet. Its offered reservation
-			// must fit. Bounded estimates already use the offer plus retained
-			// growth; launch must not discard their observed helper occupancy.
-			charge = hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
-			pending = charge
-		}
-		sample := samples[jobKey(j)]
-		forecast, fresh := sample.hostGrowth(now)
-		if slices.Contains(launching, jobKey(j)) {
-			// The exact launch owns this complete reservation (#1033). Helpers
-			// cannot demand more unallocated RAM than that bound.
-			pending = min(pending, charge)
-			if len(launching) == 1 {
-				expanded := helperHostCharge(&j, owner, sample, now, charge)
-				ownResident = helperDeviceResident(owner, sample, now)
-				// Anonymous occupancy does not prove that future CUDA demand is
-				// already allocated. Preserve the device component, including its
-				// forecast/overshoot, after crediting only direct device occupancy.
-				ownDevicePending = max(0, helperDeviceCharge(&j, sample, now)-ownResident)
-				pending += expanded - charge
-				helper = expanded - charge
-				charge = expanded
-				ownCharge, ownPending = charge, pending
-				if fresh {
-					ownAnon, ownForecast = sample.gb, forecast
-				}
-			}
-		}
-		ram += charge
-		growth += pending
-		c := HostGrowthContributor{ID: j.ID, Attempt: j.Attempt, Kind: "attempt", Launching: slices.Contains(launching, jobKey(j)), ChargeGB: charge, PendingGB: pending, HelperGB: helper, SampleFresh: fresh}
-		if !sample.at.IsZero() && !now.Before(sample.at) {
-			age := now.Sub(sample.at).Seconds()
-			c.SampleAgeSeconds = &age
-		}
-		if c.Launching && len(launching) == 1 {
-			ownContributor = len(contributors)
-		}
-		contributors = append(contributors, c)
+		held, growth := pooledHostCharge(&j, owner, samples[jobKey(j)], now, localJobHostNeed(Worker{Machine: rt.memoryMachine}, j))
+		charge += held
+		pending += growth
 	}
 	for _, other := range rt.models {
 		if other.state != "unloaded" && other.state != "failed" {
 			cores++
 			need := hostNeed(allocationMachine(&rt.memoryMachine, []string{other.device}), other.model.MemoryGB, other.model.HostMemoryGB)
-			ram += need
-			growth += need
-			contributors = append(contributors, HostGrowthContributor{Kind: "model", ChargeGB: need, PendingGB: need})
-		}
-	}
-	if ownResident > 0 && ownContributor >= 0 && union.owner == launching[0] {
-		// Host anon is uniquely charged across attempt cgroups, but can also
-		// contain CUDA pages. Credit only the union lower bound max(all anon,
-		// one process's CUDA counter), never their sum or two process counters.
-		additional := union.credit(launching[0])
-		pending := max(0, ownCharge-ownAnon-additional, ownForecast, ownDevicePending)
-		growth += pending - ownPending
-		if ownContributor >= 0 {
-			contributors[ownContributor].PendingGB = pending
+			charge += need
+			if other.state == "loading" {
+				pending += need
+			}
 		}
 	}
 	capacity, reason := cpuCapacity(&rt.memoryMachine)
 	if reason == "" && cores > capacity {
-		return fmt.Errorf("aggregate engine CPU/RAM allowance: %w", refuseAdmission("aggregate_cpu_allowance", "cores", float64(cores), float64(capacity), false))
+		return refuseAdmission("aggregate_cpu_allowance", "cores", float64(cores), float64(capacity), false)
 	}
-	if (rt.memoryMachine.HostMemoryBudgetGB > 0 || rt.memoryMachine.HostMemoryBudgetMeasured) && ram > rt.memoryMachine.HostMemoryBudgetGB {
-		return fmt.Errorf("aggregate engine CPU/RAM allowance: %w", refuseAdmission("aggregate_host_allowance", "GiB", ram, rt.memoryMachine.HostMemoryBudgetGB, false))
+	if (rt.memoryMachine.HostMemoryBudgetGB > 0 || rt.memoryMachine.HostMemoryBudgetMeasured) && charge > rt.memoryMachine.HostMemoryBudgetGB {
+		return refuseAdmission("aggregate_host_allowance", "GiB", charge, rt.memoryMachine.HostMemoryBudgetGB, false)
 	}
-	if hostMeasured && hostFree < growth {
-		return fmt.Errorf("insufficient host RAM for launch and pending growth: %w", refuseAdmission("live_host_growth", "GiB", growth, hostFree, false, contributors...))
+	if hostMeasured && hostFree < pending {
+		return checkMemoryPool(pending, hostFree, 0, 0, true)
 	}
 	return nil
 }
 
 // hostLedger is this worker's ledger as launch admission computes it: what
 // each live attempt and loaded model is charged, and the part of that not yet
-// resident. Published under rt.mu wherever its inputs change, and read without
-// locks by attempt samplers (firstRunFloorRoom).
+// resident. Published under rt.mu wherever its inputs change.
 type hostLedger struct {
 	charge, pending float64
+	cores           int
 	attempts        map[attemptKey][2]float64
 }
 
@@ -1250,7 +1198,6 @@ func (rt *modelRuntime) publishHostLedgerLocked() {
 		now = rt.clock.Now()
 	}
 	l := &hostLedger{attempts: map[attemptKey][2]float64{}}
-	union := rt.deviceResidentUnionLocked(rt.batchHostMemorySamples, now)
 	for _, j := range rt.batchJobs {
 		if a := rt.batchSupervisors[jobKey(j)]; a != nil {
 			j = a.admissionJob()
@@ -1259,11 +1206,13 @@ func (rt *modelRuntime) publishHostLedgerLocked() {
 			continue
 		}
 		owner := allocationMachine(&rt.memoryMachine, j.AllocatedDevices)
-		c, p := memoryChargeForGrace(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), rt.batchHostMemorySamples[jobKey(j)], now, rt.memoryStopGrace(), union.credit(jobKey(j)))
+		c, p := pooledHostCharge(&j, owner, rt.batchHostMemorySamples[jobKey(j)], now, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB))
+		l.cores += j.Spec.Needs.cores()
 		l.charge, l.pending, l.attempts[jobKey(j)] = l.charge+c, l.pending+p, [2]float64{c, p}
 	}
 	for _, other := range rt.models {
 		if other.state != "unloaded" && other.state != "failed" {
+			l.cores++
 			need := hostNeed(allocationMachine(&rt.memoryMachine, []string{other.device}), other.model.MemoryGB, other.model.HostMemoryGB)
 			l.charge, l.pending = l.charge+need, l.pending+need
 		}
@@ -1284,26 +1233,39 @@ func (rt *modelRuntime) hostChargesExcept(key attemptKey) (charge, pending float
 
 // Queue authorization can outlast preparation or any sensor read. Revalidate
 // the exact local reservation after those reads and before releasing a batch.
+
 func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostLaunch) error {
-	samples := rt.admissionMemorySnapshot()
-	hostFree, measured := 0.0, rt.hostMemorySource != nil
-	if measured {
-		var err error
-		hostFree, err = rt.hostMemorySource(ctx)
-		if err != nil || !validMemoryValue(hostFree) {
-			return fmt.Errorf("%w: host RAM observation unavailable", errWorkerMemory)
-		}
+	attempt, err := strconv.Atoi(launch.Attempt)
+	key := attemptKey{launch.Key, attempt, launch.Session}
+	rt.mu.Lock()
+	actor := rt.batchSupervisors[key]
+	rt.mu.Unlock()
+	free, known := 0.0, false
+	if rt.poolHostMemorySource != nil {
+		var probeErr error
+		free, probeErr = rt.poolHostMemorySource(ctx)
+		known = probeErr == nil && validMemoryValue(free)
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	rt.admissionMu.Lock()
 	defer rt.admissionMu.Unlock()
-	attempt, err := strconv.Atoi(launch.Attempt)
-	actor := rt.batchSupervisors[attemptKey{launch.Key, attempt, launch.Session}]
-	if err != nil || actor == nil || launch.Machine != rt.machine || actor.admissionJob().State == "stopping" || actor.admissionJob().ReleaseConfirmed {
+	if err != nil || actor == nil || rt.batchSupervisors[key] != actor || launch.Machine != rt.machine || actor.admissionJob().State == "stopping" || actor.admissionJob().ReleaseConfirmed {
 		return fmt.Errorf("%w: batch admission custody changed", errWorkerMemory)
 	}
-	return rt.checkHostAdmissionLocked(hostFree, measured, samples, jobKey(actor.job))
+	job := actor.job
+	if !pooledMemory(&job) {
+		Worker{Machine: rt.memoryMachine}.acceptMemoryOffer(&job)
+	}
+	pools := memoryPools(&job)
+	if ledger := rt.hostLedger.Load(); ledger != nil {
+		if capacity, reason := cpuCapacity(&rt.memoryMachine); reason == "" && ledger.cores > capacity {
+			return refuseAdmission("aggregate_cpu_allowance", "cores", float64(ledger.cores), float64(capacity), false)
+		}
+	}
+	held, pending := rt.hostChargesExcept(key)
+	free = memoryWithinAllowance(&rt.memoryMachine, free, pools.KeepGB, held, pending)
+	return checkMemoryPool(pools.RAM.TypicalGB, free, pools.KeepGB, pending, known)
 }
 
 func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerModel) error {

@@ -78,6 +78,7 @@ func TestWorkerWallTimeWholeTreeOffline(t *testing.T) {
 	server := httptest.NewServer((API{Queue: q, Token: "test"}).Handler())
 	defer server.Close()
 	w := Worker{Interval: time.Millisecond, Clock: clock, Machine: m, StateDir: newTestStateRoot(t), Client: Client{URL: server.URL, Token: "test"}, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
+	w.MemorySource = func(context.Context) (float64, error) { return 8, nil }
 	w.memoryCeilings = fakeCeilings(t)
 	store, err := w.openStore()
 	if err != nil {

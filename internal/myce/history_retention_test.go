@@ -1,9 +1,6 @@
 package myce
 
 import (
-	"context"
-	"errors"
-	"maps"
 	"os"
 	"testing"
 	"time"
@@ -62,104 +59,6 @@ func TestHistoryRetentionReplayRestartAndExpiry(t *testing.T) {
 // Finished records expire 14 days after they finish and leave a summary;
 // learned memory evidence is unchanged across expiry and restart; open work,
 // held work and after: parents stay.
-func TestJobRecordExpiryKeepsSummaryAndLearning(t *testing.T) {
-	q, _ := candidateCostFixture(t)
-	clock := q.clock.(*fakeClock)
-	source := storedTestJob(t, q, "retained-001")
-	key := *source.Timing.Key
-	configuration := memoryConfiguration(source.Spec.Needs, source.Spec.Args, source.Spec.Program)
-	evidence := func(stage string, q *Queue) memoryConstraintEvidence {
-		t.Helper()
-		q.mu.Lock()
-		defer q.mu.Unlock()
-		q.memoryPlanning = newMemoryPlanningCache()
-		cached := q.memoryConstraintEvidence(key, configuration, false)
-		q.memoryPlanning = nil
-		full := q.memoryConstraintEvidenceFrom(key, configuration, maps.Values(q.s.Jobs), false, time.Time{})
-		if cached != full {
-			t.Fatalf("%s: cached %+v, full %+v", stage, cached, full)
-		}
-		return cached
-	}
-	before := evidence("before", q)
-	if before.lower == 0 {
-		t.Fatal("fixture has no learned evidence")
-	}
-	// A held job naming a finished parent in after: keeps the parent.
-	held := storedTestJob(t, q, "queued-001")
-	held.ID, held.Pause = "held-child", &JobPause{}
-	held.Spec.After = &PieceDependency{Job: "retained-002", Outputs: map[string]string{"in": "out"}}
-	if err := q.update(func() error {
-		q.putJob(held.ID, &held)
-		for id, j := range q.s.Jobs {
-			if terminal(j.State) { // The fixture shares the clock's own time value.
-				ended := clock.Now()
-				j = q.touchJob(id)
-				j.StartedAt, j.FinishedAt = &ended, &ended
-			}
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	expire := func(q *Queue) {
-		t.Helper()
-		for range 64 {
-			if err := q.pruneJobHistory(); err != nil {
-				t.Fatal(err)
-			}
-			if h := q.records.history.heap; len(h) == 0 || h[0].at.After(q.clock.Now()) {
-				return
-			}
-		}
-	}
-	clock.Advance(jobRecordRetention - time.Nanosecond)
-	expire(q)
-	if q.s.Jobs["retained-001"] == nil {
-		t.Fatal("record expired before 14 days")
-	}
-	clock.Advance(24*time.Hour + time.Nanosecond)
-	expire(q)
-	for _, id := range []string{"running-0", "queued-000", "held-child", "retained-002"} {
-		if q.s.Jobs[id] == nil {
-			t.Fatalf("%s expired", id)
-		}
-	}
-	if q.s.Jobs["retained-001"] != nil {
-		t.Fatal("15-day-old finished record kept")
-	}
-	summary, err := q.expiredJobSummary(context.Background(), "retained-001")
-	if err != nil || summary == nil || summary.State != "succeeded" || summary.Project != source.Spec.Project || summary.PeakMemoryGB != 3 {
-		t.Fatalf("summary %+v, %v", summary, err)
-	}
-	_, err = q.jobSnapshot("retained-001")
-	var gone *HTTPError
-	if !errors.As(q.expiredJobError(context.Background(), err), &gone) || gone.Status != 410 || gone.Code != "job_expired" {
-		t.Fatalf("expired lookup: %v", err)
-	}
-	if after := evidence("after expiry", q); after != before {
-		t.Fatalf("learned evidence changed: %+v -> %+v", before, after)
-	}
-	reopened := reopenCancellationQueue(t, q, clock)
-	reopened.mu.Lock()
-	reopened.unreported = map[string]bool{} // Workers check in again after restart.
-	reopened.mu.Unlock()
-	if reopened.s.Jobs["retained-001"] != nil || reopened.s.Jobs["retained-002"] == nil {
-		t.Fatal("restart changed expiry")
-	}
-	if after := evidence("after restart", reopened); after != before {
-		t.Fatalf("learned evidence lost on restart: %+v -> %+v", before, after)
-	}
-	// Once its dependent goes, the parent expires on its next look.
-	if err := reopened.update(func() error { reopened.deleteJob("held-child"); return nil }); err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(jobExpiryRecheck)
-	expire(reopened)
-	if reopened.s.Jobs["retained-002"] != nil {
-		t.Fatal("parent kept after its dependent left")
-	}
-}
 
 func TestJobRecordExpiryKeyedReplay(t *testing.T) {
 	q, c := fixture(t)

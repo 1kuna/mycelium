@@ -34,7 +34,9 @@ func TestDeviceFaultQuarantine(t *testing.T) {
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
 	client := Client{URL: server.URL, Token: "test"}
-	first := submit(t, q, spec("production"))
+	work := spec("production")
+	work.Needs.HostMemoryGB = 1
+	first := submit(t, q, work)
 	var clientStates []string
 	observe := func(want string) *Job {
 		t.Helper()
@@ -52,7 +54,7 @@ func TestDeviceFaultQuarantine(t *testing.T) {
 	if a == nil || a.ID != first.ID || !slices.Equal(a.AllocatedDevices, []string{"0"}) {
 		t.Fatal("device 0 assignment", a)
 	}
-	second := submit(t, q, spec("production"))
+	second := submit(t, q, work)
 	b := assignedJob(machineCheck(t, q, w.Machine, a))
 	if b == nil || b.ID != second.ID || !slices.Equal(b.AllocatedDevices, []string{"1"}) {
 		t.Fatal("device 1 assignment", b)

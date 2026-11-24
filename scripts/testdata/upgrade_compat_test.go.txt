@@ -57,7 +57,7 @@ func TestUpgradeCompatProcess(t *testing.T) {
 		if err = os.WriteFile(filepath.Join(root, "durable-state.json"), data, 0600); err != nil {
 			t.Fatal(err)
 		}
-	case "queue-rollback-seed", "queue-rollback-open":
+	case "queue-rollback-seed", "queue-rollback-open", "queue-rollback-previous":
 		q, err := Open(filepath.Join(root, "state", "queue.db"), filepath.Join(root, "checkpoints"), upgradeClock{})
 		if err != nil {
 			t.Fatal(err)
@@ -79,6 +79,12 @@ func TestUpgradeCompatProcess(t *testing.T) {
 			err = q.update(func() error {
 				for _, state := range []string{"queued", "paused", "running", "succeeded", "failed"} {
 					j := &Job{ID: "rollback-" + state, Spec: Spec{Name: state, Project: "rollback", Priority: "experiment"}, State: state, Queued: now}
+					if state == "queued" {
+						// The same fixture compiles against both releases.
+						if err := json.Unmarshal([]byte(`{"memory_limit_gb":2.5}`), &j.Spec); err != nil {
+							return err
+						}
+					}
 					if state == "succeeded" || state == "failed" {
 						j.FinishedAt = &now
 					}
@@ -104,6 +110,31 @@ func TestUpgradeCompatProcess(t *testing.T) {
 		j := q.s.Jobs["rollback-succeeded"]
 		if j.FinishedAt == nil || j.Attempt != 3 || j.Session != "rollback-session" || j.ReleaseConfirmed || len(q.s.HostReleases) != 1 {
 			t.Fatal("reopen lost terminal timestamp or pending custody", j, q.s.HostReleases)
+		}
+		explicit := q.s.Jobs["rollback-queued"]
+		spec, err := json.Marshal(explicit.Spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(spec, &fields); err != nil {
+			t.Fatal(err)
+		}
+		if mode == "queue-rollback-previous" {
+			if limit := fields["memory_limit_gb"]; len(limit) != 0 {
+				t.Fatalf("previous source unexpectedly recognizes RAM limit: %s", limit)
+			}
+			if err := q.update(func() error {
+				q.touchJob("rollback-paused").Reason = "updated by rollback release"
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		} else if string(fields["memory_limit_gb"]) != "2.5" {
+			t.Fatalf("candidate lost the explicit RAM limit: %s", fields["memory_limit_gb"])
+		}
+		if mode == "queue-rollback-open" && q.s.Jobs["rollback-paused"].Reason != "updated by rollback release" {
+			t.Fatal("candidate lost a previous-release write")
 		}
 	default:
 		t.Fatal("unknown fixture mode")

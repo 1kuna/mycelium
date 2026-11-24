@@ -29,7 +29,6 @@ func (q *Queue) estimateCompletion(j *Job, m *Machine) (completionEstimate, bool
 	}
 	for _, candidate := range candidates {
 		copy := *candidate
-		q.applyLearnedNeeds(&copy)
 		copy = *q.memoryCandidate(&copy, m)
 		copy.Machine, copy.Session = m.ID, m.Session
 		copy.AllocatedDevices = nil
@@ -108,14 +107,6 @@ func (q *Queue) capabilityPlacementBetterWithTie(j *Job, a, b *Machine, allowTie
 	}
 	if knownValue {
 		return allowTie && q.deviceUseTieBetter(a, b, targetKey(a) < targetKey(b))
-	}
-	if q.unmeasuredProgram(j, a) {
-		if capabilityBetter(a, b) {
-			return true
-		}
-		if !capabilityBetter(b, a) {
-			return allowTie && q.deviceUseTieBetter(a, b, false)
-		}
 	}
 	return false
 }

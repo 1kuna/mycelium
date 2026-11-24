@@ -156,16 +156,17 @@ func (h *fleetUpgradeHost) startCapacityDeadline() time.Time {
 	return h.StepAt.Add(fleetStepTimeout) // An in-flight deferral written by an older queue.
 }
 
-// A projected fence and a new offer are distinct. One late heartbeat must
-// keep the former while waiting for fresh proof of the same runtime to offer
-// the same job. Invalid identities, owner maintenance and expiry fence both.
+// Protect the start check during active verification and capacity deferral.
+// One late heartbeat keeps the reservation while the worker refreshes proof
+// of the same runtime. Invalid identities, owner maintenance and expiry fence
+// both reservation and admission.
 func (q *Queue) fleetStartReservation(j *Job) *fleetUpgradeHost {
 	u := q.s.FleetUpgrade
 	if u == nil || u.State != "running" || !fleetProbePending(j) || j.Spec.Name != fleetStartProbeName {
 		return nil
 	}
 	for _, h := range u.Hosts {
-		if h.StartProbe == j.ID && h.Outcome == FleetHostDeferred && (h.Phase == "deferred" || h.Phase == "worker_start") {
+		if h.StartProbe == j.ID && (h.Phase == "worker_start" || h.Phase == "deferred" && h.Outcome == FleetHostDeferred) {
 			return h
 		}
 	}

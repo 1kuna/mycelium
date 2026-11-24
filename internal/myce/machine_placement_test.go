@@ -93,17 +93,19 @@ func assignedJob(r Reply) *Job {
 func TestM3ConcurrentDeviceSlotsAndCPU(t *testing.T) {
 	q, _ := fixture(t)
 	m := m3Machine()
-	first := submit(t, q, spec("experiment"))
+	work := spec("experiment")
+	work.Needs.HostMemoryGB = 1
+	first := submit(t, q, work)
 	a := assignedJob(machineCheck(t, q, m))
 	if a == nil || a.ID != first.ID || !slices.Equal(a.AllocatedDevices, []string{"0"}) {
 		t.Fatal("first device assignment", a)
 	}
-	second := submit(t, q, spec("experiment"))
+	second := submit(t, q, work)
 	b := assignedJob(machineCheck(t, q, m3Machine(), a))
 	if b == nil || b.ID != second.ID || !slices.Equal(b.AllocatedDevices, []string{"1"}) {
 		t.Fatal("neighbor was not admitted on the free device", b)
 	}
-	third := submit(t, q, spec("experiment"))
+	third := submit(t, q, work)
 	if got := assignedJob(machineCheck(t, q, m3Machine(), a, b)); got != nil {
 		t.Fatal("same-card overlap", got.ID)
 	}

@@ -127,6 +127,13 @@ type recordedStartError struct {
 func (e *recordedStartError) Error() string { return e.cause.Error() }
 func (e *recordedStartError) Unwrap() error { return e.cause }
 
+func (s *workerStore) recordMemoryWait(j Job, err error) error {
+	if s == nil || !pooledMemory(&j) {
+		return err
+	}
+	return s.startFailure(j, launchRefused, err)
+}
+
 func (s *workerStore) startFailure(j Job, kind string, cause error) error {
 	return s.startFailureAt(j, kind, cause, time.Now().UTC())
 }
@@ -183,6 +190,11 @@ func startFailureOutcome(owner Result, err error) Result {
 		owner.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "oom"}
 	}
 	owner = classifyAttemptOutcome(owner, attemptCause{memberOutcome: facts, OutOfMemory: oom != nil})
+	var admission *admissionError
+	if !owner.OutOfMemory && errors.As(err, &admission) && admission.detail.Subcheck == memoryWaitReason {
+		owner.Interrupted = true
+		owner.ExecutionCause = safeRuntimeCause(&RuntimeCause{Operation: "launch", Class: "resource_limit", Predicate: "memory_capacity", Admission: &admission.detail})
+	}
 	if !owner.OutOfMemory && errors.As(err, &staging) && (staging.diagnostic.Class == "tools_missing" || staging.diagnostic.Class == machoLibraryMissing) {
 		owner.ExecutionCause = runtimeDiagnostic(staging)
 	}
@@ -229,6 +241,10 @@ func classifyAttemptOutcome(result Result, facts attemptCause) Result {
 	result.PriorityStop = nil
 	if facts.Stale || facts.Cancelled {
 		result.Success, result.Forced = false, false
+		return result
+	}
+	if result.ExecutionCause != nil && result.ExecutionCause.Class == "memory_pressure" {
+		result.Success, result.Interrupted = false, true
 		return result
 	}
 	if result.OutOfMemory || facts.Exit != nil && facts.Exit.Status != 0 {

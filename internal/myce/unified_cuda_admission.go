@@ -1,7 +1,5 @@
 package myce
 
-import "fmt"
-
 func unifiedCUDA(m *Machine) bool {
 	return m != nil && backendFor(m.GPU).unifiedProcessAdmission && m.UnifiedMemory
 }
@@ -49,82 +47,3 @@ func unifiedCUDAFloor(m *Machine) (float64, bool) {
 // Existing holds still own takeover/preemption. This additional admission-only
 // check protects a sole qualified destination for queued, forecast production
 // before the dependency becomes runnable. Cancellation removes it immediately.
-func (q *Queue) unifiedCUDAProductionReason(j *Job, m *Machine) string {
-	if !unifiedCUDA(m) || j.Spec.Needs.cpuOnly() {
-		return ""
-	}
-	host := hostID(m)
-	charge := 0.0
-	for _, candidate := range q.memoryCandidates(j, m) {
-		charge = max(charge, hostNeed(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB))
-	}
-	// An offer already owns its reservation: revalidate it once, not twice.
-	room := q.hostRoomAfter(m, []*Job{j}, nil)
-	for _, demand := range q.liveJobs() {
-		if demand.State != "queued" || demand.Spec.Priority != "production" || cancelled(demand) || expired(demand.Spec.GiveUpAt, q.clock.Now()) || q.comparePriority(j.Spec, demand.Spec) <= 0 {
-			continue
-		}
-		if demand.FanOut != nil && demand.Spec.FanOut != nil && demand.FanOut.Next >= len(demand.Spec.FanOut.Pieces) {
-			continue
-		}
-		if _, expected := q.productionArrival(demand); !expected {
-			continue
-		}
-		need, sole := 0.0, true
-		for _, target := range q.plannerMachines() {
-			if !q.jobAllowsMachine(demand, target.ID) || !q.reservationAllows(demand, target) {
-				continue
-			}
-			for _, candidate := range q.memoryCandidates(demand, target) {
-				// Evidence belongs to this exact recipe, not a qualified sibling.
-				if q.variantParityReason(candidate, target) != "" {
-					continue
-				}
-				if !fitsResources(candidate, target, target.TotalMemoryGB) {
-					continue
-				}
-				if hostID(target) != host {
-					now := q.clock.Now()
-					if q.unreported[target.ID] || !q.workerFresh(target, now) {
-						continue
-					}
-					// Reuse #401's immediate-admission proof, forecasting only the
-					// dependency's readiness. Approval alone is not spare capacity.
-					copy := *candidate
-					copy.Spec.After = nil
-					alternative := q.batchCandidateWithResources(&copy, target, nil)
-					if alternative == nil || !q.workerIdle(target, alternative) || q.immediateCandidate(alternative, target) == nil {
-						continue
-					}
-					sole = false
-					continue
-				}
-				n := candidate.Spec.Needs
-				estimate := q.memoryEstimate(candidate, target)
-				if estimate.host != nil {
-					host := hostMemoryPeakGB(estimate.host) * estimate.hostFactor
-					if estimate.measuredHostGB > 0 {
-						host = estimate.measuredHostGB
-					}
-					n.HostMemoryGB = max(n.HostMemoryGB, host)
-				}
-				if estimate.device != nil && estimate.device.DeviceGB != nil {
-					n.MemoryGB = max(n.MemoryGB, *estimate.device.DeviceGB*estimate.deviceFactor)
-				}
-				envelope := hostNeed(target, n.MemoryGB, n.HostMemoryGB)
-				floor, known := unifiedCUDAFloor(target)
-				// An envelope that can never fit must not reserve this host
-				// forever. Ignore live usage here: transient pressure still
-				// deserves protection for production that can eventually fit.
-				if !known || envelope > float64(target.CapabilityProfile.SystemMemoryBytes)/(1<<30)-floor {
-					continue
-				}
-				need = max(need, envelope)
-			}
-		}
-		if sole && need > 0 && charge+need > room {
-			return fmt.Sprintf("host %s: unified CUDA production headroom for %s; %.3f GiB charge + %.3f GiB production envelope > %.3f GiB physical admission headroom", host, demand.ID, charge, need, room)
-		}
-	}
-	return ""
-}

@@ -14,105 +14,68 @@ import (
 	"time"
 )
 
+const attemptMemorySamplePeriod = 200 * time.Millisecond
+
 func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 	if a == nil {
 		return nil
 	}
-	p := &AttemptMemoryPeak{Pressure: &MemoryPressureEvidence{Reason: "eligible"}}
-	// PSI some includes full stalls. Eligibility uses baselined cumulative
-	// totals over the attempt window; avg10 is diagnostic only.
-	b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.pressure"))
-	psi, psiErr := sharedMemoryPSI(b)
-	total, totalErr := memoryPSITotal(b)
-	p.pressureTotalUS, p.pressureAvg10 = total, psi
-	p.PressureUnavailable = err != nil || psiErr != nil || totalErr != nil
-	if b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.peak")); err == nil {
-		if n, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64); err == nil {
-			gb := float64(n) / (1 << 30)
-			p.CgroupGB = &gb
+	peak := &AttemptMemoryPeak{}
+	readGiB := func(name string) *float64 {
+		data, err := a.fs.ReadFile(filepath.Join(a.path, name))
+		n, parseErr := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+		if err != nil || parseErr != nil {
+			return nil
 		}
+		gb := float64(n) / (1 << 30)
+		return &gb
 	}
-	if b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.stat")); err == nil {
-		stats := memoryCounters(b)
+	peak.CgroupGB = readGiB("memory.peak")
+	peak.SwapGB = readGiB("memory.swap.peak")
+	if peak.SwapGB == nil {
+		peak.SwapGB = readGiB("memory.swap.current")
+	}
+	if data, err := a.fs.ReadFile(filepath.Join(a.path, "memory.stat")); err == nil {
+		stats := memoryCounters(data)
 		anon, aok := stats["anon"]
-		kernel, kok := stats["kernel"]
 		shmem, sok := stats["shmem"]
-		if aok && kok && sok {
-			gb := (float64(anon) + float64(kernel) + float64(shmem)) / (1 << 30)
-			p.HostGB = &gb
-			unevictable, uok := stats["unevictable"]
-			dirty, dok := stats["file_dirty"]
-			writeback, wok := stats["file_writeback"]
-			if uok && dok && wok {
-				// Conservatively retain all kernel and shmem pages. Unevictable
-				// can overlap anon/shmem; double counting is safer than omitting
-				// locked file pages. Dirty/writeback pages need I/O before reclaim;
-				// sum them conservatively even where the counters overlap.
-				// This is not a driver pin counter; GPU reduction also needs
-				// complete independent driver/proc and whole-host evidence.
-				nonreclaimable := gb + (float64(unevictable)+float64(dirty)+float64(writeback))/(1<<30)
-				p.nonreclaimableSampleGB = &nonreclaimable
+		kernel, kok := stats["kernel"]
+		if aok && sok && kok {
+			gb := (float64(anon) + float64(shmem) + float64(kernel)) / (1 << 30)
+			peak.HostGB = &gb
+			if device := a.device.Load(); device != nil && device.pinnedGB > 0 {
+				combined := gb + device.pinnedGB
+				peak.CombinedHostGB = &combined
 			}
 		}
-		for _, name := range []string{"workingset_refault_anon", "pswpout"} {
-			p.Constrained = p.Constrained || stats[name] > 0
-		}
-		p.Pressure.CgroupRefaultAnon, p.Pressure.CgroupSwapOutPages = stats["workingset_refault_anon"], stats["pswpout"]
-		if p.Constrained {
-			p.Pressure.Reason = "cgroup_refault_or_swap_out"
+		if out := stats["pswpout"]; out > 0 {
+			peak.Pressure = &MemoryPressureEvidence{CgroupSwapOutPages: out}
 		}
 	}
-	if b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.events")); err == nil {
-		events := memoryCounters(b)
-		p.Events = &MemoryEventCounts{High: events["high"], Max: events["max"], OOM: events["oom"], OOMKill: events["oom_kill"], OOMGroupKill: events["oom_group_kill"]}
-		// File-backed working sets can bind while resident-only samples retain
-		// apparent headroom. Any max/high pressure makes true need unknown.
-		p.Constrained = p.constrained() || events["oom"] > 0 || events["oom_kill"] > 0 || events["oom_group_kill"] > 0
-		if p.Constrained && p.Pressure.Reason == "eligible" {
-			p.Pressure.Reason = "cgroup_events"
-		}
+	if data, err := a.fs.ReadFile(filepath.Join(a.path, "memory.events")); err == nil {
+		events := memoryCounters(data)
+		peak.Events = &MemoryEventCounts{High: events["high"], Max: events["max"], OOM: events["oom"], OOMKill: events["oom_kill"], OOMGroupKill: events["oom_group_kill"]}
 	}
-	for _, name := range []string{"memory.swap.peak", "memory.swap.current"} {
-		if b, err := a.fs.ReadFile(filepath.Join(a.path, name)); err == nil {
-			n, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
-			p.Constrained = p.Constrained || err != nil || n > 0
-			if (err != nil || n > 0) && p.Pressure.Reason == "eligible" {
-				p.Pressure.Reason = "cgroup_swap"
-			}
-			if name == "memory.swap.peak" && err == nil {
-				gb := float64(n) / (1 << 30)
-				p.SwapGB = &gb
-			}
-		}
-	}
-	// A member can bind well below the shared envelope. Check descendants
-	// against their own enforced caps, retaining only their pressure evidence;
-	// the parent's resident counters already include their memory.
-	if entries, err := a.fs.ReadDir(a.path); err == nil {
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			child := &memoryAttempt{fs: a.fs, path: filepath.Join(a.path, entry.Name())}
-			if b, err := a.fs.ReadFile(filepath.Join(child.path, "memory.max")); err == nil {
-				child.bytes, _ = strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
-			}
-			if peak := child.peak(); peak != nil {
-				if peak.Constrained && !p.Constrained {
-					p.Pressure.Reason = "descendant_" + strings.TrimPrefix(peak.Pressure.Reason, "descendant_")
-				}
-				p.Constrained = p.Constrained || peak.Constrained
-				p.PressureUnavailable = p.PressureUnavailable || peak.PressureUnavailable
-			}
-		}
-	}
-	if p.HostGB == nil && p.CgroupGB == nil && p.SwapGB == nil && p.Events == nil && !p.Constrained {
+	if peak.HostGB == nil && peak.CgroupGB == nil && peak.SwapGB == nil && peak.Events == nil {
 		return nil
 	}
-	if !p.Constrained {
-		p.Pressure.Reason = "counter_snapshot_only" // No baselined observation window yet.
+	if a.availableAtLaunch != nil {
+		if available, ok := a.hostAvailable(); ok {
+			combined := max(memoryValue(peak.CombinedHostGB), memoryValue(peak.HostGB), *a.availableAtLaunch-available)
+			peak.CombinedHostGB = &combined
+		}
 	}
-	return p
+	peak.Constrained = pooledSampleLimited(peak)
+	return peak
+}
+
+func (a *memoryAttempt) hostAvailable() (float64, bool) {
+	data, err := a.fs.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, false
+	}
+	available, err := parseMemAvailable(data)
+	return available, err == nil
 }
 
 func memoryCounters(b []byte) map[string]uint64 {
@@ -254,116 +217,75 @@ func (w Worker) observeProcessMemoryWith(groups func() []int, sink attemptMemory
 	if len(attempts) > 0 {
 		attempt = attempts[0]
 	}
+	probe := w.processMemory
 	clock := w.Clock
 	if clock == nil {
 		clock = RealClock{}
 	}
-	guard := learnedMemoryGuard{}
-	probe := w.processMemory
-	footprint := sink != nil && w.Machine.GPU == "metal" && probe.OwnedFootprint != nil
-	if attempt != nil && attempt.job.Spec.Needs.cpuOnly() {
-		guard = w.learnedGuard(attempt.job)
-	} else if attempt != nil && w.footprintGuarded(attempt.job) {
-		footprint, guard = true, w.footprintGuard(attempt.job)
-	}
-	var mu sync.Mutex
 	var peak *AttemptMemoryPeak
 	var growth processMemoryGrowth
-	readPressure := func() (*gpuHostState, error) {
-		if probe.Pressure == nil {
-			return nil, errAttemptMemoryUnsupported
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), attemptMemorySamplePeriod)
-		defer cancel()
-		return probe.Pressure(ctx)
+	var guard rssGuard
+	if attempt != nil {
+		guard.limit, _ = w.jobCeilingBytes(attempt.job)
 	}
-	baseline, err := readPressure()
-	complete := err == nil && baseline != nil
-	var worst gpuHostState
-	if complete {
-		worst = *baseline
-	}
+	footprint := attempt != nil && probe.OwnedFootprint != nil
 	sample := func(enforce bool) {
 		started := clock.Now()
-		host, pressureErr := readPressure()
-		if pressureErr != nil {
-			host = nil
-		}
-		var err error
-		if pressureErr != nil || host == nil || baseline == nil || host.swapOut < baseline.swapOut {
-			complete = false
-		} else {
-			worst.retainPressure(host)
-		}
-		ids := map[int]bool{}
-		for _, g := range groups() {
-			if g > 0 {
-				ids[g] = true
-			}
-		}
-		var bytes, resident uint64
+		var bytes uint64
 		var members int
-		var sampleAt time.Time
-		if (probe.OwnedResident != nil || footprint) && attempt != nil {
+		var err error
+		if attempt != nil && (footprint || probe.OwnedResident != nil) {
 			roots := attempt.rssRoots()
 			quality := "owned_session_rss"
 			if footprint {
-				bytes, resident, members, err = probe.OwnedFootprint(roots)
+				bytes, _, members, err = probe.OwnedFootprint(roots)
 				quality = footprintGuardQuality
 			} else {
 				bytes, members, err = probe.OwnedResident(roots)
 			}
-			sampleAt = clock.Now()
 			if enforce {
-				if evidence := guard.observeMemory(clock.Now(), roots, bytes, members, err, host); evidence != nil {
-					evidence.Quality = quality
-					guard.exceeded = attempt.stopRSS(clock.Now(), roots, evidence)
+				if e := guard.observe(clock.Now(), roots, bytes, members, err); e != nil {
+					e.Quality = quality
+					guard.exceeded = attempt.stopRSS(clock.Now(), roots, e)
 				}
 			}
 		} else if probe.Resident != nil {
 			if sink != nil && attempt != nil {
 				bytes, members, err = readinessProcessResident(probe, attempt.rssRoots(), processBirth)
 			} else {
+				ids := map[int]bool{}
+				for _, id := range groups() {
+					if id > 0 {
+						ids[id] = true
+					}
+				}
 				bytes, members, err = probe.Resident(ids)
 			}
-			sampleAt = clock.Now()
 		}
 		if err != nil || members == 0 {
-			if sink != nil && enforce {
-				sink(started, clock.Now(), &AttemptMemoryPeak{PressureUnavailable: !complete}, processMemorySamplePeriod, false)
-				if footprint {
-					sink(started, clock.Now(), &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNoSample}, processMemorySamplePeriod, true)
-				}
-			}
 			growth = processMemoryGrowth{}
 			if attempt != nil {
 				attempt.rssMemory.Store(nil)
 			}
+			if sink != nil && enforce {
+				sink(started, clock.Now(), &AttemptMemoryPeak{}, processMemorySamplePeriod, false)
+			}
 			return
 		}
+		at := clock.Now()
 		gb := float64(bytes) / (1 << 30)
-		margin := growth.observe(sampleAt, gb)
+		margin := growth.observe(at, gb)
 		if attempt != nil {
-			attempt.rssMemory.Store(&processResidentSample{gb: gb, growth: margin, rate: growth.rate, at: sampleAt, observed: growth.horizon > 0})
+			attempt.rssMemory.Store(&processResidentSample{gb: gb, growth: margin, rate: growth.rate, at: at, observed: growth.horizon > 0})
 		}
-		next := &AttemptMemoryPeak{HostGB: &gb, Source: processGroupMemorySource, GrowthGB: &margin}
+		next := &AttemptMemoryPeak{HostGB: &gb, Source: processGroupMemorySource, GrowthGB: &margin, Constrained: guard.exceeded}
 		if footprint {
-			// Unified sizing sums a host and a device share. RSS is the host
-			// share; the footprint beyond it (Metal buffers, compressed pages)
-			// is the device share. Their sum is the measured footprint, or RSS
-			// when shared file pages make RSS the larger.
-			host, device := float64(resident)/(1<<30), max(0, gb-float64(resident)/(1<<30))
-			next.HostGB, next.DeviceGB, next.DeviceSource = &host, &device, deviceFootprintSource
+			next.DeviceSource = ownedFootprintSource
 		}
 		if sink != nil && enforce {
-			next.PressureUnavailable = !complete
-			next.Constrained = guard.exceeded || complete && hostPressureEvidence(baseline, &worst, *next.HostGB, w.HostMemoryReserveGB, os.Getpagesize()).Reason != "eligible"
-			sink(started, clock.Now(), next, processMemorySamplePeriod, false)
+			sink(started, at, next, processMemorySamplePeriod, false)
 		}
-		mu.Lock()
 		peak = sampledMemoryPeak(peak, next)
-		peak.Source = processGroupMemorySource
-		mu.Unlock()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -385,17 +307,8 @@ func (w Worker) observeProcessMemoryWith(groups func() []int, sink attemptMemory
 		once.Do(func() {
 			cancel()
 			<-done
-			sample(false) // Include teardown pressure even after the process groups exit.
+			sample(false)
 		})
-		mu.Lock()
-		defer mu.Unlock()
-		if peak != nil && peak.HostGB != nil {
-			peak.Pressure = hostPressureEvidence(baseline, &worst, *peak.HostGB, w.HostMemoryReserveGB, os.Getpagesize())
-			if !complete {
-				peak.Pressure.Reason = "host_pressure_unavailable"
-			}
-			peak.Constrained = peak.Pressure.Reason != "eligible" || guard.exceeded
-		}
 		return peak
 	}
 }
@@ -405,7 +318,7 @@ func (w Worker) observeProcessMemoryWith(groups func() []int, sink attemptMemory
 // alone: its RSS and beyond-RSS shares sum to the sampled footprint, and
 // raising one share alone would count the same pages twice.
 func withExitMaxRSS(peak *AttemptMemoryPeak, state *os.ProcessState) *AttemptMemoryPeak {
-	if peak == nil || peak.Source != processGroupMemorySource || peak.DeviceSource == deviceFootprintSource || state == nil {
+	if peak == nil || peak.Source != processGroupMemorySource || (peak.DeviceSource == deviceFootprintSource || peak.DeviceSource == ownedFootprintSource) || state == nil {
 		return peak
 	}
 	ru, ok := state.SysUsage().(*syscall.Rusage)
@@ -431,10 +344,10 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 
 func (w Worker) observeAttemptMemoryWith(a *memoryAttempt, j Job, groups func() []int, devicePeriod time.Duration, sink attemptMemorySampleSink, attempts ...*process) func() *AttemptMemoryPeak {
 	deviceTelemetry := !j.Spec.Needs.cpuOnly() && backendFor(w.Machine.GPU).attemptMemory != nil
-	if a == nil && w.processMemory != nil && groups != nil {
-		return w.observeProcessMemoryWith(groups, sink, attempts...)
-	}
 	if a == nil {
+		if w.processMemory != nil && groups != nil {
+			return w.observeProcessMemoryWith(groups, sink, attempts...)
+		}
 		if deviceTelemetry {
 			return func() *AttemptMemoryPeak { return &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNoCgroup} }
 		}
@@ -446,159 +359,24 @@ func (w Worker) observeAttemptMemoryWith(a *memoryAttempt, j Job, groups func() 
 		clock = RealClock{}
 	}
 	peak := a.peak()
-	var mu sync.Mutex
-	record := func(sample *AttemptMemoryPeak) {
-		mu.Lock()
-		peak = sampledMemoryPeak(peak, sample)
-		mu.Unlock()
-	}
-	completeNonreclaimable := peak != nil && peak.nonreclaimableSampleGB != nil && !peak.PressureUnavailable
-	// The empty-cgroup baseline precedes payload launch, including for plain
-	// commands whose observer is installed just after exec. No baseline means
-	// diagnostic counters only, never permission to shrink a GPU envelope.
-	cudaHost := unifiedCUDA(&w.Machine) && deviceTelemetry && len(w.selectedDevices) <= 1
-	gpuHost := sink == nil && (cudaHost || backendFor(w.Machine.GPU).deviceHostMemory && !w.Machine.UnifiedMemory && w.selectedDevice != nil && w.selectedDevice.pciAddress != "" && !j.Spec.Needs.cpuOnly() && len(w.selectedDevices) == 0)
-	completeGPUHost := gpuHost && a.hostBaseline != nil && a.rootBaseline != nil
-	hostRejection := ""
-	rejectHost := func(reason string) {
-		if hostRejection == "" {
-			hostRejection = reason
-		}
-		completeGPUHost = false
-	}
-	if gpuHost && !completeGPUHost {
-		rejectHost("host_or_root_baseline_unavailable")
-	}
-	var worstHost gpuHostState
-	pressureKnown := a.hostBaseline != nil && a.pressureBaseline != nil && !a.pressureStart.IsZero()
-	unknownReason := "pressure_baseline_unavailable"
-	var groupAvg10 float64
-	var groupTotal uint64
-	if a.pressureBaseline != nil {
-		groupTotal = *a.pressureBaseline
-	}
-	if a.hostBaseline != nil {
-		worstHost = *a.hostBaseline
-	}
-	var hostDropGB, outsideGB float64
-	// Unified CUDA hosts that list processes without per-process memory:
-	// track the host drop outside every Mycelium cgroup, attributable to this
-	// attempt only while nvidia-smi shows no other process on its GPU.
-	unifiedDelta := unifiedCUDA(&w.Machine) && deviceTelemetry && a.hostBaseline != nil && a.rootBaseline != nil
-	unifiedOutsideGB := 0.0
-	sampleHost := func(component *AttemptMemoryPeak) {
-		// Pressure eligibility applies to ordinary learning on every Linux
-		// cgroup attempt, independently of complete DRM/component evidence.
-		if component == nil || component.PressureUnavailable || component.pressureTotalUS < groupTotal {
-			pressureKnown = false
-			unknownReason = "cgroup_psi_unavailable_or_reset"
-		} else {
-			groupTotal = component.pressureTotalUS
-		}
-		if component != nil {
-			groupAvg10 = max(groupAvg10, component.pressureAvg10)
-		}
-		host, err := readGPUHostState(a.fs)
-		if err != nil || a.hostBaseline == nil || host.oom < worstHost.oom || host.swapOut < worstHost.swapOut || host.psiTotalUS < worstHost.psiTotalUS {
-			pressureKnown = false
-			unknownReason = "host_pressure_unavailable_or_reset"
-			rejectHost("host_pressure_unavailable_or_reset")
-			unifiedDelta = false
-			return
-		}
-		worstHost.retainPressure(host)
-		if unifiedDelta {
-			root, ok := a.accountingResidentGB()
-			unifiedDelta = ok
-			// Unclamped: a sibling attempt that exits raises MemAvailable and
-			// shrinks the root by the same pages, leaving the outside drop.
-			unifiedOutsideGB = max(unifiedOutsideGB, a.hostBaseline.available-host.available-(root-*a.rootBaseline))
-		}
-		if !completeGPUHost || component == nil || component.nonreclaimableSampleGB == nil || component.PressureUnavailable {
-			rejectHost("cgroup_components_unavailable")
-			return
-		}
-		root, ok := a.accountingResidentGB()
-		if !ok || component.HostGB == nil {
-			rejectHost("root_cgroup_components_unavailable")
-			return
-		}
-		// The root includes this attempt's resident counters, so remove only
-		// siblings' growth. Keep negative growth: an exiting sibling raises
-		// MemAvailable and must not hide this attempt's outside allocations.
-		siblingGrowth := root - *a.rootBaseline - *component.HostGB
-		drop := a.hostBaseline.available - host.available - siblingGrowth
-		hostDropGB = max(hostDropGB, drop)
-		// DRM I/O stays off this sampler. Its driver floor is added at finish.
-		outsideGB = max(outsideGB, drop-*component.nonreclaimableSampleGB)
-	}
-	sampleHost(peak)
-	var driver <-chan gpuHostCollection
-	if completeGPUHost {
-		pci := ""
-		if w.selectedDevice != nil {
-			pci = w.selectedDevice.pciAddress
-		}
-		driver = a.collectGPUHost(ctx, clock, w.GPUTelemetryHelper, pci, cudaHost)
-	}
-	var samplers sync.WaitGroup
-	var growth memoryGrowth
-	guard := w.learnedGuard(j)
-	guard.hard = guard.ceiling // Linux's uniquely charged bytes have a physical bound.
-	var guarded *process
-	if len(attempts) > 0 && guard.ceiling > 0 {
-		guarded = attempts[0]
-	}
-	hostSampled := false // Read only after joining the host sampler.
-	samplers.Add(1)
+	hostDone := make(chan struct{})
 	go func() {
-		defer samplers.Done()
-		// Resident memory can spike and disappear before process exit. Keep
-		// cheap cgroup reads independent of the slower driver probe cadence.
-		hostTick := time.NewTicker(attemptMemorySamplePeriod)
-		defer hostTick.Stop()
+		defer close(hostDone)
+		tick := time.NewTicker(attemptMemorySamplePeriod)
+		defer tick.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-hostTick.C:
-				if guarded != nil {
-					data, currentErr := a.fs.ReadFile(filepath.Join(a.path, "memory.current"))
-					bytes, parseErr := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
-					host, hostErr := readGPUHostState(a.fs)
-					if hostErr != nil {
-						host = nil
-					}
-					roots := guarded.rssRoots()
-					if evidence := guard.observeMemory(clock.Now(), roots, bytes, 1, errors.Join(currentErr, parseErr), host); evidence != nil {
-						evidence.Quality = "cgroup_current"
-						guard.exceeded = guarded.stopRSS(clock.Now(), roots, evidence)
-					}
-				}
-				started := clock.Now()
+			case <-tick.C:
+				start := clock.Now()
 				sample := a.peak()
-				if sample != nil && sample.HostGB != nil {
-					margin := growth.observe(clock.Now(), hostMemoryPeakGB(sample))
-					sample.GrowthGB = &margin
-				}
-				completeNonreclaimable = completeNonreclaimable && sample != nil && sample.nonreclaimableSampleGB != nil && !sample.PressureUnavailable
-				hostSampled = hostSampled || sample != nil && sample.HostGB != nil
-				record(sample)
-				sampleHost(sample)
+				peak = sampledMemoryPeak(peak, sample)
 				if sink != nil {
-					observation := AttemptMemoryPeak{}
-					if sample != nil {
-						observation = *sample
+					if sample == nil {
+						sample = &AttemptMemoryPeak{}
 					}
-					observation.PressureUnavailable = !pressureKnown
-					if pressureKnown && observation.HostGB != nil {
-						now := clock.Now()
-						elapsed := now.Sub(a.pressureStart)
-						evidence := hostPressureEvidence(a.hostBaseline, &worstHost, *observation.HostGB, w.HostMemoryReserveGB, a.pageSize)
-						observation.Constrained = observation.constrained() || evidence.Reason != "eligible" ||
-							memoryStallPressure(a.hostBaseline.psiTotalUS, worstHost.psiTotalUS, elapsed) || memoryStallPressure(*a.pressureBaseline, groupTotal, elapsed)
-					}
-					sink(started, clock.Now(), &observation, attemptMemorySamplePeriod, false)
+					sink(start, clock.Now(), sample, attemptMemorySamplePeriod, false)
 				}
 			}
 		}
@@ -607,138 +385,24 @@ func (w Worker) observeAttemptMemoryWith(a *memoryAttempt, j Job, groups func() 
 	if deviceTelemetry {
 		device = w.observeDeviceMemoryWith(ctx, func() (map[int]bool, map[int]bool, error) {
 			ids := map[int]bool{}
-			err := a.processIDs(ids)
-			known := map[int]bool{}
-			if err == nil && unifiedCUDA(&w.Machine) {
-				err = a.accountingProcessIDs(known)
-				for pid := range ids {
-					delete(known, pid)
-				}
-			}
-			return ids, known, err
+			return ids, nil, a.processIDs(ids)
 		}, a.fs, devicePeriod, clock, a, sink)
 	}
 	var once sync.Once
 	return func() *AttemptMemoryPeak {
 		once.Do(func() {
 			cancel()
-			wait, stopWaiting := context.WithTimeout(context.Background(), attemptMemorySamplePeriod)
-			defer stopWaiting()
-			samplers.Wait()
-			// Timestamp before final I/O, so sensor latency cannot dilute the
-			// pressure ratio. Counter resets and nonpositive windows are unknown.
-			elapsed := clock.Now().Sub(a.pressureStart)
-			final := a.peak()
-			record(final)
-			sampleHost(final)
-			if !pressureKnown || elapsed <= 0 {
-				record(&AttemptMemoryPeak{PressureUnavailable: true})
-				rejectHost("pressure_window_unavailable")
-			}
-			if peak != nil {
-				peak.Constrained = peak.Constrained || guard.exceeded
-				resident := 0.0
-				if peak.HostGB != nil {
-					resident = *peak.HostGB
-				}
-				e := hostPressureEvidence(a.hostBaseline, &worstHost, resident, w.HostMemoryReserveGB, a.pageSize)
-				e.ElapsedUS, e.CgroupAvg10 = float64(elapsed)/float64(time.Microsecond), groupAvg10
-				if peak.Pressure != nil {
-					e.CgroupRefaultAnon, e.CgroupSwapOutPages = peak.Pressure.CgroupRefaultAnon, peak.Pressure.CgroupSwapOutPages
-					if peak.Constrained {
-						e.Reason = peak.Pressure.Reason
-					}
-				}
-				if pressureKnown {
-					hostDelta, groupDelta := worstHost.psiTotalUS-a.hostBaseline.psiTotalUS, groupTotal-*a.pressureBaseline
-					e.HostStallUS, e.CgroupStallUS = &hostDelta, &groupDelta
-					if e.Reason == "eligible" && memoryStallPressure(a.hostBaseline.psiTotalUS, worstHost.psiTotalUS, elapsed) {
-						e.Reason = "host_psi_total"
-					}
-					if e.Reason == "eligible" && memoryStallPressure(*a.pressureBaseline, groupTotal, elapsed) {
-						e.Reason = "cgroup_psi_total"
-					}
-				}
-				if !pressureKnown {
-					e.Reason = unknownReason
-				} else if elapsed <= 0 {
-					e.Reason = "invalid_pressure_window"
-				}
-				peak.Pressure = e
-				if pressureKnown && elapsed > 0 && e.Reason != "eligible" {
-					peak.Constrained = true
-				}
-			}
+			<-hostDone
+			peak = sampledMemoryPeak(peak, a.peak())
 			if device != nil {
+				deadline := time.NewTimer(attemptMemorySamplePeriod)
+				defer deadline.Stop()
 				select {
 				case r := <-device:
-					record(r.peak)
-					if r.unreported && (r.peak == nil || r.peak.DeviceGB == nil) {
-						record(unifiedDevicePeak(unifiedDelta, r.shared, unifiedOutsideGB))
-					}
-				case <-wait.Done():
-					record(&AttemptMemoryPeak{DeviceUnavailable: deviceMemoryTimeout})
-					rejectHost("device_sampler_finish_timeout")
+					peak = sampledMemoryPeak(peak, r.peak)
+				case <-deadline.C:
+					peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryTimeout})
 				}
-			}
-			var collected gpuHostCollection
-			if driver != nil {
-				// Proc/debugfs reads cannot be cancelled once inside the kernel.
-				// A buffered result owns no peak state, so cleanup need not wait
-				// indefinitely and a late return cannot mutate published facts.
-				select {
-				case collected = <-driver:
-				case <-wait.Done():
-					rejectHost("host_collector_finish_timeout")
-				}
-			}
-			age := clock.Now().Sub(collected.last)
-			if gpuHost {
-				switch {
-				case collected.sampling.Reason != "":
-					rejectHost(collected.sampling.Reason)
-				case !collected.complete:
-					rejectHost("host_collector_incomplete")
-				case !collected.seen:
-					rejectHost("host_collector_no_process")
-				case age < 0:
-					rejectHost("host_collector_clock_reversed")
-				case age > 2*attemptMemorySamplePeriod:
-					rejectHost("host_collector_stale")
-				}
-				if !hostSampled || !completeNonreclaimable || final == nil || final.nonreclaimableSampleGB == nil || final.PressureUnavailable {
-					rejectHost("cgroup_components_incomplete")
-				}
-				if peak != nil {
-					s := collected.sampling
-					s.Complete, s.Reason = completeGPUHost, hostRejection
-					if s.Complete {
-						s.Reason = "complete"
-					}
-					if !collected.last.IsZero() {
-						s.FinalAgeSeconds = age.Seconds()
-					}
-					peak.HostSampling = &s
-				}
-			}
-			if (j.Spec.Needs.cpuOnly() || completeGPUHost) && peak != nil && !peak.PressureUnavailable && hostSampled && completeNonreclaimable && final != nil && final.nonreclaimableSampleGB != nil && !final.PressureUnavailable {
-				peak.NonreclaimableGB = peak.nonreclaimableSampleGB
-				if gpuHost {
-					outsideGB = max(outsideGB, collected.driverGB)
-					peak.GPUHost = &GPUHostMemory{SiblingAdjusted: true, DriverGB: &collected.driverGB, HostDropGB: &hostDropGB, OutsideGB: &outsideGB}
-					if cudaHost {
-						peak.GPUHost.Source = cudaHostMemorySource
-						peak.GPUHost.PinnedGB, peak.GPUHost.PhysicalGB = &collected.pinnedGB, &collected.physicalGB
-					}
-					combined, _ := peak.gpuHostPeakGB()
-					peak.CombinedHostGB = &combined
-				}
-			}
-			// Counter-only read zeros are diagnostic facts, not a new
-			// incomplete resident measurement that invalidates learning.
-			if !hostSampled && peak != nil && (peak.HostGB != nil || peak.CgroupGB != nil || peak.DeviceGB != nil || peak.Constrained) {
-				peak.Constrained = true
-				peak.Pressure.Reason = "resident_sampling_incomplete"
 			}
 		})
 		return peak
@@ -765,20 +429,8 @@ const (
 	deviceHostDeltaSource = "host memory drop outside Mycelium cgroups"
 	// DeviceSource for a Metal figure: phys_footprint beyond RSS (#1044).
 	deviceFootprintSource = "phys_footprint beyond RSS"
+	ownedFootprintSource  = "owned phys_footprint"
 )
-
-// The fallback for a unified CUDA attempt whose processes nvidia-smi listed
-// without memory. Another process on the GPU makes the drop unattributable.
-func unifiedDevicePeak(complete, shared bool, outsideGB float64) *AttemptMemoryPeak {
-	switch {
-	case shared:
-		return &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryShared}
-	case !complete || !validMemoryValue(outsideGB):
-		return &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNotReported}
-	}
-	gb := max(0, outsideGB)
-	return &AttemptMemoryPeak{DeviceGB: &gb, DeviceSource: deviceHostDeltaSource}
-}
 
 // Anonymous, kernel and shmem pages charged to one cgroup subtree.
 func cgroupResidentGB(fs memoryFS, path string) (float64, bool) {
@@ -861,9 +513,9 @@ func cudaAttemptMemoryReading(b []byte, selector string, ids map[int]bool, resid
 	return total, foreign, nil
 }
 
-func drmAttemptMemory(b []byte, pci string) (string, float64, error) {
+func drmAttemptMemory(b []byte, pci string) (string, float64, float64, error) {
 	client, pdev := "", ""
-	total := 0.0
+	var total, host float64
 	found := false
 	for _, line := range strings.Split(string(b), "\n") {
 		key, val, ok := strings.Cut(line, ":")
@@ -876,93 +528,64 @@ func drmAttemptMemory(b []byte, pci string) (string, float64, error) {
 			client = val
 		case "drm-pdev":
 			pdev = val
+		case "drm-resident-system", "drm-resident-gtt":
+			if gb, ok := drmMemoryGB(val); ok {
+				host = max(host, gb)
+			}
 		default:
 			if strings.HasPrefix(key, "drm-resident-vram") {
-				f := strings.Fields(val)
-				if len(f) == 0 || len(f) > 2 {
-					return "", 0, errAttemptMemoryUnsupported
+				gb, ok := drmMemoryGB(val)
+				if !ok {
+					return "", 0, 0, errAttemptMemoryUnsupported
 				}
-				scale := float64(1)
-				if len(f) == 2 {
-					switch f[1] {
-					case "KiB":
-						scale = 1 << 10
-					case "MiB":
-						scale = 1 << 20
-					default:
-						return "", 0, errAttemptMemoryUnsupported
-					}
-				}
-				n, err := strconv.ParseUint(f[0], 10, 64)
-				if err != nil {
-					return "", 0, errAttemptMemoryUnsupported
-				}
-				total += float64(n) * scale / (1 << 30)
+				total += gb
 				found = true
 			}
 		}
 	}
 	if !found || client == "" || normalizePCIAddress(pdev) != normalizePCIAddress(pci) {
-		return "", 0, errAttemptMemoryPending
+		return "", 0, 0, errAttemptMemoryPending
 	}
-	return pdev + "/" + client, total, nil
+	return pdev + "/" + client, total, host, nil
+}
+
+func drmMemoryGB(value string) (float64, bool) {
+	fields := strings.Fields(value)
+	if len(fields) == 0 || len(fields) > 2 {
+		return 0, false
+	}
+	scale := float64(1)
+	if len(fields) == 2 {
+		switch fields[1] {
+		case "KiB":
+			scale = 1 << 10
+		case "MiB":
+			scale = 1 << 20
+		default:
+			return 0, false
+		}
+	}
+	n, err := strconv.ParseUint(fields[0], 10, 64)
+	return float64(n) * scale / (1 << 30), err == nil
 }
 
 // memory.current includes reclaimable file cache that MemAvailable already
 // counts as available. Credit anonymous resident pages only, not total/peak/RSS.
 // Cgroup charging counts shared pages once across disjoint attempt subtrees.
+
 func (a *memoryAttempt) currentHostMemory(clock Clock) *CurrentHostMemory {
-	if a == nil {
+	p := a.peak()
+	if p == nil || p.HostGB == nil {
 		return nil
 	}
 	at := clock.Now()
-	b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.stat"))
-	if err != nil {
-		return nil
-	}
-	stats := memoryCounters(b)
-	anon, ok := stats["anon"]
-	if !ok {
-		return nil
-	}
-	b, err = a.fs.ReadFile(filepath.Join(a.path, "memory.current"))
-	if err != nil {
-		return nil
-	}
-	current, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
-	if err != nil {
-		return nil
-	}
-	a.currentMu.Lock()
-	var footprint *float64
-	complete, bytes := true, 0.0
-	for _, name := range []string{"anon", "kernel", "shmem", "unevictable", "file_dirty", "file_writeback"} {
-		n, ok := stats[name]
-		complete = complete && ok
-		bytes += float64(n)
-	}
-	margin, observed := 0.0, false
-	if complete {
-		gb := bytes / (1 << 30)
-		footprint = &gb
-		// Check-ins arrive irregularly. Report the largest growth measured
-		// between two of them and the current rate, never the fastest rate
-		// ever seen over the longest gap: a 3 GiB burst followed by one 30 s
-		// gap reported 90 GiB, and the queue projected the ended burst rate.
-		a.currentGrowth.observe(at, gb)
-		margin = a.currentGrowth.increment
-		observed = a.currentGrowth.horizon > 0
-	} else {
-		a.currentGrowth = memoryGrowth{} // Never bridge a missing interval.
-	}
-	rate := a.currentGrowth.current
-	a.currentMu.Unlock()
-	sample := &CurrentHostMemory{GrowthObserved: observed, GrowthRateGB: rate, FootprintGB: footprint, GrowthGB: margin, NonreclaimableGB: float64(min(anon, current)) / (1 << 30), sampledAt: at, deviceSample: &a.device}
+	sample := &CurrentHostMemory{NonreclaimableGB: *p.HostGB, sampledAt: at, deviceSample: &a.device}
 	if device := a.device.Load(); device != nil {
 		gb := device.gb
-		sample.DeviceGB, sample.deviceSampledAt, sample.DeviceGrowthGB = &gb, device.at, device.growthGB
-		sample.DeviceSource, sample.DeviceExclusive, sample.DeviceGrowthRateGB = device.source, device.exclusive, device.rateGB
-		sample.deviceResidentGB = device.residentGB
+		sample.DeviceGB, sample.deviceSampledAt = &gb, device.at
+		if age := at.Sub(device.at); age >= 0 && age < deviceMemorySampleFreshFor {
+			sample.NonreclaimableGB += device.pinnedGB
+		}
 	}
 	return sample
 }
@@ -983,16 +606,12 @@ func (w Worker) observeDeviceMemoryWith(ctx context.Context, inventory func() (m
 	started := clock.Now()
 	go func() {
 		peak := &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNoSample}
-		unreported, shared, incompleteFallback := false, false, false
+		unreported := false
 		var growth processMemoryGrowth
 		sampling := deviceSampling{start: started}
 		defer func() {
 			peak.DeviceSampling = sampling.finish(clock.Now(), period)
-			if incompleteFallback {
-				peak.DeviceGB, peak.DeviceGrowthGB, peak.DeviceSource = nil, nil, ""
-				peak.DeviceUnavailable = deviceUnifiedUncertain
-			}
-			result <- deviceMemoryResult{peak, unreported, shared}
+			result <- deviceMemoryResult{peak: peak, unreported: unreported}
 		}()
 		var sampleTick <-chan time.Time
 		if len(ticks) > 0 {
@@ -1024,26 +643,17 @@ func (w Worker) observeDeviceMemoryWith(ctx context.Context, inventory func() (m
 				if len(ids) == 0 {
 					continue
 				}
-				resident := 0.0
-				gb, foreign, err := w.attemptDeviceMemoryReading(ctx, ids, fs, &resident, known)
-				// Known co-tenants also make a whole-host delta ambiguous.
-				shared = shared || foreign || len(known) > 0
-				source, exclusive := "", false
+
+				var pinned float64
+				var host *float64
+				if w.Machine.GPU == "xpu" && !w.Machine.UnifiedMemory {
+					host = &pinned
+				}
+				gb, _, err := w.attemptDeviceMemoryReading(ctx, ids, fs, host, known)
 				if errors.Is(err, errDeviceMemoryNotReported) {
-					sampling.incomplete = true // Reconciliation is not a driver counter.
 					unreported = true
 					report(&AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNotReported})
-					if !unifiedCUDA(&w.Machine) || a == nil {
-						continue
-					}
-					gb, exclusive, err = a.unifiedDeviceMemory(ids, foreign)
-					incompleteFallback = incompleteFallback || exclusive || err != nil
-					source = deviceUnifiedResidentSource
-					if err != nil {
-						a.device.Store(&hostMemorySample{at: clock.Now(), exclusive: true, source: source})
-						peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceUnavailable: deviceUnifiedUncertain})
-						continue
-					}
+					continue
 				}
 				if err != nil {
 					sampling.incomplete = true
@@ -1055,16 +665,16 @@ func (w Worker) observeDeviceMemoryWith(ctx context.Context, inventory func() (m
 					report(&AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNoSample})
 					continue
 				}
-				if !exclusive && source != deviceUnifiedResidentSource {
-					report(&AttemptMemoryPeak{DeviceGB: &gb, DeviceSource: source})
-				}
+
+				report(&AttemptMemoryPeak{DeviceGB: &gb})
 				now := clock.Now()
 				sampling.observe(now, gb, period)
 				margin := growth.observe(now, gb)
-				peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceGB: &gb, DeviceGrowthGB: &margin, DeviceSource: source})
+				peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceGB: &gb, DeviceGrowthGB: &margin})
 				if a != nil {
-					a.device.Store(&hostMemorySample{gb: gb, residentGB: resident, at: clock.Now(), growthGB: margin, source: source, exclusive: exclusive, rateGB: growth.rate})
+					a.device.Store(&hostMemorySample{gb: gb, pinnedGB: pinned, at: now})
 				}
+
 			}
 		}
 	}()
@@ -1104,12 +714,13 @@ func queryCUDAAttemptMemory(ctx context.Context) ([]byte, error) {
 	cmd.WaitDelay = attemptMemorySamplePeriod
 	return cmd.Output()
 }
-func xpuAttemptDeviceMemory(w Worker, _ context.Context, ids map[int]bool, fs memoryFS, _ *float64, _ ...map[int]bool) (float64, bool, error) {
+func xpuAttemptDeviceMemory(w Worker, _ context.Context, ids map[int]bool, fs memoryFS, host *float64, _ ...map[int]bool) (float64, bool, error) {
 	if w.selectedDevice == nil || w.selectedDevice.pciAddress == "" {
 		return 0, false, errAttemptMemoryUnsupported
 	}
 
 	clients := map[string]float64{}
+	system := map[string]float64{}
 	for pid := range ids {
 		entries, err := fs.ReadDir(filepath.Join("/proc", strconv.Itoa(pid), "fdinfo"))
 		if err != nil {
@@ -1120,12 +731,15 @@ func xpuAttemptDeviceMemory(w Worker, _ context.Context, ids map[int]bool, fs me
 			if err != nil {
 				continue
 			}
-			key, gb, err := drmAttemptMemory(b, w.selectedDevice.pciAddress)
+			key, gb, pinned, err := drmAttemptMemory(b, w.selectedDevice.pciAddress)
 			if errors.Is(err, errAttemptMemoryUnsupported) {
 				return 0, false, err
 			}
 			if err == nil {
 				clients[key] = max(clients[key], gb)
+				if host != nil {
+					system[key] = max(system[key], pinned)
+				}
 			}
 		}
 	}
@@ -1133,8 +747,14 @@ func xpuAttemptDeviceMemory(w Worker, _ context.Context, ids map[int]bool, fs me
 	for _, gb := range clients {
 		total += gb
 	}
+	for _, gb := range system {
+		*host += gb
+	}
 	if len(clients) == 0 {
 		return 0, false, errAttemptMemoryPending
 	}
 	return total, false, nil
 }
+
+const deviceUnifiedResidentSource = "unified RSS/cgroup upper estimate with host reconciliation"
+const deviceUnifiedUncertain = "unified device attribution uncertain; exclusive execution required"

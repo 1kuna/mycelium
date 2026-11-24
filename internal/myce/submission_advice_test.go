@@ -254,7 +254,6 @@ func TestSubmissionAdvicePreservesFields(t *testing.T) {
 	// index once, as a status projection does, instead of rebuilding all 1,400
 	// curves for each hypothetical backfill candidate. Keep the reference's
 	// planning decisions independent of the submission view and its caches.
-	q.memoryObservationIndex = q.memoryObservationCatalog()
 	// One reference pass owns its own planning cache and scan, just as the
 	// detached status projection does. Neither is shared with snapshot's view.
 	// The fixture, clock, observations and occupancy stay fixed for all cases.

@@ -58,6 +58,7 @@ while :; do sleep .01; done
 			// sampler. Supply the RAM telemetry required by the extension's needs.
 			w.Machine.HostMemoryMeasured, w.Machine.HostAvailableMemoryGB = true, 32
 			w.HostMemorySource = func(context.Context) (float64, error) { return 32, nil }
+			w.MemorySource = func(context.Context) (float64, error) { return 8, nil }
 			w.ephemeralProbe = func() error { return nil }
 			w.Machine.Capabilities = append(w.Machine.Capabilities, ephemeralCapability, nativeCICapability, "native_isolation_namespace", "native_sidecars")
 			w.environmentCache.Clock = w.Clock

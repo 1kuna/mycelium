@@ -405,7 +405,7 @@ func (q *Queue) nativeCheckProgress(e Extension, work string, m *Machine, resolv
 			copy := *j
 			if h := q.waitHold(&copy); h != nil {
 				detail := compactLine(h.Detail)
-				if h.Kind == memoryEvidenceRecovering || h.Kind == "host_memory_headroom" || h.Kind == "memory" {
+				if h.Kind == memoryWaitReason || h.Kind == "host_memory_headroom" || h.Kind == "memory" {
 					// A check is bound to one target. Keep the measured
 					// operands, which usually come last in the explanation.
 					detail = strings.Join(strings.Fields(h.Detail), " ")

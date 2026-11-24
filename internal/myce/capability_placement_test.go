@@ -1,8 +1,6 @@
 package myce
 
 import (
-	"errors"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -29,152 +27,6 @@ func placementMachine(id, layout string, ram, accelerator float64, e Extension) 
 		}
 	}
 	return m
-}
-
-func TestCapabilityLearnedNeedsPersistAndScope(t *testing.T) {
-	clock := &fakeClock{now: time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)}
-	db, checkpoints := filepath.Join(t.TempDir(), "q.db"), t.TempDir()
-	q, err := Open(db, checkpoints, clock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { q.Close() }()
-	e := fakeExtension(t)
-	if err := q.AddExtension(e); err != nil {
-		t.Fatal(err)
-	}
-	m := placementMachine("big", "unified", 128, 128, e)
-	check(t, q, m, nil)
-	s := placementSpec(true)
-	j := submit(t, q, s)
-	clock.Advance(time.Millisecond)
-	queued := submit(t, q, s)
-	run := check(t, q, m, nil).Job
-	if run == nil || run.ID != j.ID {
-		t.Fatal("missing first assignment")
-	}
-	r := result(run, true)
-	r.Usage = &SizeHint{MemoryGB: 40, HostMemoryGB: 4}
-	// Accepted learning requires a started, pressure-qualified attempt.
-	if err := q.Started(result(run, false)); err != nil {
-		t.Fatal(err)
-	}
-	host := r.Usage.HostMemoryGB
-	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
-	stale := r
-	stale.Attempt++
-	if err := q.Complete(stale); !errors.Is(err, ErrStale) {
-		t.Fatal("accepted stale measurements", err)
-	}
-	if len(q.s.ProgramNeeds) != 0 {
-		t.Fatal("stale result taught memory needs")
-	}
-	clock.Advance(time.Second)
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	if job(t, q, queued.ID).Spec.Needs.MemoryGB != 40 {
-		t.Fatal("already queued program did not learn")
-	}
-	if err := q.Close(); err != nil {
-		t.Fatal(err)
-	}
-	q, err = Open(db, checkpoints, clock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	learned := submit(t, q, s)
-	if learned.Spec.Needs.MemoryGB != 40 || learned.Spec.Needs.HostMemoryGB != 4 {
-		t.Fatal("measurements did not survive restart", learned.Spec.Needs)
-	}
-	small := placementMachine("small", "separate", 64, 24, e)
-	if check(t, q, small, nil).Job != nil {
-		t.Fatal("learned accelerator needs admitted to 24 GiB")
-	}
-	for _, changed := range []func(*Spec){
-		func(s *Spec) { s.Project = "another" },
-		func(s *Spec) { s.Program.Args = []string{"changed"} },
-		func(s *Spec) { s.Inputs = map[string]string{"script": "immutable/script-v2"} },
-		func(s *Spec) { s.Run.Env = map[string]string{"MODEL": "new"} },
-	} {
-		copy := cloneJob(&Job{Spec: s}).Spec
-		changed(&copy)
-		if submit(t, q, copy).Spec.Needs.MemoryGB != e.MemoryGB {
-			t.Fatal("learning crossed program identity")
-		}
-	}
-}
-
-func TestCapabilityOOMRetriesOnceOnStrictlyBiggerHypha(t *testing.T) {
-	q, clock := fixture(t)
-	e := fakeExtension(t)
-	if err := q.AddExtension(e); err != nil {
-		t.Fatal(err)
-	}
-	small := placementMachine("small", "separate", 64, 24, e)
-	check(t, q, small, nil)
-	// With no known larger host the larger-hypha wait is a dead end: fail at
-	// once with the action instead of waiting for hardware that does not exist.
-	stranded := submit(t, q, placementSpec(false))
-	r := result(check(t, q, small, nil).Job, false)
-	r.OutOfMemory = true
-	clock.Advance(time.Second)
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	if got := job(t, q, stranded.ID); got.State != "failed" || !strings.HasPrefix(got.Reason, "dead end: out of memory") || !strings.Contains(got.Reason, "action: ") {
-		t.Fatal("OOM on the largest known host kept waiting", got.State, got.Reason)
-	}
-	// A known but not yet qualified larger host keeps the wait open.
-	unqualified := placementMachine("big", "unified", 128, 128, e)
-	unqualified.ExtensionReports = nil
-	check(t, q, unqualified, nil)
-	j := submit(t, q, placementSpec(true))
-	run := check(t, q, small, nil).Job
-	r = result(run, false)
-	r.OutOfMemory = true
-	clock.Advance(time.Second)
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	if got := job(t, q, j.ID); got.State != "queued" || got.OOMRetries != 1 || got.Losses != 0 {
-		t.Fatal(got)
-	}
-	if len(q.s.ProgramNeeds) != 0 {
-		t.Fatal("OOM became learned successful needs")
-	}
-	if err := q.Complete(r); !errors.Is(err, ErrStale) {
-		t.Fatal("duplicate OOM was not stale", err)
-	}
-	if check(t, q, small, nil).Job != nil {
-		t.Fatal("OOM retry on same hypha")
-	}
-	equal := placementMachine("equal", "separate", 64, 24, e)
-	if check(t, q, equal, nil).Job != nil {
-		t.Fatal("OOM retry on equal capacity")
-	}
-	tradeoff := placementMachine("tradeoff", "separate", 32, 48, e)
-	if check(t, q, tradeoff, nil).Job != nil {
-		t.Fatal("OOM retry on smaller system pool")
-	}
-	big := placementMachine("big", "unified", 128, 128, e)
-	big.ExtensionReports = nil
-	if check(t, q, big, nil).Job != nil {
-		t.Fatal("OOM retry without qualification")
-	}
-	big = placementMachine("big", "unified", 128, 128, e)
-	retry := check(t, q, big, nil).Job
-	if retry == nil || retry.ID != j.ID || retry.Attempt != 2 {
-		t.Fatal("bigger qualified hypha did not retry", retry)
-	}
-	r = result(retry, false)
-	r.OutOfMemory = true
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	if got := job(t, q, j.ID); got.State != "failed" || got.OOMRetries != 1 || got.Losses != 0 {
-		t.Fatal("second OOM was retried", got)
-	}
 }
 
 func placementSpec(program bool) Spec {
@@ -280,45 +132,6 @@ func TestCapabilityFirstProductionProgramUsesLeastValueFreeWithHold(t *testing.T
 	}
 	if r := check(t, q, small, nil); r.Job == nil || r.Job.ID != j.ID || r.Job.Spec.StartBy == nil {
 		t.Fatal("production gate or capability placement lost", r.Job)
-	}
-}
-
-func TestCapabilityLearnedProgramUsesSmallerFreeHypha(t *testing.T) {
-	q, clock := fixture(t)
-	e := fakeExtension(t)
-	if err := q.AddExtension(e); err != nil {
-		t.Fatal(err)
-	}
-	small := placementMachine("small", "separate", 64, 24, e)
-	big := placementMachine("big", "unified", 128, 128, e)
-	check(t, q, small, nil)
-	check(t, q, big, nil)
-	s := placementSpec(true)
-	first := s
-	first.AllowedMachines = []string{big.ID}
-	submit(t, q, first)
-	run := check(t, q, big, nil).Job
-	if run == nil {
-		t.Fatal("restricted first measurement not assigned")
-	}
-	r := result(run, true)
-	r.Usage = &SizeHint{MemoryGB: 2, HostMemoryGB: 40}
-	// Accepted learning requires a started, pressure-qualified attempt.
-	if err := q.Started(result(run, false)); err != nil {
-		t.Fatal(err)
-	}
-	host := r.Usage.HostMemoryGB
-	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(time.Second)
-	next := submit(t, q, s)
-	if next.Spec.Needs.MemoryGB != 2 || next.Spec.Needs.HostMemoryGB != 40 {
-		t.Fatal("RAM-heavy needs not learned")
-	}
-	if got := check(t, q, small, nil).Job; got == nil || got.ID != next.ID {
-		t.Fatal("learned RAM-heavy program waited for largest hypha")
 	}
 }
 

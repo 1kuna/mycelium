@@ -187,6 +187,7 @@ type Spec struct {
 	Program          *Program               `json:"program,omitempty" yaml:"program,omitempty"`
 	Args             []string               `json:"args,omitempty" yaml:"args,omitempty"`
 	SizeHint         SizeHint               `json:"size_hint,omitempty" yaml:"size_hint,omitempty"`
+	MemoryLimitGB    *float64               `json:"memory_limit_gb,omitempty" yaml:"memory_limit_gb,omitempty"`
 	Inputs           map[string]string      `json:"inputs,omitempty" yaml:"inputs,omitempty"`
 	Outputs          map[string]string      `json:"outputs,omitempty" yaml:"outputs,omitempty"`
 	Name             string                 `json:"name" yaml:"name"`
@@ -231,6 +232,11 @@ func (s Spec) Validate() error {
 	if s.Advanced != nil {
 		if _, err := s.FoldAdvanced(); err != nil {
 			return err
+		}
+	}
+	if s.MemoryLimitGB != nil {
+		if limit, err := memoryBytes(*s.MemoryLimitGB); err != nil || limit <= 0 {
+			return errors.New("advanced.memory_limit_gb must specify a positive memory limit representable in bytes")
 		}
 	}
 	if err := validateWorkerData(s); err != nil {
@@ -358,7 +364,7 @@ func (s Spec) Validate() error {
 	if s.Kind == "" && !s.ephemeral() && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && len(s.Files) == 0 && !sharedReaders(s) && s.After == nil && s.OutputDelivery == "" && s.StorageProtocol == "") || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
 		return reject("job_program_invalid", errors.New("inputs, outputs, args and size_hint require a kind/program job"))
 	}
-	// A missing figure is the queue's call (learned_memory policy), not a
+	// A missing figure is estimated by the queue, not a
 	// static error: the CLI cannot see that local policy (#585).
 	if !validMemoryValue(s.Needs.MemoryGB) {
 		return reject("job_memory_invalid", errors.New(declareMemory))
@@ -420,6 +426,7 @@ func legacyRank(p string) int {
 }
 
 type Copy struct {
+	Memory           *MemoryPools        `json:"memory,omitempty"`
 	Liveness         *AttemptLiveness    `json:"liveness,omitempty"`
 	StartedAt        *time.Time          `json:"started_at,omitempty"`
 	StoppedAt        *time.Time          `json:"stopped_at,omitempty"`
@@ -586,6 +593,7 @@ type Job struct {
 	FileReclamation           *FileReclamation             `json:"file_reclamation,omitempty"`
 	OutputRefs                FileManifest                 `json:"output_refs,omitempty"`
 	MemoryEnvelope            *JobMemoryEnvelope           `json:"memory_envelope,omitempty"`
+	Memory                    *MemoryPools                 `json:"memory,omitempty"`
 	LastMemoryAdmission       *MemoryAdmissionSnapshot     `json:"last_memory_admission,omitempty"`
 	MemoryAttempts            []AttemptMemoryFacts         `json:"memory_attempts,omitempty"`
 	MemoryAttemptsDropped     int                          `json:"memory_attempts_dropped,omitempty"`

@@ -101,10 +101,19 @@ func TestPlacementPlanLostAttemptRetainsResourceClass(t *testing.T) {
 		if attempt == nil || attempt.ID != cpu.ID {
 			t.Fatal("missing CPU assignment", attempt)
 		}
-		clock.Advance(LossAfter)
-		check(t, q, observer(), nil)
+		if err := q.Started(result(attempt, false)); err != nil {
+			t.Fatal(err)
+		}
+		if err := q.update(func() error {
+			lost := q.touchJob(cpu.ID)
+			q.retainRelease(lost)
+			q.retry(lost, "machine quiet")
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
 		if got := job(t, q, cpu.ID); got.State != "queued" || got.Machine != "" || got.Session != "" {
-			t.Fatal("CPU loss did not clear current custody", got)
+			t.Fatal("CPU loss did not clear current custody", got.State, got.Reason)
 		}
 		q = reopenCancellationQueue(t, q, clock)
 		s := spec("production")

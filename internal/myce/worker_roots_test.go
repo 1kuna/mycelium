@@ -12,6 +12,17 @@ import (
 	"time"
 )
 
+// The root tests vary storage readiness while both memory pools have room.
+func localRootAdmission(w Worker, job Job) error {
+	if w.HostMemorySource == nil {
+		w.HostMemorySource = func(context.Context) (float64, error) { return 16, nil }
+	}
+	if !job.Spec.Needs.cpuOnly() && len(w.Machine.Devices) == 0 {
+		w.Machine.Devices = []MachineDevice{{ID: firstDevice(job, w.Machine), Platform: w.Machine.GPU, MemoryMode: "fixed", BudgetGB: 8}}
+	}
+	return localAttemptAdmission(w, nil, job, nil)
+}
+
 func TestWorkerRootsMissingMountAndRecovery(t *testing.T) {
 	nas := t.TempDir() // The mountpoint survives, so existence/statfs is not proof.
 	mounted := false
@@ -154,7 +165,7 @@ func TestWorkerRootsDependencyChecks(t *testing.T) {
 			if q.storageRootReason(&j, &m) == "" {
 				t.Fatal("NAS dependency bypassed admission")
 			}
-			if err := localAttemptAdmission(Worker{Machine: m}, nil, j, nil); err == nil {
+			if err := localRootAdmission(Worker{Machine: m}, j); err == nil {
 				t.Fatal("local launch admitted missing root")
 			}
 			if tc.root == "checkpoint" {
@@ -172,7 +183,7 @@ func TestWorkerRootsDependencyChecks(t *testing.T) {
 			if reason := q.storageRootReason(&j, &m); reason != "" {
 				t.Fatal("recovered dependency still blocked", reason)
 			}
-			if err := localAttemptAdmission(Worker{Machine: m}, nil, j, nil); err != nil {
+			if err := localRootAdmission(Worker{Machine: m}, j); err != nil {
 				t.Fatal("recovered dependency refused locally", err)
 			}
 		})
@@ -191,7 +202,7 @@ func TestWorkerRootsMissingExtensionAllowsPlainCommand(t *testing.T) {
 		t.Fatal("plain command blocked by unrelated extension storage")
 	}
 	w := Worker{Machine: m, HostMemorySource: func(context.Context) (float64, error) { return 16, nil }}
-	if err := localAttemptAdmission(w, nil, *assigned, nil); err != nil {
+	if err := localRootAdmission(w, *assigned); err != nil {
 		t.Fatal("plain command refused locally", err)
 	}
 }
@@ -244,14 +255,14 @@ func TestWorkerRootsCachedModelKeepsSnapshotSource(t *testing.T) {
 	if reason := q.storageRootReason(&j, &m); reason != "" {
 		t.Fatal("cached engine model blocked", reason)
 	}
-	if err := localAttemptAdmission(w, nil, j, nil); err != nil {
+	if err := localRootAdmission(w, j); err != nil {
 		t.Fatal("cached engine model refused locally", err)
 	}
 	j.Spec.ModelSnapshots = map[string]ModelSnapshot{"base": {Repo: "org/model", Revision: strings.Repeat("a", 40)}}
 	if reason := q.storageRootReason(&j, &m); !strings.Contains(reason, "model unavailable") {
 		t.Fatal("cached engine model hid snapshot source dependency", reason)
 	}
-	if err := localAttemptAdmission(w, nil, j, nil); err == nil || !strings.Contains(err.Error(), "model unavailable") {
+	if err := localRootAdmission(w, j); err == nil || !strings.Contains(err.Error(), "model unavailable") {
 		t.Fatal("snapshot admitted locally without source", err)
 	}
 	m.UnavailableRoots = nil
@@ -259,7 +270,7 @@ func TestWorkerRootsCachedModelKeepsSnapshotSource(t *testing.T) {
 	if reason := q.storageRootReason(&j, &m); reason != "" {
 		t.Fatal("snapshot source recovery ignored", reason)
 	}
-	if err := localAttemptAdmission(w, nil, j, nil); err != nil {
+	if err := localRootAdmission(w, j); err != nil {
 		t.Fatal("recovered snapshot refused locally", err)
 	}
 }
@@ -312,7 +323,7 @@ func TestWorkerRootsDiscoveredCachesReachActorAndModelLaunch(t *testing.T) {
 	next := Job{Spec: cpuSpec(1, 1)}
 	next.Spec.Priority = "production"
 	next.Spec.SharedInputs = map[string]SharedInput{"input": input}
-	if err := localAttemptAdmission(actor, nil, next, nil); err != nil {
+	if err := localRootAdmission(actor, next); err != nil {
 		t.Fatal("stale actor rejected discovered input", err)
 	}
 	rt := &modelRuntime{models: map[string]*workerModel{}, worker: &engineWorker, session: m.Session, machine: m.ID, platform: "fake", cache: cache, environmentCache: envCache, config: ModelConfig{Wait: time.Second, Models: []Model{model}}, memoryMachine: m, memorySource: func(context.Context) (float64, error) { return 8, nil }, engineFactory: func(Model) Engine { return &FakeEngine{} }, authorize: func(context.Context, HostLaunch) error { return nil }}
@@ -387,16 +398,16 @@ func TestWorkerRootsBatchModelUsesAssignedEnvironmentKey(t *testing.T) {
 		t.Fatal("assignment lost frozen model environment key")
 	}
 	w := Worker{Machine: m, ModelConfig: config}
-	if err := localAttemptAdmission(w, nil, *assignment, nil); err != nil {
+	if err := localRootAdmission(w, *assignment); err != nil {
 		t.Fatal("worker rejected queue-selected prepared model environment", err)
 	}
 	w.Machine.Environments = nil
-	if err := localAttemptAdmission(w, nil, *assignment, nil); err == nil {
+	if err := localRootAdmission(w, *assignment); err == nil {
 		t.Fatal("cold model environment accepted without source")
 	}
 	w.Machine.Environments = []string{recipe.Key}
 	w.Machine.UnavailableRoots = []UnavailableRoot{{Root: "environment", Reason: "configured NAS mount missing"}}
-	if err := localAttemptAdmission(w, nil, *assignment, nil); err == nil {
+	if err := localRootAdmission(w, *assignment); err == nil {
 		t.Fatal("missing environment cache admitted")
 	}
 }
@@ -436,7 +447,7 @@ func TestWorkerRootsFrozenLockNeedsNoSource(t *testing.T) {
 	if reason := q.storageRootReason(j, &m); reason != "" {
 		t.Fatal("frozen lock environment blocked by unused source", reason)
 	}
-	if err := localAttemptAdmission(w, nil, *j, nil); err != nil {
+	if err := localRootAdmission(w, *j); err != nil {
 		t.Fatal("frozen lock environment refused locally", err)
 	}
 	if reply := check(t, q, m, nil); len(reply.EnvironmentPlan) != 1 || reply.EnvironmentPlan[0].Key != recipe.Key {
@@ -490,7 +501,7 @@ func TestWorkerRootsSidecarOnlyEnvironment(t *testing.T) {
 		if reason := q.storageRootReason(&j, &m); !strings.Contains(reason, root+" unavailable") {
 			t.Errorf("queue ignored helper %s dependency: %s", root, reason)
 		}
-		if err := localAttemptAdmission(w, nil, j, nil); err == nil || !strings.Contains(err.Error(), root+" unavailable") {
+		if err := localRootAdmission(w, j); err == nil || !strings.Contains(err.Error(), root+" unavailable") {
 			t.Errorf("worker ignored helper %s dependency: %v", root, err)
 		}
 		m.Environments = []string{recipe.Key}
@@ -498,7 +509,7 @@ func TestWorkerRootsSidecarOnlyEnvironment(t *testing.T) {
 		if reason := q.storageRootReason(&j, &m); (reason == "") != (root == "environment-source") {
 			t.Errorf("prepared helper %s dependency: %s", root, reason)
 		}
-		if err := localAttemptAdmission(w, nil, j, nil); (err == nil) != (root == "environment-source") {
+		if err := localRootAdmission(w, j); (err == nil) != (root == "environment-source") {
 			t.Errorf("prepared helper worker %s dependency: %v", root, err)
 		}
 		m.Environments = nil
@@ -508,7 +519,7 @@ func TestWorkerRootsSidecarOnlyEnvironment(t *testing.T) {
 	if reason := q.storageRootReason(&j, &m); reason != "" {
 		t.Fatal("helper roots recovery ignored", reason)
 	}
-	if err := localAttemptAdmission(w, nil, j, nil); err != nil {
+	if err := localRootAdmission(w, j); err != nil {
 		t.Fatal("recovered helper refused locally", err)
 	}
 }
@@ -527,7 +538,7 @@ func TestWorkerRootsQueueBackedOutputs(t *testing.T) {
 		t.Fatal("queue-backed outputs blocked by unused worker root")
 	}
 	w := Worker{Machine: m, HostMemorySource: func(context.Context) (float64, error) { return 16, nil }}
-	if err := localAttemptAdmission(w, nil, *assigned, nil); err != nil {
+	if err := localRootAdmission(w, *assigned); err != nil {
 		t.Fatal("queue-backed outputs refused locally", err)
 	}
 	if err := w.publishExtensionFiles(*assigned, ""); err != nil {
@@ -542,7 +553,7 @@ func TestWorkerRootsQueueBackedOutputs(t *testing.T) {
 		if reason := q.storageRootReason(dependent, &m); !strings.Contains(reason, "job-files unavailable") {
 			t.Fatal("NAS-dependent transport bypassed queue fence", reason)
 		}
-		if err := localAttemptAdmission(w, nil, *dependent, nil); err == nil || !strings.Contains(err.Error(), "job-files unavailable") {
+		if err := localRootAdmission(w, *dependent); err == nil || !strings.Contains(err.Error(), "job-files unavailable") {
 			t.Fatal("NAS-dependent transport bypassed worker fence", err)
 		}
 		healthy := m
@@ -552,7 +563,7 @@ func TestWorkerRootsQueueBackedOutputs(t *testing.T) {
 		}
 		healthyWorker := w
 		healthyWorker.Machine = healthy
-		if err := localAttemptAdmission(healthyWorker, nil, *dependent, nil); err != nil {
+		if err := localRootAdmission(healthyWorker, *dependent); err != nil {
 			t.Fatal("worker root recovery refused locally", err)
 		}
 	}

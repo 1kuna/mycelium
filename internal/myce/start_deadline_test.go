@@ -44,7 +44,8 @@ func TestProductionStartDeadlineQualifiedRouteDiagnostic(t *testing.T) {
 		t.Fatal(err)
 	}
 	failed := job(t, q, j.ID)
-	if failed.State != "failed" || failed.Attempt != 0 || !strings.Contains(failed.Reason, "waiting for RAM envelope: "+m.ID) || strings.Contains(failed.Reason, decoy.ID) {
+	want := m.ID + ": RAM needs 0.100 GiB, available 0.050 GiB"
+	if failed.State != "failed" || failed.Attempt != 0 || !strings.Contains(failed.Reason, want) || strings.Contains(failed.Reason, decoy.ID) {
 		t.Errorf("wrong startup diagnostic: %+v", failed)
 	}
 	if got := statusJobValue(failed); got.Reason != "production start deadline exceeded" {
@@ -53,7 +54,7 @@ func TestProductionStartDeadlineQualifiedRouteDiagnostic(t *testing.T) {
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	if got := logs.String(); strings.Count(got, "event=production_start_failed") != 1 || !strings.Contains(got, "job="+j.ID) || !strings.Contains(got, "attempt=0") || !strings.Contains(got, "waiting for RAM envelope: "+m.ID) || strings.Contains(got, decoy.ID) {
+	if got := logs.String(); strings.Count(got, "event=production_start_failed") != 1 || !strings.Contains(got, "job="+j.ID) || !strings.Contains(got, "attempt=0") || !strings.Contains(got, want) || strings.Contains(got, decoy.ID) {
 		t.Errorf("missing or repeated deadline evidence: %s", got)
 	}
 }
@@ -273,6 +274,8 @@ func TestProductionStartDeadlineWorkerPreparationCannotLaunchLate(t *testing.T) 
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
 	w := Worker{StateDir: newTestStateRoot(t), Machine: machine("b70", "xpu"), Clock: c, Client: Client{URL: server.URL, Token: "test"}, checkpointPrepare: func(Job) (string, error) { c.Advance(ProductionStartTimeout); return prepared, nil }}
+	w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
+	w.MemorySource = func(context.Context) (float64, error) { return 8, nil }
 	store, err := w.openStore()
 	if err != nil {
 		t.Fatal(err)
@@ -718,6 +721,8 @@ func TestProductionStartDeadlineExecErrorPreservesUnknownRelease(t *testing.T) {
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
 	w := Worker{StateDir: newTestStateRoot(t), Machine: machine("b70", "xpu"), Clock: c, Client: Client{URL: server.URL, Token: "test"}}
+	w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
+	w.MemorySource = func(context.Context) (float64, error) { return 8, nil }
 	store, err := w.openStore()
 	if err != nil {
 		t.Fatal(err)

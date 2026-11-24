@@ -17,6 +17,15 @@ SUPPLEMENTAL_CONSUMERS = {
                    'memory_observation_identity', 'queue')
 }
 
+# The pool replay suite exercises the shared placement, admission and memory
+# sample plumbing by way of real queue and worker entry points.
+for _source in ('memory_planning', 'memory_pools', 'memory_room', 'memory_pressure',
+                'shared_gpu_pressure', 'launch_capacity', 'host_backfill'):
+    SUPPLEMENTAL_CONSUMERS[f'internal/myce/{_source}.go'] = (
+        'memory_pools_test.go', 'memory_pressure_test.go')
+
+SUPPLEMENTAL_CONSUMERS['internal/myce/memory_learning.go'] = ('storage_envelope_test.go',)
+
 # Compatibility guidance is exercised through the existing shared hold fixtures.
 SUPPLEMENTAL_CONSUMERS['internal/myce/compatibility_hold.go'] = ('job_hold_test.go',)
 

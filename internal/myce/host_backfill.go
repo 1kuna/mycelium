@@ -13,18 +13,12 @@ type hostBackfillDemand struct {
 	job     *Job
 	machine *Machine
 	order   *candidateSet
+	pooled  bool
 	// drain marks a maintenance resume's fence; start is when it is expected
 	// to fit anyway, or nil when unknown.
 	drain bool
 	start *time.Time
-	// Device demand can be next after a finite GPU execution. CPU backfill
-	// and lower-tier GPU work observe production's fence;
-	// the projection grants no accelerator admission.
-	devicePending bool
-	// Host room returned by the sole running device holder, with unrelated
-	// attempts still charged. Used only to fence same-tier CPU backfill.
-	deviceReleaseRoom *Machine
-	// A deferred startup probe has first use of non-production backfill.
+	// A fleet startup probe has first use of non-production backfill.
 	// When production owns the main fence, its vector is protected first.
 	fleetProbe bool
 	probeReady bool
@@ -69,49 +63,6 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 		return scan.hostBackfill
 	}
 	live := q.placementLiveness(scan)
-	projections := map[string]*Machine{}
-	deviceProjections := map[string]*Machine{}
-	deviceReleaseRooms := map[string]*Machine{}
-	checkProjections := map[string]*Machine{}
-	for _, m := range scan.machines {
-		if !live[m.ID] || q.preparationActive(m) || q.preparationStopping(m) || m.HostMemoryError != "" || hostHasUnifiedCUDA(m) && !validHostMemoryObservation(m.MemoryObservation) {
-			continue
-		}
-		jobs := []*Job{}
-		for _, running := range q.liveJobs() {
-			owner := q.s.Machines[running.Machine]
-			if owner != nil && !owner.Gone && hostID(owner) == hostID(m) && backfillFiniteExecution(running) && batchReservesCapacity(running) {
-				jobs = append(jobs, running)
-			}
-		}
-		projected := q.afterReleases(m, jobs, nil)
-		capacity := q.qualificationCapacity(m)
-		projected.FreeHostMemoryGB = min(capacity.FreeHostMemoryGB, projected.FreeHostMemoryGB)
-		projections[targetKey(m)] = &projected
-		if m.GPU != "cpu" {
-			deviceJobs := []*Job{}
-			for _, running := range q.liveJobs() {
-				if !running.Spec.Needs.cpuOnly() && backfillFiniteExecution(running) && batchReservesCapacity(running) && batchOnTarget(running, m) {
-					deviceJobs = append(deviceJobs, running)
-				}
-			}
-			if len(deviceJobs) > 0 {
-				future := projected // jobs already includes these device holders.
-				for _, running := range deviceJobs {
-					future.FreeMemoryGB += deviceShareGB(running)
-				}
-				future.FreeMemoryGB = min(m.TotalMemoryGB, future.FreeMemoryGB)
-				deviceProjections[targetKey(m)] = &future
-				// With shared device custody, a successor may fit before all
-				// holders release. Only lend the sole holder's host capacity.
-				if len(deviceJobs) == 1 && deviceJobs[0].StartedAt != nil {
-					room := q.afterReleases(m, deviceJobs, nil)
-					room.FreeHostMemoryGB = min(capacity.FreeHostMemoryGB, room.FreeHostMemoryGB)
-					deviceReleaseRooms[targetKey(m)] = &room
-				}
-			}
-		}
-	}
 	choices := []*hostBackfillDemand{}
 	probes := map[string]*hostBackfillDemand{}
 	orders := map[string]*candidateSet{}
@@ -127,55 +78,35 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 		var best *hostBackfillDemand
 		drain := maintenanceResume(j) && j.Spec.FanOut == nil
 		start := q.fleetStartReservation(j)
+
+		if !drain && start == nil && (q.s.FleetUpgrade == nil || q.s.FleetUpgrade.State != "running" || jobClass(j.Spec) != "production") {
+			continue
+		}
 		for _, m := range scan.machines {
-			projected := projections[targetKey(m)]
-			if projected == nil || start != nil && !q.fleetStartReserves(start, m) || !q.placementAllowed(j, m) || !q.preemptionPlacementAllows(j, m) || q.preemptionReleasesPending(j) || !q.checkpointReady(j, m) || q.environmentFailureBlocked(j, m) {
+			if !live[m.ID] || q.preparationActive(m) || q.preparationStopping(m) ||
+				start != nil && !q.fleetStartReserves(start, m) || !q.placementAllowed(j, m) ||
+				!q.preemptionPlacementAllows(j, m) || q.preemptionReleasesPending(j) ||
+				!q.checkpointReady(j, m) || q.environmentFailureBlocked(j, m) {
 				continue
 			}
-			device := m.FreeMemoryGB
-			devicePending := false
-			if !j.Spec.Needs.cpuOnly() && !drain && deviceProjections[targetKey(m)] != nil {
-				projected = deviceProjections[targetKey(m)]
-				device, devicePending = projected.FreeMemoryGB, true
+			key := targetKey(m)
+			if drains[key] == nil {
+				room := q.drainProjection(m, q.drainingAttempts(m))
+				drains[key] = &room
 			}
-			if drain {
-				// The whole host drains toward a maintenance resume.
-				if drains[targetKey(m)] == nil {
-					p := q.drainProjection(m, q.drainingAttempts(m))
-					drains[targetKey(m)] = &p
-				}
-				projected, device = drains[targetKey(m)], drains[targetKey(m)].FreeMemoryGB
-			}
+			projected := drains[key]
 			for _, candidate := range q.backfillCandidates(j, m, projected, resourceRoom(projected)) {
-				if !environmentReady(candidate, m) || q.capReasonFor(candidate, m) != "" || !fits(candidate, projected, device) {
+				if !environmentReady(candidate, m) || q.capReasonFor(candidate, m) != "" || !fits(candidate, projected, projected.FreeMemoryGB) {
 					continue
 				}
-				slotFree := q.batchSlotFree(m, candidate)
-				if !drain && !devicePending && !slotFree {
-					continue
-				}
-				key := targetKey(m)
 				ready := fits(candidate, m, m.FreeMemoryGB)
-				if candidate.Spec.ExtensionCheck != nil && (!ready || !slotFree) {
-					forecast, known := checkProjections[key]
-					if !known {
-						forecast = q.forecastCheckCapacity(m)
-						checkProjections[key] = forecast
-					}
-					if forecast == nil || !fits(candidate, forecast, forecast.FreeMemoryGB) {
-						continue
-					}
-				}
 				if orders[key] == nil {
 					orders[key] = &candidateSet{q: q, scores: map[string]float64{}, actives: map[string]float64{}}
 				}
 				orders[key].jobs = append(orders[key].jobs, candidate)
 				bestReady := best != nil && fits(best.job, best.machine, best.machine.FreeMemoryGB)
 				if best == nil || ready && !bestReady || ready == bestReady && q.targetPlacementBetter(candidate, m, best.machine, scan) {
-					best = &hostBackfillDemand{job: candidate, machine: m, drain: drain, devicePending: devicePending}
-					if devicePending && (!slotFree || candidate.Spec.Needs.MemoryGB > m.FreeMemoryGB) {
-						best.deviceReleaseRoom = deviceReleaseRooms[key]
-					}
+					best = &hostBackfillDemand{job: candidate, machine: m, drain: drain}
 				}
 			}
 		}
@@ -205,6 +136,8 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 				continue
 			}
 			choice.startProbe = probe
+		} else if !choice.drain {
+			continue // Ordinary production reservations use the pooled rule below.
 		}
 		previous := scan.hostBackfill[host]
 		if previous == nil || q.hostBackfillBefore(choice.job, previous.job, choice.machine, set) {
@@ -216,43 +149,8 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 			scan.hostBackfill[host] = probe
 		}
 	}
+	q.addPoolBackfillHeads(scan, demands, live)
 	return scan.hostBackfill
-}
-
-// A native check can protect its resolved demand while capacity accumulates
-// toward a future release. An unstarted holder or an expired prediction gives
-// no basis to idle RAM indefinitely. This projection grants no release credit
-// to dispatch, which still checks the live ledger and exact custody.
-func (q *Queue) forecastCheckCapacity(m *Machine) *Machine {
-	releasing := q.forecastCheckReleases(m)
-	if len(releasing) == 0 {
-		return nil
-	}
-	projected := q.drainProjection(m, releasing)
-	return &projected
-}
-
-func (q *Queue) forecastCheckReleases(m *Machine) []*Job {
-	// The same exact-attempt custody check used for dispatch also covers a
-	// terminal attempt whose release never entered the live-job forecast.
-	if !q.cardSettled(m) {
-		return nil
-	}
-	now := q.clock.Now()
-	running := q.drainingAttempts(m)
-	releasing := running[:0]
-	for _, holder := range running {
-		if holder.StartedAt != nil {
-			if end := q.expectedEnd(holder, q.s.Machines[holder.Machine]); end != nil && end.After(now) {
-				releasing = append(releasing, holder)
-				continue
-			}
-		}
-		if batchOnTarget(holder, m) {
-			return nil // An unforecastable exclusive slot also blocks the check.
-		}
-	}
-	return releasing
 }
 
 // Host RAM is shared by CPU and device views. Apply accelerator-first backfill
@@ -291,6 +189,12 @@ func (q *Queue) hostBackfillBlocker(j *Job, m *Machine, fence *hostBackfillDeman
 	if fence == nil || j.ID == fence.job.ID {
 		return nil
 	}
+	if fence.pooled {
+		if q.beforeWithFair(j, fence.job, fence.machine, fence.order.score, fence.order.active) || q.poolBackfillFits(j, m, fence) {
+			return nil
+		}
+		return fence.job
+	}
 	production := jobClass(j.Spec) == "production"
 	switch {
 	case fence.fleetProbe:
@@ -308,9 +212,6 @@ func (q *Queue) hostBackfillBlocker(j *Job, m *Machine, fence *hostBackfillDeman
 			return fence.startProbe.job
 		}
 		return nil
-	}
-	if fence.devicePending && !j.Spec.Needs.cpuOnly() && !(fence.job.Spec.Priority == "production" && q.comparePriority(j.Spec, fence.job.Spec) > 0) {
-		return nil // Other GPU demand keeps ordinary device admission order.
 	}
 	// Keep the existing tier and fair-turn order, including accelerator-first
 	// ordering across CPU/device views of the same worker. A demand protects
@@ -342,12 +243,7 @@ func hostBackfillRoom(j *Job, m, room *Machine, fence, extra *hostBackfillDemand
 }
 
 func (q *Queue) hostBackfillFits(j *Job, m *Machine, fence *hostBackfillDemand) bool {
-	capacity := m
-	if fence.deviceReleaseRoom != nil && j.Spec.Needs.cpuOnly() && q.comparePriority(j.Spec, fence.job.Spec) == 0 &&
-		(jobClass(fence.job.Spec) != "production" || jobClass(j.Spec) == "production") {
-		capacity = fence.deviceReleaseRoom
-	}
-	room := hostBackfillRoom(j, m, capacity, fence, nil)
+	room := hostBackfillRoom(j, m, m, fence, nil)
 	if !fence.drain {
 		return room
 	}
@@ -362,6 +258,7 @@ func (q *Queue) hostBackfillFits(j *Job, m *Machine, fence *hostBackfillDemand) 
 
 func (q *Queue) hostBackfillWaitingReason(j *Job, scan *placementScan) string {
 	var demand *Job
+	var poolFence bool
 	for _, m := range scan.machines {
 		if !q.placementLiveness(scan)[m.ID] || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) || !environmentReady(j, m) || q.preparationActive(m) || q.preparationStopping(m) {
 			continue
@@ -372,16 +269,21 @@ func (q *Queue) hostBackfillWaitingReason(j *Job, scan *placementScan) string {
 			}
 			// No fitting target means capacity accumulation cannot be this job's
 			// blocker. Avoid sizing the entire backlog just to discover that.
-			blocker := q.hostBackfillBlocker(candidate, m, q.hostBackfillFences(scan)[hostID(m)])
+			fence := q.hostBackfillFences(scan)[hostID(m)]
+			blocker := q.hostBackfillBlocker(candidate, m, fence)
 			if blocker == nil {
 				return "" // Another currently fitting host is not withheld.
 			}
 			if demand == nil || blocker.ID < demand.ID {
 				demand = blocker
+				poolFence = fence.pooled
 			}
 		}
 	}
 	if demand != nil {
+		if poolFence {
+			return fmt.Sprintf("memory_wait: waiting for job %s to acquire its reserved pool capacity", demand.ID)
+		}
 		return fmt.Sprintf("host_capacity_accumulation: waiting for job %s to acquire host RAM/cores; running attempts finish normally", demand.ID)
 	}
 	return ""

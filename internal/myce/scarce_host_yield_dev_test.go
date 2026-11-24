@@ -136,7 +136,7 @@ while True:signal.pause()
 	general.Devices = []MachineDevice{}
 	general.CapabilityProfile.OS = runtime.GOOS
 	general.CapabilityProfile.Arch = runtime.GOARCH
-	w := Worker{EnvironmentLimit: 1 << 20, sharedCPUDev: true, CPUIsolationProbe: func(context.Context) error { return nil }, Machine: general, StateDir: filepath.Join(root, "general"), Client: c, ModelConfig: d.Queue.models, Clock: d.Queue.clock, Interval: defaultWorkerInterval, HostMemorySource: func(context.Context) (float64, error) { return 8, nil }}
+	w := Worker{EnvironmentLimit: 1 << 20, sharedCPUDev: true, devEnvironmentSizing: true, CPUIsolationProbe: func(context.Context) error { return nil }, Machine: general, StateDir: filepath.Join(root, "general"), Client: c, ModelConfig: d.Queue.models, Clock: d.Queue.clock, Interval: defaultWorkerInterval, HostMemorySource: func(context.Context) (float64, error) { return 8, nil }}
 	go func() { done <- w.Run(workerCtx) }()
 	defer func() {
 		stopWorker()

@@ -789,7 +789,6 @@ func (q *Queue) jobSnapshotCapture(id string, contexts ...context.Context) (*Job
 		// index across waiting, eligibility and deadline diagnostics rather
 		// than copying every curve again for each target comparison.
 		v.memoryPlanning = newMemoryPlanningCache()
-		v.memoryObservationIndex = v.memoryObservationCatalog()
 		v.observationScan = v.placementScan()
 		v.observationScan.observationOwner = v
 		v.observationScan.memory = v.memoryPlanning

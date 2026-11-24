@@ -210,9 +210,9 @@ The fields an agent states up front:
 | `run.workdir` | Absent: managed `{work}` | Native cwd must resolve within the private attempt directory; stage source/data as inputs or a profile |
 | `run.env` | Empty map | String overrides over the worker's safe environment allowlist; attempt/device/temp controls remain worker-owned |
 | `needs.cpu_cores` | Default one | Admitted logical cores for the whole attempt, including sidecars; omit GPU selectors for CPU-only work |
-| `needs.memory_gb` | Finite and positive unless `memory: auto`; omitted means auto unless policy `learned_memory: false` (#585) | Host RAM GiB for CPU-only work; GPU memory for GPU work; optional hint with auto |
-| `needs.host_memory_gb` | Absent / `0`: GPU-only admission on uncapped hosts | Additional host RAM in GiB, including runtime/activation peaks; capped hosts require a positive resolved envelope; qualified Linux services enforce it plus worker slack |
-| `needs.memory` | Omitted: declared reservation, or auto when no figure is given | `auto`: local accepted peaks, cross-machine estimate, optional hint, or exploratory first run (bounded for CPU work, #559, and for plain GPU work on unified-memory hosts, #596); resolved once per attempt |
+| `needs.memory_gb` | Omit for automatic sizing | Starting estimate in GiB for CPU RAM or GPU memory |
+| `needs.host_memory_gb` | Omit for automatic sizing | Starting estimate in GiB for additional GPU host RAM |
+| `needs.memory` | Omitted uses the same estimator | `auto` uses available evidence, with authored figures as starting hints |
 | `needs.platform` | GPU work: required; CPU input: omitted or `cpu` | `[cuda]` shorthand, `{required: [cuda, xpu]}`, `{preferred: [metal]}`, or `any` / `{any: true}`; exactly one mode |
 | `needs.model` | Absent | Batch affinity hint; does not load a model |
 | `needs.network` | Omitted / `false` | Native payload outbound opt-in. `true` requires a host advertising protected egress or submission is refused; reserved sidecar loopback and preparation need no opt-in. [Platform limits](native-isolation.md) apply, including fallback's partial network isolation. |
@@ -248,6 +248,7 @@ advanced:
 | `allow_cpu_fallback` | `false`: GPU work waits for a GPU | `true` lets GPU work run on a CPU target when no GPU target fits it at placement time. The attempt then reserves host RAM (its `memory_gb` becomes host memory), gets `MYCE_DEVICE=cpu` and `MYCE_GPU_COUNT=0`, and a requeue tries a GPU again. Plain commands only: extension work runs on CPU through a declared `cpu` variant; refused with `needs.model` or a `needs.gpu.devices` pin |
 | `worker_data` | Omitted: ordinary retention | `ephemeral` removes attempt-private worker payload and delivered logs synchronously after durable result acceptance and before release; supports offline non-resumable commands, extensions, environments, sidecars, `after` and fan-out on v2-capable Linux namespace workers. Shared software caches stay read-only. Unsupported combinations return `job_worker_data_unsupported`. Check `worker_data_cleanup` and its attempt-history receipt; unlink is not SSD secure erasure. Queue/NAS retention stays unchanged ([contract](files.md#ephemeral-worker-data)) |
 | `checkpoint` | Existing configured checkpoint mode | `local_first` opts resumable plain commands into the versioned cooperative [JSON generation protocol](files.md#local-first-checkpoints-1600); no implicit NAS substitution |
+| `memory_limit_gb` | Absent: estimate-based admission with physical containment | Explicit host RAM limit. Set it when the job must respect an authored bound. |
 | `resumable` | `false` | Set true only for a command implementing the checkpoint/stop contract |
 | `start_by` | Production: submission + effective start window (readiness for dependents); absent for other priorities | Absolute RFC3339 first-start deadline, production batch only; takes precedence over `start_window`; a started infrastructure interruption renews its original-length window, while waits and unstarted retries cannot extend it |
 | `start_window` | Production: `150s`; absent for other priorities | Relative Go duration string, `0 < duration <= 1h`, production batch only; inherited by physical fan-out children |
@@ -1036,7 +1037,26 @@ OpenAI client defaults: [operator configuration](services.md#shared-entries-loca
 `files_ref` bundle reference (`sha256` and `size_bytes`) instead of embedded
 files. Job GET replies continue to omit extension payloads.
 
+### Pooled memory admission
+
+On workers advertising `pooled_memory_v1`, typed RAM and device memory values
+seed placement until comparable runs provide evidence. Job status shows each
+pool's typical estimate, charge, evidence and measured peak. Unified memory
+uses one RAM pool. New work on a discrete card gets exclusive access to the
+card until it has comparable device evidence.
+
+The worker's launch check uses the typical estimate. A physical shortfall
+reports `memory_wait` and requeues the same job. An admission refusal keeps
+its issued attempt identifier and refunds its start count. Relative start
+windows pause during memory waits. The Linux slice ceiling, card capacity and
+explicit limits such as `advanced.memory_limit_gb` provide containment.
+Lower-priority work can be stopped and requeued during a shortage. Work that
+cannot resume starts from scratch.
+
 ### Measured job envelopes
+
+These rules apply to legacy assignments and Linux workers without confirmed
+slice containment during the adjacent-release transition.
 
 Installed Linux workers put their service and detached attempts under one
 `myce.slice` memory ceiling. The worker applies the queue's existing host

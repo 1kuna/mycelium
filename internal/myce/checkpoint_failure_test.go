@@ -49,6 +49,7 @@ func TestCheckpointFailureCommandAttribution(t *testing.T) {
 			health := &hostHealthMonitor{clock: clock, mounts: map[string]*hostMountProbe{}}
 			w := Worker{StateDir: newTestStateRoot(t), CheckpointRoot: root, Clock: clock, Machine: a,
 				Client: Client{URL: api.URL, Token: "test"}, storageHealth: health, memoryCeilings: fakeCeilings(t),
+				MemorySource:      func(context.Context) (float64, error) { return 8, nil },
 				HostMemorySource:  func(context.Context) (float64, error) { return 64, nil },
 				checkpointPrepare: func(Job) (string, error) { return root, nil }}
 			store, err := w.openStore()

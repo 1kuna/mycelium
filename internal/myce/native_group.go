@@ -432,6 +432,9 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		if oom != nil {
 			r.Error = oom.Error()
 			r.ExecutionCause = &RuntimeCause{Operation: "command", Class: "resource_limit"}
+			if errors.Is(oom, errMemoryPoolExhausted) {
+				r.ExecutionCause.Class = "memory_pressure"
+			}
 		}
 		if cleanup != nil {
 			if r.Success {
@@ -1207,14 +1210,15 @@ func (g *nativeGroup) setupMemory() error {
 	if err != nil || c == nil {
 		return err
 	}
-	whole := g.p.job.Spec.Needs.Memory == "auto" || g.p.job.Spec.Run.MemoryGB == 0
+	pooled := pooledMemory(&g.p.job)
+	whole := pooled || g.p.job.Spec.Needs.Memory == "auto" || g.p.job.Spec.Run.MemoryGB == 0
 	for _, side := range g.p.job.Spec.Run.Sidecars {
 		whole = whole || side.MemoryGB == 0
 	}
 	if err := g.memory.setOOMGroup(whole); err != nil {
 		return err
 	}
-	g.control, err = c.create("control", g.memory.bytes, 0)
+	g.control, err = c.createAttempt("control", g.memory.bytes, 0, pooled)
 	if err != nil {
 		return err
 	}
@@ -1235,7 +1239,7 @@ func (g *nativeGroup) setupMemory() error {
 		if name != "main" {
 			leaf = "sidecar-" + name
 		}
-		g.memberMemory[name], err = c.create(leaf, bytes, g.worker.MemorySwapMaxBytes)
+		g.memberMemory[name], err = c.createAttempt(leaf, bytes, g.worker.MemorySwapMaxBytes, pooled)
 		if err != nil {
 			return err
 		}
@@ -1248,6 +1252,9 @@ func (g *nativeGroup) memoryFailure() error {
 		if err := m.memory.localLimitFailure(); err != nil {
 			return fmt.Errorf("native member %s: %w", m.Name, err)
 		}
+	}
+	if pooledMemory(&g.p.job) && g.memory != nil && g.memory.bytes == 0 {
+		return g.memory.failure()
 	}
 	return g.memory.localLimitFailure()
 }

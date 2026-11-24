@@ -36,15 +36,6 @@ type admissionWaitBuilder struct {
 // that read planning state never race a background publication.
 var synchronousAdmissionWaitDefault = false
 
-// WithSynchronousAdmissionWait selects the admission-wait evidence mode. When
-// on, a committing transaction returns only after its post-commit capture,
-// and any capture still pending from a concurrent commit, has been published
-// or fenced off. Builds stay serialized and revision-ordered. Production uses
-// the asynchronous, cooled-down builder; tests of that path opt into it here.
-func WithSynchronousAdmissionWait(on bool) QueueOption {
-	return func(q *Queue) { q.admissionWaitBuild.synchronous = on }
-}
-
 func (q *Queue) enqueueAdmissionWait(c *admissionWaitCapture) {
 	if c.index == nil || q.stopping.Load() {
 		return
@@ -581,8 +572,13 @@ func (q *Queue) waitHolder(o HostObligation, demand *Job, now time.Time) Admissi
 		// This is the Started worker contract, not a direct memory.max read.
 		// Never describe sampled RSS or unstarted work as a kernel cap.
 		if j.StartedAt != nil && owner.MemoryEnforcement == "memory ceilings enforced (cgroup v2)" {
-			cap := max(n, adaptiveMemoryCeilingGB(j, owner))
-			h.EnforcedHostGB, h.EnforcementBasis = waitNumber(cap), "started_worker_contract_not_direct_read"
+			cap := n
+			if pooledMemory(j) {
+				cap = memoryPools(j).LimitGB
+			}
+			if cap > 0 {
+				h.EnforcedHostGB, h.EnforcementBasis = waitNumber(cap), "started_worker_contract_not_direct_read"
+			}
 		}
 		h.Preemptible = q.batchPreemptible(j, demand.Spec)
 		switch {

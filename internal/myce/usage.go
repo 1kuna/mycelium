@@ -257,6 +257,9 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 	if e = q.persistModelIntervals(tx); e != nil {
 		return e
 	}
+	if e = q.memoryEvidencePending.persist(tx); e != nil {
+		return e
+	}
 	measured.SQL += holdNow(q.holdClock).Sub(started)
 	next, e := q.persistState(tx, &measured)
 	if e != nil {
@@ -267,6 +270,10 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 	measured.Commit = holdNow(q.holdClock).Sub(started)
 	if e != nil {
 		return e
+	}
+	if q.memoryEvidencePending != nil {
+		q.memoryEvidencePending.writes = nil
+		q.memoryEvidence = q.memoryEvidencePending
 	}
 	if q.persisted == nil {
 		q.persisted = map[string][]byte{}

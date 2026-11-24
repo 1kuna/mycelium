@@ -68,69 +68,6 @@ func incidentVariantFixture(t *testing.T, capGB float64) (*Queue, *fakeClock, Ma
 	return q, clock, m, s
 }
 
-func TestHealthIncidentInheritedAutoMemoryReplay(t *testing.T) {
-	for _, requireTarget := range []bool{false, true} {
-		t.Run(fmt.Sprint("require_target=", requireTarget), func(t *testing.T) {
-			q, clock, m, s := incidentVariantFixture(t, 0)
-			first := startObservation(t, q, m, s)
-			clock.Advance(time.Second)
-			r := result(&first, true)
-			peak := 26.0 // Measured demand itself exceeds the 24 GiB allowance; no universal padding.
-			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak}
-			if err := q.Complete(r); err != nil {
-				t.Fatal(err)
-			}
-			incidentAllowance(t, q, &m, 24)
-			s.RequireTarget = requireTarget
-			queued, err := q.Submit(s)
-			if err != nil {
-				t.Fatal("unexpected admission", err)
-			}
-			if queued.Spec.Needs.Memory != "" {
-				t.Fatal("fixture did not inherit auto from variant")
-			}
-			if why := memoryEvidenceReason(t, q, queued); !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
-				t.Fatal("inherited learned sizing lost typed wait", why)
-			}
-			kind := "learned_envelope_exceeds_allowances"
-			var key string
-			for k := range q.s.Health.Conditions {
-				if strings.HasPrefix(k, "learned-envelope/") {
-					key = k
-				}
-			}
-			requireIncident(t, q, kind, key, 1, true)
-			incidentAllowance(t, q, &m, 64)
-			requireIncident(t, q, kind, key, 1, false)
-			clock.Advance(healthAlertCooldown)
-			check(t, q, m, nil)
-			if _, exists := q.s.Health.Conditions[key]; exists {
-				t.Fatal("recovered envelope condition outlived cooldown")
-			}
-		})
-	}
-}
-
-func TestHealthIncidentDeclaredMemberCapExcluded(t *testing.T) {
-	q, clock, m, s := incidentVariantFixture(t, 32)
-	first := startObservation(t, q, m, s)
-	clock.Advance(time.Second)
-	r := result(&first, true)
-	peak := 2.0
-	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak}
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	incidentAllowance(t, q, &m, 24)
-	s.RequireTarget = true
-	if _, err := q.Submit(s); err == nil {
-		t.Fatal("oversized declared member cap admitted")
-	}
-	if events := alertsOf(q, "learned_envelope_exceeds_allowances"); len(events) != 0 {
-		t.Fatal("declared cap misclassified as learning", events)
-	}
-}
-
 func TestHealthIncidentHealthyDemandLeavesNoHistory(t *testing.T) {
 	q, _, m, s := observationFixture(t)
 	s.Needs.Memory = "auto"
@@ -146,37 +83,6 @@ func TestHealthIncidentHealthyDemandLeavesNoHistory(t *testing.T) {
 		if strings.HasPrefix(key, "learned-envelope/") {
 			t.Fatal("healthy demand retained a condition", key)
 		}
-	}
-}
-
-func TestHealthIncidentOfflineUndersizedPeerDoesNotSuppress(t *testing.T) {
-	q, clock, m, s := observationFixture(t)
-	first := startObservation(t, q, m, s)
-	clock.Advance(time.Second)
-	r := result(&first, true)
-	peak := 26.0 // Measured demand itself exceeds the 24 GiB allowance; no universal padding.
-	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak}
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	incidentAllowance(t, q, &m, 24)
-	peer := incidentPeer(t, q, &m, "offline-peer")
-	check(t, q, peer, nil)
-	// Reproduce the queue's loss observation without making the fitting
-	// worker stale too. Qualification ignores this temporary availability.
-	if err := q.update(func() error { q.touchMachine(peer.ID).Gone = true; return nil }); err != nil {
-		t.Fatal(err)
-	}
-	s.Needs.Memory, s.RequireTarget = "auto", true
-	queued := submit(t, q, s)
-	if why := memoryEvidenceReason(t, q, queued); !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
-		t.Fatal("oversized learned work lost typed wait", why)
-	}
-	if assigned := assignedJob(machineCheck(t, q, m)); assigned != nil {
-		t.Fatal("oversized learned work assigned", assigned.ID)
-	}
-	if events := alertsOf(q, "learned_envelope_exceeds_allowances"); len(events) != 1 {
-		t.Fatal("offline undersized peer suppressed the incident", events)
 	}
 }
 

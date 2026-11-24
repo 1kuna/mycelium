@@ -229,16 +229,21 @@ func TestProjectPolicyValidation(t *testing.T) {
 func TestBusyStatusUsesDispatchOrderAndCombinedReasons(t *testing.T) {
 	q, c := fixture(t)
 	m := machine("one", "fake")
-	prod := submit(t, q, spec("production"))
+	production := spec("production")
+	production.Needs.HostMemoryGB = 2
+	prod := submit(t, q, production)
 	running := check(t, q, m, nil).Job
 	if running == nil || running.ID != prod.ID {
 		t.Fatal("production not running")
 	}
-	a := submit(t, q, projectSpec("verso"))
+	experiment := projectSpec("verso")
+	experiment.Needs.HostMemoryGB = 1
+	a := submit(t, q, experiment)
 	c.Advance(time.Second)
-	b := submit(t, q, projectSpec("atlas"))
+	experiment.Project = "atlas"
+	b := submit(t, q, experiment)
 	c.Advance(time.Second)
-	d := submit(t, q, projectSpec("atlas"))
+	d := submit(t, q, experiment)
 	q.mu.Lock()
 	q.s.FairUsage = map[string]FairUsage{fairUsageKey("experiment", "gpu", "verso"): {Seconds: 100, At: c.Now()}}
 	q.mu.Unlock()

@@ -168,9 +168,6 @@ func (q *Queue) roomPlan(j *Job, m *Machine, batch bool) *placementPlan {
 // yield decisions also belong to the exact demand, so keep that fallback out
 // of the shared projection used by an immutable candidate pass.
 func (q *Queue) ordinaryRoomPlan(j *Job, m *Machine, batch bool) (*placementPlan, bool) {
-	if batch && q.memoryYieldHold(j, m) != nil {
-		return nil, false
-	}
 	if m.Recovering {
 		return nil, false
 	}
@@ -195,15 +192,6 @@ func (q *Queue) ordinaryRoomPlan(j *Job, m *Machine, batch bool) (*placementPlan
 	if best != nil && !q.addDeviceTierStops(best, j) {
 		return nil, false
 	}
-	if batch && j.MemoryCensoredOOMGrowthGB != nil {
-		// This retry waits for ordinary admission. A larger envelope grants
-		// no authority to stop another attempt, residency or preparation.
-		if best == nil || best.stops > 0 || len(best.jobs)+len(best.slots)+len(best.calls) > 0 {
-			return nil, false
-		}
-		best.preparations = false
-		return best, false
-	}
 	return best, best == nil && batch
 }
 func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool, yieldPlans ...map[string]*ScarceHostYield) *placementPlan {
@@ -214,6 +202,9 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool, 
 	p := &placementPlan{machine: m, preparations: true}
 	if len(yieldPlans) > 0 {
 		p.yields = yieldPlans[0]
+	}
+	if batch && pooledMemory(j) && !q.planPoolCustody(j, m, p) {
+		return nil
 	}
 	need, host := j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB
 	if !batch {
@@ -350,6 +341,10 @@ func (q *Queue) cardRoom(j *Job, m *Machine, need float64, batch, releaseBatch, 
 		if !batchOnTarget(r, m) || !batchReservesCapacity(r) {
 			continue
 		}
+		if slices.Contains(p.jobs, r) {
+			room += deviceShareGB(r)
+			continue
+		}
 		isolateTier := isolatesDeviceTiers(m) && !j.Spec.Needs.cpuOnly() && !r.Spec.Needs.cpuOnly() && q.comparePriority(r.Spec, j.Spec) != 0
 		if !q.batchPreemptible(r, j.Spec) && p.yields[r.ID] == nil {
 			if batch && !shared || isolateTier {
@@ -367,6 +362,10 @@ func (q *Queue) cardRoom(j *Job, m *Machine, need float64, batch, releaseBatch, 
 	var slots []*ModelSlot
 	for _, s := range q.s.ModelSlots {
 		if ownsResidentSlot(j.Spec, s) {
+			continue
+		}
+		if slotOnTarget(s, m) && slices.Contains(p.slots, s) {
+			room += q.slotMemory(s)
 			continue
 		}
 		if slotOnTarget(s, m) && slotReservesMemory(s) && isolatesDeviceTiers(m) && !j.Spec.Needs.cpuOnly() && (batch || s.Model != j.Spec.Needs.Model) && q.comparePriority(q.slotSpec(s), j.Spec) != 0 {

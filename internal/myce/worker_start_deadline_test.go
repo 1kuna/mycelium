@@ -31,6 +31,7 @@ func TestWorkerStartHandoffCapacity(t *testing.T) {
 	m.CapabilityProfile.SystemMemoryBytes = 128 << 30
 	m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 96
 	s := spec("production")
+	s.Needs.HostMemoryGB = requiredGB
 	s.Run.Command = []string{"sh", "-c", `printf x > "$MARKER"`}
 	s.Run.Env = map[string]string{"MARKER": "{work}/main-ran"}
 	submit(t, q, s)
@@ -39,9 +40,10 @@ func TestWorkerStartHandoffCapacity(t *testing.T) {
 	defer server.Close()
 	w := recoveryWorker(t)
 	w.Clock, w.Machine, w.Client = clock, m, Client{URL: server.URL, Token: "test"}
+	w.HostMemorySource = func(context.Context) (float64, error) { return 96, nil }
 	w.batchAdmission = func(context.Context, HostLaunch) error {
 		if job(t, q, a.ID).StartedAt != nil {
-			return refuseAdmission("live_host_growth", "GiB", requiredGB, refusedAvailableGB, false)
+			return checkMemoryPool(requiredGB, refusedAvailableGB, 0, 0, true)
 		}
 		return nil
 	}
@@ -72,7 +74,7 @@ func TestWorkerStartHandoffCapacity(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(p.job.Spec.Run.Workdir, "main-ran")); !os.IsNotExist(err) {
 		t.Fatal("refused main executed", err)
 	}
-	if !launchCapacityRefusal(r) || r.ExecutionCause.Class != "resource_limit" || r.ExecutionCause.Admission == nil || r.ExecutionCause.Admission.Subcheck != "live_host_growth" || r.ExecutionCause.PrelaunchRefused {
+	if !launchCapacityRefusal(r) || r.ExecutionCause.Class != "resource_limit" || r.ExecutionCause.Admission == nil || r.ExecutionCause.Admission.Subcheck != memoryWaitReason || r.ExecutionCause.PrelaunchRefused {
 		t.Fatalf("late refusal lost type or supervisor custody: %+v", r.ExecutionCause)
 	}
 	if err := q.Complete(r); err != nil {
@@ -83,6 +85,7 @@ func TestWorkerStartHandoffCapacity(t *testing.T) {
 	if got.State != "queued" || got.Losses != 0 || got.InfrastructureRetries != 0 || got.Copies[0].LossCharged {
 		t.Fatalf("capacity refusal charged: %+v", got)
 	}
+	m.HostAvailableMemoryGB = refusedAvailableGB
 	if next := check(t, q, m, nil).Job; next != nil {
 		t.Fatal("unchanged capacity reoffered", next)
 	}
@@ -133,6 +136,8 @@ func TestWorkerStartHandoffQueueWait(t *testing.T) {
 				handler.ServeHTTP(rw, r)
 			})
 			w := Worker{control: &processControl{clock: clock}, StateDir: newTestStateRoot(t), Machine: m, Clock: clock, Client: Client{URL: "http://queue.invalid", Token: "test", HTTP: &http.Client{Transport: handlerTestTransport(server)}}}
+			w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
+			w.MemorySource = func(context.Context) (float64, error) { return 8, nil }
 			if !virtual {
 				live := httptest.NewServer(server)
 				defer live.Close()
@@ -531,6 +536,8 @@ func TestWorkerNativeHandshakeCancellation(t *testing.T) {
 	entered := make(chan struct{})
 	calls := 0
 	w := Worker{Machine: m, Clock: clock, StateDir: newTestStateRoot(t), Client: Client{URL: "http://queue.invalid", Token: "test"}}
+	w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
+	w.MemorySource = func(context.Context) (float64, error) { return 8, nil }
 	w.Client.HTTP = &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path == "/api/workers/launch" {
 			calls++

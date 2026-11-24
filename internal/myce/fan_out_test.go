@@ -2,6 +2,7 @@ package myce
 
 import (
 	"fmt"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -192,4 +193,30 @@ func TestFanOutMaxConcurrencyCapsRunningPieces(t *testing.T) {
 	if got := job(t, q, parent.ID); got.State != "succeeded" || len(got.FanOut.Results) != 5 {
 		t.Fatalf("incomplete gather: state=%s results=%d", got.State, len(got.FanOut.Results))
 	}
+}
+
+func curveFixture(t *testing.T) (*Queue, *workerFakeClock, Machine, Extension, Spec) {
+	t.Helper()
+	q, initial := fixture(t)
+	clock := &workerFakeClock{now: initial.Now()}
+	q.clock = clock
+	e := compositionExtension(t, false)
+	e.Kinds = nil
+	v := &e.Variants[0]
+	v.Target.Platform = "cpu"
+	v.Needs = ResourceNeeds{CPUCores: 1, MemoryGB: 1}
+	delete(v.Baselines, "kind:sample")
+	v.References = map[string]WorkReference{"extension:sample": {InputShape: "small-v1", Unit: "records", Units: 10}}
+	e = freezeComposition(t, e)
+	if err := q.AddExtension(e); err != nil {
+		t.Fatal(err)
+	}
+	m := cpuMachine("curves", "curve-host", "cpu", 8, 32)
+	m.CapabilityProfile.OS, m.CapabilityProfile.Arch = runtime.GOOS, runtime.GOARCH
+	m.ExtensionFingerprint = "cpu-v1"
+	r := newExtensionReport(e, &m, "extension:sample")
+	r.Setup, r.Qualified, r.CheckID = true, true, "curve-check"
+	m.ExtensionReports = []ExtensionReport{r}
+	check(t, q, m, nil)
+	return q, clock, m, e, Spec{Name: "count", Project: "synthetic", Extension: extensionKey(e), Workload: &Workload{InputShape: "small-v1", Units: 10}}
 }

@@ -15,6 +15,7 @@ func TestR1MixedHostSteersCPUAndPreservesGPUBackfill(t *testing.T) {
 		check(t, q, cpu, nil)
 		cs, gs := cpuSpec(2, 1), spec("experiment")
 		gs.Needs.Platform = Platform{Required: []string{"cuda"}}
+		gs.Needs.HostMemoryGB = 1
 		cs.Project = gs.Project
 		cj := submit(t, q, cs)
 		clock.Advance(time.Millisecond)
@@ -57,6 +58,7 @@ func TestR1MixedHostSteersCPUAndPreservesGPUBackfill(t *testing.T) {
 				clock.Advance(time.Millisecond)
 				gs := spec("experiment")
 				gs.Needs.Platform = Platform{Required: []string{"cuda"}}
+				gs.Needs.HostMemoryGB = 1
 				gj = submit(t, q, gs)
 			}
 			run := check(t, q, gpu, nil).Job
@@ -99,6 +101,7 @@ func TestR1HostReleaseSkipsUnneededDimensions(t *testing.T) {
 					q.refreshHostMemory()
 				} else {
 					s := spec("experiment")
+					s.Needs.HostMemoryGB = minimumHostMemoryGB
 					s.AllowedMachines = []string{a.ID}
 					low = submit(t, q, s)
 					if run := check(t, q, a, nil).Job; run == nil || run.ID != low.ID {
@@ -125,82 +128,6 @@ func TestR1HostReleaseSkipsUnneededDimensions(t *testing.T) {
 					}
 				} else if job(t, q, low.ID).State != "running" {
 					t.Fatal("stopped zero-RAM job after RAM release covers cores")
-				}
-			})
-		}
-	}
-}
-
-func TestR1VariantOOMReservationFloors(t *testing.T) {
-	for _, backend := range []string{"fake", "cuda"} {
-		for _, path := range []string{"kind", "program", "explicit"} {
-			t.Run(path+"/retry="+backend, func(t *testing.T) {
-				q, clock := fixture(t)
-				e := compositionExtension(t, false)
-				e.ProgramTypes = []string{"sample-script"}
-				e.Variants[0].Baselines["program:sample-script"] = fakeExtension(t).Baselines["program:sample-script"]
-				e.Variants[0].Needs.CPUCores = 2
-				if backend != "fake" {
-					other := e.Variants[0]
-					other.Target.Platform = backend
-					other.Needs.CPUCores = 1
-					e.Variants = append(e.Variants, other)
-				}
-				e = freezeComposition(t, e)
-				if err := q.AddExtension(e); err != nil {
-					t.Fatal(err)
-				}
-				small := placementMachine("small", "separate", 64, 24, e)
-				check(t, q, small, nil)
-				// The larger host is known (unqualified) before the OOM, so
-				// waiting for a larger hypha is not a dead end.
-				known := placementMachine("big", "separate", 128, 48, e)
-				known.GPU = backend
-				known.CapabilityProfile.Accelerators[0].Type = backend
-				known.ExtensionReports = nil
-				check(t, q, known, nil)
-				s := placementSpec(path == "program")
-				if path == "explicit" {
-					s.Kind = ""
-					s.Extension = extensionKey(e)
-				}
-				if path == "explicit" {
-					report := newExtensionReport(e, &small, s.workType())
-					report.Setup, report.Qualified, report.CheckID = true, true, "explicit-check"
-					small.ExtensionReports = append(small.ExtensionReports, report)
-					check(t, q, small, nil)
-				}
-				j := submit(t, q, s)
-				run := check(t, q, small, nil).Job
-				if run == nil || run.ID != j.ID {
-					t.Fatal("missing first assignment")
-				}
-				r := result(run, false)
-				r.OutOfMemory = true
-				clock.Advance(time.Second)
-				if err := q.Complete(r); err != nil {
-					t.Fatal(err)
-				}
-				floor := job(t, q, j.ID).Spec.Needs
-				if floor.MemoryGB != 2 || floor.HostMemoryGB != .2 || floor.CPUCores != 2 {
-					t.Fatalf("wrong stored OOM floor: %+v", floor)
-				}
-				big := placementMachine("big", "separate", 128, 48, e)
-				big.GPU = backend
-				big.CapabilityProfile.Accelerators[0].Type = backend
-				report := newExtensionReport(e, &big, s.workType())
-				report.Setup, report.Qualified, report.CheckID = true, true, "retry-check"
-				big.ExtensionReports = []ExtensionReport{report}
-				retry := check(t, q, big, nil).Job
-				if retry == nil || retry.ID != j.ID || retry.Attempt != 2 {
-					t.Fatal("missing OOM retry")
-				}
-				if retry.Spec.Needs.MemoryGB < floor.MemoryGB || retry.Spec.Needs.HostMemoryGB < floor.HostMemoryGB || retry.Spec.Needs.CPUCores < floor.CPUCores {
-					t.Fatalf("retry lowered stored floor: got %+v want >= %+v", retry.Spec.Needs, floor)
-				}
-				saved := job(t, q, j.ID).Spec.Needs
-				if saved.MemoryGB < floor.MemoryGB || saved.HostMemoryGB < floor.HostMemoryGB || saved.CPUCores < floor.CPUCores {
-					t.Fatal("dispatch lowered persisted reservation")
 				}
 			})
 		}

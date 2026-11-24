@@ -458,20 +458,6 @@ func TestCPUPlacementDoesNotReserveGPUMemory(t *testing.T) {
 	}
 }
 
-func TestCPULearnedProgramUsageRemainsHostRAM(t *testing.T) {
-	t.Parallel()
-	q, _ := fixture(t)
-	e := fakeExtension(t)
-	e.Platforms = []string{"cpu"}
-	j := &Job{Spec: placementSpec(true), Extensions: []Extension{e}}
-	j.Spec.Needs = ResourceNeeds{CPUCores: 2, HostMemoryGB: 1, Platform: Platform{Required: []string{"cpu"}}}
-	q.s.ProgramNeeds = map[string]SizeHint{programNeedsKey(j, e, "cpu"): {MemoryGB: 4, HostMemoryGB: 2}}
-	q.applyLearnedNeeds(j)
-	if j.Spec.Needs.MemoryGB != 0 || j.Spec.Needs.HostMemoryGB != 4 {
-		t.Fatal("CPU observation became a GPU reservation", j.Spec.Needs)
-	}
-}
-
 func TestCPUProfileDoesNotProbeAnAccelerator(t *testing.T) {
 	t.Parallel()
 	for _, goos := range []string{"linux", "darwin"} {

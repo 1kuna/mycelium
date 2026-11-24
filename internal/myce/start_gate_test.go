@@ -145,6 +145,8 @@ func TestProductionStartGateUnreachableDoesNotExecute(t *testing.T) {
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	server.Close()
 	w := Worker{StateDir: newTestStateRoot(t), Machine: machine("b70", "xpu"), Clock: c, Client: Client{URL: server.URL, Token: "test"}}
+	w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
+	w.MemorySource = func(context.Context) (float64, error) { return 8, nil }
 	store, e := w.openStore()
 	if e != nil {
 		t.Fatal(e)
@@ -377,6 +379,8 @@ func TestProductionStartGateStorageFailureDoesNotExecute(t *testing.T) {
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
 	w := Worker{StateDir: newTestStateRoot(t), Machine: machine("b70", "xpu"), Clock: c, Client: Client{URL: server.URL, Token: "test"}}
+	w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
+	w.MemorySource = func(context.Context) (float64, error) { return 8, nil }
 	store, e := w.openStore()
 	if e != nil {
 		t.Fatal(e)

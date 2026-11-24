@@ -136,9 +136,6 @@ func (q *Queue) productionAdmissionHold(j *Job, m *Machine) *Hold {
 	if reason := q.productionGapReason(j, m, host); reason != "" {
 		return newHold("production_admission", reason)
 	}
-	if reason := q.unifiedCUDAProductionReason(j, m); reason != "" {
-		return newHold("unified_cuda_headroom", reason)
-	}
 	setup, known := measuredSetupSeconds(j, m, false)
 	if !known || setup <= 0 {
 		return nil

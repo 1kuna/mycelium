@@ -130,7 +130,6 @@ type Worker struct {
 	batchAdmission    func(context.Context, HostLaunch) error
 	// The worker ledger without one attempt: others' charges and pending growth.
 	hostChargesExcept     func(attemptKey) (charge, pending float64)
-	firstRunAdmission     *MemoryRoomDecision
 	stopAdmission         func()
 	DeviceBinding         string
 	EnvironmentSourceRoot string
@@ -439,6 +438,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 }
 
 func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (startedProcess *process, startErr error) {
+	w.acceptMemoryOffer(&j)
 	timing := s.launchRecorder(w.Clock)
 	w.launchTiming = timing
 	timing.enter(launchStaging)
@@ -512,25 +512,8 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if err := w.checkAvailability(); err != nil {
 		return nil, err
 	}
-	if err := w.checkHostRAM(j.Spec.Needs.MemoryGB, chargedHostGB(&j)); err != nil {
-		return nil, err
-	}
-	if floorCharged(j.MemoryEnvelope) {
-		decision, err := w.firstRunMemoryAdmission(ctx, j)
-		if err != nil {
-			return nil, s.startFailure(j, launchRefused, err)
-		}
-		w.firstRunAdmission = decision
-		admit := w.batchAdmission
-		w.batchAdmission = func(ctx context.Context, launch HostLaunch) error {
-			if admit != nil {
-				if err := admit(ctx, launch); err != nil {
-					return err
-				}
-			}
-			_, err := w.firstRunMemoryAdmission(ctx, j)
-			return err
-		}
+	if err := w.checkJobRAM(ctx, j); err != nil {
+		return nil, s.recordMemoryWait(j, err)
 	}
 	phaseDone(nil)
 	phaseDone = stagingMeasure(ctx, stageRoots)
@@ -643,7 +626,18 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if ceilingErr != nil {
 		return nil, ceilingErr
 	}
-	if w.MemorySource != nil {
+	if pooledMemory(&j) {
+		if card := memoryPools(&j).Card; card != nil {
+			free, known := 0.0, false
+			if w.MemorySource != nil {
+				value, err := w.MemorySource(ctx)
+				free, known = value, err == nil && validMemoryValue(value)
+			}
+			if err := checkMemoryPool(card.TypicalGB, free, 0, 0, known); err != nil {
+				return nil, s.recordMemoryWait(j, err)
+			}
+		}
+	} else if w.MemorySource != nil {
 		free, e := w.MemorySource(context.Background())
 		if e != nil || !validMemoryValue(free) || free < j.Spec.Needs.MemoryGB {
 			return nil, refuseAdmission("live_gpu_memory", "GiB", j.Spec.Needs.MemoryGB, free, e != nil)
@@ -721,8 +715,8 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if j.Spec.Run.Workdir == "" {
 		j.Spec.Run.Workdir = executionWork
 	}
-	if err := w.checkHostRAM(j.Spec.Needs.MemoryGB, chargedHostGB(&j)); err != nil {
-		return nil, err
+	if err := w.checkJobRAM(ctx, j); err != nil {
+		return nil, s.recordMemoryWait(j, err)
 	}
 	if err := w.checkAvailability(); err != nil {
 		return nil, err
@@ -799,11 +793,8 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		return nil, err
 	}
 	timing.enter(launchCommandSetup)
-	if err := w.checkHostMemoryBudget(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
-		return nil, err
-	}
 	identity := ID()
-	memoryAttempt, err := w.executionCeilings().create("attempt-"+identity, ceilingBytes, w.MemorySwapMaxBytes)
+	memoryAttempt, err := w.executionCeilings().createAttempt("attempt-"+identity, ceilingBytes, w.MemorySwapMaxBytes, pooledMemory(&j))
 	if err != nil {
 		return nil, fmt.Errorf("memory ceiling setup: %w", err)
 	}
@@ -811,6 +802,11 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if memoryAttempt != nil {
 		ceilingBytes = memoryAttempt.bytes
 		memoryAttempt.oomScore = attemptOOMScore(j)
+		if !j.Spec.Needs.cpuOnly() && j.Spec.Resident == nil && memoryPools(&j).RAM.Alone {
+			if available, ok := memoryAttempt.hostAvailable(); ok {
+				memoryAttempt.availableAtLaunch = &available
+			}
+		}
 	}
 	started := false
 	defer func() {
@@ -1238,6 +1234,10 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		result.Resources = p.resources.finish()
 		result.Resources = withExitCPU(result.Resources, cmd.ProcessState)
 		oomErr := memoryAttempt.failure()
+		var exceeded *memoryCeilingExceeded
+		if pooledMemory(&j) && errors.As(oomErr, &exceeded) && memoryAttempt.localLimitFailure() == nil {
+			oomErr = errMemoryPoolExhausted
+		}
 		groupErr = errors.Join(groupErr, memoryAttempt.cleanup(w.Clock))
 		result.MemoryPeak = peak
 		result.ReleasePending = groupErr != nil
@@ -1253,7 +1253,10 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 			collectProgramUsage(&result, cmd.ProcessState, programUsageFile(s.dir, identity))
 			result.OutOfMemory = result.OutOfMemory || (oomErr != nil && strings.HasPrefix(ceilingDiagnostic(oomErr.Error(), ""), "exceeded its "))
 		}
-		if oomErr != nil {
+		if errors.Is(oomErr, errMemoryPoolExhausted) {
+			result.ExecutionCause = &RuntimeCause{Operation: "command", Class: "memory_pressure"}
+			result.Interrupted = true
+		} else if oomErr != nil {
 			result.ExecutionCause = &RuntimeCause{Operation: "command", Class: "resource_limit"}
 		} else if launchErr != nil {
 			result.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("launch", launchErr))
@@ -1680,20 +1683,18 @@ func (w Worker) String() string {
 	return fmt.Sprintf("%s (%s, %.1f GB)", w.Machine.ID, w.Machine.GPU, w.Machine.FreeMemoryGB)
 }
 
-func (w Worker) checkHostRAM(gpu, host float64) error {
-	if err := w.checkHostMemoryBudget(gpu, host); err != nil {
-		return err
+func (w Worker) checkJobRAM(ctx context.Context, j Job) error {
+	w.acceptMemoryOffer(&j)
+	return w.checkJobRAMWithReservations(ctx, j, 0, 0)
+}
+
+func (w Worker) checkJobRAMWithReservations(ctx context.Context, j Job, held, pending float64) error {
+	pools := memoryPools(&j)
+	free, known := 0.0, w.hostRawMemorySource != nil || w.HostMemorySource != nil
+	if known {
+		_, raw, err := w.sampleHostMemory(ctx)
+		free, known = raw, err == nil && validMemoryValue(raw)
 	}
-	if host == 0 && (!unifiedCUDA(&w.Machine) || gpu == 0) {
-		return nil
-	}
-	if w.HostMemorySource == nil {
-		return refuseAdmission("live_host_ram", "GiB", hostNeed(&w.Machine, gpu, host), 0, true)
-	}
-	free, err := w.sharedHostLiveMemory(context.Background())
-	need := hostNeed(&w.Machine, gpu, host)
-	if err != nil || !hostMemoryAvailableFits(&w.Machine, gpu, host, free) {
-		return refuseAdmission("live_host_ram", "GiB", need, free, err != nil)
-	}
-	return nil
+	free = memoryWithinAllowance(&w.Machine, free, pools.KeepGB, held, pending)
+	return checkMemoryPool(pools.RAM.TypicalGB, free, pools.KeepGB, pending, known)
 }

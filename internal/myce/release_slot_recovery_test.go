@@ -63,6 +63,7 @@ func TestReleaseSlotProoflessWorkerInstall(t *testing.T) {
 	m.ModelConfigHash = modelConfigHash(oldCatalog)
 	m.Enrollment = &EnrollmentProof{"v1.0.0", StartGateProtocol, AttemptProtocol, true}
 	m.Release = &RunningRelease{Version: m.Enrollment.Version}
+	m.Capabilities = append(m.Capabilities, pooledMemoryCapability, sampledMemoryCapability)
 	if err := saveEnrollmentReceipt(c.State, m); err != nil {
 		t.Fatal(err)
 	}

@@ -382,7 +382,9 @@ func TestModelLimitWaitingCallDoesNotBlockFittingBatch(t *testing.T) {
 	addModelCall(t, q, "production")
 	reportModel(t, q, m, "ready")
 	waiting := addModelCall(t, q, "production")
-	batch := submit(t, q, spec("deadline"))
+	s := spec("deadline")
+	s.Needs.HostMemoryGB = 1
+	batch := submitMeasuredCardJob(t, q, m, s)
 	reply := reportModel(t, q, m, "ready")
 	if waiting.Machine != "" {
 		t.Fatal("full copy accepted another call")

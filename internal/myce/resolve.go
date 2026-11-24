@@ -167,7 +167,6 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 		if !j.Spec.extensionJob() {
 			_ = lowerExecution(&j.Spec)
 		}
-		view.applyLearnedNeeds(j)
 		return j
 	}
 	j := job(s)

@@ -102,7 +102,7 @@ func machine(id, gpu string, host ...string) Machine {
 	if len(host) > 0 {
 		physicalHost = host[0]
 	}
-	return Machine{Capabilities: []string{"native_isolation_landlock"}, CPUIsolation: "select-none", HostID: physicalHost, ID: id, Session: "session-" + id, GPU: gpu, FreeMemoryGB: 8, CapabilityProfile: &CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []AcceleratorProfile{{Type: gpu, MemoryBytes: 64 << 30}}}}
+	return Machine{Capabilities: []string{"native_isolation_landlock"}, CPUIsolation: "select-none", HostID: physicalHost, ID: id, Session: "session-" + id, GPU: gpu, FreeMemoryGB: 8, HostMemoryMeasured: true, HostAvailableMemoryGB: 64, FreeHostMemoryGB: 64, CapabilityProfile: &CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []AcceleratorProfile{{Type: gpu, MemoryBytes: 64 << 30}}}}
 }
 func check(t testing.TB, q *Queue, m Machine, r *Job) Reply {
 	t.Helper()

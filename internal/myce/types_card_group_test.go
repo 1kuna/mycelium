@@ -16,7 +16,7 @@ import (
 // a 12 GiB job only together; an 8 GiB job keeps one card.
 func bigSpec(priority string, gb float64) Spec {
 	s := spec(priority)
-	s.Needs.MemoryGB = gb
+	s.Needs.MemoryGB, s.Needs.HostMemoryGB = gb, 1
 	return s
 }
 
@@ -44,7 +44,7 @@ func TestMultiCardJobReservesBindsAndReleasesBothCards(t *testing.T) {
 			}
 		}
 	}
-	small := submit(t, q, spec("experiment"))
+	small := submit(t, q, bigSpec("experiment", 8))
 	if got := assignedJob(machineCheck(t, q, m, a)); got != nil {
 		t.Fatal("a card of the running group admitted another batch", got.ID)
 	}
@@ -95,7 +95,7 @@ func TestMultiCardJobReservesBindsAndReleasesBothCards(t *testing.T) {
 	if first == nil || first.ID != small.ID || !slices.Equal(first.AllocatedDevices, []string{"0"}) {
 		t.Fatal("released cards did not admit one-card work", first)
 	}
-	next := submit(t, q, spec("experiment"))
+	next := submit(t, q, bigSpec("experiment", 8))
 	if second := assignedJob(machineCheck(t, q, m, first)); second == nil || second.ID != next.ID || !slices.Equal(second.AllocatedDevices, []string{"1"}) {
 		t.Fatal("second card stayed reserved after the group's release", second)
 	}
@@ -104,10 +104,10 @@ func TestMultiCardJobReservesBindsAndReleasesBothCards(t *testing.T) {
 func TestMultiCardProductionPreemptsBothExperimentsAndWaitsForBothReleases(t *testing.T) {
 	q, clock := fixture(t)
 	m := m3Machine()
-	submit(t, q, spec("experiment"))
+	submit(t, q, bigSpec("experiment", 8))
 	a := assignedJob(machineCheck(t, q, m))
 	clock.Advance(time.Second)
-	submit(t, q, spec("experiment"))
+	submit(t, q, bigSpec("experiment", 8))
 	b := assignedJob(machineCheck(t, q, m, a))
 	if a == nil || b == nil || !slices.Equal(append(a.AllocatedDevices, b.AllocatedDevices...), []string{"0", "1"}) {
 		t.Fatal("experiments did not fill both cards", a, b)
@@ -157,7 +157,7 @@ func TestMultiCardPlacementFollowsMemory(t *testing.T) {
 	if err := q.Complete(result(got, true)); err != nil {
 		t.Fatal(err)
 	}
-	fits := submit(t, q, spec("experiment"))
+	fits := submit(t, q, bigSpec("experiment", 8))
 	if got := assignedJob(machineCheck(t, q, dual)); got == nil || got.ID != fits.ID || len(got.AllocatedDevices) != 1 {
 		t.Fatal("a job that fits one card did not get exactly one card", got)
 	}
@@ -195,14 +195,14 @@ func TestMultiCardMixedSizesKeepWorkOnOneCardThatHoldsIt(t *testing.T) {
 func TestMultiCardNoPartialReservationAcrossRaceOrRestart(t *testing.T) {
 	q, clock := fixture(t)
 	m := m3Machine()
-	holder := submit(t, q, spec("production"))
+	holder := submit(t, q, bigSpec("production", 8))
 	h := assignedJob(machineCheck(t, q, m))
 	if h == nil || h.ID != holder.ID {
 		t.Fatal("holder", h)
 	}
 	big := submit(t, q, bigSpec("experiment", 12))
 	clock.Advance(time.Second)
-	small := submit(t, q, spec("experiment"))
+	small := submit(t, q, bigSpec("experiment", 8))
 	got := assignedJob(machineCheck(t, q, m, h))
 	if got == nil || got.ID != small.ID || !slices.Equal(got.AllocatedDevices, []string{"1"}) {
 		t.Fatal("waiting group job held the free card", got)
@@ -221,7 +221,7 @@ func TestMultiCardNoPartialReservationAcrossRaceOrRestart(t *testing.T) {
 
 	// The worker refuses an attempt whose card another local attempt holds.
 	w := Worker{Machine: m3Machine(), Clock: clock}
-	other := Job{AllocatedDevices: []string{"1"}, Spec: spec("experiment")}
+	other := Job{AllocatedDevices: []string{"1"}, Spec: bigSpec("experiment", 8)}
 	if err := localAttemptAdmission(w, []Job{other}, *a, nil); err == nil || !strings.Contains(err.Error(), "local_device_reservation") {
 		t.Fatal("worker admitted a group over a held card", err)
 	}
@@ -231,7 +231,7 @@ func TestMultiCardNoPartialReservationAcrossRaceOrRestart(t *testing.T) {
 	if running.State != "running" || !slices.Equal(running.AllocatedDevices, []string{"0", "1"}) {
 		t.Fatal("restart lost the group's custody", running)
 	}
-	submit(t, q, spec("experiment"))
+	submit(t, q, bigSpec("experiment", 8))
 	if got := assignedJob(machineCheck(t, q, m, running)); got != nil {
 		t.Fatal("restart freed a card of the running group", got.ID, got.AllocatedDevices)
 	}
@@ -288,10 +288,10 @@ func TestMultiCardHoldEndsWhenHostCanNoLongerHoldDemand(t *testing.T) {
 		t.Run(loss, func(t *testing.T) {
 			q, clock := fixture(t)
 			m := m3Machine()
-			submit(t, q, spec("experiment"))
+			submit(t, q, bigSpec("experiment", 8))
 			a := assignedJob(machineCheck(t, q, m))
 			clock.Advance(time.Second)
-			submit(t, q, spec("experiment"))
+			submit(t, q, bigSpec("experiment", 8))
 			b := assignedJob(machineCheck(t, q, m, a))
 			demand := submit(t, q, bigSpec("deadline", 12))
 			if got := job(t, q, b.ID); got.State != "stopping" || priorityStop(got).Demand != demand.ID {

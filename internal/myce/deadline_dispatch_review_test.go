@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -37,7 +38,9 @@ func TestReviewDeadlineDelayedGateMustNotExecute(t *testing.T) {
 		api.ServeHTTP(w, r)
 	}))
 	defer server.Close()
-	w := Worker{StateDir: newTestStateRoot(t), Machine: machine("worker", "fake"), Clock: c, Client: Client{URL: server.URL, Token: "test"}}
+	w := Worker{StateDir: newTestStateRoot(t), Machine: machine("worker", "fake"), Clock: c, Client: Client{URL: server.URL, Token: "test"},
+		HostMemorySource: func(context.Context) (float64, error) { return 64, nil },
+		MemorySource:     func(context.Context) (float64, error) { return 8, nil }}
 	store, err := w.openStore()
 	if err != nil {
 		t.Fatal(err)

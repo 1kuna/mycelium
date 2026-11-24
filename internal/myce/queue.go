@@ -62,7 +62,6 @@ type state struct {
 	StorageMigration       json.RawMessage                `json:"storage_migration,omitempty"`
 	StorageProtection      json.RawMessage                `json:"storage_protection,omitempty"`
 	StorageAdmissionActive bool                           `json:"storage_admission_active,omitempty"`
-	MemoryExplorations     map[string]memoryExploration   `json:"memory_explorations,omitempty"`
 	StorageObservations    map[string]StorageObservation  `json:"storage_observations,omitempty"`
 	ExternalMemory         map[string]*externalMemoryRing `json:"external_memory,omitempty"`
 	AttemptOutputUploads   map[string]time.Time           `json:"attempt_output_uploads,omitempty"`
@@ -167,7 +166,6 @@ type Queue struct {
 	efficiencyView         *EfficiencyReport // immutable maintenance projection; published only after commit.
 	nasInspections         *resolveNASCache  // ephemeral evidence shared by every listener for this queue.
 	// Qualification removes occupancy, but retains diagnostic history/inventory.
-	memoryOrigin *Queue
 	// Only detached observation views set this page selection.
 	observationSelection *statusSelection
 	deliveryRoot         string
@@ -296,12 +294,11 @@ type Queue struct {
 	observeSubmissionAdvice func(submissionAdviceTiming)
 	observeMemoryHistory    func(int, bool) // Test observer: jobs visited by a full evidence scan.
 
-	memoryPlanning          *memoryPlanningCache // Only while a read-only placement scan is active.
-	memoryObservationIndex  *memoryObservationCatalog
-	retainedMemoryIndex     retainedMemoryIndex // Immutable cold facts; record mutations invalidate.
-	retainedMemoryRevision  uint64
-	expiredMemory           []learnedMemoryFact // Memory evidence of expired job records; append-only.
-	checkinMemoryIdentities map[*Job]string     // Fenced, transaction-local planner input.
+	memoryPlanning        *memoryPlanningCache // Only while a read-only placement scan is active.
+	memoryEvidence        *memoryEvidence      // Immutable committed estimates and calibration.
+	memoryEvidencePending *memoryEvidence      // Staged with the result transaction.
+	poolAvailability      map[string]poolAvailability
+	poolLastStop          map[string]time.Time
 }
 
 func ID() string {
@@ -428,6 +425,11 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		db.Close()
 		return nil, err
 	}
+	q.memoryEvidence, err = loadMemoryEvidence(db, q.s.WorkObservations)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("load memory evidence: %w", err)
+	}
 	q.traceStartup("load_indexes")
 	q.retireWholeMachineHolds()
 	fileRoot, fileLimit, fileCheckpoints := "", int64(100<<30), false
@@ -462,7 +464,6 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		q.migrateParityKinds()
 		q.mirrorProjectParity()
 		q.convertJobRecords()
-		q.repairSuccessfulConstrainedMemory()
 		return nil
 	}); err != nil {
 		db.Close()
@@ -740,8 +741,7 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	q.admissionWaitPending = false
 	q.admissionWaitDecisions = nil
 	q.admissionTrace = nil
-	q.memoryObservationIndex = nil
-	defer func() { q.memoryObservationIndex = nil }()
+	defer func() { q.memoryEvidencePending = nil }()
 	old, err := q.beginRecords()
 	if err != nil {
 		return err
@@ -787,7 +787,6 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	}
 	if err == nil {
 		q.detectHealth()
-		q.invalidateWorkObservations()
 	}
 	if err == nil {
 		q.closeChangedAdmissionWaits()
@@ -1191,7 +1190,6 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 			_ = normalizeResources(&hintSpec) // submitted.Validate already checked it.
 			j.MemoryFallback = &SizeHint{MemoryGB: max(hintSpec.Needs.MemoryGB, submitted.SizeHint.MemoryGB), HostMemoryGB: max(hintSpec.Needs.HostMemoryGB, submitted.SizeHint.HostMemoryGB)}
 		}
-		q.applyLearnedNeeds(j)
 		if err := q.sharedInputCapacityRefusal(j); err != nil {
 			return err
 		}
@@ -1337,8 +1335,18 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 			j.InfrastructureRetries++
 		}
 	}
+	for i := range j.Copies {
+		c := &j.Copies[i]
+		if c.Attempt == j.Attempt && c.Machine == j.Machine && c.Session == j.Session && j.Memory != nil {
+			c.Memory = j.Memory
+		}
+	}
 	j.Machine = ""
 	j.StorageEnvelope = nil
+	if pooledMemory(j) && j.MemoryFallback != nil {
+		j.Spec.Needs.HostMemoryGB, j.Spec.Needs.MemoryGB = j.MemoryFallback.HostMemoryGB, j.MemoryFallback.MemoryGB
+	}
+	j.Memory = nil
 	j.MemoryEnvelope = nil // Re-resolve variants and live sizing for every retry.
 	j.Session = ""
 	j.StopAt = nil
@@ -1431,13 +1439,13 @@ func (q *Queue) maintain() {
 	q.maintainFileExpiry()
 	q.maintainHostMaintenance()
 	q.maintainSharedHosts()
-	q.yieldMemoryOvercommit()
+
+	q.yieldPooledMemory()
 	q.maintainDeviceMaintenance()
 	q.maintainExtensionQualifications()
 	now := q.clock.Now()
 	for _, j := range q.liveJobs() {
 		if j.State == "queued" {
-			q.applyLearnedNeeds(j)
 		}
 		if j.State == "running" || j.State == "stopping" {
 			q.retainRelease(j)
@@ -1713,7 +1721,6 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			}
 		}
 	}
-	identities := q.snapshotCheckinMemoryIdentities(ctx)
 	var releaseStops []AttemptDirective
 	err = q.updateRequest(ctx, func() error {
 		body := q.startBodyPhase("checkin_inventory")
@@ -1721,9 +1728,6 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		identities.installRetainedMemory(q)
-		q.checkinMemoryIdentities = identities.current(q)
-		defer func() { q.checkinMemoryIdentities = nil }()
 		m := preparedMachine
 		m.ExternalMemory = nil // Summary is queue-owned, never worker-supplied.
 		m.HostMemoryDerivation = nil
@@ -1942,6 +1946,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		}
 		body.next("checkin_memory")
 		q.recordExternalMemory(&m)
+		q.observePoolAvailability(&m, c.period)
 		if q.hostMemorySamples == nil {
 			q.hostMemorySamples = map[string]map[attemptKey]hostMemorySample{}
 		}
@@ -1995,7 +2000,10 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			}
 			// Onboarding reports health and exact custody before any ordinary
 			// admission. Do not return offers that this startup phase cannot run.
-			if c.Recovering || q.workerSuspect(&m, q.clock.Now()) {
+			if hold := workerMemoryHold(&m); hold != nil {
+				m.AdmissionReason = hold.Kind + ": " + hold.Reason
+			}
+			if c.Recovering || q.workerSuspect(&m, q.clock.Now()) || workerMemoryHold(&m) != nil {
 				// Preserve retained engines and deliver their cleanup deadlines.
 				// A retention-only plan cannot start a missing engine: the worker
 				// starts only loading plans. New launch authorization also refuses
@@ -2104,7 +2112,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		} else if c.Recovering {
 			q.skipAdmissionSelection(&m, predicateRecovering)
 		}
-		if !m.Leaving && !c.Recovering {
+		if !m.Leaving && !c.Recovering && workerMemoryHold(&m) == nil {
 			q.skipAdmissionSelection(&m, predicateSelectionNotReached)
 			scan := q.placementScan()
 			j := q.plannedPick(&m, scan)
@@ -2464,6 +2472,7 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 	outcome := attemptOutcome(j, r)
 	q.recordAttemptStorage(j, r)
 	q.recordAttemptMemory(j, r) // Preserve facts before retry clears the envelope.
+	q.recordPoolEvidence(j, r)
 	j.ExecutionEvidence = safeExecutionEvidence(r.ExecutionEvidence, j.Attempt)
 	j.ExecutionCause = safeRuntimeCause(r.ExecutionCause)
 	j.CleanupCause = safeRuntimeCause(r.CleanupCause)
@@ -2471,13 +2480,8 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 	ceilingFailure := !r.Success && strings.HasPrefix(ceilingDiagnostic(r.Error, ""), "exceeded its ")
 	oomFailure := !r.Success && (r.OutOfMemory || ceilingFailure)
 	outcome.OutOfMemory = oomFailure
-	// Native ceiling pressure censors true need even when the payload succeeds.
-	// Invalidate comparable memory without changing that successful outcome.
-	// Unenforced process-group pressure never invalidates; a real OOM still does.
-	if oomFailure || r.MemoryPeak.constrained() && r.MemoryPeak.Source != processGroupMemorySource {
-		q.recordWorkOOM(j, r, oomFailure)
-	}
 	stageFailure := (j.Spec.Priority == "production" || plannedPriorityStop(j)) && !r.Success && !r.Interrupted
+	poolPressure := j.Reason == memoryPressureCause || r.ExecutionCause != nil && r.ExecutionCause.Class == memoryPressureCause
 	// Bridge cleanup-to-inventory telemetry with the same absolute bound as
 	// pending cleanup. Completion and heartbeats cannot renew planning credit.
 	if j.State == "stopping" && !r.ReleasePending && j.StopAt != nil {
@@ -2496,7 +2500,7 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 			}
 		}
 	}
-	if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure && !diskFailure && !wallFailure && !wallTimeStopped(j) && !launchCapacityRefusal(r) {
+	if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure && !diskFailure && !wallFailure && !wallTimeStopped(j) && !launchCapacityRefusal(r) && !poolPressure {
 		if cancelled(j) {
 			q.finishCancellation(j)
 		} else {
@@ -2509,6 +2513,11 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 		j.State, j.Reason = "failed", "execution failed: "+j.ExecutionCause.String()
 	} else if launchCapacityRefusal(r) {
 		q.waitLaunchCapacity(j, r)
+		if j.State == "queued" && j.Reason == memoryWaitReason {
+			admissionRequeueOutcome(&outcome)
+		}
+	} else if poolPressure && !r.Success && !oomFailure {
+		q.requeueMemoryPressure(j)
 	} else if !r.Success && !oomFailure && cancelledPreparation(r) {
 		// Started is an authorization fence, not proof main executed. A worker
 		// lifecycle cancellation with exact no-main evidence spends no budget.
@@ -2542,12 +2551,17 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 		if j.State == "queued" {
 			admissionRequeueOutcome(&outcome)
 		}
-	} else if oomFailure && j.Spec.Needs.Memory == "auto" {
-		q.retryOOM(j)
-	} else if (j.Spec.Priority == "production" || plannedPriorityStop(j)) && (stageFailure || oomFailure) {
+
+	} else if oomFailure {
+		if pooledMemory(j) && memoryPools(j).LimitGB > 0 {
+			j.State, j.Reason = "failed", "command exceeded explicit memory limit"
+		} else if j.StartedAt != nil && (r.MemoryPeak != nil || poolPressure) {
+			q.requeueMemoryPressure(j)
+		} else {
+			j.State, j.Reason = "failed", "command failed: "+r.Error
+		}
+	} else if (j.Spec.Priority == "production" || plannedPriorityStop(j)) && stageFailure {
 		j.State, j.Reason = "failed", "command failed: "+r.Error
-	} else if oomFailure && j.Spec.extensionJob() {
-		q.retryOOM(j)
 	} else if r.ExtensionUnavailable && j.Spec.extensionJob() && j.StartedAt == nil && j.Extension != nil {
 		if m := q.s.Machines[r.Machine]; m != nil {
 			q.touchMachine(m.ID)
@@ -3315,6 +3329,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 				j.Machine = m.ID
 				j.Session = m.Session
 				j.AllocatedDevices = slices.Clone(copy.AllocatedDevices)
+				j.restorePoolCustody(copy)
 				j.State = "running"
 				j.ReleaseConfirmed = false
 				j.StopAt = nil
@@ -3456,11 +3471,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j.Spec.Needs = selected.Spec.Needs
 	j.CPUFallbackFrom = selected.CPUFallbackFrom
 	j.MemoryEnvelope, j.MemoryFallback = selected.MemoryEnvelope, selected.MemoryFallback
-	if e := j.MemoryEnvelope; e != nil && e.LimitHostGB > 0 && e.ChargeHostGB == j.Spec.Needs.HostMemoryGB {
-		// Admission used the learned charge; the typed figure stays the limit.
-		j.Spec.Needs.HostMemoryGB = e.LimitHostGB
-	}
-	q.recordLearnedMemory(j, m)
+	j.Memory = selected.Memory
 	if selected.Batch != nil {
 		j.Batch = selected.Batch
 	}
@@ -3538,12 +3549,11 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	if m.Devices != nil && !j.Spec.Needs.cpuOnly() {
 		j.AllocatedDevices = slices.Clone(targetDevices(m))
 	}
-	j.Copies = append(j.Copies, Copy{AllocatedDevices: slices.Clone(j.AllocatedDevices), Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension, ReleaseReason: "awaiting_release"})
+	j.Copies = append(j.Copies, Copy{AllocatedDevices: slices.Clone(j.AllocatedDevices), Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension, Memory: j.Memory, ReleaseReason: "awaiting_release"})
 	j.Session = m.Session
 	if j.Spec.ephemeral() {
 		j.WorkerDataCleanup = &WorkerDataCleanup{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session, State: "pending", CheckedAt: q.clock.Now()}
 	}
-	q.claimMemoryExploration(j, m)
 	j.StorageEnvelope = q.storageEnvelope(j, m)
 	j.Reason = ""
 	if measured {

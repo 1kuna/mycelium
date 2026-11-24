@@ -674,37 +674,13 @@ func TestModelReadyIdleReloadStatusFakeClock(t *testing.T) {
 	}
 }
 
-func TestCombinedBatchModelReclamation(t *testing.T) {
-	t.Parallel()
-	q, _, m := modelFixture(t)
-	m.FreeMemoryGB = 16
-	check(t, q, m, nil)
-	call := addModelCall(t, q, "experiment")
-	reportModel(t, q, m, "ready")
-	if err := q.finishCall(call.ID); err != nil {
-		t.Fatal(err)
-	}
-	submit(t, q, spec("experiment"))
-	r := check(t, q, m, nil).Job
-	if r == nil {
-		t.Fatal("no experiment")
-	}
-	p := spec("production")
-	p.Needs.MemoryGB = 16
-	submit(t, q, p)
-	slot := q.s.ModelSlots[slotKey(m.ID, "test")]
-	got := q.s.Jobs[r.ID]
-	if slot.State != "draining" || got.State != "stopping" {
-		t.Fatalf("production needs 16GB: free=%.0f model=%s/8GB batch=%s/8GB", q.s.Machines[m.ID].FreeMemoryGB, slot.State, got.State)
-	}
-}
-
 func TestCombinedReclamationTierAndPinEligibility(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name, priority               string
 		pin, active, resumable, stop bool
 	}{
+		{"unpinned", "production", false, false, true, true},
 		{"active-pin", "production", true, true, true, false},
 		{"inactive-pin", "production", true, false, true, true},
 		{"nonresumable-production", "production", false, false, false, true},
@@ -728,15 +704,15 @@ func TestCombinedReclamationTierAndPinEligibility(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			s := spec("experiment")
+			s := bigSpec("experiment", 8)
 			s.Resumable = tc.resumable
-			submit(t, q, s)
+			submitMeasuredCardJob(t, q, m, s)
 			r := check(t, q, m, nil).Job
 			if r == nil {
 				t.Fatal("no experiment")
 			}
-			p := spec(tc.priority)
-			p.Needs.MemoryGB = 16
+			p := bigSpec(tc.priority, 16)
+			p.Name = "combined-release-demand"
 			submit(t, q, p)
 			slot := q.s.ModelSlots[slotKey(m.ID, "test")]
 			if (slot.State == "draining") != tc.stop || (q.s.Jobs[r.ID].State == "stopping") != tc.stop {
@@ -773,9 +749,7 @@ func TestBatchReclamationStopsLeastWork(t *testing.T) {
 					}
 				}
 			}
-			p := spec("production")
-			p.Needs.MemoryGB = need
-			submit(t, q, p)
+			submitMeasuredCardJob(t, q, m, bigSpec("production", need))
 			want := "idle"
 			if need == 16 {
 				want = "large"

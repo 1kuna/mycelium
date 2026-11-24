@@ -28,7 +28,7 @@ func hostNeed(m *Machine, gpu, host float64) float64 {
 		need += gpu
 	}
 	if host > 0 {
-		return max(need+m.MemoryCeilingSlackGB, minimumHostMemoryGB)
+		return max(need, minimumHostMemoryGB)
 	}
 	return need
 }
@@ -80,8 +80,7 @@ func (q *Queue) refreshHostMemory() {
 		m.HostMemoryInUseGB = reserved
 		// Full charges consume the allowance; only unused growth consumes live RAM.
 		capacity, available, availableKnown, observedAt := q.hostLiveCapacity(m)
-		room, enforced := q.hostMemoryRoom(m, capacity, reserved, growth)
-		ledger.enforcedGB = enforced
+		room := q.hostMemoryRoom(m, capacity, reserved, growth)
 		m.hostReservationDebtGB = max(0, -room)
 		m.FreeHostMemoryGB = max(0, room)
 		ledger.AvailableGB, ledger.CapacityGB, ledger.AllowanceGB = available, capacity, m.EffectiveHostMemoryBudgetGB
@@ -149,23 +148,23 @@ func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Sp
 		return cores == 0 || cpuAllocationFits(&copy, cores)
 	}
 	// Room after the caller's releases; each candidate adds its own return.
-	base := q.hostRoomArms(m)
+	base := m.FreeHostMemoryGB - m.hostReservationDebtGB
 	for j := range releasedJobs {
-		base = base.plus(q.jobRelease(m, j))
+		base += q.jobRelease(m, j)
 	}
 	for s := range releasedSlots {
-		base = base.plus(q.slotRelease(m, s))
+		base += q.slotRelease(m, s)
 	}
-	jobRAM, slotRAM := map[*Job]roomArms{}, map[*ModelSlot]roomArms{}
+	jobRAM, slotRAM := map[*Job]float64{}, map[*ModelSlot]float64{}
 	ramAfter := func(jobs []*Job, slots []*ModelSlot) float64 {
 		room := base
 		for _, j := range jobs {
-			room = room.plus(jobRAM[j])
+			room += jobRAM[j]
 		}
 		for _, s := range slots {
-			room = room.plus(slotRAM[s])
+			room += slotRAM[s]
 		}
-		return room.gb()
+		return room
 	}
 	room := ramAfter(nil, nil)
 	if host > 0 && (!m.HostMemoryMeasured || m.HostMemoryError != "") {
@@ -216,8 +215,8 @@ func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Sp
 		return slotKey(slots[i].Machine, slots[i].Model, slots[i].Device) < slotKey(slots[j].Machine, slots[j].Model, slots[j].Device)
 	})
 	// Exclude victims that free neither RAM nor cores, including build hand-back.
-	jobs = slices.DeleteFunc(jobs, func(j *Job) bool { return jobRAM[j].live == 0 && freedCPU([]*Job{j}, nil) == 0 })
-	slots = slices.DeleteFunc(slots, func(s *ModelSlot) bool { return slotRAM[s].live == 0 && freedCPU(nil, []*ModelSlot{s}) == 0 })
+	jobs = slices.DeleteFunc(jobs, func(j *Job) bool { return jobRAM[j] == 0 && freedCPU([]*Job{j}, nil) == 0 })
+	slots = slices.DeleteFunc(slots, func(s *ModelSlot) bool { return slotRAM[s] == 0 && freedCPU(nil, []*ModelSlot{s}) == 0 })
 	// Reject impossible demands without constructing a partial release plan.
 	fits := func(js []*Job, ss []*ModelSlot) bool { return ramAfter(js, ss) >= need && cpuOK(js, ss) }
 	if !fits(jobs, slots) {
@@ -271,7 +270,7 @@ func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Sp
 		if fits(nil, chosenSlots) {
 			break
 		}
-		if ramAfter(nil, chosenSlots) < need && slotRAM[s].live > 0 || !cpuOK(nil, chosenSlots) && slotReservesMemory(s) {
+		if ramAfter(nil, chosenSlots) < need && slotRAM[s] > 0 || !cpuOK(nil, chosenSlots) && slotReservesMemory(s) {
 			chosenSlots = append(chosenSlots, s)
 		}
 	}
@@ -280,7 +279,7 @@ func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Sp
 		if fits(chosenJobs, chosenSlots) {
 			break
 		}
-		if ramAfter(chosenJobs, chosenSlots) < need && jobRAM[j].live > 0 || !cpuOK(chosenJobs, chosenSlots) && !j.ReleaseConfirmed {
+		if ramAfter(chosenJobs, chosenSlots) < need && jobRAM[j] > 0 || !cpuOK(chosenJobs, chosenSlots) && !j.ReleaseConfirmed {
 			chosenJobs = append(chosenJobs, j)
 		}
 	}
@@ -415,6 +414,7 @@ type hostMemorySample struct {
 	gb, deviceGB             float64
 	devicePeakGB             float64 // Attempt high water of fresh device samples.
 	residentGB               float64
+	pinnedGB                 float64
 	growthGB, deviceGrowthGB float64
 	rateGB, deviceRateGB     float64
 	at, deviceAt             time.Time
@@ -442,7 +442,7 @@ func updateHostMemorySamples(reports []AttemptReport, now time.Time, previous ma
 		// exact-attempt memory is occupancy evidence, never main-start evidence.
 		if sample == nil || !validMemoryValue(sample.GrowthGB) || !validMemoryValue(sample.GrowthRateGB) || !validMemoryValue(sample.DeviceGrowthGB) || !validMemoryValue(sample.DeviceGrowthRateGB) {
 			// A missing reading keeps the forecast the last one supported.
-			samples[key] = hostMemorySample{id: old.id, at: old.at, receivedAt: old.receivedAt, period: old.period, peakGB: old.peakGB, devicePeakGB: old.devicePeakGB, retainedGB: sampleForecast(old, now)}
+			samples[key] = hostMemorySample{id: old.id, at: old.at, receivedAt: old.receivedAt, period: old.period, peakGB: old.peakGB, devicePeakGB: old.devicePeakGB, retainedGB: old.retainedGB}
 			continue
 		}
 		if validMemoryValue(sample.NonreclaimableGB) && validMemoryValue(sample.AgeSeconds) {
@@ -556,40 +556,22 @@ func retainedHostCharge(j *Job) float64 {
 }
 
 func (q *Queue) retainHostMemoryCharges(machine string, now time.Time) {
+	m := q.s.Machines[machine]
 	for _, j := range q.liveJobs() {
-		m := q.s.Machines[j.Machine]
-		if j.Machine != machine || j.ReleaseConfirmed || (j.State != "running" && j.State != "stopping") || adaptiveMemoryCeilingGB(j, m) <= 0 && !chargedBelowLimit(j) {
+		if j.Machine != machine || !batchReservesCapacity(j) || j.Memory == nil {
 			continue
 		}
 		sample := q.hostMemorySamples[machine][jobKey(*j)]
-		charge, _ := memoryChargeForGrace(j, m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), sample, now, q.preemptionGrace())
-		observed, id := 0.0, int64(0)
-		if old := j.HostMemoryCharge; retainedHostCharge(j) > 0 && old != nil {
-			observed, id = old.GiB, old.SampleID
-			if old.ObservedGB != nil {
-				observed = *old.ObservedGB
-			}
-		}
-		observed = max(observed, sample.peakGB, sample.gb, sample.footprintGB)
-		if j.MemoryEnvelope.ProbeFloorGB > 0 {
-			// Cold probes may release the unused offered envelope after complete
-			// Started evidence. Persist only actual high water, never the offer
-			// or forecast, so a transient prediction cannot become a floor.
-			charge = max(retainedHostCharge(j), observed)
-		}
-		if _, fresh := sample.identifiedHostForecast(now); fresh {
-			id = max(id, sample.id)
-		}
-		old := j.HostMemoryCharge
-		if charge != retainedHostCharge(j) || old == nil || old.ObservedGB == nil || observed != *old.ObservedGB || id != old.SampleID {
-			j = q.touchJob(j.ID)
-			j.HostMemoryCharge = &AttemptHostMemoryCharge{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, GiB: charge, ObservedGB: &observed, SampleID: id}
+		host := max(sample.peakGB, pooledFootprint(sample, unifiedCUDA(m)))
+		if host > j.Memory.RAM.PeakGB || j.Memory.Card != nil && sample.devicePeakGB > j.Memory.Card.PeakGB {
+			q.touchJob(j.ID)
+			retainPoolPeaks(j, host, sample.devicePeakGB)
 		}
 	}
 }
 
 // hostJobCharge is the ledger's one charge for a live attempt; growth is its
-// pending physical headroom, including the lending stop horizon.
+// pending physical headroom from the same footprint.
 func (q *Queue) hostJobCharge(j *Job) float64 {
 	charge, _ := q.hostJobChargeGrowth(j)
 	return charge
@@ -597,5 +579,5 @@ func (q *Queue) hostJobCharge(j *Job) float64 {
 
 func (q *Queue) hostJobChargeGrowth(j *Job) (charge, growth float64) {
 	m := q.planningAllocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
-	return memoryChargeForGrace(j, m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now(), q.preemptionGrace(), q.deviceResidentCredit(j, m))
+	return pooledHostCharge(j, m, q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now(), hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB))
 }

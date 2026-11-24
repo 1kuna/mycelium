@@ -150,10 +150,16 @@ func (q *Queue) maintainStartDeadlines() {
 		q.memoryPlanning = newMemoryPlanningCache()
 		defer func() { q.memoryPlanning = previous }()
 		var scan *placementScan
+		for _, m := range q.s.Machines {
+			if workerUsesMemoryPools(m) {
+				scan = q.placementScan()
+				break
+			}
+		}
 		status := map[*Job]capacityStatus{}
 		for _, j := range q.liveJobs() {
 			if j.State == "queued" && j.Spec.StartBy != nil && !absoluteStartBy(j) {
-				waiting, ready := q.queuedCapacityStatus(j)
+				waiting, ready := q.queuedCapacityStatus(j, scan)
 				// Fence planning sizes the backlog. Keep it off ordinary check-ins;
 				// only an expired production budget needs this final expiry guard.
 				rearm := false

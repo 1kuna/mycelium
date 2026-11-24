@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -73,57 +72,6 @@ func memoryPSITotal(b []byte) (uint64, error) {
 	return 0, errors.New("memory PSI total unavailable")
 }
 
-func memoryStallPressure(start, end uint64, elapsed time.Duration) bool {
-	// Compare microseconds with one percent of the injected-clock interval.
-	return end >= start && elapsed > 0 && float64(end-start) >= float64(elapsed)/float64(time.Microsecond)*.01
-}
-
-// A one-percent RSS error is small beside the existing 25% sizing margin.
-// Also bound swap by one percent of remaining headroom; plentiful RAM must
-// not excuse material swap churn. Compare whole-attempt maxima at finish so
-// startup's tiny RSS cannot turn a few unrelated pages into pressure.
-func hostPressureEvidence(base, worst *gpuHostState, residentGB, reserveGB float64, pageSize int) *MemoryPressureEvidence {
-	e := &MemoryPressureEvidence{Reason: "eligible", ResidentGB: residentGB, ReserveGB: reserveGB,
-		AvailableFloorGB: max(reserveGB, .125, residentGB*.25)}
-	if base == nil || worst == nil {
-		e.Reason = "host_pressure_unavailable"
-		return e
-	}
-	available := worst.available
-	e.MinAvailableGB, e.HostAvg10, e.HostPressureLevel = &available, worst.psi, worst.level
-	e.SwapBudgetGB = min(residentGB, available) * .01
-	if worst.swap > base.swap {
-		e.HostSwapGrowthBytes = (worst.swap - base.swap) * 1024 // meminfo is KiB.
-	}
-	if worst.swapOut > base.swapOut {
-		e.HostSwapOutBytes = (worst.swapOut - base.swapOut) * uint64(pageSize)
-	}
-	if worst.oom > base.oom {
-		e.HostOOMDelta = worst.oom - base.oom
-	}
-	switch {
-	case e.HostOOMDelta > 0:
-		e.Reason = "host_oom"
-	case worst.level >= 2:
-		e.Reason = "host_pressure_level"
-	case available < e.AvailableFloorGB:
-		e.Reason = "available_below_floor"
-	case float64(max(e.HostSwapGrowthBytes, e.HostSwapOutBytes))/(1<<30) > e.SwapBudgetGB:
-		e.Reason = "host_swap_growth"
-	}
-	return e
-}
-
-func (s *gpuHostState) retainPressure(next *gpuHostState) {
-	s.available = min(s.available, next.available)
-	s.swap = max(s.swap, next.swap)
-	s.swapOut = max(s.swapOut, next.swapOut)
-	s.oom = max(s.oom, next.oom)
-	s.psi = max(s.psi, next.psi)
-	s.psiTotalUS = max(s.psiTotalUS, next.psiTotalUS)
-	s.level = max(s.level, next.level)
-}
-
 func readGPUHostState(fs memoryFS) (*gpuHostState, error) {
 	b, err := fs.ReadFile("/proc/meminfo")
 	if err != nil {
@@ -170,63 +118,6 @@ func readGPUHostState(fs memoryFS) (*gpuHostState, error) {
 		return nil, err
 	}
 	return &gpuHostState{available: available, swap: total - free, oom: oom, swapOut: out, psi: psi, psiTotalUS: psiTotal}, nil
-}
-
-// DRM host objects are supported only for discrete xe GPUs. Unified CUDA uses
-// the separate proc physical upper bound, never a reinterpretation of DRM.
-func drmHostMemory(b []byte) (string, float64, error) {
-	fields := map[string]string{}
-	for _, line := range strings.Split(string(b), "\n") {
-		k, v, ok := strings.Cut(line, ":")
-		if ok {
-			fields[k] = strings.TrimSpace(v)
-		}
-	}
-	if fields["drm-client-id"] == "" {
-		// Ordinary descriptors have no DRM fields. A damaged DRM identity
-		// must invalidate coverage even if another client is readable.
-		for name := range fields {
-			if strings.HasPrefix(name, "drm-") {
-				return "", 0, errAttemptMemoryUnsupported
-			}
-		}
-		return "", 0, errAttemptMemoryPending
-	}
-	if fields["drm-driver"] != "xe" || fields["drm-pdev"] == "" {
-		return "", 0, errAttemptMemoryUnsupported
-	}
-	total := 0.0
-	for _, region := range []string{"system", "gtt"} {
-		var allocated, resident float64
-		for i, counter := range []string{"total", "resident"} {
-			f := strings.Fields(fields["drm-"+counter+"-"+region])
-			if len(f) < 1 || len(f) > 2 {
-				return "", 0, errAttemptMemoryUnsupported
-			}
-			n, err := strconv.ParseUint(f[0], 10, 64)
-			if err != nil {
-				return "", 0, errAttemptMemoryUnsupported
-			}
-			scale := 1.0
-			if len(f) == 2 {
-				switch f[1] {
-				case "KiB":
-					scale = 1 << 10
-				case "MiB":
-					scale = 1 << 20
-				default:
-					return "", 0, errAttemptMemoryUnsupported
-				}
-			}
-			if i == 0 {
-				allocated = float64(n) * scale / (1 << 30)
-			} else {
-				resident = float64(n) * scale / (1 << 30)
-			}
-		}
-		total += max(allocated, resident)
-	}
-	return fields["drm-pdev"] + "/" + fields["drm-client-id"], total, nil
 }
 
 func validateGPUTelemetryHelper(path string) error {
@@ -287,103 +178,6 @@ func decodeGPUTelemetrySnapshot(data []byte, started, finished time.Time) (*gpuT
 	return &sample, nil
 }
 
-func (a *memoryAttempt) gpuHostMemory(ctx context.Context, clock Clock, helper, pci string) (float64, bool, error) {
-	b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.events"))
-	if err != nil {
-		return 0, false, err
-	}
-	events := memoryCounters(b)
-	for _, name := range []string{"high", "max", "oom", "oom_kill", "oom_group_kill"} {
-		if _, ok := events[name]; !ok {
-			return 0, false, errors.New("incomplete cgroup pressure counters")
-		}
-	}
-	ids := map[int]bool{}
-	if err := a.processIDs(ids); err != nil {
-		return 0, false, err
-	}
-	clients := map[string]float64{}
-	cards := map[string]bool{normalizePCIAddress(pci): true}
-	for pid := range ids {
-		dir := filepath.Join("/proc", strconv.Itoa(pid), "fdinfo")
-		entries, err := a.fs.ReadDir(dir)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		} // A process exited since cgroup.procs.
-		if err != nil {
-			return 0, false, err
-		}
-		for _, entry := range entries {
-			b, err := a.fs.ReadFile(filepath.Join(dir, entry.Name()))
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			} // A descriptor closed since readdir.
-			if err != nil {
-				return 0, false, err
-			}
-			key, gb, err := drmHostMemory(b)
-			if errors.Is(err, errAttemptMemoryPending) {
-				continue
-			}
-			if err != nil {
-				return 0, false, err
-			}
-			clients[key] = max(clients[key], gb) // inherited/duplicated fds count once
-		}
-	}
-	total := 0.0
-	for _, gb := range clients {
-		total += gb
-	}
-	seen := false
-	for key := range clients {
-		device, _, _ := strings.Cut(key, "/")
-		seen = seen || normalizePCIAddress(device) == normalizePCIAddress(pci)
-		cards[normalizePCIAddress(device)] = true
-	}
-	var managers map[string]string
-	if helper != "" {
-		managers, err = readGPUTelemetryHelper(ctx, clock, helper)
-		if err != nil {
-			return 0, false, err
-		}
-	}
-	for card := range cards {
-		if card == "" || card == "." || filepath.Base(card) != card {
-			return 0, false, errAttemptMemoryUnsupported
-		}
-		// Runtime corroboration is mandatory, through direct debugfs reads
-		// or the explicitly configured helper. Missing evidence rejects it. Count
-		// the whole manager, not its net change, so unrelated allocations
-		// being freed cannot mask this card's driver-host storage.
-		var b []byte
-		if helper != "" {
-			text, ok := managers[card]
-			if !ok {
-				return 0, false, errAttemptMemoryUnsupported
-			}
-			b = []byte(text)
-		} else {
-			b, err = a.fs.ReadFile(filepath.Join("/sys/kernel/debug/dri", card, "gtt_mm"))
-			if err != nil {
-				return 0, false, err
-			}
-		}
-		stats := memoryCounters([]byte(strings.ReplaceAll(string(b), ":", "")))
-		usage, ok := stats["usage"]
-		if !ok || stats["use_type"] != 1 || stats["use_tt"] != 1 {
-			return 0, false, errAttemptMemoryUnsupported
-		}
-		total += float64(usage) / (1 << 30)
-	}
-	return total, seen, nil
-}
-
-// Driver I/O may block in kernel locks. It must neither occupy the resident
-// sampler nor hold its peak mutex. One collection period bounds freshness,
-// not job runtime; slow/incomplete evidence costs conservative sizing only.
-const attemptMemorySamplePeriod = 200 * time.Millisecond
-
 // HostMemorySampling explains why host evidence was or was not promoted.
 // Labels are worker-owned predicates, never raw errors or private paths.
 // Failure-only proc details identify an unmeasured owner without a status dump.
@@ -400,98 +194,11 @@ type HostMemorySampling struct {
 	FailedCounterReason  string  `json:"failed_counter_reason,omitempty"`
 }
 
-type hostMemoryReadError struct {
-	reason string
-	err    error
-}
-
-func (e hostMemoryReadError) Error() string { return e.reason }
-func (e hostMemoryReadError) Unwrap() error { return e.err }
-
-func hostMemoryReadReason(err error) string {
-	reason := "driver_read"
-	var read hostMemoryReadError
-	if errors.As(err, &read) {
-		reason = read.reason
-	}
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		return reason + ":not_found"
-	case errors.Is(err, os.ErrPermission):
-		return reason + ":permission"
-	case errors.Is(err, errAttemptMemoryUnsupported):
-		return reason + ":unsupported"
-	default:
-		return reason + ":read_failed"
-	}
-}
-
-type gpuHostCollection struct {
-	sampling             HostMemorySampling
-	driverGB             float64
-	pinnedGB, physicalGB float64
-	seen                 bool
-	complete             bool
-	last                 time.Time
-}
-
-func (a *memoryAttempt) collectGPUHost(ctx context.Context, clock Clock, helper, pci string, cuda bool) <-chan gpuHostCollection {
-	result := make(chan gpuHostCollection, 1)
-	go func() {
-		out := gpuHostCollection{complete: true}
-		defer func() { result <- out }()
-		tick := time.NewTicker(attemptMemorySamplePeriod)
-		defer tick.Stop()
-		for {
-			if ctx.Err() != nil {
-				return
-			}
-			start := clock.Now()
-			// Finish the in-flight collection at teardown, as for kernel reads.
-			// The helper keeps its own deadline; cleanup still waits at most
-			// one period and rejects a missing or stale result. Cancellation
-			// stops subsequent collections, not a healthy final invocation.
-			var gb, pinned, physical float64
-			var seen bool
-			var err error
-			if cuda {
-				gb, pinned, physical, seen, err = a.cudaHostMemory()
-			} else {
-				gb, seen, err = a.gpuHostMemory(context.WithoutCancel(ctx), clock, helper, pci)
-			}
-			end := clock.Now()
-			out.sampling.MaxCollectionSeconds = max(out.sampling.MaxCollectionSeconds, end.Sub(start).Seconds())
-			if !out.last.IsZero() {
-				out.sampling.MaxIntervalSeconds = max(out.sampling.MaxIntervalSeconds, start.Sub(out.last).Seconds())
-			}
-			switch {
-			case err != nil:
-				out.sampling.Reason = hostMemoryReadReason(err)
-				var proc cudaProcPinReadError
-				if errors.As(err, &proc) {
-					out.sampling.FailedPID, out.sampling.FailedState = proc.pid, proc.state
-					out.sampling.FailedCounter, out.sampling.FailedCounterReason = proc.counter.name, proc.counter.reason
-				}
-			case end.Before(start):
-				out.sampling.Reason = "collector_clock_reversed"
-			case end.Sub(start) > attemptMemorySamplePeriod:
-				out.sampling.Reason = "collector_read_over_period"
-			case !out.last.IsZero() && start.Sub(out.last) > 2*attemptMemorySamplePeriod:
-				out.sampling.Reason = "collector_gap"
-			}
-			if out.sampling.Reason != "" {
-				out.complete = false
-				return
-			}
-			out.sampling.Samples++
-			out.driverGB, out.seen, out.last = max(out.driverGB, gb), out.seen || seen, end
-			out.pinnedGB, out.physicalGB = max(out.pinnedGB, pinned), max(out.physicalGB, physical)
-			select {
-			case <-ctx.Done():
-				return
-			case <-tick.C:
-			}
+func cardTelemetry(m *Machine) *DeviceTelemetry {
+	for _, d := range m.Devices {
+		if d.ID == m.Device {
+			return d.Telemetry
 		}
-	}()
-	return result
+	}
+	return nil
 }

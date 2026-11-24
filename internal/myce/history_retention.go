@@ -129,7 +129,6 @@ func (q *Queue) pruneJobHistory(requestContexts ...context.Context) error {
 		// Ownership of the deadline stays here until the deletion commits.
 		q.records.history.set(id, now.Add(jobExpiryRecheck))
 		row := expiredJobRow{id: id, finished: *j.FinishedAt}
-		row.learning.Memory = learnedMemoryFactOf(j)
 		for _, e := range j.LedgerEntries {
 			if e.WorkLearning != nil {
 				row.learning.WorkLearning = append(row.learning.WorkLearning, identityHash(e.WorkLearning.Key))
@@ -214,9 +213,6 @@ func (q *Queue) pruneJobHistory(requestContexts ...context.Context) error {
 		for _, row := range expired {
 			q.learnExpired(row.learning)
 		}
-		if len(expired) > 0 {
-			q.invalidateRetainedMemory()
-		}
 	})
 	if err != nil {
 		return err
@@ -250,9 +246,6 @@ func replayJob(j *Job) *Job {
 // learnExpired installs a durable expired record's learning. Facts are
 // appended to a fresh slice so snapshots taken outside q.mu stay valid.
 func (q *Queue) learnExpired(l expiredJobLearning) {
-	if l.Memory != nil {
-		q.expiredMemory = append(q.expiredMemory[:len(q.expiredMemory):len(q.expiredMemory)], *l.Memory)
-	}
 	if len(l.WorkLearning) > 0 {
 		if q.evidenceLearned == nil {
 			q.evidenceLearned = map[string]bool{}
@@ -289,7 +282,6 @@ func (q *Queue) loadExpiredLearning() error {
 		return err
 	}
 	defer rows.Close()
-	q.expiredMemory = nil
 	for rows.Next() {
 		var id string
 		var data []byte
@@ -311,7 +303,6 @@ func (q *Queue) loadExpiredLearning() error {
 		}
 		q.learnExpired(l)
 	}
-	q.invalidateRetainedMemory()
 	return rows.Err()
 }
 
