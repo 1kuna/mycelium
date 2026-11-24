@@ -5,26 +5,34 @@ import "time"
 const memoryPressureCause = "memory_pressure"
 
 type poolAvailability struct {
-	session string
-	at      time.Time
-	free    float64
-	growth  float64
-	period  time.Duration
+	session         string
+	at              time.Time
+	free            float64
+	growth          float64
+	sustainedGrowth float64
+	period          time.Duration
+	raw             bool
 }
 
-func (q *Queue) observePoolAvailability(m *Machine, period time.Duration) {
-	if !workerUsesMemoryPools(m) || !m.HostMemoryMeasured || m.HostMemoryError != "" {
+func (q *Queue) observePoolAvailability(m *Machine, period time.Duration, receivedAt time.Time) {
+	previous := q.poolAvailability[m.ID]
+	if previous.session == m.Session && receivedAt.Before(previous.at) {
 		return
 	}
-	now := q.clock.Now()
-	available := m.HostAvailableMemoryGB
-	if observation := m.MemoryObservation; validHostMemoryObservation(observation) {
-		available = observation.TotalGB - observation.UsedGB
+	if !workerUsesMemoryPools(m) || !m.HostMemoryMeasured || m.HostMemoryError != "" {
+		delete(q.poolAvailability, m.ID)
+		return
 	}
-	previous := q.poolAvailability[m.ID]
-	reading := poolAvailability{session: m.Session, at: now, free: available, period: period}
-	if dt := now.Sub(previous.at); previous.session == m.Session && dt > 0 {
-		reading.growth = max(0, previous.free-available) / dt.Seconds()
+	reading := poolAvailability{session: m.Session, at: receivedAt, free: m.HostAvailableMemoryGB, period: period}
+	if o := m.MemoryObservation; validHostMemoryObservation(o) {
+		reading.free, reading.raw = o.TotalGB-o.UsedGB, true
+	}
+	if dt := receivedAt.Sub(previous.at); previous.session == m.Session && previous.raw == reading.raw && dt > 0 {
+		reading.growth = max(0, previous.free-reading.free) / dt.Seconds()
+		// A single allocation changes the level without proving a lasting
+		// rate. Project across the stop grace only at a rate both intervals
+		// support. A stall or recovery resets that rate.
+		reading.sustainedGrowth = min(previous.growth, reading.growth)
 	}
 	if q.poolAvailability == nil {
 		q.poolAvailability = map[string]poolAvailability{}
@@ -44,7 +52,11 @@ func (q *Queue) memoryPoolShort(m *Machine, r poolAvailability) bool {
 			return true
 		}
 	}
-	return r.free-q.pooledKeep(m) < r.growth*(r.period+q.preemptionGrace()).Seconds()
+	room := r.free - q.pooledKeep(m)
+	// Act immediately below the reserve or if even the next sample could
+	// arrive too late. Use the sustained rate for the longer stop horizon.
+	return room < r.growth*r.period.Seconds() ||
+		room < r.sustainedGrowth*(r.period+q.preemptionGrace()).Seconds()
 }
 
 func (q *Queue) yieldPooledMemory() {

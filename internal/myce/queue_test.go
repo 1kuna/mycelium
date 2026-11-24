@@ -643,7 +643,8 @@ func TestWaitingReasonAndGiveUp(t *testing.T) {
 				want = "installed=false, builder=false"
 			case "memory":
 				s.Needs.MemoryGB = 80
-				want = "80.0 GiB free accelerator memory"
+				reasonPrefix = "card needs 80.000 GiB"
+				want = "card allowance 8.000 GiB"
 			}
 			giveUp := c.Now().Add(time.Minute)
 			s.GiveUpAt = &giveUp

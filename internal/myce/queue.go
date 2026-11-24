@@ -1946,7 +1946,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		}
 		body.next("checkin_memory")
 		q.recordExternalMemory(&m)
-		q.observePoolAvailability(&m, c.period)
+		q.observePoolAvailability(&m, c.period, memoryReceivedAt)
 		if q.hostMemorySamples == nil {
 			q.hostMemorySamples = map[string]map[attemptKey]hostMemorySample{}
 		}
