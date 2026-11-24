@@ -549,6 +549,10 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return errors.Join(err, d.Close())
 		}
 	case "queue":
+		notifySocket := os.Getenv("NOTIFY_SOCKET")
+		if err := os.Unsetenv("NOTIFY_SOCKET"); err != nil {
+			return err
+		}
 		startupPhase := queueStartupTrace(myce.RealClock{}, log.Printf)
 		// Reject invalid admission limits before opening storage and starting
 		// background checkpoint preparation.
@@ -736,7 +740,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		go func() { errs <- q.Run(ctx) }()
 		fmt.Printf("Mycelium queue: http://%s\n", listener.Addr())
 		startupPhase("listener_ready")
-		if err = notifyQueueReady(); err == nil {
+		if err = notifyQueueReady(notifySocket); err == nil {
 			select {
 			case <-ctx.Done():
 			case err = <-errs:

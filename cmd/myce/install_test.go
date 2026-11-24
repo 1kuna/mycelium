@@ -361,11 +361,15 @@ func TestInstallQueueStartsAndReportsLocally(t *testing.T) {
 	c.Listen = address
 	c.EnvironmentFile = filepath.Join(home, "fleet.env")
 	os.WriteFile(c.EnvironmentFile, []byte("MYCE_TOKEN=private-test-only\nMYCE_QUEUE=http://"+address+"\n"), 0600)
+	hook := filepath.Join(home, "check-notify-env")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\ntest \"$1\" = --check && test -z \"${NOTIFY_SOCKET+x}\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	var child *exec.Cmd
 	runner := func(_ context.Context, n string, a ...string) ([]byte, error) {
 		if strings.Join(a, " ") == "--user enable --now myce-queue.service" {
 			child = exec.Command(c.Binary, "-test.run=^TestInstalledQueueServiceProcess$")
-			child.Env = append(os.Environ(), "MYCE_TEST_INSTALLED_SERVICE="+c.Config, "INVOCATION_ID=", "NOTIFY_SOCKET="+notifyPath)
+			child.Env = append(os.Environ(), "MYCE_TEST_INSTALLED_SERVICE="+c.Config, "INVOCATION_ID=", "NOTIFY_SOCKET="+notifyPath, "MYCE_HEALTH_NOTIFY="+hook)
 			return nil, child.Start()
 		}
 		return nil, nil

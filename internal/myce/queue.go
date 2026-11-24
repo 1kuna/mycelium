@@ -2,6 +2,7 @@ package myce
 
 import (
 	"cmp"
+	"container/list"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -260,6 +261,7 @@ type Queue struct {
 	usageReader     *sql.DB
 	db              *sql.DB
 	persisted       map[string][]byte
+	coldRecords     map[string]coldQueueRecord
 	slimJobRecords  bool // Write settled job rows with shared values; see job_record_codec.go.
 	records         *queueRecords
 	observeUpdate   func(time.Duration, time.Duration)
@@ -271,6 +273,9 @@ type Queue struct {
 	lossTimeouts    [3]time.Duration
 	usageWrites     []usageSample
 	s               state
+
+	jobSnapshotLRU   list.List // jobSnapshotsMu, most recent lookup first.
+	jobSnapshotBytes int       // jobSnapshotsMu, total encoded bytes held by the cache.
 
 	restartControlUntil  time.Duration // Available startup service, not blocked wall time.
 	restartGraceDuration time.Duration

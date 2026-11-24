@@ -283,7 +283,14 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 	changedJobs := false
 	for key, value := range next.records {
 		if key != "state" {
-			q.noteEvidenceRecord(key, q.persisted[key], value)
+			if cold, ok := q.coldRecords[key]; ok {
+				q.replaceEvidenceBytes(cold.size, len(value))
+				if strings.HasPrefix(key, "jobs/") {
+					q.enqueueEvidence(key)
+				}
+			} else {
+				q.noteEvidenceRecord(key, q.persisted[key], value)
+			}
 		}
 		// persistState reuses the immutable byte slice for unchanged records.
 		// Invalidate only after SQLite commit, including removal, and never on
@@ -292,6 +299,7 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 			changedJobs = true
 			q.invalidateJobSnapshot(id)
 		}
+		delete(q.coldRecords, key)
 		if value == nil {
 			delete(q.persisted, key)
 		} else {

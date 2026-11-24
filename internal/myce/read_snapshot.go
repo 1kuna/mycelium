@@ -240,6 +240,9 @@ func readJobLedgerSpan(data []byte, jobDepth int) (int, int) {
 	return 0, 0
 }
 func (r *readRecord) decode(key string) (any, error) {
+	if r.data == nil && r.decoded.Load() {
+		return r.value, r.err
+	}
 	r.once.Do(func() {
 		defer r.decoded.Store(true)
 		group, _, _ := strings.Cut(key, "/")
@@ -286,7 +289,7 @@ func (r *readRecord) decode(key string) (any, error) {
 }
 
 // Only successful commits publish. Rollback neither advances the root nor
-// discards a reader's lazy decoded records. No SQLite access is used by reads.
+// discards a reader's lazy decoded records. Snapshot readers use no SQLite I/O.
 func (q *Queue) publishReadRecords(next map[string][]byte) {
 	if q.records != nil && (len(q.records.reasons) > 0 || len(q.records.staleness) > 0) {
 		next = maps.Clone(next)
@@ -323,6 +326,17 @@ func (q *Queue) publishReadRecords(next map[string][]byte) {
 				}
 				q.readRoot = readPut(q.readRoot, key, &readRecord{data: encoded.base, stateRoot: root})
 			}
+			continue
+		}
+
+		// An already cold record appears here only for a derived view change.
+		// A durable change first removes its old comparison in persistUsage.
+		_, cold := q.coldRecords[key]
+		if cold || q.compactColdRecord(key, data) {
+			if id, ok := strings.CutPrefix(key, "jobs/"); ok {
+				q.invalidateJobSnapshot(id)
+			}
+			q.readRoot = readPut(q.readRoot, key, q.coldReadRecord(key))
 			continue
 		}
 
@@ -397,12 +411,12 @@ func (q *Queue) publishReadRuntime() {
 	// a cache entry after the matching new generation is published.
 	q.jobSnapshotsMu.Lock()
 	for id := range q.readInvalidations {
-		delete(q.jobSnapshots, id)
+		q.evictJobSnapshot(id)
 	}
 	if q.readDependenciesInvalid {
 		for id, entry := range q.jobSnapshots {
 			if entry.dependsOnJobs {
-				delete(q.jobSnapshots, id)
+				q.evictJobSnapshot(id)
 			}
 		}
 	}
@@ -607,7 +621,7 @@ func (g *readGeneration) inputs(ctx context.Context) (state, *queueRecords, erro
 			switch group {
 			case "jobs":
 				s.Jobs[name] = value.(*Job)
-				if record.history.inputs != nil {
+				if record.history.source != nil {
 					g.records.statusHistory[name] = record.history
 				}
 			case "submissions":

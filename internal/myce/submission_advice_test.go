@@ -233,14 +233,14 @@ func TestSubmissionAdviceCapacityPreservesAcceptance(t *testing.T) {
 		t.Run(fmt.Sprintf("warm=%t", warm), func(t *testing.T) {
 			q, clock := fixture(t)
 			retained := &Job{ID: "retained", State: "succeeded", ReleaseConfirmed: true, Queued: clock.Now(), Spec: spec("experiment")}
-			retained.Spec.Run.Command = []string{"echo", strings.Repeat("payload", 20000)}
-			q.s.Jobs[retained.ID] = retained
+			retained.Spec.Run.Command = []string{"echo", strings.Repeat("payload", 400)}
 			for i := 1; i < 1024; i++ {
 				j := *retained
 				j.ID = fmt.Sprintf("retained-%04d", i)
 				j.Spec = spec("experiment")
 				q.s.Jobs[j.ID] = &j
 			}
+			q.s.Jobs[retained.ID] = retained
 			if err := q.update(func() error { return nil }); err != nil {
 				t.Fatal(err)
 			}
