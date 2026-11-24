@@ -1,0 +1,21 @@
+name: namespace-fatal-signal-qualification
+project: mycelium
+priority: experiment
+advanced: {worker_data: ephemeral}
+needs: {platform: cpu, cpu_cores: 1}
+outputs: {result.txt: results}
+run:
+  command:
+    - /usr/bin/python3
+    - -c
+    - |
+      import os, resource, signal, time
+
+      assert "MYCE_TOKEN" not in os.environ
+      assert resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)
+      with open("result.txt", "w") as result:
+          result.write("synthetic pre-signal canary\n")
+      time.sleep(20)  # Leave time for the host observer to sample this process.
+      print("myce-fatal-signal-ready", flush=True)
+      os.kill(os.getpid(), signal.SIGABRT)
+    - myce-fatal-signal-payload

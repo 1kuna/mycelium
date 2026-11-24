@@ -144,15 +144,41 @@ recheck fresh worker capability after upgrading/resuming the worker. A shell
 outside the configured worker service or detached scope fails `--qualify`.
 The installed worker runs this probe from its actual cgroup. The router and
 worker executable each need the release's corresponding version.
+For release qualification, use the fixed router from the verified checkout of
+the signed worker release under test. The router is installed separately, so a
+worker upgrade alone leaves any previously installed router in place.
 
 Before accepting the release, use harmless fixtures on each Linux execution
-host: an ephemeral managed-I/O success plus a fatal-signal attempt, including
-a descendant inside its PID namespace. Exercise detached scope custody on a
-worker that launches into scopes. Check output hashes, logs, exact-attempt
-cleanup receipts and release, absence of all private payload/log/cache copies,
-and journal `MYCE_CORE_CAPTURE=suppressed_ephemeral` with matching
-`COREDUMP_CGROUP`, `MYCE_ATTEMPT`, signal and timestamp. Compare read-only core
-store listings before/after: no ephemeral core or partial file may appear.
+host: an ephemeral managed-I/O success plus a fatal-signal attempt. Exercise
+detached scope custody on a worker that launches into scopes. For the fatal
+attempt, copy [fatal.yaml](../deploy/qualification/fatal.yaml), set a fresh
+`submission_key` and restrict `advanced.allowed_machines` to the worker under
+test. Submit it detached. Start the read-only observer on that worker as soon
+as the exact attempt and its session are available, while the fixture is live:
+
+```sh
+sudo python3 deploy/qualification/observe-fatal.py "$WORKER_STATE" \
+  "$JOB_ID" "$ATTEMPT" "$SESSION" --worker-cgroup "$WORKER_CGROUP" --wait 60
+```
+
+The observer requires the fixture marker and the `/usr/bin/python3` executable
+in the exact attempt cgroup or a child cgroup. Check the scoped AppArmor label
+where applicable, a one-ID UID map, and distinct user, mount, PID, IPC and
+network namespace inodes. Require the fixture's `myce-fatal-signal-ready` marker
+and exit 134, and match the observer's host PID, `cgroup` and `identity` to a
+structured journal entry from the qualification window. Set the query variables
+from the observer and the window start time:
+
+```sh
+sudo journalctl --since "$WINDOW_START" -o json SYSLOG_IDENTIFIER=myce-core-router \
+  MYCE_CORE_CAPTURE=suppressed_ephemeral COREDUMP_SIGNAL=6 \
+  COREDUMP_PID="$CRASH_PID" COREDUMP_CGROUP="$ATTEMPT_CGROUP" MYCE_ATTEMPT="$ATTEMPT_IDENTITY"
+```
+
+Check output hashes for successful fixtures, logs, exact-attempt cleanup
+receipts and release, and absence of private payload, log and cache copies.
+Compare read-only core-store listings before and after. No ephemeral core or
+partial file may appear.
 Verify an ordinary crash still captures within budget and a concurrent ordinary
 consumer retains its cache/pins. Retry/requeue and restart recovery must also
 pass. Record running release/SHA and sanitized evidence in #1585; laptop tests

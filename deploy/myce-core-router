@@ -33,7 +33,7 @@ def suppression_evidence(pid, signal, cgroup, attempt):
               'MYCE_CORE_CAPTURE': 'suppressed_ephemeral'}
     with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as journal:
         journal.connect('/run/systemd/journal/socket')
-        journal.send('\n'.join(k + '=' + v for k, v in fields.items()).encode())
+        journal.send(''.join(f'{key}={value}\n' for key, value in fields.items()).encode())
 
 def files():
     for directory in (ROOT, ROOT + '/keep'):
