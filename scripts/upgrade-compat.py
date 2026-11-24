@@ -492,7 +492,18 @@ def downgrade(previous, candidate, scratch, tools):
         config_path = Path(config)
         saved_bytes = config_path.read_bytes()
         saved = json.loads(saved_bytes)
-        command(install_command, env=env, timeout=30)
+        # This synthetic install has a unit file but no registered manager
+        # unit. Exercise the old CLI's saved-config path without systemd.
+        unit = Path(saved["service"])
+        if not unit.resolve().is_relative_to(install_root.resolve()):
+            raise RuntimeError("fixture service escaped its install root")
+        with tempfile.TemporaryDirectory(prefix="inactive-unit-", dir=install_root) as tmp:
+            inactive = Path(tmp) / unit.name
+            unit.rename(inactive)
+            try:
+                command(install_command, env=env, timeout=30)
+            finally:
+                inactive.rename(unit)
         restored = json.loads(config_path.read_bytes())
         for field in ("environment_cache_bytes", "file_retention", "log_retention"):
             assert restored[field] == saved[field], f"downgrade changed {field}"
