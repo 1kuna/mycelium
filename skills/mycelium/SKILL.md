@@ -143,6 +143,10 @@ durability is required. Status comes from the running worker.
   capacity versus coverage, memory, storage and device evidence. Route owner
   actions with the job ID, attempt and typed reason. Keep full history reads
   out of loops.
+- A `memory_wait` or occupied-card `capacity` hold clears as room or custody
+  becomes available. A `memory_capacity` hold gives the estimate and the
+  allowance of each eligible pool that is too small even when empty.
+  For `fan_out_dispatched`, inspect the piece's status for any remaining wait.
 - Fetch with `myce result JOB_ID --out DIR`. Fetch successful results before
   file expiry (72 hours by default). See [results](references/results.md) and
   [retention](https://github.com/1kuna/mycelium/blob/main/docs/retention.md#job-records)

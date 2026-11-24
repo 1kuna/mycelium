@@ -396,6 +396,7 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	// need the active diagnostic context, but never the fleet projection.
 	minimal := selected != nil && q.calls[id] == nil && (terminal(selected.State) || selected.State != "queued" && selected.StartedAt != nil && !jobHasVariants(selected))
 	if !minimal {
+		v.memoryEvidence, v.hostMemoryLedgers = q.memoryEvidence, q.hostMemoryLedgers
 		// Shared-device diagnostics use the same fresh attempt evidence as
 		// admission. Detach both map levels while the samples are protected;
 		// their values contain only scalars, strings and timestamps.
