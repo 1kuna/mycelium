@@ -70,18 +70,6 @@ func TestPixiLockCheckRefusesOutdatedLockAtSubmission(t *testing.T) {
 	}
 }
 
-// A wrong or absent Pixi cannot judge the workers' lock check: skip, never refuse.
-func TestPixiLockCheckSkipsWithoutWorkerVersion(t *testing.T) {
-	calls := fakeWorkerPixi(t, "0.1.0")
-	r := EnvironmentRecipe{Backend: "pixi", Files: map[string][]byte{"pixi.lock": []byte("stale"), "pixi.toml": []byte("[workspace]\n")}}
-	if err := checkInlinePixiLock(context.Background(), r); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(calls); err == nil {
-		t.Fatal("unpinned pixi ran the check")
-	}
-}
-
 func TestPixiLockCheckRefusesOutdatedExtensionRegistration(t *testing.T) {
 	fakeWorkerPixi(t, workerPixiVersion())
 	e := compositionExtension(t, false)

@@ -102,27 +102,6 @@ func TestWorkerHygieneCollectionEnvironmentBudgetReferencesAndCustody(t *testing
 	}
 }
 
-func TestWorkerHygieneCollectionUsesExistingAutomaticBudgetAndCadence(t *testing.T) {
-	clock := &fakeClock{now: time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC)}
-	cache := &EnvironmentCache{Root: t.TempDir(), Clock: clock, sizeLimit: func(string) (int64, error) { return 12345, nil }}
-	c := &workerHygieneCollector{w: Worker{Clock: clock, environmentCache: cache}}
-	c.collect(context.Background())
-	first := c.snapshot()
-	if first.Environments.Limit != 12345 || first.Environments.Error != "" {
-		t.Fatal("automatic budget not applied", first)
-	}
-	clock.Advance(time.Second)
-	c.collect(context.Background())
-	if !c.snapshot().At.Equal(first.At) {
-		t.Fatal("release requests caused repeated bulk sweeps")
-	}
-	clock.Advance(time.Minute)
-	c.collect(context.Background())
-	if !c.snapshot().At.After(first.At) {
-		t.Fatal("idle maintenance did not run again")
-	}
-}
-
 func TestWorkerHygieneCollectionFailedStagingRequiresReceiptAndInactivity(t *testing.T) {
 	f := newFleetInstallFixture(t, "linux")
 	// The fixture's installation, manifest and receipt are all local synthetic

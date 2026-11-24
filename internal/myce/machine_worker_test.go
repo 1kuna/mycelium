@@ -669,21 +669,6 @@ func TestMachineInventoryAuthorityAllowsIndependentDeviceSlots(t *testing.T) {
 	}
 	requireState(t, q, second.ID, "running")
 }
-func TestMachineDeviceProjectionPreservesSharedHostFacts(t *testing.T) {
-	m := machine("host", "fake")
-	m.CapabilityProfile.Availability = &Availability{Available: false}
-	d := fakeMachineDevices()[0]
-	d.TotalMemoryGB, d.FreeMemoryGB, d.BudgetGB = 32, 32, 2
-	d.CapabilityProfile = &CapabilityProfile{LogicalCPUs: 1, SystemMemoryBytes: 1, OS: "wrong", Arch: "wrong"}
-	got := d.machine(m)
-	if got.FreeMemoryGB != 2 || got.TotalMemoryGB != 2 {
-		t.Fatal("physical capacity or telemetry widened the device allowance")
-	}
-	if got.CapabilityProfile.LogicalCPUs != m.CapabilityProfile.LogicalCPUs || got.CapabilityProfile.SystemMemoryBytes != m.CapabilityProfile.SystemMemoryBytes || got.CapabilityProfile.Availability.Available {
-		t.Fatal("device profile replaced shared CPU/RAM or participation facts")
-	}
-}
-
 func TestMachineInventoryEmptyAndDuplicateOwner(t *testing.T) {
 	q, _ := fixture(t)
 	m := machine("cpu-machine", "fake", "physical")

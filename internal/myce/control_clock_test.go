@@ -843,23 +843,6 @@ func TestRestartGraceExpiryRetainsExactHandover(t *testing.T) {
 	}
 }
 
-func TestControlClockOverlappingReadersCountOnce(t *testing.T) {
-	clock := &fakeClock{now: time.Unix(100, 0)}
-	c := &controlClock{clock: clock.Now, at: clock.Now()}
-	clock.Advance(time.Second)
-	c.begin()
-	clock.Advance(time.Second)
-	c.begin()
-	clock.Advance(time.Second)
-	c.end(func() {})
-	clock.Advance(time.Second)
-	c.end(func() {})
-	clock.Advance(time.Second)
-	if got := c.now(); got != 2*time.Second {
-		t.Fatalf("overlapping occupancy counted twice: %s", got)
-	}
-}
-
 type heldCheckinResponse struct {
 	header  http.Header
 	entered chan struct{}

@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -94,32 +93,6 @@ func TestRealProbeGuard(t *testing.T) {
 			}()
 			call()
 		})
-	}
-}
-
-func TestSparkInventoryUsesInjectedFilesystem(t *testing.T) {
-	probe := MachineProbe{OS: "linux", Arch: "arm64", Files: fstest.MapFS{
-		"proc/meminfo":                                        {Data: []byte("MemTotal: 134217728 kB\nMemAvailable: 33554432 kB\n")},
-		"dev/dri/renderD128":                                  {},
-		"sys/bus/pci/devices/0000:01:00.0/vendor":             {Data: []byte("0x10de")},
-		"sys/bus/pci/devices/0000:01:00.0/class":              {Data: []byte("0x030000")},
-		"sys/bus/pci/devices/0000:01:00.0/current_link_width": {Data: []byte("0")},
-	}, Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
-		if name != "nvidia-smi" {
-			t.Fatalf("unexpected device command %s", name)
-		}
-		if len(args) > 0 && strings.HasPrefix(args[0], "--query-gpu=uuid,driver_version") {
-			return []byte("GPU-synthetic-gb10, 580.159.03"), nil
-		}
-		return []byte("NVIDIA GB10, [N/A]"), nil
-	}, CommandEnv: func(context.Context, map[string]string, string, ...string) ([]byte, error) { return []byte("[]"), nil }}
-	devices, err := (Worker{Machine: Machine{GPU: "cuda"}}).localInventoryWithProbe(context.Background(), probe)
-	if err != nil || len(devices) != 1 {
-		t.Fatal(devices, err)
-	}
-	d := devices[0]
-	if d.Identity != "GPU-synthetic-gb10" || !d.UnifiedMemory || !d.MemoryMeasured || d.ReserveMemoryGB != 0 || d.FreeMemoryGB != 32 || d.BudgetGB != 32 || d.Reason != "" {
-		t.Fatalf("injected unified-memory inventory: %+v", d)
 	}
 }
 

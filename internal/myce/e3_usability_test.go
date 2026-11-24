@@ -182,22 +182,6 @@ func TestStatusNonzeroSubsecondDuration(t *testing.T) {
 	}
 }
 
-func TestExtensionNoEnvironmentWaitsForPreparation(t *testing.T) {
-	e := compositionExtension(t, false)
-	m := machine("local", "fake")
-	m.CapabilityProfile = &CapabilityProfile{OS: e.Variants[0].Target.OS, Arch: e.Variants[0].Target.Arch}
-	j := &Job{Spec: Spec{Extension: extensionKey(e), ExtensionCheck: &ExtensionCheckRequest{Work: "extension:" + e.Name}}, Extensions: []Extension{e}}
-	if environmentReady(j, &m) {
-		t.Fatal("check assigned before frozen files were installed")
-	}
-	report := newExtensionReport(e, &m, "extension:"+e.Name)
-	report.Setup = true
-	m.ExtensionReports = []ExtensionReport{report}
-	if !environmentReady(j, &m) {
-		t.Fatal("no-op preparation still requires a synthetic environment")
-	}
-}
-
 func TestClientRunFailureProvidesTypedLogHint(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

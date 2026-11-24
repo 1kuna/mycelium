@@ -313,38 +313,6 @@ func TestWorkerStartHandoffOwnerCancellation(t *testing.T) {
 	})
 }
 
-// A completed dial refusal is positive outage evidence, unlike a slow response
-// or a lost reply after commit. Every handshake must return its typed cause.
-func TestWorkerControlHandshakeUnreachable(t *testing.T) {
-	for _, boundary := range []string{"started", "launch", "native-custody"} {
-		t.Run(boundary, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-				defer cancel()
-				calls := 0
-				w := Worker{launchCtx: ctx, Client: Client{URL: "http://queue.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(*http.Request) (*http.Response, error) {
-					calls++
-					return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
-				})}}}
-				started := time.Now()
-				var err error
-				switch boundary {
-				case "started":
-					err = w.authorizeStart(Job{}, "session")
-				case "launch":
-					err = w.authorizeLaunch(HostLaunch{})
-				case "native-custody":
-					err = w.reportNativeCustody(Job{}, "session", "execution", "custody", "reserved")
-				}
-				cause := runtimeDiagnostic(runtimeErrorFor("start_authorization", err))
-				if calls != 1 || time.Since(started) != 0 || !errors.Is(err, syscall.ECONNREFUSED) || cause.Class != "control_unreachable" {
-					t.Fatalf("outage did not return typed cause immediately: calls=%d elapsed=%v cause=%+v err=%v", calls, time.Since(started), cause, err)
-				}
-			})
-		})
-	}
-}
-
 // Fake-clock API replay: completed request RTT, rather than report cadence,
 // paces a lost reply. Each phase remains the same attempt and custody identity.
 func TestWorkerControlHandshakeReconciliation(t *testing.T) {

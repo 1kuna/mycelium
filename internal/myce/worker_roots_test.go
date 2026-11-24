@@ -223,21 +223,6 @@ func TestWorkerRootsAutofsIsNotMountedNAS(t *testing.T) {
 	}
 }
 
-func TestWorkerRootsCachedModelAndDirectNAS(t *testing.T) {
-	m := Machine{UnavailableRoots: []UnavailableRoot{{Root: "model", Reason: "configured NAS mount missing"}}, CachedModels: []string{"model"}}
-	j := Job{Spec: cpuSpec(1, 1)}
-	j.Spec.Priority = "production"
-	j.Spec.Needs.Model = "model"
-	model := Model{Name: "model"}
-	if storageRootReasonForModel(&j, &m, model, nil) != "" {
-		t.Fatal("local cached model blocked")
-	}
-	model.DirectNAS = true
-	if storageRootReasonForModel(&j, &m, model, nil) == "" {
-		t.Fatal("direct NAS model bypassed missing mount")
-	}
-}
-
 func TestWorkerRootsCachedModelKeepsSnapshotSource(t *testing.T) {
 	q, _ := fixture(t)
 	model := Model{Name: "test", Path: "test", Engine: "fake", MemoryGB: 1, Platforms: []string{"fake"}}

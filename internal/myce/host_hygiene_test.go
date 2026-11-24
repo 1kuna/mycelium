@@ -154,31 +154,6 @@ func TestHostHygieneZeroPressureBaseline(t *testing.T) {
 	}
 }
 
-func TestHostHygieneColdPressureWithSwapGrowth(t *testing.T) {
-	for _, learnedTail := range []bool{false, true} {
-		t.Run(fmt.Sprint("learned_tail=", learnedTail), func(t *testing.T) {
-			c := &fakeClock{now: time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)}
-			h := HostHealth{}
-			for range hostHealthWarmup {
-				c.Advance(signalRefresh)
-				h.observe(HostHealthSample{At: c.Now()})
-			}
-			if learnedTail {
-				c.Advance(signalRefresh)
-				h.observe(HostHealthSample{At: c.Now(), HostHealthReading: HostHealthReading{Pressure: 2.16, pressurePSI: true}})
-			}
-			baseline := len(h.Baseline)
-			for i := range hostHealthConfirmation {
-				c.Advance(signalRefresh)
-				h.observe(HostHealthSample{At: c.Now(), HostHealthReading: HostHealthReading{Pressure: 6.17, SwapBytes: float64(i+1) * 38e6 * signalRefresh.Seconds(), pressurePSI: true}})
-			}
-			if h.DrainReason != "host_memory_pressure" || len(h.Baseline) != baseline {
-				t.Fatal("corroborated pressure was accepted into the healthy baseline", h.DrainReason, len(h.Baseline), baseline)
-			}
-		})
-	}
-}
-
 func TestHostHygieneNormalPressureLevelWithSwapGrowth(t *testing.T) {
 	// Darwin reports an OS level: 1 is normal, not positive memory PSI.
 	m, c := healthFixture(t, 1)

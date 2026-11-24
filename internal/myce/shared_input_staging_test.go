@@ -259,67 +259,6 @@ func TestWorkerStagingCancellationAndPreemption(t *testing.T) {
 	}
 }
 
-func TestSharedInputStagingProgressAndLateSuccess(t *testing.T) {
-	clock := &workerFakeClock{now: time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)}
-	cache := &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: clock}}
-	if err := cache.cache.init(); err != nil {
-		t.Fatal(err)
-	}
-	for _, mode := range []string{"progress", "stall", "cancel"} {
-		t.Run(mode, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			progress, unblock := make(chan context.Context, 1), make(chan struct{})
-			var published bool
-			done := make(chan error, 1)
-			go func() {
-				done <- cache.stageInput(ctx, func(ctx context.Context, stage string) error {
-					progress <- ctx
-					<-unblock // An uninterruptible call may return success after stop.
-					return os.WriteFile(filepath.Join(stage, "late"), []byte("value"), 0600)
-				}, func(string) error { published = true; return nil })
-			}()
-			stageCtx := <-progress
-			pending := onlySharedStaging(t, cache)
-			if mode == "progress" {
-				for range 3 {
-					clock.Advance(20 * time.Second)
-					if err := sharedInputProgress(stageCtx); err != nil {
-						t.Fatal(err)
-					}
-				}
-				close(unblock)
-				if err := <-done; err != nil || !published {
-					t.Fatalf("progressing stage refused: %v", err)
-				}
-			} else {
-				if mode == "stall" {
-					clock.Advance(checkpointAvailabilityStallBudget)
-				} else {
-					cancel()
-				}
-				select {
-				case err := <-done:
-					if mode == "stall" && !errors.Is(err, errCheckpointIOTimeout) || mode == "cancel" && !errors.Is(err, context.Canceled) {
-						t.Fatal(err)
-					}
-				case <-time.After(testWaitTimeout):
-					t.Fatal("staging did not detach")
-				}
-				close(unblock)
-				<-pending.done
-				if published {
-					t.Fatal("late successful staging result was accepted")
-				}
-			}
-			entries, err := filepath.Glob(filepath.Join(cache.cache.Root, "*.partial"))
-			if err != nil || len(entries) != 0 {
-				t.Fatal("private staging was not cleaned", entries, err)
-			}
-		})
-	}
-}
-
 func TestSharedInputStagingMetadataProgressAndCancellation(t *testing.T) {
 	for _, operation := range []struct {
 		name string

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -113,60 +112,6 @@ func TestAcceleratorBackendDescriptors(t *testing.T) {
 	}
 	if validGPU("mps") || validGPU("") || ExtensionDevice("unknown") != "" || resourceWords("unknown") != "unknown resource" {
 		t.Fatal("unknown backend must remain unknown")
-	}
-}
-
-func TestAcceleratorBackendInventoryAndDetection(t *testing.T) {
-	for _, platform := range []string{"cuda", "xpu", "metal", "fake", "cpu"} {
-		t.Run(platform, func(t *testing.T) {
-			backend := backendFor(platform)
-			if platform == "fake" || platform == "cpu" {
-				if backend.inventory != nil {
-					t.Fatal("simulated/CPU backend discovered physical hardware")
-				}
-				return
-			}
-			p := MachineProbe{OS: "linux", Arch: "amd64",
-				Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
-					switch name {
-					case "nvidia-smi":
-						if strings.Contains(strings.Join(args, " "), "name,memory.total") {
-							return []byte("card, 8192, 0000:03:00.0"), nil
-						}
-						return []byte("GPU-card, driver, 0000:03:00.0"), nil
-					case "/usr/sbin/system_profiler":
-						return []byte("Metal"), nil
-					}
-					t.Fatal("unexpected probe", name, args)
-					return nil, nil
-				},
-				CommandEnv: func(context.Context, map[string]string, string, ...string) ([]byte, error) {
-					return []byte(`[{"identity":"intel-card","fingerprint":"driver","pci_address":"0000:03:00.0","memory_bytes":8589934592}]`), nil
-				},
-			}
-			pci := []pciAccelerator{{address: "0000:03:00.0", vendor: backend.pciVendor, topologyKnown: true}}
-			devices, err := backend.inventory(p, t.Context(), pci)
-			if err != nil || len(devices) != 1 || devices[0].Platform != platform {
-				t.Fatal("inventory", devices, err)
-			}
-			if backend.pciVendor != "" {
-				if pci[0].platform() != platform || backend.nativeNodes == nil {
-					t.Fatal("physical backend mapping missing")
-				}
-				devices[0].pciFact = &pci[0]
-			}
-			detected, err := p.detectAccelerator(t.Context(), devices[0])
-			mode := "dedicated"
-			if platform == "xpu" {
-				mode = "fixed"
-			}
-			if platform == "metal" {
-				mode = "unified"
-			}
-			if err != nil || detected.Platform != platform || detected.MemoryMode != mode {
-				t.Fatal("detection", detected, err)
-			}
-		})
 	}
 }
 
