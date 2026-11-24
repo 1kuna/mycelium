@@ -71,13 +71,6 @@ func (q *Queue) resolveEnvironment(e Environment) (map[string]EnvironmentRecipe,
 	return q.environments.resolveEnvironment(e)
 }
 
-// SetQueueHostMemorySource supplies the queue process's own host-memory probe
-// during embedded process setup. It must not run concurrently with queue reads.
-// Worker inventory overrides do not change this source.
-func SetQueueHostMemorySource(source func(float64) (MemorySource, error)) {
-	queueHostMemorySource = source
-}
-
 func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 	return w.prepareExtensionFilesContext(context.Background(), j, stateDir)
 }
