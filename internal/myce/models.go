@@ -34,7 +34,6 @@ type VLLMPreset struct {
 	GPUMemoryUtilization float64 `yaml:"gpu_memory_utilization" json:"gpu_memory_utilization"`
 }
 type Model struct {
-	readinessRecipe string
 	Measurement     retiredField      `yaml:"measurement,omitempty" json:"measurement,omitzero"`
 	Project         string            `yaml:"project,omitempty" json:"project,omitempty"`
 	AllowedMachines []string          `yaml:"allowed_machines,omitempty" json:"allowed_machines,omitempty"`
@@ -73,9 +72,10 @@ type Model struct {
 	Args      []string `yaml:"args,omitempty" json:"args,omitempty"`
 }
 type ModelConfig struct {
-	Models []Model       `yaml:"models"`
-	Idle   time.Duration `yaml:"idle_timeout"`
-	Wait   time.Duration `yaml:"max_wait"`
+	legacyHash string
+	Models     []Model       `yaml:"models"`
+	Idle       time.Duration `yaml:"idle_timeout"`
+	Wait       time.Duration `yaml:"max_wait"`
 }
 
 func ReadModels(path string) (ModelConfig, error) {
@@ -97,14 +97,43 @@ func ReadModels(path string) (ModelConfig, error) {
 	if d.Decode(&extra) != io.EOF {
 		return c, errors.New("expected one model config")
 	}
+	// Keep the original fingerprint during the adjacent rolling upgrade so
+	// batch and catalog work for supported entries can still use either peer.
+	for _, model := range c.Models {
+		if model.LocalSource != "" {
+			c.legacyHash = modelConfigHash(c)
+			break
+		}
+	}
+	if c.legacyHash != "" {
+		kept := c.Models[:0]
+		for _, model := range c.Models {
+			if model.LocalSource != "" {
+				log.Print("ignoring a catalog entry with retired local_source; stage verified weights under the model root (docs/services.md)")
+				continue
+			}
+			kept = append(kept, model)
+		}
+		c.Models = kept
+	}
 	return c, validateModels(c)
 }
+func modelIdleTimeout(configured time.Duration) time.Duration {
+	if configured > 0 {
+		return configured
+	}
+	return 10 * time.Minute
+}
+
 func validateModels(c ModelConfig) error {
 	if c.Idle < 0 || c.Wait < 0 {
-		return errors.New("model timeouts must be nonnegative (zero learns residency and waits for caller cancellation)")
+		return errors.New("model timeouts must be nonnegative (zero uses the default idle timeout and waits for caller cancellation)")
 	}
 	seen := map[string]bool{}
 	for _, m := range c.Models {
+		if m.LocalSource != "" {
+			return &HTTPError{Code: "model_local_source_retired", Message: "stage verified weights under the configured model root (docs/services.md)"}
+		}
 		if err := singleDeviceMask(m.Device); err != nil {
 			return err
 		}
@@ -127,14 +156,11 @@ func validateModels(c ModelConfig) error {
 		if m.MaxInFlight < 0 {
 			return errors.New("max_in_flight must be nonnegative (zero means unlimited)")
 		}
-		if m.Name == "" || seen[m.Name] || (m.Path == "" && !m.FileStore && m.LocalSource == "") || m.MemoryGB <= 0 || math.IsNaN(m.MemoryGB) || math.IsInf(m.MemoryGB, 0) || len(m.Platforms) == 0 {
+		if m.Name == "" || seen[m.Name] || (m.Path == "" && !m.FileStore) || m.MemoryGB <= 0 || math.IsNaN(m.MemoryGB) || math.IsInf(m.MemoryGB, 0) || len(m.Platforms) == 0 {
 			return errors.New("models require unique names, path, positive memory and platforms")
 		}
 		if m.Engine != "fake" && (m.SizeBytes <= 0 || len(m.SHA256) != 64) {
 			return fmt.Errorf("model %s requires size_bytes and sha256", m.Name)
-		}
-		if m.LocalSource != "" && (!localName(m.LocalSource) || m.FileStore || m.DirectNAS || m.Path != "" || len(m.Files) == 0) {
-			return errors.New("local_source requires a named approval and files; omit path, file_store and direct_nas")
 		}
 		if err := validateProjectIdentifier(m.Project); err != nil {
 			return err
@@ -177,7 +203,7 @@ func validateModels(c ModelConfig) error {
 		if m.Engine == "llama.cpp" || m.Engine == "fake" {
 			for _, arg := range m.Args {
 				if strings.HasPrefix(arg, "--hf-") || strings.HasPrefix(arg, "--model-url") || strings.HasPrefix(arg, "--mmproj-url") {
-					return errors.New("remote model args are forbidden; use myce model fetch")
+					return errors.New("remote model args are forbidden; download and stage weights under the configured model root")
 				}
 				for _, reserved := range []string{"--host", "--port", "--model", "--alias", "-m", "--model-url", "-mu", "--hf-repo", "-hf", "--hf-file", "-hff", "--hf-token", "-hft", "--mmproj-url"} {
 					if arg == reserved || strings.HasPrefix(arg, reserved+"=") {
@@ -196,27 +222,25 @@ func validateModels(c ModelConfig) error {
 }
 
 type ModelSlot struct {
-	MemoryPeaks          *ModelMemoryPeaks   `json:"memory_peaks,omitempty"`
-	PriorityPolicy       *PriorityMatch      `json:"priority_policy,omitempty"`
-	Custody              *ModelCustody       `json:"custody,omitempty"`
-	URL                  string              `json:"url,omitempty"`
-	Device               string              `json:"device,omitempty"`
-	PreemptionCount      int                 `json:"preemption_count,omitempty"`
-	RunSince             *time.Time          `json:"run_since,omitempty"`
-	Class                string              `json:"class,omitempty"`
-	PriorityStop         *PriorityPreemption `json:"priority_stop,omitempty"`
-	Project              string              `json:"project,omitempty"`
-	RuntimeFailed        bool                `json:"runtime_failed,omitempty"`
-	LoadUntil            *time.Time          `json:"load_until,omitempty"`
-	LoadTimedOut         bool                `json:"load_timed_out,omitempty"`
-	RetryReserved        bool                `json:"retry_reserved,omitempty"`
-	FailureCounted       bool                `json:"failure_counted,omitempty"`
-	Attempt              string              `json:"attempt,omitempty"`
-	CrashCount           int                 `json:"crash_count,omitempty"`
-	HealthySince         *time.Time          `json:"healthy_since,omitempty"`
-	HealthRevision       uint64              `json:"health_revision,omitempty"`
-	ApprovalUnknownSince *time.Time          `json:"approval_unknown_since,omitempty"`
-	Placement            *ModelPlacement     `json:"placement,omitempty"`
+	MemoryPeaks     *ModelMemoryPeaks   `json:"memory_peaks,omitempty"`
+	PriorityPolicy  *PriorityMatch      `json:"priority_policy,omitempty"`
+	Custody         *ModelCustody       `json:"custody,omitempty"`
+	URL             string              `json:"url,omitempty"`
+	Device          string              `json:"device,omitempty"`
+	PreemptionCount int                 `json:"preemption_count,omitempty"`
+	RunSince        *time.Time          `json:"run_since,omitempty"`
+	Class           string              `json:"class,omitempty"`
+	PriorityStop    *PriorityPreemption `json:"priority_stop,omitempty"`
+	Project         string              `json:"project,omitempty"`
+	RuntimeFailed   bool                `json:"runtime_failed,omitempty"`
+	LoadUntil       *time.Time          `json:"load_until,omitempty"`
+	LoadTimedOut    bool                `json:"load_timed_out,omitempty"`
+	FailureCounted  bool                `json:"failure_counted,omitempty"`
+	Attempt         string              `json:"attempt,omitempty"`
+	CrashCount      int                 `json:"crash_count,omitempty"`
+	HealthySince    *time.Time          `json:"healthy_since,omitempty"`
+	HealthRevision  uint64              `json:"health_revision,omitempty"`
+	Placement       *ModelPlacement     `json:"placement,omitempty"`
 
 	RetryAt           *time.Time         `json:"retry_at,omitempty"`
 	RetryDelay        time.Duration      `json:"retry_delay,omitempty"`
@@ -300,19 +324,6 @@ func (q *Queue) ConfigureModels(c ModelConfig) error {
 		return e
 	}
 	return q.update(func() error {
-		if q.calls != nil {
-			for _, p := range q.s.Pins {
-				found := false
-				for _, m := range c.Models {
-					if m.Name == p.Model {
-						found = true
-					}
-				}
-				if !found {
-					return fmt.Errorf("catalog removes pinned model %s; unpin first", p.Model)
-				}
-			}
-		}
 		for _, m := range c.Models {
 			if err := q.validateMachineNames(m.AllowedMachines); err != nil {
 				return err
@@ -422,7 +433,7 @@ func (q *Queue) reconcileModels(m *Machine, reports []ModelReport) {
 					s.InFlight = max(0, r.InFlight)
 					if s.InFlight == 0 {
 						s.Recovering = false
-					} else if !q.slotPinned(s) {
+					} else {
 						s.State = "draining"
 					}
 				}
@@ -451,7 +462,6 @@ func (q *Queue) maintainModels() {
 		q.s.ModelSlots = map[string]*ModelSlot{}
 	}
 	now := q.clock.Now()
-	q.maintainPins()
 	removedSlot := false
 	for k, s := range q.s.ModelSlots {
 		m := slotMachine(q.s.Machines[s.Machine], s)
@@ -466,10 +476,10 @@ func (q *Queue) maintainModels() {
 		model, exists := q.model(s.Model)
 		q.expireEngineLoad(s)
 		if s.State == "failed" {
-			q.maintainEngineRetry(k, s, m, model)
+			q.maintainEngineRetry(k, s, m)
 			continue
 		}
-		if s.State != "unloading" && s.State != "unload_failed" && ((!exists || !q.modelUsableMachine(model, m)) || availabilityBlocked(m) || m.Leaving || !q.slotPinned(s) && s.State == "ready" && s.InFlight == 0 && q.modelIdleExpired(s)) {
+		if s.State != "unloading" && s.State != "unload_failed" && ((!exists || !q.modelFitsMachine(model, m)) || availabilityBlocked(m) || m.Leaving || s.State == "ready" && s.InFlight == 0 && now.Sub(s.LastUsed) >= modelIdleTimeout(q.models.Idle)) {
 			s.State = "draining"
 		}
 	}
@@ -582,7 +592,6 @@ func (q *Queue) maintainModels() {
 			if s.InFlight == 0 || q.comparePriority(callJob(c).Spec, Spec{Project: s.Project, Priority: s.Priority, Class: s.Class}) < 0 {
 				s.Priority, s.Class, s.Project = c.Priority, c.Class, c.Project
 			}
-			q.noteModelDemand(c.Model, m.ID)
 			s.InFlight++
 			s.LastUsed = now
 			continue
@@ -677,7 +686,7 @@ func callJob(c *ModelCall) *Job {
 // behind requests that cannot reclaim higher-priority work.
 func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 	model, ok := q.model(c.Model)
-	if !ok || !q.callPlacementAllowed(c, m) || c.Machine != "" || c.Error != "" || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || q.callExcludes(c, m.ID, targetDevice(m)) || m.ModelURL == "" || !q.modelUsableMachine(model, m) || q.unreported[m.ID] {
+	if !ok || !q.callPlacementAllowed(c, m) || c.Machine != "" || c.Error != "" || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || q.callExcludes(c, m.ID, targetDevice(m)) || m.ModelURL == "" || !q.modelFitsMachine(model, m) || q.unreported[m.ID] {
 		return false
 	}
 	if s := q.s.ModelSlots[targetSlotKey(m, c.Model)]; s != nil && s.State == "ready" {
@@ -704,7 +713,7 @@ func (q *Queue) slotReclaimableFor(s *ModelSlot, demand Spec) bool {
 	if n > 0 && s.PriorityStop == nil && q.preemptionProtected(s.PreemptionCount, s.RunSince) {
 		return false
 	}
-	return n > 0 || !q.slotPinned(s) && n == 0 && s.InFlight == 0 && (s.State == "ready" || s.State == "draining")
+	return n > 0 || n == 0 && s.InFlight == 0 && (s.State == "ready" || s.State == "draining")
 }
 
 func (q *Queue) modelPlan(machine string) []ModelSlot {
@@ -778,9 +787,6 @@ func (q *Queue) finishCallWithMemory(id string, memory *ModelMemoryWindow, ctx c
 				}
 			}
 			delete(q.calls, id)
-			if c.Machine != "" && c.Error == "" {
-				q.recordModelUse(c.Model)
-			}
 			q.refreshModelPriority(c)
 		}
 		q.maintain()
@@ -1265,6 +1271,9 @@ func (q *Queue) retryCall(id string, requestContexts ...context.Context) error {
 }
 
 func modelConfigHash(c ModelConfig) string {
+	if c.legacyHash != "" {
+		return c.legacyHash
+	}
 	models := append([]Model(nil), c.Models...)
 	sort.Slice(models, func(i, j int) bool { return models[i].Name < models[j].Name })
 	data, _ := json.Marshal(models)

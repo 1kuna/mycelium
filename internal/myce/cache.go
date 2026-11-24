@@ -14,14 +14,12 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 )
 
 // ModelCache reserves complete copy sizes under one admission lock.
 type ModelCache struct {
 	budget        *workerDiskBudget
 	knownModels   sync.Map
-	ApprovalRoot  string
 	storedModels  sync.Map
 	FileClient    *Client
 	mu            sync.Mutex
@@ -30,7 +28,6 @@ type ModelCache struct {
 	Clock         Clock
 	Free          func(string) (int64, error)
 	Protected     func(string) bool
-	Usage         func(string) int
 	Parallel      int
 	active        map[string]chan struct{}
 	reservations  sync.Map
@@ -40,15 +37,6 @@ type ModelCache struct {
 	speedMu       sync.Mutex
 	beforeChunk   func(context.Context) // deterministic interruption hook for tests
 
-	localCheckMu        sync.Mutex
-	localApprovalRound  uint64
-	localResults        sync.Map // Completed metadata checks, consumed once by their heartbeat.
-	localRecordProbe    checkpointIO[localApprovalRecords]
-	localProbe          checkpointIO[localApprovalSnapshot]
-	localProbeInit      sync.Once
-	localWarningMu      sync.Mutex
-	nextApprovalWarning time.Time
-	localMetadataProbe  func(context.Context, string, string) ([]localModelMetadata, error) // Filesystem fault seam.
 }
 
 func diskFree(path string) (int64, error) {
@@ -245,18 +233,7 @@ func verifyModelContext(ctx context.Context, path string, m Model) error {
 	return nil
 }
 
-// Prepare is foreground work; Precopy adds popularity-aware eviction.
 func (c *ModelCache) Prepare(ctx context.Context, m Model) (string, error) {
-	return c.prepare(ctx, m, false, 0)
-}
-func (c *ModelCache) Precopy(ctx context.Context, m Model, score int) (string, error) {
-	return c.prepare(ctx, m, true, score)
-}
-func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, score int) (string, error) {
-	if m.LocalSource != "" {
-		return c.prepareLocal(ctx, m)
-	}
-
 	if len(m.Files) > 0 {
 		if e := validateModelFiles(m); e != nil {
 			return "", e
@@ -395,9 +372,6 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		if k == key || c.active[k] != nil || c.Protected != nil && c.Protected(k) {
 			continue
 		}
-		if background && c.Usage != nil && c.Usage(k) > score {
-			continue
-		}
 		victims = append(victims, entry{filepath.Join(c.Root, ent.Name()), k, entrySize, st.ModTime().UnixNano()})
 	}
 	// Reserve other active models in full. Disk admission is deliberately
@@ -441,9 +415,6 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		}
 		// Protection may have changed since the candidate scan.
 		if c.Protected != nil && c.Protected(v.key) {
-			continue
-		}
-		if background && c.Usage != nil && c.Usage(v.key) > score {
 			continue
 		}
 		if e = c.discardContext(ctx, v.path); e != nil {
@@ -639,9 +610,6 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 // happens before joining; it cannot block heartbeats behind a large NAS copy.
 func (c *ModelCache) ValidateInventory(models []Model) {
 	for _, m := range models {
-		if m.LocalSource != "" {
-			continue
-		}
 		if m.FileStore {
 			c.storedModels.Store(cacheKey(m), m)
 		}
@@ -656,11 +624,6 @@ func (c *ModelCache) ValidateInventory(models []Model) {
 	}
 }
 func (c *ModelCache) Report(models []Model) ([]string, int64, error) {
-	return c.report(models, c.ApprovedModels(models))
-}
-
-// The heartbeat shares its one approval snapshot with cache inventory.
-func (c *ModelCache) report(models []Model, approved map[string]string) ([]string, int64, error) {
 	entries, e := os.ReadDir(c.Root)
 	if e != nil {
 		return nil, 0, e
@@ -686,13 +649,6 @@ func (c *ModelCache) report(models []Model, approved map[string]string) ([]strin
 		}
 		for _, m := range models {
 			if ent.Name() == cacheKey(m) && size == m.SizeBytes {
-				names = append(names, m.Name)
-			}
-		}
-	}
-	for _, m := range models {
-		if m.LocalSource != "" {
-			if approved[m.LocalSource] == m.SHA256 {
 				names = append(names, m.Name)
 			}
 		}

@@ -8,9 +8,9 @@ import "testing"
 // the full 8x5 cross product did (#1086).
 func TestPriorityPreemptionFreePlacementEveryWorkKind(t *testing.T) {
 	for _, pair := range [][2]string{
-		{"resumable", "pin"}, {"restart", "call"}, {"native-group", "native-group"}, {"native-group", "build"},
+		{"restart", "call"}, {"native-group", "native-group"}, {"native-group", "build"},
 		{"call", "call"}, {"call", "native-group"}, {"load", "call"}, {"idle", "build"},
-		{"pin", "call"}, {"pin", "pin"}, {"build", "batch"}, {"build", "pin"}, {"build", "build"},
+		{"build", "batch"}, {"build", "build"},
 	} {
 		kind, demandKind := pair[0], pair[1]
 		t.Run(kind+"/"+demandKind, func(t *testing.T) {
@@ -44,14 +44,8 @@ func TestPriorityPreemptionFreePlacementEveryWorkKind(t *testing.T) {
 				if err := q.Started(result(victim, false)); err != nil {
 					t.Fatal(err)
 				}
-			case "call", "load", "idle", "pin":
-				if kind == "pin" {
-					if err := q.Pin(ModelPin{Project: "test", Model: "test", Machine: m.ID}); err != nil {
-						t.Fatal(err)
-					}
-				} else {
-					call = addModelCall(t, q, "experiment")
-				}
+			case "call", "load", "idle":
+				call = addModelCall(t, q, "experiment")
 				if kind != "load" {
 					reportModel(t, q, m, "ready")
 				}
@@ -110,13 +104,6 @@ func TestPriorityPreemptionFreePlacementEveryWorkKind(t *testing.T) {
 				if high.Machine == "" && q.s.ModelSlots[slotKey(free.ID, "test")] == nil && (engine == nil || engine.State != "loading") {
 					t.Fatal("no free call placement")
 				}
-			case "pin":
-				if err := q.Pin(ModelPin{Project: "urgent", Model: "test", Platform: "fake"}); err != nil {
-					t.Fatal(err)
-				}
-				if q.s.Pins[len(q.s.Pins)-1].Assigned == "" {
-					t.Fatal("no free pin placement")
-				}
 			}
 			if victim != nil && (job(t, q, victim.ID).State != "running" || priorityStop(job(t, q, victim.ID)) != nil) {
 				t.Fatal("interrupted batch despite free placement")
@@ -135,7 +122,7 @@ func TestPriorityPreemptionFreePlacementEveryWorkKind(t *testing.T) {
 }
 
 func TestPriorityPreemptionLeastCostUsefulRelease(t *testing.T) {
-	for _, kind := range []string{"call", "pin", "batch-ram"} {
+	for _, kind := range []string{"call", "batch-ram"} {
 		t.Run(kind, func(t *testing.T) {
 			q, _, m := modelFixture(t)
 			preemptionPolicy(t, q)
@@ -169,10 +156,6 @@ func TestPriorityPreemptionLeastCostUsefulRelease(t *testing.T) {
 			switch kind {
 			case "call":
 				if err := q.addCall(&ModelCall{Project: "urgent", Priority: "experiment", Model: "other"}); err != nil {
-					t.Fatal(err)
-				}
-			case "pin":
-				if err := q.Pin(ModelPin{Project: "urgent", Model: "other", Machine: m.ID}); err != nil {
 					t.Fatal(err)
 				}
 			case "batch-ram":

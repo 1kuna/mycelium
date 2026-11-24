@@ -135,40 +135,6 @@ func TestR1StartedEnvironmentDoesNotDuplicateBuild(t *testing.T) {
 	}
 }
 
-func TestR1StartedCopyDoesNotDuplicateModel(t *testing.T) {
-	q, clock, copying := syncFixture(t)
-	cold := machine("cold", "fake")
-	check(t, q, cold, nil)
-	if err := q.SyncModel(SyncRequest{Model: "a", To: copying.ID}); err != nil {
-		t.Fatal(err)
-	}
-	plan := check(t, q, copying, nil).CopyPlan
-	if len(plan) != 1 || plan[0].Launch == nil {
-		t.Fatal("missing copy offer", plan)
-	}
-	launch := *plan[0].Launch
-	if err := q.AuthorizeLaunch(launch); err != nil {
-		t.Fatal(err)
-	}
-	copying.CopyReports = []CopyReport{{Model: "a", Attempt: launch.Attempt, State: "copying", Bytes: 20_000_000_000, Total: 40_000_000_000}}
-	clock.Advance(time.Second)
-	check(t, q, copying, nil)
-	unrelated := &Job{Spec: spec("experiment")}
-	unrelated.Spec.Needs.Model = "b"
-	if q.workerIdle(q.s.Machines[copying.ID], unrelated) {
-		t.Fatal("copy of a made the worker idle for unrelated model b")
-	}
-	s := spec("experiment")
-	s.Needs.Model = "a"
-	j := submit(t, q, s)
-	if duplicate := check(t, q, cold, nil).Job; duplicate != nil {
-		t.Fatalf("cold worker took %s and duplicated a started 40 GB model copy", duplicate.ID)
-	}
-	if got := check(t, q, copying, nil).Job; got == nil || got.ID != j.ID {
-		t.Fatal("worker already copying the model did not receive its demand", got)
-	}
-}
-
 func TestHostReleaseConfirmedStoppingJobHasNoCredit(t *testing.T) {
 	for _, extra := range []int{0, 13} {
 		t.Run(fmt.Sprint(extra), func(t *testing.T) {

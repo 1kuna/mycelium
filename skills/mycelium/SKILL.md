@@ -87,6 +87,9 @@ sizing. Use a pin only for a [hard requirement](references/submit.md#explicit-pl
 - [Catalog model serving](https://github.com/1kuna/mycelium/blob/main/docs/services.md#calling-openai-models)
   loads on demand for `/v1` calls and unloads idle engines. `advanced.resident`
   returns `job_resident_retired`. Call `/v1` or declare a native sidecar.
+  Stage verified catalog weights under the configured model root with the
+  upstream client. The queue copies weights when a model loads. Set
+  `idle_timeout` to control retention.
 - [Ephemeral worker data](https://github.com/1kuna/mycelium/blob/main/docs/files.md#ephemeral-worker-data)
   covers compatibility, cleanup receipts and release. Check the cleanup receipt
   for the exact attempt before claiming local removal.

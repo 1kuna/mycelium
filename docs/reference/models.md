@@ -1,17 +1,14 @@
-# Models and engine history
+# Models and engine measurements
 
-Model storage, general model servers, joint measurement and the durable
-model memory observations. See [services](../services.md) for the model and
-server contract.
+See [services](../services.md) for the model and server contract.
 
-## Model master folder, worker cache, and production reservations
+## Model masters and worker cache
 
-Models use immutable NAS masters, verified file-store imports or explicit local
-source approvals. Loading never downloads weights. Catalog hashes and byte counts
-identify content; cache verification precedes publication. Protect loaded/pinned
-files from eviction and keep recoverable copies. Use `model sync` for pre-copy;
-partial transfers and pins persist through restart. See [models](../services.md)
-and [files](../files.md) for transfer, retention and cache limits.
+Models use immutable masters under the configured model root or verified
+file-store imports. Catalog hashes and byte counts identify content. A cache
+copy resumes from its verified prefix and is published after size and SHA-256
+verification. The worker protects loaded models from eviction. See
+[models](../services.md) and [files](../files.md) for transfer and retention.
 
 ### Local acquisition root
 <a id="local-acquisition-root-1248-next-release"></a>
@@ -46,8 +43,8 @@ snapshot it lacks from the model hub into its own snapshot cache
 ## General model servers and joint measurement
 
 General HTTP servers, llama.cpp and vLLM share the queue's engine lifecycle,
-placement, pins and release custody. See [servers](../services.md) for routing,
-local secrets, approved folders, timeout/retry behavior and log policy.
+placement and release custody. See [servers](../services.md) for routing,
+local secrets, timeout/retry behavior and log policy.
 Accepted jobs retain their last duration and eligible memory peaks. Memory
 admission uses those observations with measured uncertainty; wall-time limits
 come only from the job's explicit contract. Native model qualification still
@@ -57,7 +54,7 @@ peaks below together with worker telemetry and the calling job’s attempt facts
 
 ### Resident engine memory peaks
 
-Read `loaded_models[].memory_peaks` in `myce status --jobs recent --json` or
+Read `loaded_models[].memory_peaks` in `myce status --json --sections work` or
 authenticated `GET /api/status?jobs=recent`. Use the model, machine, device and engine attempt to select
 the right record. `load` covers engine startup through readiness, `steady`
 accumulates samples taken while ready with no routed requests active, and

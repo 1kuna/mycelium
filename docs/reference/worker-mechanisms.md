@@ -132,8 +132,8 @@ records bind the exact attempt/session, custodian PID and kernel birth, and
 manager placement. Startup adopts only verified custody, preserving the
 original queue session; an unverified record stays held, never guessed from
 a PID number. Other legacy recovery still verifies cleanup and replays results.
-Resident bridges and model engines retain worker-bound custody and require
-natural drain for normal upgrades. Linux attribution spans both the worker
+Catalog engines retain worker-bound custody and require natural drain for
+normal upgrades. Linux attribution spans both the worker
 root and detached jobs slice, so siblings remain known Mycelium processes.
 Linux shared-host work retains its worker-bound aggregate CPU quota and
 naturally drains for updates; detaching only batch jobs would split the hard

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -26,53 +25,10 @@ func (q *Queue) modelFitsMachine(model Model, m *Machine) bool {
 	return logPolicyFits(model.Logs, m) && modelFitsMachine(model, m) && q.projectAllows(model.Project, m.ID)
 }
 
-// Unknown storage checks preserve only ready slots from this worker session.
-// All remaining fences (owner, machine, platform, log policy) still apply.
-func (q *Queue) residentModel(model Model, m *Machine) Model {
-	if model.LocalSource != "" && m.ModelApprovalStates[model.LocalSource] == approvalUnknown {
-		if s := q.s.ModelSlots[targetSlotKey(m, model.Name)]; s != nil && s.Session == m.Session && s.State == "ready" && (s.ApprovalUnknownSince == nil || q.clock.Now().Sub(*s.ApprovalUnknownSince) <= localApprovalUnknownGrace) {
-			model.LocalSource = ""
-		}
-	}
-	return model
-}
-
-const localApprovalUnknownGrace = 5 * time.Minute
-
-func (q *Queue) maintainApprovalGrace() {
-	now := q.clock.Now()
-	for _, slot := range q.s.ModelSlots {
-		model, ok := q.model(slot.Model)
-		machine := q.s.Machines[slot.Machine]
-		if !ok || model.LocalSource == "" || machine == nil || machine.Session != slot.Session || machine.ModelApprovalStates[model.LocalSource] != approvalUnknown {
-			slot.ApprovalUnknownSince = nil
-			continue
-		}
-		if slot.State != "ready" {
-			continue
-		}
-		if slot.ApprovalUnknownSince == nil {
-			since := now
-			slot.ApprovalUnknownSince = &since
-		}
-		if now.Sub(*slot.ApprovalUnknownSince) > localApprovalUnknownGrace {
-			slot.State = "draining"
-			slot.Error = "local model approval unknown for more than 5m; draining until the source is verified or re-approved"
-			if !now.Before(q.nextApprovalWarning) {
-				log.Print(slot.Error)
-				q.nextApprovalWarning = now.Add(time.Minute)
-			}
-		}
-	}
-}
-
-func (q *Queue) modelUsableMachine(model Model, m *Machine) bool {
-	return q.modelFitsMachine(q.residentModel(model, m), m)
-}
-
 func (q *Queue) callPlacementAllowed(c *ModelCall, m *Machine) bool {
 	// Routing/demand checks do not launch a model or write its cache files.
-	return !q.deviceAdmissionBlocked(m) && q.placementPolicyAllowed(callJob(c), m, true)
+	// Catalog engines use one device per process. Card groups are batch targets.
+	return len(m.group) == 0 && !q.deviceAdmissionBlocked(m) && q.placementPolicyAllowed(callJob(c), m, true)
 }
 
 var localNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
@@ -201,7 +157,7 @@ func (q *Queue) callDefaults(c *ModelCall, model Model, h http.Header, defaults 
 }
 
 func modelFenceAllows(model Model, m *Machine) bool {
-	return (len(model.AllowedMachines) == 0 || contains(model.AllowedMachines, m.ID)) && (model.LocalSource == "" || m.ModelApprovalStates[model.LocalSource] == approvalVerified && m.ApprovedModels[model.LocalSource] == model.SHA256)
+	return len(model.AllowedMachines) == 0 || contains(model.AllowedMachines, m.ID)
 }
 func (p *ModelPlacement) allows(machine string) bool {
 	return p == nil || (len(p.AllowedMachines) == 0 || contains(p.AllowedMachines, machine)) && (len(p.ProjectMachines) == 0 || contains(p.ProjectMachines, machine))

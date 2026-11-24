@@ -134,14 +134,13 @@ func TestCustodianNativeWorkerReplacement(t *testing.T) {
 			t.Fatalf("build replacement: %v\n%s", err, out)
 		}
 	}
-	for _, mode := range []string{"plain", "native", "cancel", "memory", "preparation", "publication", "model"} {
+	for _, mode := range []string{"plain", "native", "cancel", "memory", "preparation", "publication"} {
 		t.Run(mode, func(t *testing.T) { custodianNativeReplacement(t, next, mode) })
 	}
 }
 
 func custodianNativeReplacement(t *testing.T, next, mode string) {
 	migration := strings.HasPrefix(mode, "migration")
-	modelMode := mode == "model" || mode == "migration-model"
 	q, _ := fixture(t)
 	q.clock = RealClock{}
 	if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "files"), 1<<20, true); err != nil {
@@ -212,9 +211,6 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 				}
 			}
 		})
-	}
-	if modelMode {
-		configureNativeModel(t, q, &c)
 	}
 	if err := os.MkdirAll(c.State, 0700); err != nil {
 		t.Fatal(err)
@@ -336,9 +332,6 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 			}
 		} else {
 			args := nativeCustodianStartArgs(c)
-			if modelMode {
-				args = append(args, "--property=StandardOutput=append:"+filepath.Join(dir, "worker.log"), "--property=StandardError=inherit")
-			}
 			command(append(args, c.Binary, "service", "--config", c.Config)...)
 		}
 	}
@@ -415,10 +408,6 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 	}()
 	start()
 	defer stop()
-	if modelMode {
-		custodianNativeModelReplacement(t, q, c, server.URL, next, start, stop, writeImage)
-		return
-	}
 	s := cpuSpec(1, 1)
 	s.Resumable = false
 	_, input := retentionUpload(t, Client{URL: server.URL, Token: "custodian-test"}, "fixture input")

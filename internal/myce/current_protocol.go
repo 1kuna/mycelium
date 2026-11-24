@@ -17,16 +17,6 @@ func validateCurrentCheckin(c Checkin) error {
 	if (m.HostMemoryBudgetGB > 0 || strings.HasPrefix(m.MemoryEnforcement, "memory ceilings enforced")) && (!m.HostMemoryMeasured || m.HostMemoryError != "") {
 		return currentProtocolError("enforced host requires measured system RAM")
 	}
-	for _, s := range m.ModelApprovalStates {
-		if s != approvalVerified && s != approvalInvalid && s != approvalUnknown {
-			return currentProtocolError("local-source state must be verified, invalid or unknown")
-		}
-	}
-	for source := range m.ApprovedModels {
-		if m.ModelApprovalStates[source] == "" {
-			return currentProtocolError("local-source approval requires explicit verified, invalid or unknown state")
-		}
-	}
 	for _, r := range c.ModelReports {
 		if r.Name == "" || r.Attempt == "" {
 			return currentProtocolError("engine report requires model and attempt identity")

@@ -247,7 +247,7 @@ func (w Worker) observeProcessMemoryWith(groups func() []int, sink attemptMemory
 			}
 		} else if probe.Resident != nil {
 			if sink != nil && attempt != nil {
-				bytes, members, err = readinessProcessResident(probe, attempt.rssRoots(), processBirth)
+				bytes, members, err = verifiedProcessGroupResident(probe, attempt.rssRoots(), processBirth)
 			} else {
 				ids := map[int]bool{}
 				for _, id := range groups() {

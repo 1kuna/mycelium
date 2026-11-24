@@ -88,7 +88,7 @@ func (q *Queue) pendingDiskDemand(m *Machine) []workerDiskDemand {
 			}
 			need, relevant := q.diskVolumeNeed(j, volume, m)
 			if call := q.calls[j.ID]; call != nil {
-				if model, ok := q.model(call.Model); ok && !model.DirectNAS && model.LocalSource == "" {
+				if model, ok := q.model(call.Model); ok && !model.DirectNAS {
 					for _, role := range volume.Roots {
 						if role == "model-cache" {
 							need = addDiskBytes(need, uint64(max(0, model.SizeBytes)))

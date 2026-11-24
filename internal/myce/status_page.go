@@ -153,22 +153,6 @@ func machineModels(slots []ModelSlot, machine string) []ModelSlot {
 	return out
 }
 
-func machinePins(pins []ModelPin, machine string) []string {
-	seen := make(map[string]bool)
-	out := make([]string, 0)
-	for _, pin := range pins {
-		if pin.Assigned != machine && pin.Machine != machine {
-			continue
-		}
-		if !seen[pin.Model] {
-			seen[pin.Model] = true
-			out = append(out, pin.Model)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
 func failedJobs(jobs []*Job) []*Job {
 	out := make([]*Job, 0)
 	for _, job := range jobs {
@@ -269,7 +253,6 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
 	"machineJobs":        machineJobs,
 	"deviceMemoryInUse":  deviceMemoryInUse,
 	"machineModels":      machineModels,
-	"machinePins":        machinePins,
 	"recentFinishedJobs": recentFinishedJobs,
 }).Parse(`<!doctype html>
 <html lang="en">
@@ -307,7 +290,7 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
   <section aria-labelledby="fleet-title">
     <div class="section-head"><h2 id="fleet-title">Hyphae</h2><p>{{len .Machines}} in your mycelium</p></div>
     {{if .Machines}}<div class="fleet">
-    {{range .Machines}}{{$machine := .}}{{$jobs := machineJobs $.Jobs .ID}}{{$models := machineModels $.LoadedModels .ID}}{{$pins := machinePins $.Pins .ID}}
+    {{range .Machines}}{{$machine := .}}{{$jobs := machineJobs $.Jobs .ID}}{{$models := machineModels $.LoadedModels .ID}}
       <article class="card machine">
         <div class="card-head"><div class="identity"><h3>{{.ID}}</h3><div class="platform">{{if .GPU}}{{.GPU}}{{else}}platform unknown{{end}}{{if .Device}} · {{.Device}}{{end}}</div></div>
           <span class="badge {{if or .Disabled .Gone}}offline{{else if or .Leaving .AdmissionReason}}leaving{{end}}">{{hyphaAvailability .}}</span>
@@ -339,7 +322,6 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
 		{{if .CacheError}}<div class="alert bad">Model cache unavailable: {{.CacheError}}</div>{{end}}
         <div class="detail"><div class="label">Current</div><div class="value">{{range $jobs}}<div><strong>{{.Spec.Name}}</strong> · {{jobState .}}{{if .Progress}} · progress {{.Progress}}{{end}}{{with jobAge . $.Now}} · {{.}}{{end}}</div>{{else}}<span class="empty-inline">Idle</span>{{end}}</div></div>
 		<div class="detail"><div class="label">Loaded</div><div class="value chips">{{range $models}}<span class="chip">{{.Model}} · {{displayState .State}} · {{.InFlight}} calls{{if .Error}} · {{.Error}}{{end}}</span>{{else}}<span class="empty-inline">None</span>{{end}}</div></div>
-        <div class="detail"><div class="label">Pinned</div><div class="value chips">{{range $pins}}<span class="chip">{{.}}</span>{{else}}<span class="empty-inline">None</span>{{end}}</div></div>
         <div class="detail"><div class="label">Cached</div><div class="value chips">{{range .CachedModels}}<span class="chip">{{.}}</span>{{else}}<span class="empty-inline">None</span>{{end}}</div></div>
         <div class="detail"><div class="label">Environments</div><div class="value chips">{{range .Environments}}<span class="chip">{{.}}</span>{{else}}<span class="empty-inline">None ready</span>{{end}}</div></div>
         {{if or .CopyReports .EnvironmentReports}}<div class="detail"><div class="label">Activity</div><div class="value progress-list">

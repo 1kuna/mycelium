@@ -240,11 +240,13 @@ intact rather than copying weights. See
 
 Stage catalog model masters under the configured model root with the upstream
 download client. `myce model fetch` returns `model_fetch_retired`. Loading
-verifies the staged weights and does not download them.
+verifies the staged weights. `myce model approve-local` returns
+`model_local_source_retired`, `myce model sync` returns `model_sync_retired`,
+and pin commands return `model_pin_retired`.
 
-Model loads have no fixed total cutoff while copy, load or health signals
-advance; keep the same request while it progresses. Custom servers report
-`MYCE_LOAD_PROGRESS` records ([adaptive readiness](https://github.com/1kuna/mycelium/blob/main/docs/readiness.md)).
+Catalog models unload after the configured idle timeout, which defaults to 10
+minutes. An explicit `ready_timeout` bounds engine startup.
+
 For catalog image chat, use the Python client's openai extra:
 `Client.from_installed().openai(project=PROJECT, priority="experiment")`, with
 base64 `image_url` parts. See [image-chat example](https://github.com/1kuna/mycelium/blob/main/examples/image-chat.py).

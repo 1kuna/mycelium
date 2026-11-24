@@ -85,20 +85,10 @@ func TestModelBundlePrepareInventoryProtectionAndEviction(t *testing.T) {
 	}
 	other := bundleFixture(t, c, "other")
 	c.Protected = func(key string) bool { return key == cacheKey(m) }
-	if _, e = c.Precopy(context.Background(), other, 1); e == nil {
+	if _, e = c.Prepare(context.Background(), other); e == nil {
 		t.Fatal("protected bundle evicted")
 	}
 	c.Protected = nil
-	c.Usage = func(key string) int {
-		if key == cacheKey(m) {
-			return 2
-		}
-		return 0
-	}
-	if _, e = c.Precopy(context.Background(), other, 1); e == nil {
-		t.Fatal("more used bundle evicted")
-	}
-	c.Usage = nil
 	if _, e = c.Prepare(context.Background(), other); e != nil {
 		t.Fatal(e)
 	}
@@ -134,7 +124,7 @@ func TestModelBundleResumeAndProgress(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	c.beforeChunk = func(context.Context) { cancel() }
-	if _, e := c.Precopy(ctx, m, 1); e == nil {
+	if _, e := c.Prepare(ctx, m); e == nil {
 		t.Fatal("cancel ignored")
 	}
 	if n, e := cacheEntrySize(partial); e != nil || n != 5 {
@@ -268,7 +258,7 @@ func TestModelBundleActiveReservationAndActualResume(t *testing.T) {
 			cancel()
 		}
 	}
-	if _, e = c.Precopy(ctx, m, 1); e == nil {
+	if _, e = c.Prepare(ctx, m); e == nil {
 		t.Fatal("interruption ignored")
 	}
 	reports, _ := c.CopyReports()

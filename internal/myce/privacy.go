@@ -51,7 +51,7 @@ func (q *Queue) publicStatusSnapshot(options *statusOptions, contexts ...context
 func publicStatusValue(s Snapshot) Snapshot {
 	for i := range s.LoadedModels {
 		s.LoadedModels[i].EnvironmentRecipe = nil
-		s.LoadedModels[i].Error = modelReadinessDiagnostic(s.LoadedModels[i].Error)
+		s.LoadedModels[i].Error = ceilingDiagnostic(s.LoadedModels[i].Error, "model load or unload failed")
 	}
 	for _, m := range s.Machines {
 		m.InventoryProbe = safeInventoryObservation(m.InventoryProbe)

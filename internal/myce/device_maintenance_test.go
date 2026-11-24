@@ -388,23 +388,3 @@ func TestDeviceMaintenanceRecoveryKeepsExactCopy(t *testing.T) {
 		})
 	}
 }
-
-func TestDeviceMaintenanceSharedModelCopy(t *testing.T) {
-	q, _, legacy := modelFixture(t)
-	legacy.Leaving = true
-	check(t, q, legacy, nil)
-	m := m3Machine()
-	m.ModelConfigHash = modelConfigHash(q.models)
-	machineCheck(t, q, m)
-	changeDevice(t, q, m.HostID, "0", "disable")
-	if err := q.SyncModel(SyncRequest{Model: "test", To: m.ID}); err != nil {
-		t.Fatal(err)
-	}
-	r := machineCheck(t, q, m)
-	if len(r.CopyPlan) != 1 || r.CopyPlan[0].Launch == nil {
-		t.Fatal("shared model copy not offered", r.CopyPlan)
-	}
-	if err := q.AuthorizeLaunch(*r.CopyPlan[0].Launch); err != nil {
-		t.Fatal("disabled component blocked host-shared model cache copy", err)
-	}
-}

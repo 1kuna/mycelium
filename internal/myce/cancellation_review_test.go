@@ -336,35 +336,27 @@ func cancellationPreparingWorker(t *testing.T, q *Queue, c Clock, m Machine, id 
 }
 
 func TestCancellationPlacementPreemption(t *testing.T) {
-	for _, kind := range []string{"job", "pin"} {
-		t.Run(kind, func(t *testing.T) {
-			q, _, m := modelFixture(t)
-			j := submit(t, q, spec("experiment"))
-			j = check(t, q, m, nil).Job
-			if kind == "job" {
-				p := spec("production")
-				p.AllowedMachines = []string{m.ID}
-				submit(t, q, p)
-			} else if err := q.Pin(ModelPin{Project: "test", Model: "test", Machine: m.ID}); err != nil {
-				t.Fatal(err)
-			}
-			if !check(t, q, m, j).Stop || !strings.Contains(job(t, q, j.ID).Reason, "making room for production") {
-				t.Fatal("real placement did not displace experiment")
-			}
-			cancelAck(t, q, j.ID)
-			// Repeated real placement exercises stopFor's reason/grace update while
-			// cancellation is already persisted, instead of calling retry directly.
-			if !check(t, q, m, j).Stop || job(t, q, j.ID).Reason != "cancel requested" {
-				t.Fatal("placement overwrote cancellation intent")
-			}
-			r := result(j, false)
-			r.Interrupted = true
-			if err := q.Complete(r); err != nil {
-				t.Fatal(err)
-			}
-			assertNoCancellationAttempt(t, q, j)
-		})
+	q, _, m := modelFixture(t)
+	j := submit(t, q, spec("experiment"))
+	j = check(t, q, m, nil).Job
+	p := spec("production")
+	p.AllowedMachines = []string{m.ID}
+	submit(t, q, p)
+	if !check(t, q, m, j).Stop || !strings.Contains(job(t, q, j.ID).Reason, "making room for production") {
+		t.Fatal("real placement did not displace experiment")
 	}
+	cancelAck(t, q, j.ID)
+	// Repeated real placement exercises stopFor's reason/grace update while
+	// cancellation is already persisted, instead of calling retry directly.
+	if !check(t, q, m, j).Stop || job(t, q, j.ID).Reason != "cancel requested" {
+		t.Fatal("placement overwrote cancellation intent")
+	}
+	r := result(j, false)
+	r.Interrupted = true
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	assertNoCancellationAttempt(t, q, j)
 }
 
 func TestSubmissionKeyLimits(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func slotReservesMemory(s *ModelSlot) bool { return s.State != "failed" || s.RetryReserved }
+func slotReservesMemory(s *ModelSlot) bool { return s.State != "failed" }
 
 func (q *Queue) failModelLoadCalls(model string) {
 	for _, c := range q.calls {
@@ -92,13 +92,6 @@ func (q *Queue) applyEngineReport(key string, s *ModelSlot, r ModelReport) {
 		s.State = "unloading"
 	}
 	switch r.State {
-	case "loading":
-		if s.State == "loading" {
-			switch r.Error {
-			case coldLoadInactive, coldLoadActive, "":
-				s.Error = r.Error
-			}
-		}
 	case "failed":
 		// Preserve prompt failure of an initial load (for example corrupt
 		// weights). Runtime recovery keeps queued demand through its backoff;
@@ -108,9 +101,6 @@ func (q *Queue) applyEngineReport(key string, s *ModelSlot, r ModelReport) {
 		}
 		if s.State != "failed" && !(r.RuntimeFailed && s.RetryAt != nil) {
 			q.noteEngineFailure(s)
-		}
-		if s.State != "failed" {
-			s.RetryReserved = q.slotPinned(s)
 		}
 		s.RuntimeFailed = r.RuntimeFailed
 		s.State = "failed"
@@ -131,7 +121,6 @@ func (q *Queue) applyEngineReport(key string, s *ModelSlot, r ModelReport) {
 		}
 	case "ready":
 		if s.State == "loading" {
-			q.noteModelLoaded(s)
 			s.State = "ready"
 			s.Error = ""
 			s.RetryAt = nil
@@ -179,26 +168,15 @@ func (q *Queue) engineDemand(s *ModelSlot, m *Machine) *ModelCall {
 	return best
 }
 
-func (q *Queue) maintainEngineRetry(key string, s *ModelSlot, m *Machine, model Model) {
-	pinned := q.slotPinned(s)
-	if !pinned && s.RetryReserved {
-		s.RetryReserved = false
-		debt := min(model.MemoryGB, m.modelReservationDebtGB)
-		m.modelReservationDebtGB -= debt
-		if q.s.Machines[m.ID] == m {
-			q.touchMachine(m.ID)
-		}
-		m.FreeMemoryGB += model.MemoryGB - debt
-		q.refreshHostMemory()
-	}
+func (q *Queue) maintainEngineRetry(key string, s *ModelSlot, m *Machine) {
 	demand := q.engineDemand(s, m)
-	if !pinned && !s.RuntimeFailed {
+	if !s.RuntimeFailed {
 		// A late transport retry can arrive after the failed load report.
 		// It must fail too, rather than turn a warm-up failure into a loop.
 		q.failModelLoadCalls(s.Model)
 		demand = nil
 	}
-	if !pinned && demand == nil {
+	if demand == nil {
 		// An HTTP handler may still be converting a lost attempt into its
 		// permitted retry. Keep history until it retries or finishes; no memory
 		// is reserved by a cleaned failed slot.
@@ -210,65 +188,11 @@ func (q *Queue) maintainEngineRetry(key string, s *ModelSlot, m *Machine, model 
 		delete(q.s.ModelSlots, key)
 		return
 	}
-	// Demand-only recovery goes through ordinary ordered call placement below,
-	// including fairness, batch precedence, fences and admission.
-	if !pinned {
-		return
-	}
-	if s.RetryAt == nil || m.Gone || m.Leaving || q.networkQuiet || q.unreported[m.ID] || m.MemoryError != "" || m.ModelURL == "" || !q.modelUsableMachine(model, m) {
-		return
-	}
-	priority := "production"
-	project := model.Project
-	if pinned {
-		for _, pin := range q.s.Pins {
-			if pin.Model == s.Model && pin.Assigned == m.ID && pin.active(q.clock.Now()) {
-				project = pin.Project
-				break
-			}
-		}
-	}
-
-	job := &Job{ID: "pin/" + project + "/" + s.Model, Spec: Spec{Project: project, Priority: priority}}
-	job.Spec.Needs.Model = s.Model
-	if q.deviceAdmissionBlocked(m) || !q.placementPolicyAllowed(job, m, false) {
-		return
-	}
-	room := *m
-	if s.RetryReserved {
-		// The pin alone can spend its planning reservation. It is never
-		// returned to the batch scheduler during crash backoff.
-		room.FreeMemoryGB = max(0, room.FreeMemoryGB+model.MemoryGB-m.modelReservationDebtGB)
-		after := q.hostRoomAfter(m, nil, []*ModelSlot{s})
-		room.FreeHostMemoryGB, room.hostReservationDebtGB = max(0, after), max(0, -after)
-	}
-	plan := q.roomPlan(job, &room, false)
-	if plan == nil {
-		return
-	}
-	q.applyPlacement(plan, job)
-	if !q.deviceTiersSettled(m, job, true) || room.FreeMemoryGB < model.MemoryGB || !hostFits(&room, model.MemoryGB, model.HostMemoryGB) || q.preparationActive(m) || q.preparationStopping(m) {
-		return
-	}
-
-	if !s.RetryReserved {
-		s.RetryReserved = true
-		if q.s.Machines[m.ID] == m {
-			q.touchMachine(m.ID)
-		}
-		m.FreeMemoryGB -= model.MemoryGB
-	}
-	q.refreshHostMemory()
-	if !q.clock.Now().Before(*s.RetryAt) {
-		q.beginEngineAttempt(s, priority)
-		s.Project = project
-	}
 }
 
 func (q *Queue) beginEngineAttempt(s *ModelSlot, priority string) {
 	s.Custody, s.URL, s.MemoryPeaks = nil, "", nil
 	s.State = "loading"
-	s.RetryReserved = false
 	s.LoadTimedOut = false
 	s.RuntimeFailed = false
 	s.LoadUntil = nil
@@ -282,7 +206,6 @@ func (q *Queue) beginEngineAttempt(s *ModelSlot, priority string) {
 	q.initEnginePreemption(s)
 	s.Recovering = false
 	s.RetryAt = nil
-	s.ApprovalUnknownSince = nil
 	s.HealthRevision = 0
 	s.HealthySince = nil
 }
@@ -300,7 +223,7 @@ func (q *Queue) engineWaitReason(c *ModelCall) string {
 		s := q.s.ModelSlots[key]
 		m := q.s.Machines[s.Machine]
 		model, _ := q.model(c.Model)
-		if s.Model != c.Model || m == nil || m.Gone || m.Leaving || !q.callPlacementAllowed(c, m) || !q.modelUsableMachine(model, m) {
+		if s.Model != c.Model || m == nil || m.Gone || m.Leaving || !q.callPlacementAllowed(c, m) || !q.modelFitsMachine(model, m) {
 			continue
 		}
 		if s.State == "unload_failed" {

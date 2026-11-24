@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"errors"
 	"slices"
 	"time"
 )
@@ -270,12 +271,6 @@ func (q *Queue) preemptObligation(p HostObligation, demand *Job) {
 }
 func (q *Queue) recordEnginePreemption(s *ModelSlot, demand *Job) {
 	if s.PriorityStop == nil {
-		for i := range q.s.Pins {
-			p := &q.s.Pins[i]
-			if p.Model == s.Model && p.Assigned == s.Machine {
-				p.PreemptionCount++
-			}
-		}
 		for _, c := range q.calls {
 			if c.Model == s.Model && c.Machine == "" && c.Error == "" {
 				c.PreemptionCount++
@@ -322,16 +317,11 @@ func (q *Queue) preparationActive(m *Machine) bool {
 	return false
 }
 
-// History belongs to desired pins or a still-waiting load request, so cleanup
+// History belongs to a still-waiting load request, so cleanup
 // cannot erase the runtime floor when a fresh engine attempt is made.
 func (q *Queue) initEnginePreemption(s *ModelSlot) {
 	now := q.clock.Now()
 	s.RunSince = &now
-	for _, p := range q.s.Pins {
-		if p.Model == s.Model && p.Project == s.Project {
-			s.PreemptionCount = max(s.PreemptionCount, p.PreemptionCount)
-		}
-	}
 	for _, c := range q.calls {
 		if c.Model == s.Model && c.Project == s.Project && c.Machine == "" {
 			s.PreemptionCount = max(s.PreemptionCount, c.PreemptionCount)
@@ -351,4 +341,44 @@ func (q *Queue) preparationShared(m *Machine, demand *Job, l *HostLaunch) bool {
 		key = extensionPreparationKey(*e, m)
 	}
 	return l.Kind == "environment" && l.Key == key
+}
+
+func (q *Queue) SetProductionGrace(d time.Duration) error {
+	return q.SetPreemptionGrace(d)
+}
+func (q *Queue) SetPreemptionGrace(d time.Duration) error {
+	if d <= 0 {
+		return errors.New("preemption grace must be positive")
+	}
+	q.mu.Lock()
+	q.productionGrace = d
+	q.republishReads()
+	q.mu.Unlock()
+	return nil
+}
+func (q *Queue) stopFor(j *Job, priority, kind string) {
+	q.touchJob(j.ID)
+	j.PriorityPolicy = q.priorityMatch(j.Spec)
+	if j.State == "running" {
+		q.s.Preemptions = append(q.s.Preemptions, Preemption{At: q.clock.Now(), Job: j.ID, Project: j.Spec.Project, For: priority})
+	}
+	q.stop(j, "making room for "+priority+" "+kind)
+	if j.State == "stopping" {
+		grace := q.preemptionGrace()
+		if priority == "deadline" {
+			grace = StopGrace
+		}
+		if gracefulGPUStop(j) {
+			grace = q.gpuStopGrace()
+		} else if !j.Spec.Resumable {
+			grace = 0
+		}
+		t := q.clock.Now().Add(grace)
+		if j.StopAt == nil || t.Before(*j.StopAt) {
+			j.StopAt = &t
+			if !cancelled(j) {
+				j.Reason = "making room for " + priority + " " + kind
+			}
+		}
+	}
 }

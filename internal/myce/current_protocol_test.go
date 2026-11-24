@@ -31,11 +31,11 @@ func TestCurrentProtocolRejectsMissingIdentity(t *testing.T) {
 			}
 		}
 	}
-	for _, edit := range []func(*Checkin){func(c *Checkin) { c.Machine.Session = "" }, func(c *Checkin) { c.Machine.CapabilityProfile = nil }, func(c *Checkin) { c.Machine.ApprovedModels = map[string]string{"source": "hash"} }, func(c *Checkin) { c.ModelReports = []ModelReport{{Name: "model", State: "unloaded"}} }} {
+	for _, edit := range []func(*Checkin){func(c *Checkin) { c.Machine.Session = "" }, func(c *Checkin) { c.Machine.CapabilityProfile = nil }, func(c *Checkin) { c.ModelReports = []ModelReport{{Name: "model", State: "unloaded"}} }} {
 		c := Checkin{Machine: machine("current", "fake")}
 		edit(&c)
 		if _, err := q.Checkin(c); err == nil {
-			t.Fatal("accepted absent identity/profile/approval")
+			t.Fatal("accepted absent identity/profile")
 		}
 	}
 	server := httptest.NewServer(API{q, "test"}.Handler())
@@ -108,16 +108,6 @@ func TestCurrentProtocolUniversalPrelaunch(t *testing.T) {
 
 func TestCurrentProtocolServerCompatibility(t *testing.T) {
 	q, _ := fixture(t)
-	m := machine("server", "fake")
-	m.ApprovedModels = map[string]string{"source": "hash"}
-	model := Model{Name: "entry", LocalSource: "source", SHA256: "hash", AllowedMachines: []string{"server"}}
-	if modelFenceAllows(model, &m) {
-		t.Fatal("implicit local-source approval")
-	}
-	m.ModelApprovalStates = map[string]ModelApprovalState{"source": approvalVerified}
-	if !modelFenceAllows(model, &m) {
-		t.Fatal("explicit local-source approval refused")
-	}
 	if (&ModelPlacement{AllowedMachines: []string{"server"}, ProjectMachines: []string{"caller"}}).allows("server") {
 		t.Fatal("owner/caller intersection")
 	}

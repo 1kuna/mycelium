@@ -254,7 +254,7 @@ func TestWorkerRootsDiscoveredCachesReachActorAndModelLaunch(t *testing.T) {
 	observed := m
 	observed.CachedSharedInputs = shared.readyKeys()
 	var err error
-	observed.CachedModels, _, err = cache.report([]Model{model}, nil)
+	observed.CachedModels, _, err = cache.Report([]Model{model})
 	if err != nil || len(observed.CachedModels) != 1 || len(observed.CachedSharedInputs) != 1 {
 		t.Fatal("missing real cache discovery", err)
 	}

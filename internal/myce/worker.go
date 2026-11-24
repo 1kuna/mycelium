@@ -153,7 +153,6 @@ type Worker struct {
 	nativeCI                    bool // Current attempt declared isolation: ci (#1298).
 	CacheLimit                  int64
 	SecretRoot                  string
-	ModelApprovalRoot           string
 	ModelConfig                 ModelConfig
 	ModelListen, ModelAdvertise string
 	Client                      Client
@@ -1394,7 +1393,7 @@ func (w Worker) replayWithProgress(ctx context.Context, s *workerStore, acknowle
 }
 func (w Worker) Run(stop context.Context) error {
 	if w.Custodian != "" {
-		return w.runExecutionCustodian(stop)
+		return w.runCustodian(stop)
 	}
 	w.Client.inventoryWire = &atomic.Bool{}
 	w.Client.inventoryWire.Store(true)
@@ -1476,14 +1475,14 @@ func (w Worker) Run(stop context.Context) error {
 		return err
 	}
 	w.reconcileFinishedCompilerPins(stop, s, stores)
-	modelSession, err := retainedModelSession(s.dir, w.Machine.ID)
+	legacyModels, err := modelRequests(s.dir)
 	if err != nil {
 		return err
 	}
-	if modelSession != "" && modelSession != s.state.Session {
-		return errors.New("detached model session differs from retained worker session")
+	if len(legacyModels) > 0 {
+		return &HTTPError{Code: "model_keeper_retired", Message: "drain detached models with the previous worker before replacing it (docs/services.md)"}
 	}
-	if len(stores) > 0 || modelSession != "" {
+	if len(stores) > 0 {
 		w.Machine.Session = s.state.Session
 	} else {
 		if !s.state.Fresh || s.state.Session == "" {

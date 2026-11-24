@@ -156,43 +156,35 @@ func TestSharedDeviceMetalHigherTierPacks(t *testing.T) {
 }
 
 func TestSharedDeviceXPUModelLoadWaitsForTierRelease(t *testing.T) {
-	for _, kind := range []string{"call", "pin"} {
-		t.Run(kind, func(t *testing.T) {
-			q, clock, m := sharedXPUModelFixture(t)
-			var tenants []*Job
-			for _, gb := range []float64{3, 2} {
-				queued := submitMeasuredCardJob(t, q, m, sharedSpec("experiment", gb))
-				run := assignedJob(machineCheck(t, q, m, tenants...))
-				if run == nil || run.ID != queued.ID {
-					t.Fatal("experiment did not pack", run, job(t, q, queued.ID).Reason)
-				}
-				if err := q.Started(result(run, false)); err != nil {
-					t.Fatal(err)
-				}
-				tenants = append(tenants, run)
-			}
-			if kind == "call" {
-				addModelCall(t, q, "production")
-			} else if err := q.Pin(ModelPin{Project: "test", Model: "test", Machine: m.ID}); err != nil {
-				t.Fatal(err)
-			}
-			for _, run := range tenants {
-				requireState(t, q, run.ID, "stopping")
-			}
-			clock.Advance(q.gpuStopGrace() + time.Second)
-			if reply := machineCheck(t, q, m, tenants...); len(reply.ModelPlan) != 0 {
-				t.Fatal("model loaded before lower-tier batch release", reply.ModelPlan)
-			}
-			finishInterrupted(t, q, tenants[0])
-			if reply := machineCheck(t, q, m, tenants[1]); len(reply.ModelPlan) != 0 {
-				t.Fatal("model loaded before every lower-tier batch released", reply.ModelPlan)
-			}
-			finishInterrupted(t, q, tenants[1])
-			reply := machineCheck(t, q, m)
-			if len(reply.ModelPlan) != 1 || reply.ModelPlan[0].State != "loading" || reply.ModelPlan[0].Device != "0" {
-				t.Fatal("model did not load after exact batch releases", reply.ModelPlan)
-			}
-		})
+	q, clock, m := sharedXPUModelFixture(t)
+	var tenants []*Job
+	for _, gb := range []float64{3, 2} {
+		queued := submitMeasuredCardJob(t, q, m, sharedSpec("experiment", gb))
+		run := assignedJob(machineCheck(t, q, m, tenants...))
+		if run == nil || run.ID != queued.ID {
+			t.Fatal("experiment did not pack", run, job(t, q, queued.ID).Reason)
+		}
+		if err := q.Started(result(run, false)); err != nil {
+			t.Fatal(err)
+		}
+		tenants = append(tenants, run)
+	}
+	addModelCall(t, q, "production")
+	for _, run := range tenants {
+		requireState(t, q, run.ID, "stopping")
+	}
+	clock.Advance(q.gpuStopGrace() + time.Second)
+	if reply := machineCheck(t, q, m, tenants...); len(reply.ModelPlan) != 0 {
+		t.Fatal("model loaded before lower-tier batch release", reply.ModelPlan)
+	}
+	finishInterrupted(t, q, tenants[0])
+	if reply := machineCheck(t, q, m, tenants[1]); len(reply.ModelPlan) != 0 {
+		t.Fatal("model loaded before every lower-tier batch released", reply.ModelPlan)
+	}
+	finishInterrupted(t, q, tenants[1])
+	reply := machineCheck(t, q, m)
+	if len(reply.ModelPlan) != 1 || reply.ModelPlan[0].State != "loading" || reply.ModelPlan[0].Device != "0" {
+		t.Fatal("model did not load after exact batch releases", reply.ModelPlan)
 	}
 }
 
@@ -239,47 +231,6 @@ func TestSharedDeviceXPUEnginePromotionWaitsForTierRelease(t *testing.T) {
 				t.Fatal("existing engine did not promote after exact release", high, slot)
 			}
 		})
-	}
-}
-
-func TestSharedDeviceXPUPinnedEngineRetryWaitsForTierRelease(t *testing.T) {
-	q, clock, m := sharedXPUModelFixture(t)
-	queued := submitMeasuredCardJob(t, q, m, sharedSpec("experiment", 3))
-	run := assignedJob(machineCheck(t, q, m))
-	if run == nil || run.ID != queued.ID {
-		t.Fatal("no experiment co-tenant", run, job(t, q, queued.ID).Reason)
-	}
-	call := addModelCall(t, q, "experiment")
-	slot := q.s.ModelSlots[slotKey(m.ID, "test", "0")]
-	if slot == nil {
-		t.Fatal("no experiment engine")
-	}
-	if err := q.Pin(ModelPin{Project: "test", Model: "test", Machine: m.ID}); err != nil {
-		t.Fatal(err)
-	}
-	// Only the production pin should demand a retry, not the experiment call.
-	if err := q.finishCall(call.ID); err != nil {
-		t.Fatal(err)
-	}
-	// Reproduce an already-pinned failed engine with a retained batch teardown.
-	if err := q.update(func() error {
-		due := clock.Now()
-		slot.State, slot.RuntimeFailed, slot.RetryAt = "failed", true, &due
-		q.s.Pins[0].Assigned, q.s.Pins[0].AssignedDevice = m.ID, "0"
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
-	}
-	requireState(t, q, run.ID, "stopping")
-	if slot.State != "failed" {
-		t.Fatal("pinned retry loaded before exact batch release", slot.State, slot.Priority)
-	}
-	finishInterrupted(t, q, run)
-	if slot.State != "loading" {
-		t.Fatal("pinned retry did not load after exact batch release", slot)
 	}
 }
 
@@ -339,7 +290,11 @@ func TestSharedDeviceXPUModelSkipsRetainedCleanup(t *testing.T) {
 	other := m
 	other.ID, other.Session = "two", "session-two"
 	machineCheck(t, q, other)
-	if err := q.Pin(ModelPin{Project: "test", Model: "test", Machine: other.ID}); err != nil {
+	warm := &ModelCall{Project: "alternate", Model: "test", Priority: "experiment"}
+	if err := q.ConfigureProjects(map[string]ProjectPolicy{"alternate": {Weight: 1, AllowedMachines: []string{other.ID}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.addCall(warm); err != nil {
 		t.Fatal(err)
 	}
 	ready := q.s.ModelSlots[slotKey(other.ID, "test", "0")]
@@ -347,6 +302,9 @@ func TestSharedDeviceXPUModelSkipsRetainedCleanup(t *testing.T) {
 		t.Fatal("no alternate engine")
 	}
 	if _, err := q.Checkin(Checkin{Machine: other, AttemptProtocol: keyedAttemptProtocol, ModelReports: []ModelReport{{Name: "test", Device: "0", Attempt: ready.Attempt, State: "ready"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.finishCall(warm.ID); err != nil {
 		t.Fatal(err)
 	}
 	high := addModelCall(t, q, "production")

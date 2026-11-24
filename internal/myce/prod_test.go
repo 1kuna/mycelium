@@ -70,38 +70,6 @@ func TestProductionGraceConfiguration(t *testing.T) {
 		t.Fatal("missing grace kill")
 	}
 }
-func TestPinRetentionReservationWindowAndUnpin(t *testing.T) {
-	q, c, m := modelFixture(t)
-	p := ModelPin{Project: "atlas", Model: "test", Platform: "fake", Start: "08:00", End: "20:00", Timezone: "UTC", Weekdays: []int{4}}
-	if e := q.Pin(p); e != nil {
-		t.Fatal(e)
-	}
-	reportModel(t, q, m, "ready")
-	// Keep worker alive while fake time crosses idle expiration.
-	c.Advance(11 * time.Minute)
-	reportModel(t, q, m, "ready")
-	s := q.s.ModelSlots[slotKey(m.ID, "test")]
-	if s == nil || s.State != "ready" {
-		t.Fatal("pin idle eviction")
-	}
-	submit(t, q, spec("production"))
-	if s.State != "ready" {
-		t.Fatal("pin memory reclaimed")
-	}
-	if check(t, q, m, nil).Job != nil {
-		t.Fatal("batch used reserved memory")
-	}
-	if e := q.Unpin("atlas", "test"); e != nil {
-		t.Fatal(e)
-	}
-	if q.slotPinned(s) {
-		t.Fatal("unpin ineffective")
-	}
-	// Window boundaries follow injected clock.
-	if p.active(time.Date(2026, 10, 8, 20, 0, 0, 0, time.UTC)) || !p.active(time.Date(2026, 10, 8, 8, 0, 0, 0, time.UTC)) || p.active(time.Date(2026, 10, 9, 9, 0, 0, 0, time.UTC)) {
-		t.Fatal("window boundaries")
-	}
-}
 func TestImmediateStopNotification(t *testing.T) {
 	q, _ := fixture(t)
 	m := machine("one", "fake")

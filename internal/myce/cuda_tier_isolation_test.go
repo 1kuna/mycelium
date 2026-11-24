@@ -100,7 +100,7 @@ func TestSharedDeviceCUDAEqualTierPacks(t *testing.T) {
 
 func TestSharedDeviceCUDAModelLoadWaitsForTierRelease(t *testing.T) {
 	for _, topology := range []string{"discrete", "unified"} {
-		for _, kind := range []string{"call", "pin"} {
+		for _, kind := range []string{"call"} {
 			t.Run(topology+"/"+kind, func(t *testing.T) {
 				q, clock, m := modelFixture(t)
 				inventory := sharedDiscreteMachine("cuda")
@@ -125,11 +125,7 @@ func TestSharedDeviceCUDAModelLoadWaitsForTierRelease(t *testing.T) {
 					}
 					tenants = append(tenants, run)
 				}
-				if kind == "call" {
-					addModelCall(t, q, "production")
-				} else if err := q.Pin(ModelPin{Project: "test", Model: "test", Machine: m.ID}); err != nil {
-					t.Fatal(err)
-				}
+				addModelCall(t, q, "production")
 				for _, run := range tenants {
 					requireState(t, q, run.ID, "stopping")
 				}

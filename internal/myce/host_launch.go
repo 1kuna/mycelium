@@ -376,9 +376,6 @@ func (q *Queue) cancelUnofferedPreparations(m *Machine, reply Reply) {
 	for _, r := range reply.EnvironmentPlan {
 		offered[launchAttempt(r.Launch)] = true
 	}
-	for _, r := range reply.CopyPlan {
-		offered[launchAttempt(r.Launch)] = true
-	}
 	for id, l := range q.s.PreparationPlans {
 		if l.Machine == m.ID && l.Session == m.Session && !l.Started && !offered[id] {
 			delete(q.s.PreparationPlans, id)

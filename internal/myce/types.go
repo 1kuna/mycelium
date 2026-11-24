@@ -744,7 +744,7 @@ type Machine struct {
 	ModelCopySeconds            map[string]float64    `json:"model_copy_seconds,omitempty"`
 	CopyReports                 []CopyReport          `json:"copy_reports,omitempty"`
 	CopyBytesPerSecond          float64               `json:"copy_bytes_per_second,omitempty"`
-	ApprovedModels              map[string]string     `json:"approved_models,omitempty"`
+	ApprovedModels              retiredField          `json:"approved_models,omitzero"`
 	CachedModels                []string              `json:"cached_models,omitempty"`
 	CacheFreeBytes              int64                 `json:"cache_free_bytes"`
 	CacheError                  string                `json:"cache_error,omitempty"`
@@ -764,8 +764,7 @@ type Machine struct {
 	Leaving                     bool                  `json:"leaving,omitempty"`
 	Gone                        bool                  `json:"gone,omitempty"`
 
-	// Explicit per-local_source tri-state; omission never authorizes use.
-	ModelApprovalStates map[string]ModelApprovalState `json:"model_approval_states,omitempty"`
+	ModelApprovalStates retiredField `json:"model_approval_states,omitzero"`
 
 	// A card group is one placement view of several cards on this host (#105).
 	// The worker sets group alone: the device IDs bound to one attempt.
@@ -849,9 +848,9 @@ type Reply struct {
 	FileCheckpoints   bool                `json:"file_checkpoints,omitempty"`
 	AdmissionBlocked  bool                `json:"admission_blocked,omitempty"`
 	EnvironmentPlan   []EnvironmentRecipe `json:"environment_plan,omitempty"`
-	CopyPlan          []CopyTask          `json:"copy_plan,omitempty"`
-	CacheUsage        []CopyTask          `json:"cache_usage,omitempty"`
-	CachePins         []string            `json:"cache_pins,omitempty"`
+	CopyPlan          retiredField        `json:"copy_plan,omitzero"`
+	CacheUsage        retiredField        `json:"cache_usage,omitzero"`
+	CachePins         retiredField        `json:"cache_pins,omitzero"`
 	ModelPlan         []ModelSlot         `json:"model_plan,omitempty"`
 	Hold              bool                `json:"hold"`
 	CheckpointRoot    string              `json:"checkpoint_root"`
@@ -972,15 +971,13 @@ type Snapshot struct {
 	WorkCurves       []WorkObservation       `json:"work_curves"`
 	PriorityPolicy   PriorityPolicyRecord    `json:"priority_policy"`
 	// Host and device fences, each one hold record.
-	Holds        []Hold        `json:"holds"`
-	Now          time.Time     `json:"now"`
-	Usage        UsageReport   `json:"usage"`
-	SyncRequests []SyncRequest `json:"sync_requests"`
-	Pins         []ModelPin    `json:"pins"`
-	LoadedModels []ModelSlot   `json:"loaded_models"`
-	Warning      string        `json:"warning,omitempty"`
-	Jobs         []*Job        `json:"jobs"`
-	Machines     []*Machine    `json:"machines"`
+	Holds        []Hold      `json:"holds"`
+	Now          time.Time   `json:"now"`
+	Usage        UsageReport `json:"usage"`
+	LoadedModels []ModelSlot `json:"loaded_models"`
+	Warning      string      `json:"warning,omitempty"`
+	Jobs         []*Job      `json:"jobs"`
+	Machines     []*Machine  `json:"machines"`
 }
 
 // Ages describe observation only; they confer no scheduling or release authority.

@@ -113,19 +113,8 @@ func (q *Queue) targetUsage(m *Machine, physical bool) []usageSample {
 			rows[i].Observed = rows[i].Busy
 		}
 	}
-	// A pin is a separate reservation, never added to busy/observed totals.
-	reserved := map[string]bool{}
-	for _, p := range q.s.Pins {
-		if p.Assigned == m.ID && (m.Devices == nil || onDevice(p.AssignedDevice) && m.GPU != "cpu") {
-			if s := q.s.ModelSlots[slotKey(m.ID, p.Model, p.AssignedDevice)]; s != nil && q.slotPinned(s) {
-				model, _ := q.model(p.Model)
-				reserved[p.Model] = true
-				rows = append(rows, usageSample{Project: p.Project, Model: p.Model, Pinned: 1, Memory: model.MemoryGB})
-			}
-		}
-	}
 	for _, slot := range q.s.ModelSlots {
-		if (slotOnTarget(slot, m) || physical && slot.Machine == m.ID && m.GPU != "cpu" && onDevice(slot.Device)) && slot.State != "unloaded" && !reserved[slot.Model] {
+		if (slotOnTarget(slot, m) || physical && slot.Machine == m.ID && m.GPU != "cpu" && onDevice(slot.Device)) && slot.State != "unloaded" {
 			found := false
 			for _, r := range rows {
 				if r.Model == slot.Model {

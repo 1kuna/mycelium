@@ -283,13 +283,7 @@ func TestLogsNoneServerRequiresWorkerCapability(t *testing.T) {
 	q.models.Models[0].Logs = "none"
 	old.ModelConfigHash = modelConfigHash(q.models)
 	check(t, q, old, nil)
-	if err := q.Pin(ModelPin{Project: "test", Model: "test", Platform: "fake"}); err != nil {
-		t.Fatal(err)
-	}
 	c := addModelCall(t, q, "experiment")
-	if q.s.Pins[0].Assigned != "" {
-		t.Fatal("pin assigned to old worker")
-	}
 	if len(q.s.ModelSlots) != 0 || c.Machine != "" {
 		t.Fatal("old worker received server")
 	}

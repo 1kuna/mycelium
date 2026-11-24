@@ -123,13 +123,13 @@ type state struct {
 	// Per adapter/profile entry without targets (#853): recipe, proven and skipped types.
 	EntryCoverage map[string]entryCoverageRecord `json:"entry_coverage,omitempty"`
 
-	SyncRequests []SyncRequest         `json:"sync_requests,omitempty"`
-	ModelUses    map[string]ModelUse   `json:"model_uses,omitempty"`
-	Pins         []ModelPin            `json:"pins,omitempty"`
-	ModelSlots   map[string]*ModelSlot `json:"model_slots,omitempty"`
-	Jobs         map[string]*Job       `json:"jobs"`
-	Machines     map[string]*Machine   `json:"machines"`
-	Front        int64                 `json:"front"`
+	SyncRequests []retiredField          `json:"sync_requests,omitempty"`
+	ModelUses    map[string]retiredField `json:"model_uses,omitempty"`
+	Pins         []retiredField          `json:"pins,omitempty"`
+	ModelSlots   map[string]*ModelSlot   `json:"model_slots,omitempty"`
+	Jobs         map[string]*Job         `json:"jobs"`
+	Machines     map[string]*Machine     `json:"machines"`
+	Front        int64                   `json:"front"`
 }
 type Queue struct {
 	diskHost                string       // Physical hostname for co-located disk relief.
@@ -421,6 +421,10 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		return nil, err
 	}
 	q.ignoreRetiredResidentSpecs()
+	if len(q.s.Pins) > 0 || len(q.s.SyncRequests) > 0 || len(q.s.ModelUses) > 0 {
+		log.Print("ignoring saved model pins, pre-copy requests and demand history (docs/services.md)")
+		q.s.Pins, q.s.SyncRequests, q.s.ModelUses = nil, nil, nil
+	}
 	q.memoryEvidence, err = loadMemoryEvidence(db, q.s)
 	if err != nil {
 		db.Close()
@@ -1471,7 +1475,6 @@ func (q *Queue) maintain() {
 		}
 		q.withdrawUnavailable(m)
 	}
-	q.maintainApprovalGrace()
 	for machine, release := range q.s.BatchReleases {
 		if !now.Before(release.Until) {
 			delete(q.s.BatchReleases, machine)
@@ -2036,7 +2039,6 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 				reply.ExtensionQualificationPlan = append(reply.ExtensionQualificationPlan, q.extensionQualificationPlan(target)...)
 			}
 			reply.ModelPlan = q.modelPlan(m.ID)
-			reply.CopyPlan, reply.CacheUsage, reply.CachePins = q.copyPlan(&m)
 			q.cancelUnofferedPreparations(&m, reply)
 		}()
 		q.beginAdmissionCheckin(&m)
@@ -2610,7 +2612,6 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 			j.Reason = ""
 		}
 		q.recordAttemptLearning(j, r)
-		q.recordModelUse(j.Spec.Needs.Model)
 		q.recordEntryCoverageSuccess(j, r.Machine)
 		j.State = "succeeded"
 	} else if q.entryCoverageFailure(j, r) {
@@ -2668,7 +2669,7 @@ func (q *Queue) snapshot(forStatus bool, contexts ...context.Context) (Snapshot,
 func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snapshot {
 	defer q.memoizeExtensionQualifications(nil)()
 	compact := q.observationSelection != nil && q.observationSelection.compact
-	out := Snapshot{CheckpointExpiry: q.checkpointExpiryCounts(), EvidenceRetention: q.evidenceRetention, Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), QueueRelease: CurrentRelease(), Holds: []Hold{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
+	out := Snapshot{CheckpointExpiry: q.checkpointExpiryCounts(), EvidenceRetention: q.evidenceRetention, Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), QueueRelease: CurrentRelease(), Holds: []Hold{}, Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	out.QueueCapabilities = queueCapabilities()
 	out.HealthAlertDelivery = q.healthAlertDelivery()
 	if compact {
@@ -2884,7 +2885,7 @@ func (q *Queue) callWait(c *ModelCall) *Hold {
 	if reason := q.capReason(call); reason != "" {
 		return newHold("project_cap", reason)
 	}
-	if c.Machine == "" && (model.Project != "" || len(model.AllowedMachines) > 0 || model.LocalSource != "") {
+	if c.Machine == "" && (model.Project != "" || len(model.AllowedMachines) > 0) {
 		eligible := false
 		for _, worker := range q.s.Machines {
 			if q.projectAllows(c.Project, worker.ID) && q.modelFitsMachine(model, worker) && !worker.Gone && !worker.Leaving {
@@ -2893,7 +2894,7 @@ func (q *Queue) callWait(c *ModelCall) *Hold {
 			}
 		}
 		if !eligible {
-			return newHold("no_eligible_host", "waiting for model placement: entry/owner/caller allowed_machines or local_source approval excludes available workers")
+			return newHold("no_eligible_host", "waiting for model placement: entry/owner/caller allowed_machines excludes available workers")
 		}
 	}
 	if reason := q.engineWaitReason(c); reason != "" {

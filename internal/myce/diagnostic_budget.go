@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"bytes"
 	"context"
 	"encoding/xml"
 	"math"
@@ -69,44 +68,6 @@ func (b *diagnosticTail) Write(p []byte) (int, error) {
 // A progress parser retains only its incomplete line. Exhaustion suppresses that
 // optional observation until the delimiter; output still reaches its sink. A
 // truncated suffix must never masquerade as a complete progress record.
-type diagnosticLine struct {
-	tail     diagnosticTail
-	dropping bool
-}
-
-func (l *diagnosticLine) clear() {
-	l.tail.data = nil
-	l.tail.limit = 0
-	l.tail.release()
-}
-
-func (l *diagnosticLine) write(p []byte, consume func([]byte)) {
-	for len(p) > 0 {
-		end := bytes.IndexAny(p, "\r\n")
-		n := len(p)
-		if end >= 0 {
-			n = end
-		}
-		if !l.dropping {
-			want := len(l.tail.data) + n
-			_, _ = l.tail.Write(p[:n])
-			if len(l.tail.data) != want {
-				l.clear()
-				l.dropping = true
-			}
-		}
-		if end < 0 {
-			return
-		}
-		if !l.dropping {
-			consume(l.tail.data)
-		}
-		l.clear()
-		l.dropping = false
-		p = p[end+1:]
-	}
-}
-
 func (b *diagnosticTail) release() {
 	for _, release := range b.releases {
 		release()

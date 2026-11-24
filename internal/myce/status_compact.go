@@ -270,7 +270,6 @@ func compactStatusMachine(m *Machine) Machine {
 	}
 	c.EnvironmentBuildSeconds, c.EnvironmentBytes, c.ModelCopySeconds = nil, nil, nil
 	c.Environments, c.CachedModels, c.Models = nil, nil, nil
-	c.ModelApprovalStates = nil
 	c.Devices = slices.Clone(c.Devices)
 	for i := range c.Devices {
 		d := &c.Devices[i]
@@ -391,7 +390,7 @@ func (q *Queue) compactStatusView(o *statusOptions, ctx context.Context, retaine
 		HostReleases: q.s.HostReleases, HostMaintenance: q.s.HostMaintenance, DeviceMaintenance: q.s.DeviceMaintenance,
 		Policies: q.s.Policies, PriorityPolicy: q.s.PriorityPolicy,
 		ComponentExclusions: map[string]ComponentExclusion{}, Reservations: map[string]Reservation{},
-		ModelSlots: q.s.ModelSlots, Pins: q.s.Pins, SyncRequests: q.s.SyncRequests, PreparationPlans: q.s.PreparationPlans}
+		ModelSlots: q.s.ModelSlots, PreparationPlans: q.s.PreparationPlans}
 	for key, r := range q.s.Reservations {
 		if r.active() || q.reservationCleanupPending(r, q.retainedJob(r.Job)) {
 			s.Reservations[key] = r

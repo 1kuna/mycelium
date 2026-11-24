@@ -32,7 +32,7 @@ accelerators as components (MY-06).
 ## Product decisions
 
 1. **CPU and GPU compute.** CPU commands and accelerator workloads share the queue. Applications retain file watching, submission and publication.
-2. **The queue owns GPU work.** Apps submit commands or model calls instead of keeping their own GPU processes between jobs. An unpinned idle model unloads after its [configured or learned interval](readiness.md), or when higher-priority work needs the memory. Explicit production pins are the reservation mechanism.
+2. **The queue owns GPU work.** Apps submit commands or model calls instead of keeping their own GPU processes between jobs. An idle model unloads after its [configured idle interval](services.md#scheduling-draining-and-recovery), or when higher-priority work needs the memory.
 3. **Progress can move.** NAS checkpoints or verified file-store checkpoint generations allow a resumable job to continue on another compatible machine. Outputs must be safe to repeat; attempt-specific results reject stale executions.
 4. **One local network, one queue.** No peer network, leases, leader election or replicated registry.
 5. **One machine is one hypha.** A worker owns the machine and selects its components; CPU/RAM capacity is shared once.
@@ -86,8 +86,9 @@ without releasing cleanup custody.
 A demand with a selected release precedes uncommitted same-tier demand, so each
 waiting batch plans its own target instead of borrowing another demand's release.
 This includes non-resumable commands, native
-sidecar groups, model calls/loads, pinned engines and environment builds. Idle
-unpinned same-tier model cache may be evicted; active same-tier work is preserved except for the qualified [scarce-host yield](#scarce-host-yield) case. Production preempts lower-tier work. Accelerator work, including
+sidecar groups, model calls and loads, and environment builds. Idle same-tier
+engines may be unloaded. Active same-tier work is preserved except for the
+qualified [scarce-host yield](#scarce-host-yield) case. Production preempts lower-tier work. Accelerator work, including
 non-resumable work, receives SIGTERM with ten seconds of grace by default,
 capped at fifteen seconds, before SIGKILL if still running. Resumable CPU commands
 receive ten seconds by default to save; non-resumable CPU work stops immediately. Deadline
@@ -148,7 +149,7 @@ This is admission fairness, with no same-tier interruption or bounded-wait
 promise for indefinite allocations. Strict higher tiers may starve lower ones.
 
 The SQLite queue retains device, project, job and model allocation history. See [usage](scheduling.md#usage) for the current query and retention contract. Busy allocation,
-idle time, memory, pins, preemptions and production start latency distinguish
+idle time, memory, preemptions and production start latency distinguish
 active pool use from reservations and unknown downtime. `myce usage` reports
 these totals. A self-contained responsive status page shows the fleet, queue,
 seven-day SVG charts and problems. See [the guide](scheduling.md) for
@@ -772,9 +773,9 @@ covers refusal and legacy records. Use [native environments and sidecars](servic
 ## Models
 <a id="models-nas-masters-local-cache-and-production-pins-maintainer-2026-10-09"></a>
 
-The NAS holds the master copy of every model file. `myce model fetch` explicitly
-downloads an approved Hugging Face HTTPS file into a NAS folder, verifying its
-expected byte count and SHA-256. Loading never fetches from the internet.
+Stage immutable model masters under the configured model root using the
+upstream download client. Workers verify their size and SHA-256 at load.
+
 The catalog `path` names the NAS master: preferably relative to each worker's
 `--model-root`, or an absolute NAS mount path when all workers share that path.
 Real models require `size_bytes` and `sha256`. Keep immutable masters and update
@@ -795,23 +796,8 @@ those reports. Copy and verification time are part of model load time. Large
 models always load from local disk. `direct_nas: true` is an explicit per-model
 exception intended for small models; verify it before reading the NAS master.
 
-`myce model pin MODEL --project PROJECT --machine MACHINE` holds a production
-model on one worker. `--platform cuda|metal|xpu` instead chooses one eligible
-worker of that platform, retaining the assignment while healthy. Pins are stored
-in SQLite and shown in status. They reserve the model's GPU memory and prevent
-idle unloading, priority reclamation, and disk-cache eviction while loaded.
-`myce model unpin MODEL --project PROJECT` releases protection. Optional
-`--weekdays 1,2,3,4,5 --start 08:00 --end 20:00 --timezone America/New_York`
-implements reservations now. Windows are start-inclusive/end-exclusive and must
-not cross midnight. Initial pin warmup and unavailable hardware remain visible;
-a ready pin serves calls without a model load wait. A pin cannot promise
-availability while its machine or NAS is down.
-
-### Pre-copying
-<a id="pre-copying-maintainer-2026-10-09"></a>
-
-See [pre-copying](reference/model-mechanisms.md#pre-copying) for the
-approved mechanism and its constraints.
+Model engines load on demand and unload after their configured idle timeout.
+The worker stages missing cache copies during load.
 
 ### Shared native server entries
 <a id="shared-native-server-entries-68"></a>
@@ -820,21 +806,12 @@ Server entries may set `project` and `allowed_machines`. Models stay shared
 across projects; owner and caller placement policies intersect. Optional `env`
 contains non-secret literals; `secret_env` references worker-local named secrets,
 read only at launch from private mode-0600 files, with `logs: none` required.
-An explicit per-folder/per-host `local_source` approval permits in-place model
-use, including HF blob symlinks within the approved root. Fingerprint once,
-check metadata subsequently, and require explicit reapproval after changes.
-Cheap approval records are checked before directory walks, and completed results
-survive sibling timeouts. Unknown blocks new loads/pre-copy and preserves ready
-routing for at most five continuous minutes under the queue Clock; definite reports
-reset that timer. Expiry, verified changes and revocation drain with custody until
-unload acknowledgement. Mid-load draining on unknown is accepted. Check-ins carry
-the approval state; all workers must use the current report/start protocol. Missing required approval evidence blocks new loads; no older-worker fallback supplies it.
-This opt-in source is an exception to the normal verified-copy contract;
-ordinary copied-model custody is unchanged. Authenticated header-less `/v1`
+Model masters use verified files under the configured model root or in the
+file store. Authenticated header-less `/v1`
 calls default to the entry owner and `experiment`; a per-project production
 default requires explicit operator opt-in by the effective caller project, even
 when calling another owner's entry. Existing entries retain defaults.
-See [operator configuration](services.md#shared-entries-local-secrets-and-approved-model-folders).
+See [operator configuration](services.md#shared-entries-and-local-secrets).
 
 ### Log opt-out
 <a id="log-opt-out-rollout-68-review-decision"></a>
@@ -1698,7 +1675,7 @@ authorized native acceptance; laptop fakes do not qualify hardware. See
 
 ## Scope and later work
 
-Supported v3 features include plain batch commands, queue-managed model calls and HTTP servers, software environments, production pins, fair sharing, enforced memory ceilings and native sidecars. Capability profiles, authenticated discovery/joining, qualified extensions, polite daily-use participation, optional measured placement and verified file transport are also implemented. An extension describes a kind of work or program; qualification is tied to its exact version and a matching native baseline. Hardware facts or benchmark timing alone do not qualify it. Unknown required participation signals withhold work; unsupported hardware is reported rather than silently using the CPU.
+Supported v3 features include plain batch commands, queue-managed model calls and HTTP servers, software environments, fair sharing, enforced memory ceilings and native sidecars. Capability profiles, authenticated discovery/joining, qualified extensions, polite daily-use participation, optional measured placement and verified file transport are also implemented. An extension describes a kind of work or program; qualification is tied to its exact version and a matching native baseline. Hardware facts or benchmark timing alone do not qualify it. Unknown required participation signals withhold work; unsupported hardware is reported rather than silently using the CPU.
 
 Explicit NAS roots remain supported for models, shared files and checkpoints. The queue file store also supports jobs without a NAS. Ordinary commands and servers do not need to become extensions. These are supported v3 paths, not a second runtime or a reason to restore older worker/report protocols.
 

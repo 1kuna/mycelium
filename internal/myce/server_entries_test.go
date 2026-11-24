@@ -16,7 +16,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestEntryPlacementSharedCallsPinsAndFenceChange(t *testing.T) {
+func TestEntryPlacementSharedCallsAndFenceChange(t *testing.T) {
 	q, clock, a := modelFixture(t)
 	q.models.Models[0].Project = "owner"
 	q.models.Models[0].AllowedMachines = []string{"one", "two"}
@@ -42,19 +42,7 @@ func TestEntryPlacementSharedCallsPinsAndFenceChange(t *testing.T) {
 	if err := q.finishCall(call.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := q.Pin(ModelPin{Project: "another-project", Model: "test", Platform: "fake"}); err != nil {
-		t.Fatal(err)
-	}
-	if q.s.Pins[0].Assigned != a.ID {
-		t.Fatal("pin escaped owner fence")
-	}
-	if err := q.SyncModel(SyncRequest{Model: "test", To: "all"}); err != nil {
-		t.Fatal(err)
-	}
-	if plan, _, pins := q.copyPlan(&b); len(plan) > 0 || len(pins) > 0 {
-		t.Fatal("precopy escaped owner fence")
-	}
-	// Policy changes must drain existing copies, even with a pin; elapsed time
+	// Policy changes must drain existing copies; elapsed time
 	// alone does not release their memory or permit reuse.
 	if err := q.ConfigureProjects(map[string]ProjectPolicy{"owner": {Weight: 1, AllowedMachines: []string{"two"}}}); err != nil {
 		t.Fatal(err)
@@ -86,16 +74,11 @@ func TestEntryPlacementSharedCallsPinsAndFenceChange(t *testing.T) {
 	}
 }
 
-func TestEntryPlacementWorkerAndLocalIdentity(t *testing.T) {
-	model := Model{Name: "test", Platforms: []string{"fake"}, AllowedMachines: []string{"eligible"}, LocalSource: "approved", SHA256: strings.Repeat("a", 64)}
+func TestEntryPlacementWorkerFence(t *testing.T) {
+	model := Model{Name: "test", Platforms: []string{"fake"}, AllowedMachines: []string{"eligible"}}
 	m := Machine{ID: "eligible", GPU: "fake"}
-	if modelFitsMachine(model, &m) {
-		t.Fatal("unapproved source eligible")
-	}
-	m.ApprovedModels = map[string]string{"approved": model.SHA256}
-	m.ModelApprovalStates = map[string]ModelApprovalState{"approved": approvalVerified}
 	if !modelFitsMachine(model, &m) {
-		t.Fatal("approved source ineligible")
+		t.Fatal("eligible worker refused")
 	}
 	m.ID = "excluded"
 	if modelFitsMachine(model, &m) {
@@ -187,11 +170,6 @@ func TestEntrySecretChild(t *testing.T) {
 	}
 	if os.Getenv("MYCE_TOKEN") != "" || os.Getenv("ENTRY_LITERAL") != "literal-value" || os.Getenv("ENTRY_SECRET") != "fake-local-credential-68" {
 		os.Exit(9)
-	}
-	if os.Getenv("ENTRY_CHECK_MODEL") == "1" {
-		if _, err := os.Stat(filepath.Join(os.Args[len(os.Args)-2], "config.json")); err != nil {
-			os.Exit(10)
-		}
 	}
 	fmt.Fprint(os.Stdout, os.Getenv("ENTRY_SECRET"))
 	fmt.Fprint(os.Stderr, os.Getenv("ENTRY_SECRET"))
@@ -375,51 +353,6 @@ func TestEntryEnvValidationAndParsingCompatibility(t *testing.T) {
 	}
 }
 
-func TestEntryWorkerLoadsApprovedSourceWithLocalSecrets(t *testing.T) {
-	c, model, original, _ := localApprovalFixture(t)
-	secrets := t.TempDir()
-	if err := os.Chmod(secrets, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(secrets, "credential"), []byte("fake-local-credential-68"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	model.StartCommand = []string{exe, "-test.run=^TestEntrySecretChild$", "--", "{model_path}", "{port}"}
-	model.Env = map[string]string{"ENTRY_CHILD": "1", "ENTRY_LITERAL": "literal-value", "ENTRY_CHECK_MODEL": "1"}
-	model.SecretEnv = map[string]string{"ENTRY_SECRET": "credential"}
-	model.Logs = "none"
-	model.HealthURL = "http://127.0.0.1:{port}/health"
-	dir := t.TempDir()
-	worker := Worker{SecretRoot: secrets, ModelApprovalRoot: c.ApprovalRoot, Machine: Machine{ID: "eligible", Session: "entry-session", GPU: "fake"}, Client: Client{Token: "fake-worker-token"}, Clock: RealClock{}, ModelConfig: ModelConfig{Models: []Model{model}, Idle: time.Minute, Wait: testWaitTimeout}, MemorySource: func(context.Context) (float64, error) { return 8, nil }}
-	rt, err := startModels(worker, dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := rt.close(); err != nil {
-			t.Error(err)
-		}
-	})
-	approved, states := rt.cache.modelApprovals([]Model{model})
-	rt.setLocalApprovals(approved, states)
-	rt.sync([]ModelSlot{{Attempt: "test-engine", Model: model.Name, State: "loading", Session: "entry-session", Placement: &ModelPlacement{AllowedMachines: []string{"eligible"}}}})
-	await(t, func() bool { reports, _ := rt.report(); return len(reports) == 1 && reports[0].State == "ready" })
-	path, err := rt.cache.Prepare(context.Background(), model)
-	if err != nil || path != original {
-		t.Fatal("worker did not retain in-place source", err)
-	}
-	if names, _, err := rt.cache.Report([]Model{model}); err != nil || !contains(names, model.Name) {
-		t.Fatal("local readiness missing", err)
-	}
-	// A fresh fence in the load plan drains an already-ready worker copy.
-	rt.sync([]ModelSlot{{Attempt: "test-engine", Model: model.Name, State: "ready", Session: "entry-session", Placement: &ModelPlacement{AllowedMachines: []string{"excluded"}}}})
-	await(t, func() bool { reports, _ := rt.report(); return len(reports) == 1 && reports[0].State == "unloaded" })
-}
-
 func TestEntrySimDryExample(t *testing.T) {
 	data, err := os.ReadFile("../../examples/sim-server-entries.yaml")
 	if err != nil {
@@ -433,7 +366,7 @@ func TestEntrySimDryExample(t *testing.T) {
 	}
 	text := string(data)
 	for _, prefix := range []string{"CHAT", "GLM", "CHANDRA"} {
-		text = strings.NewReplacer(prefix+"_GPU_GIB_PLACEHOLDER", "1", prefix+"_HOST_GIB_PLACEHOLDER", "1", prefix+"_SIZE_PLACEHOLDER", fmt.Sprint(size), prefix+"_MANIFEST_SHA256_PLACEHOLDER", identity, prefix+"_FILE_PLACEHOLDER", files[0].Path, prefix+"_FILE_SIZE_PLACEHOLDER", "1", prefix+"_FILE_SHA256_PLACEHOLDER", sum).Replace(text)
+		text = strings.NewReplacer(prefix+"_GPU_GIB_PLACEHOLDER", "1", prefix+"_HOST_GIB_PLACEHOLDER", "1", prefix+"_BUNDLE_PLACEHOLDER", "weights/"+strings.ToLower(prefix), prefix+"_SIZE_PLACEHOLDER", fmt.Sprint(size), prefix+"_MANIFEST_SHA256_PLACEHOLDER", identity, prefix+"_FILE_PLACEHOLDER", files[0].Path, prefix+"_FILE_SIZE_PLACEHOLDER", "1", prefix+"_FILE_SHA256_PLACEHOLDER", sum).Replace(text)
 	}
 	path := filepath.Join(t.TempDir(), "models.yaml")
 	if err := os.WriteFile(path, []byte(text), 0600); err != nil {
@@ -447,8 +380,55 @@ func TestEntrySimDryExample(t *testing.T) {
 		t.Fatal("three dry entries required")
 	}
 	for _, model := range config.Models {
-		if model.Project != "sim" || model.Logs != "none" || len(model.AllowedMachines) != 0 || model.Device != "" || model.Environment == "" || len(model.Platforms) != 1 || model.Platforms[0] != "cuda" || model.LocalSource == "" || model.Path != "" || model.Env["VLLM_WORKER_MULTIPROC_METHOD"] != "spawn" {
+		if model.Project != "sim" || model.Logs != "none" || len(model.AllowedMachines) != 0 || model.Device != "" || model.Environment == "" || len(model.Platforms) != 1 || model.Platforms[0] != "cuda" || model.Path == "" || model.Env["VLLM_WORKER_MULTIPROC_METHOD"] != "spawn" {
 			t.Fatalf("incomplete or pinned dry entry: %s", model.Name)
+		}
+	}
+}
+
+func TestReadModelsIgnoresSavedLocalSource(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "catalog.yaml")
+	old := ModelConfig{Models: []Model{
+		{Name: "old", LocalSource: "worker-approval", Engine: "server", MemoryGB: 1, Platforms: []string{"fake"}},
+		{Name: "active", Path: "weights", Engine: "fake", MemoryGB: 1, Platforms: []string{"fake"}},
+	}}
+	data, err := yaml.Marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := ReadModels(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.Models) != 1 || catalog.Models[0].Name != "active" {
+		t.Fatalf("saved approval affected the supported catalog: %+v", catalog.Models)
+	}
+	if got := modelConfigHash(catalog); got != modelConfigHash(old) {
+		t.Fatal("old workers reporting the original catalog should remain compatible")
+	}
+}
+
+func TestRetiredModelRoutes(t *testing.T) {
+	q, _ := fixture(t)
+	handler := API{Queue: q, Token: "test"}.Handler()
+	for _, tc := range []struct {
+		method, path, code, replacement string
+	}{
+		{"POST", "/api/models/pin", "model_pin_retired", "idle_timeout"},
+		{"POST", "/api/models/unpin", "model_pin_retired", "idle_timeout"},
+		{"POST", "/api/models/sync", "model_sync_retired", "on demand"},
+		{"GET", "/api/models/intervals", "model_intervals_retired", "loaded_models"},
+	} {
+		r := httptest.NewRequest(tc.method, tc.path, nil)
+		r.Header.Set("Authorization", "Bearer test")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		var body struct{ Code, Error string }
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || w.Code != http.StatusGone || body.Code != tc.code || !strings.Contains(body.Error, tc.replacement) {
+			t.Fatalf("%s returned %d %s", tc.path, w.Code, w.Body.String())
 		}
 	}
 }

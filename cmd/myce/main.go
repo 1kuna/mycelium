@@ -314,7 +314,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	jobFileRoot := f.String("job-file-root", "", "local shared-storage root for extension job inputs/outputs")
 	cacheRoot := f.String("model-cache", "", "worker local model cache directory")
 	secretRoot := f.String("secret-root", "", "worker-local directory of mode-0600 named secrets")
-	modelApprovalRoot := f.String("model-approval-root", "", "worker-local approved model manifests")
+	f.String("model-approval-root", "", "retired")
 	modelRoot := f.String("model-root", "", "worker model source/acquisition root on NAS or local disk")
 	var nativeReadRoots, nativeExecuteRoots myce.NativeRootPaths
 	f.Var(&nativeReadRoots, "native-read-root", "operator-granted native read-only root (absolute; repeat; empty clears)")
@@ -433,6 +433,15 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	if err := f.Parse(flags); err != nil {
 		return err
+	}
+	var retiredModelFlag error
+	f.Visit(func(option *flag.Flag) {
+		if option.Name == "model-approval-root" {
+			retiredModelFlag = &myce.HTTPError{Code: "model_local_source_retired", Message: "stage verified weights under the configured model root (docs/services.md)"}
+		}
+	})
+	if retiredModelFlag != nil {
+		return retiredModelFlag
 	}
 	if *desktop && *laptop {
 		return errors.New("--desktop and --laptop are mutually exclusive")
@@ -825,7 +834,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return err
 			}
 		}
-		w := myce.Worker{NativeReadRoots: []string(nativeReadRoots), NativeExecuteRoots: []string(nativeExecuteRoots), AcceleratorStopGrace: *productionGrace, Enrollment: *enrollment, DeviceSettings: deviceConfig, FileCacheRoot: *fileCache, FileCacheLimit: *fileCacheLimit, DailyUse: *dailyUse, Laptop: *laptop, Desktop: *desktop, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, GPUTelemetryHelper: *gpuTelemetryHelper, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostMemoryReserveGB: ramReserve, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, SecretRoot: *secretRoot, ModelApprovalRoot: *modelApprovalRoot, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, FixedAcceleratorMemory: *memoryMode == "fixed", MemoryMeasured: myce.AcceleratorMemoryMeasured(*gpu, *memoryMode), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MaxJobs: *maxJobs, HostMemoryBudgetGB: *hostBudget, HostMemoryBudgetMeasured: *hostBudgetMeasured, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, ReservedMemoryGB: *reserve, Environments: split(*environments), Models: split(*models)}}
+		w := myce.Worker{NativeReadRoots: []string(nativeReadRoots), NativeExecuteRoots: []string(nativeExecuteRoots), AcceleratorStopGrace: *productionGrace, Enrollment: *enrollment, DeviceSettings: deviceConfig, FileCacheRoot: *fileCache, FileCacheLimit: *fileCacheLimit, DailyUse: *dailyUse, Laptop: *laptop, Desktop: *desktop, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, GPUTelemetryHelper: *gpuTelemetryHelper, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostMemoryReserveGB: ramReserve, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, SecretRoot: *secretRoot, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, FixedAcceleratorMemory: *memoryMode == "fixed", MemoryMeasured: myce.AcceleratorMemoryMeasured(*gpu, *memoryMode), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MaxJobs: *maxJobs, HostMemoryBudgetGB: *hostBudget, HostMemoryBudgetMeasured: *hostBudgetMeasured, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, ReservedMemoryGB: *reserve, Environments: split(*environments), Models: split(*models)}}
 		if *serviceConfigPath != "" {
 			c, e := myce.ReadServiceConfig(*serviceConfigPath)
 			if e != nil {
@@ -1352,12 +1361,6 @@ func printStatusDetail(s myce.Snapshot, full, detail bool) {
 			fmt.Printf("fault monitor %s: %s; device quarantine is off\n", m.ID, m.FaultMonitorError)
 		}
 		fmt.Printf("cache %s: %v, %d bytes free %s\n", m.ID, m.CachedModels, m.CacheFreeBytes, m.CacheError)
-	}
-	for _, r := range s.SyncRequests {
-		fmt.Printf("sync %s to %s cancelled=%t\n", r.Model, r.To, r.Cancel)
-	}
-	for _, p := range s.Pins {
-		fmt.Printf("pin %s/%s: machine=%s platform=%s assigned=%s window=%s-%s %s\n", p.Project, p.Model, p.Machine, p.Platform, p.Assigned, p.Start, p.End, p.Timezone)
 	}
 	for _, m := range s.LoadedModels {
 		if m.CrashCount > 0 {
