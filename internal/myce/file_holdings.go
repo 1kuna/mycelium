@@ -115,7 +115,7 @@ func (q *Queue) captureProjectFileHoldings(ctx context.Context, project string) 
 	}
 	age := q.filePublicationAge(at)
 	snapshot.refs = fileReferenceView{}
-	q.visitFileReferences(true, nil, func(file FileRef, flags fileReferenceFlags, owner fileKeeper) {
+	q.visitFileReferences(true, nil, func(file FileRef, flags fileReferenceFlags, owner FileKeepingReference) {
 		if flags&fileKept == 0 || file.SHA256 == "" {
 			return
 		}
@@ -125,7 +125,7 @@ func (q *Queue) captureProjectFileHoldings(ctx context.Context, project string) 
 		}
 		if owner.Project != project {
 			// Only the kinds of other holders are visible to this project.
-			owner = fileKeeper{FileKeepingReference: FileKeepingReference{Kind: owner.Kind}}
+			owner = FileKeepingReference{Kind: owner.Kind}
 		}
 		snapshot.refs.note(file, flags, owner, true)
 	})
@@ -240,21 +240,19 @@ func summarizeProjectFileHoldings(project string, snapshot fileHoldingsSnapshot)
 				continue
 			}
 			var charge uint64
-			if projectFileCharge(owner.FileKeepingReference) {
+			if projectFileCharge(owner) {
 				charge = size
 			}
 			item.RetainedBytes = max(item.RetainedBytes, charge)
 			kinds[owner.Kind] = max(kinds[owner.Kind], charge)
-			item.Holders = append(item.Holders, owner.FileKeepingReference)
+			item.Holders = append(item.Holders, owner)
 			if detail, ok := snapshot.claims[owner.Name]; ok && owner.Kind == "input_claim" {
 				item.InputClaims = append(item.InputClaims, detail)
 			}
 		}
 		slices.SortFunc(item.Holders, compareFileHolders)
-		item.Holders = slices.Compact(item.Holders)
 		slices.SortFunc(item.InputClaims, func(a, b FileHoldingClaim) int { return strings.Compare(a.ClaimID, b.ClaimID) })
 		slices.Sort(item.OtherHolderKinds)
-		item.OtherHolderKinds = slices.Compact(item.OtherHolderKinds)
 		for kind, charge := range kinds {
 			s := out.ByKind[kind]
 			s.RetainedBytes = addDiskBytes(s.RetainedBytes, charge)

@@ -351,16 +351,13 @@ func enrollLegacyCheckpointReclamation(j *Job) {
 	j.FileReclamation = &FileReclamation{Pending: pending, LegacyCheckpointsExpired: true}
 }
 
-func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]fileReleaseScope, report func(FileRef, FileKeepingReference), subset ...map[string]*Job) (expired, keep, referenced map[string]bool) {
-	expired, keep, referenced = q.collectDurableFileReferences(pendingOnly, releasing, report, subset...)
-	q.visitFileInputClaimKeepers(func(claim FileInputClaim, owner fileKeeper) {
-		hash := claim.File.SHA256
-		keep[hash], referenced[hash] = true, true
-		if report != nil {
-			report(claim.File, owner.FileKeepingReference)
+// The storage pressure diagnostic reports keepers without building digest sets.
+func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]fileReleaseScope, report func(FileRef, FileKeepingReference)) {
+	q.visitFileReferences(pendingOnly, releasing, func(ref FileRef, flags fileReferenceFlags, owner FileKeepingReference) {
+		if flags&fileKept != 0 {
+			report(ref, owner)
 		}
 	})
-	return expired, keep, referenced
 }
 
 type fileReferenceFlags uint8
@@ -371,31 +368,20 @@ const (
 	fileKept
 )
 
-// Registry identity is used for ownership deduplication. The existing public
-// reference describes the asset path and deliberately omits this identity.
-type fileKeeper struct {
-	FileKeepingReference
-	registry fileRegistryOwner
-}
-
-type fileRegistryOwner struct {
-	kind, name, variant string
-}
-
 type fileDigestReferences struct {
 	flags   fileReferenceFlags
-	keepers map[fileKeeper]uint64
+	keepers map[FileKeepingReference]uint64
 }
 
 type fileReferenceView map[string]fileDigestReferences
 
-func (v fileReferenceView) note(ref FileRef, flags fileReferenceFlags, owner fileKeeper, names bool) {
+func (v fileReferenceView) note(ref FileRef, flags fileReferenceFlags, owner FileKeepingReference, names bool) {
 	hash := ref.SHA256
 	entry := v[hash]
 	entry.flags |= flags
 	if names && flags&fileKept != 0 {
 		if entry.keepers == nil {
-			entry.keepers = map[fileKeeper]uint64{}
+			entry.keepers = map[FileKeepingReference]uint64{}
 		}
 		entry.keepers[owner] = max(entry.keepers[owner], uint64(ref.SizeBytes))
 	}
@@ -408,9 +394,9 @@ func (r fileDigestReferences) collectionEligible() bool {
 
 // q.mu held. Claims protect published blobs without granting durable
 // custody over interrupted uploads or retiring their cleanup markers.
-func (q *Queue) visitFileReferences(pendingOnly bool, releasing map[string]fileReleaseScope, note func(FileRef, fileReferenceFlags, fileKeeper)) {
+func (q *Queue) visitFileReferences(pendingOnly bool, releasing map[string]fileReleaseScope, note func(FileRef, fileReferenceFlags, FileKeepingReference)) {
 	q.visitDurableFileReferences(pendingOnly, releasing, note)
-	q.visitFileInputClaimKeepers(func(claim FileInputClaim, owner fileKeeper) {
+	q.visitFileInputClaimKeepers(func(claim FileInputClaim, owner FileKeepingReference) {
 		note(claim.File, fileKept|fileReferenced, owner)
 	})
 }
@@ -419,7 +405,7 @@ func (q *Queue) visitFileReferences(pendingOnly bool, releasing map[string]fileR
 // a selected release also captures the keeper identities for its preview.
 func (q *Queue) captureFileReferences(pendingOnly bool, releasing map[string]fileReleaseScope, hashes map[string]bool, keepers bool) fileReferenceView {
 	view := make(fileReferenceView, len(hashes))
-	q.visitFileReferences(pendingOnly, releasing, func(ref FileRef, flags fileReferenceFlags, owner fileKeeper) {
+	q.visitFileReferences(pendingOnly, releasing, func(ref FileRef, flags fileReferenceFlags, owner FileKeepingReference) {
 		if hashes == nil || hashes[ref.SHA256] {
 			view.note(ref, flags, owner, keepers)
 		}
@@ -431,7 +417,7 @@ func (q *Queue) captureFileReferences(pendingOnly bool, releasing map[string]fil
 // give an interrupted transfer durable job or catalog custody.
 func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[string]fileReleaseScope, report func(FileRef, FileKeepingReference), subset ...map[string]*Job) (expired, keep, referenced map[string]bool) {
 	expired, keep, referenced = map[string]bool{}, map[string]bool{}, map[string]bool{}
-	q.visitDurableFileReferences(pendingOnly, releasing, func(ref FileRef, flags fileReferenceFlags, owner fileKeeper) {
+	q.visitDurableFileReferences(pendingOnly, releasing, func(ref FileRef, flags fileReferenceFlags, owner FileKeepingReference) {
 		hash := ref.SHA256
 		if flags&fileExpired != 0 {
 			expired[hash] = true
@@ -442,7 +428,7 @@ func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[str
 		if flags&fileKept != 0 {
 			keep[hash] = true
 			if report != nil {
-				report(ref, owner.FileKeepingReference)
+				report(ref, owner)
 			}
 		}
 	}, subset...)
@@ -451,13 +437,13 @@ func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[str
 
 // q.mu held. This walk only reads committed identities. Callers can bound
 // retained facts by digest or project before inspecting the store.
-func (q *Queue) visitDurableFileReferences(pendingOnly bool, releasing map[string]fileReleaseScope, note func(FileRef, fileReferenceFlags, fileKeeper), subset ...map[string]*Job) {
+func (q *Queue) visitDurableFileReferences(pendingOnly bool, releasing map[string]fileReleaseScope, note func(FileRef, fileReferenceFlags, FileKeepingReference), subset ...map[string]*Job) {
 	if len(subset) == 0 {
 		for hash := range q.s.RetiredJobFiles {
-			note(FileRef{SHA256: hash}, fileExpired|fileReferenced, fileKeeper{})
+			note(FileRef{SHA256: hash}, fileExpired|fileReferenced, FileKeepingReference{})
 		}
 	}
-	owner := fileKeeper{}
+	owner := FileKeepingReference{}
 	keep := func(kind, name string, ref FileRef) {
 		r := owner
 		r.Kind, r.Name = kind, name
@@ -470,7 +456,7 @@ func (q *Queue) visitDurableFileReferences(pendingOnly bool, releasing map[strin
 	}
 	add := func(flags fileReferenceFlags, files FileManifest) {
 		for _, ref := range files {
-			note(ref, flags, fileKeeper{})
+			note(ref, flags, FileKeepingReference{})
 		}
 	}
 	bundle := func(ref *FileRef) {
@@ -513,7 +499,7 @@ func (q *Queue) visitDurableFileReferences(pendingOnly bool, releasing map[strin
 			}
 			j = &planned
 		}
-		owner = fileKeeper{FileKeepingReference: FileKeepingReference{JobID: j.ID, Project: j.Spec.Project}}
+		owner = FileKeepingReference{JobID: j.ID, Project: j.Spec.Project}
 		deliveryProtected := parkedStorageCustody(j) || deliveryPending(j) || checkpointMirrorsPending(j)
 		protected := deliveryProtected
 		if terminal(j.State) && j.FilesExpired {
@@ -560,7 +546,7 @@ func (q *Queue) visitDurableFileReferences(pendingOnly bool, releasing map[strin
 				flags |= fileExpired
 			}
 			for _, hash := range j.FileReclamation.Pending {
-				note(FileRef{SHA256: hash}, flags, fileKeeper{})
+				note(FileRef{SHA256: hash}, flags, FileKeepingReference{})
 			}
 		}
 		if expired {
@@ -635,22 +621,19 @@ func (q *Queue) visitDurableFileReferences(pendingOnly bool, releasing map[strin
 			}
 		}
 	}
-	for key, e := range q.s.Extensions {
-		owner = fileKeeper{registry: fileRegistryOwner{kind: "extension", name: key}}
+	owner = FileKeepingReference{}
+	for _, e := range q.s.Extensions {
 		extension(e)
 	}
-	for key, recipes := range q.environments.Environments {
-		for variant, r := range recipes {
-			owner = fileKeeper{registry: fileRegistryOwner{kind: "environment", name: key, variant: variant}}
+	for _, recipes := range q.environments.Environments {
+		for _, r := range recipes {
 			recipe("environment_asset", r)
 		}
 	}
 	for _, m := range q.models.Models {
-		owner = fileKeeper{registry: fileRegistryOwner{kind: "model", name: m.Name}}
 		model("model_catalog", m)
 	}
-	for key, slot := range q.s.ModelSlots {
-		owner = fileKeeper{registry: fileRegistryOwner{kind: "model_slot", name: key}}
+	for _, slot := range q.s.ModelSlots {
 		if slot.Resident != nil {
 			for _, recipe := range slot.Resident.Environments {
 				keepFiles("resident_environment", recipe.Assets)
@@ -668,7 +651,7 @@ func (q *Queue) expiredBlob(hash string, requestContexts ...context.Context) boo
 	unlockRequest := requestReadLock(requestCtx, &q.mu)
 	defer unlockRequest()
 	var refs fileDigestReferences
-	q.visitFileReferences(false, nil, func(ref FileRef, flags fileReferenceFlags, _ fileKeeper) {
+	q.visitFileReferences(false, nil, func(ref FileRef, flags fileReferenceFlags, _ FileKeepingReference) {
 		if ref.SHA256 == hash {
 			refs.flags |= flags
 		}

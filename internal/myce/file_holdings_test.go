@@ -170,12 +170,14 @@ func TestProjectFileHoldingsAndCollectionAccounting(t *testing.T) {
 
 func testFileOwnershipCollectorAgreement(t *testing.T) {
 	for _, tc := range []struct {
-		name, keeper string
-		protected    bool
-		recent       bool
+		name, keeper   string
+		protected      bool
+		recent         bool
+		terminalKeeper bool
 	}{
 		{name: "expired and retained history"},
 		{name: "cross-project job", keeper: "input", protected: true},
+		{name: "cross-project terminal job with a marked bundle", keeper: "input", protected: true, terminalKeeper: true},
 		{name: "unsettled upload claim", keeper: "input_claim", protected: true},
 		{name: "legacy checkpoint", keeper: "checkpoint", protected: true},
 		{name: "delayed delivery", keeper: "pending_delivery", protected: true},
@@ -186,6 +188,7 @@ func testFileOwnershipCollectorAgreement(t *testing.T) {
 			ctx := context.Background()
 			q, clock, c := retentionFixture(t)
 			selected, _, ref := releaseTerminal(t, q, c, "shared-payload")
+			var otherID string
 			if tc.keeper == "input_claim" {
 				if _, err := q.claimFileInput(ctx, Spec{Project: "foreign"}, ref); err != nil {
 					t.Fatal(err)
@@ -195,9 +198,14 @@ func testFileOwnershipCollectorAgreement(t *testing.T) {
 				otherSpec.Project = "foreign"
 				otherSpec.Files = FileManifest{"foreign-input": ref}
 				other := submit(t, q, otherSpec)
+				otherID = other.ID
 				if err := q.update(func() error {
 					other := q.touchJob(other.ID)
 					if tc.keeper == "input" {
+						if tc.terminalKeeper {
+							other.State = "succeeded"
+							q.markBundleUpload(ref.SHA256)
+						}
 						return nil
 					}
 					other.State = "succeeded"
@@ -246,7 +254,9 @@ func testFileOwnershipCollectorAgreement(t *testing.T) {
 			}
 			p := releasePlan(t, q, releaseSelection(selected))
 			if len(p.Blobs) != 1 || p.Blobs[0].CollectionEligible == tc.protected ||
-				(tc.protected && !slices.ContainsFunc(p.Blobs[0].References, func(r FileKeepingReference) bool { return r.Kind == tc.keeper })) {
+				(tc.protected && !slices.ContainsFunc(p.Blobs[0].References, func(r FileKeepingReference) bool {
+					return r.Kind == tc.keeper && r.Project == "foreign" && r.JobID == otherID
+				})) {
 				t.Fatal("wrong planned keeper or scope", p)
 			}
 			if tc.name == "expired and retained history" {
@@ -267,21 +277,6 @@ func testFileOwnershipCollectorAgreement(t *testing.T) {
 				t.Fatal("wrong planned reclaimable bytes", p)
 			}
 			applyFixtureRelease(t, q, p)
-			q.mu.RLock()
-			expired, keep, referenced := q.collectFileReferences(true, nil, nil)
-			view := q.captureFileReferences(true, nil, nil, false)
-			q.mu.RUnlock()
-			if len(view) != len(referenced) {
-				t.Fatal("reference view and collector disagree on the digest inventory", len(view), len(referenced))
-			}
-			for hash, entry := range view {
-				if !referenced[hash] || (entry.flags&fileExpired != 0) != expired[hash] || (entry.flags&fileKept != 0) != keep[hash] {
-					t.Fatal("reference view and collector disagree on the digest state", hash, entry.flags)
-				}
-			}
-			if legacy := expired[ref.SHA256] && !keep[ref.SHA256]; legacy != p.Blobs[0].CollectionEligible {
-				t.Fatalf("planned scope and current collector disagree: plan=%+v expired=%t keep=%t", p.Blobs[0], expired[ref.SHA256], keep[ref.SHA256])
-			}
 			if status := q.fileStoreStatus(ctx); status.Error != "" || status.ReclaimableBytes != uint64(wantBytes) {
 				t.Fatal("dry-run status disagrees with plan", status)
 			}

@@ -272,10 +272,9 @@ func (q *Queue) fileReleaseMetadata(selection FileReleaseSelection, includeRefer
 		entry := refs[hash]
 		var keepers []FileKeepingReference
 		for owner := range entry.keepers {
-			keepers = append(keepers, owner.FileKeepingReference)
+			keepers = append(keepers, owner)
 		}
 		slices.SortFunc(keepers, func(a, b FileKeepingReference) int { return compareReleaseJSON(a, b) })
-		keepers = slices.Compact(keepers)
 		at, marked := q.s.BundleUploads[hash]
 		plan.Blobs = append(plan.Blobs, FileReleaseBlob{
 			SHA256: hash, CollectionEligible: entry.collectionEligible(), References: keepers,
@@ -343,7 +342,7 @@ func (q *Queue) fileReleasePlan(ctx context.Context, selection FileReleaseSelect
 			b.Present, b.SizeBytes, b.ModifiedAt = true, st.Size(), st.ModTime()
 			b.PublicationProtected = age.protects(b.ModifiedAt, !b.BundleTracked)
 			b.BundleProtected = b.BundleProtected || b.BundleTracked && !b.CollectionEligible && b.ModifiedAt.After(age.now.Add(-age.retention))
-			if b.CollectionEligible && !b.BundleProtected && age.payloadEligible(st, b.BundleTracked, b.CollectionEligible) {
+			if b.CollectionEligible && age.payloadEligible(st, b.BundleTracked, true) {
 				b.ReclaimableBytes = b.SizeBytes
 				plan.ReclaimableBytes += b.SizeBytes
 			}
