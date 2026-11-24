@@ -477,11 +477,17 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		respondOperation(w, map[string]bool{"allowed": allowed}, err, "worker_yield_invalid")
 	})
 	mux.HandleFunc("POST /api/workers/complete", func(w http.ResponseWriter, r *http.Request) {
-		var c Result
+		var c workerCompletion
 		if !decode(w, r, &c) {
 			return
 		}
-		respondOperation(w, map[string]bool{"ok": true}, a.Queue.CompleteContext(r.Context(), c), "worker_complete_invalid")
+		var err error
+		if c.PublicationPending {
+			err = a.Queue.releaseForPublication(r.Context(), c.Result)
+		} else {
+			err = a.Queue.CompleteContext(r.Context(), c.Result)
+		}
+		respondOperation(w, map[string]bool{"ok": true}, err, "worker_complete_invalid")
 	})
 	mux.HandleFunc("POST /api/workers/environment-log", func(w http.ResponseWriter, r *http.Request) {
 		var c EnvironmentLog

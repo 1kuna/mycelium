@@ -684,31 +684,28 @@ func (w Worker) runCustodian(stop context.Context) error {
 	mu.Lock()
 	running = p
 	mu.Unlock()
-	if p != nil {
-		for {
-			if err := publish(p, false); err != nil {
-				// Do not discard the sole process waiter when a metadata write
-				// fails. Continue guarding and retry on the existing cadence.
-				<-tick.C
-				continue
+	for {
+		finished := s.state.Result != nil
+		if err := publish(p, finished); err != nil {
+			if p == nil {
+				return err
 			}
-			select {
-			case f := <-p.done:
-				if f.err != nil {
-					return f.err
-				}
-				s.state.Result = &f.result
-				for {
-					if err := publish(p, true); err == nil {
-						return nil
-					}
-					<-tick.C
-				}
-			case <-tick.C:
+			// A failed metadata write cannot discard the sole process waiter.
+			<-tick.C
+			continue
+		}
+		if finished {
+			return nil
+		}
+		select {
+		case f := <-p.done:
+			if f.err != nil {
+				return f.err
 			}
+			s.state.Result = &f.result
+		case <-tick.C:
 		}
 	}
-	return publish(nil, true)
 }
 
 // Only the publishing worker retires control records, after exact release and

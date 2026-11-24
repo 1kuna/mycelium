@@ -1431,20 +1431,12 @@ func (s *workerStore) drainCancelledNativeMain(st *workerState, clock Clock, mem
 			if main.Name != "main" || main.PID <= 0 {
 				continue
 			}
-			var memory *memoryAttempt
-			if main.Cgroup != "" {
-				if st.Cgroup == "" || main.Cgroup != filepath.Join(st.Cgroup, "main") {
-					return errors.New("mismatched native main cgroup custody")
-				}
-				if _, err := os.Stat(main.Cgroup); err == nil {
-					var fs memoryFS = osMemoryFS{}
-					if len(memoryFiles) > 0 {
-						fs = memoryFiles[0]
-					}
-					memory = &memoryAttempt{fs: fs, path: main.Cgroup}
-				} else if !errors.Is(err, os.ErrNotExist) {
-					return err
-				}
+			if main.Cgroup != "" && (st.Cgroup == "" || main.Cgroup != filepath.Join(st.Cgroup, "main")) {
+				return errors.New("mismatched native main cgroup custody")
+			}
+			memory, err := recoveredMemory(main.Cgroup, memoryFiles...)
+			if err != nil {
+				return err
 			}
 			alive := func() (bool, error) {
 				birth, err := processBirth(main.PID)

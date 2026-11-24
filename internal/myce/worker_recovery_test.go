@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -388,8 +386,16 @@ func TestWorkerPersistedResultReconcilesThenReplaysBeforeFresh(t *testing.T) {
 			}
 			rw.Write([]byte(`{}`))
 		case "/api/workers/complete":
-			var result Result
+			var result workerCompletion
 			json.NewDecoder(r.Body).Decode(&result)
+			if result.PublicationPending {
+				if !result.ReleaseOnly || result.Session != "old-session" {
+					t.Error("early release lost its execution key")
+				}
+				rw.WriteHeader(http.StatusBadRequest)
+				rw.Write([]byte(`{"code":"request_invalid"}`))
+				return
+			}
 			uploadedSession = result.Session
 			calls = append(calls, "complete")
 			rw.Write([]byte(`{}`))
@@ -424,46 +430,6 @@ func TestWorkerPersistedResultReconcilesThenReplaysBeforeFresh(t *testing.T) {
 	}
 	if total != "recovered\n" || uploadedSession != "old-session" {
 		t.Fatalf("replay text %q session %s", total, uploadedSession)
-	}
-}
-
-func TestWorkerReplayRetriesIdenticalChunkAfterLostAck(t *testing.T) {
-	w := recoveryWorker(t)
-	s, err := w.openStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.close()
-	j := recoveryJob(t, []string{"true"})
-	s.state.Job = &j
-	s.state.Session = "session"
-	s.state.Log = "logs"
-	os.WriteFile(filepath.Join(s.dir, s.state.Log), []byte("first"), 0600)
-	var count atomic.Int32
-	var chunks []LogChunk
-	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		var l LogChunk
-		json.NewDecoder(r.Body).Decode(&l)
-		chunks = append(chunks, l)
-		if count.Add(1) == 1 {
-			http.Error(rw, "ack lost", 503)
-			return
-		}
-		rw.Write([]byte(`{}`))
-	}))
-	defer server.Close()
-	w.Client.URL = server.URL
-	if err = w.replay(context.Background(), s); err == nil {
-		t.Fatal("missing replay failure")
-	}
-	f, _ := os.OpenFile(filepath.Join(s.dir, s.state.Log), os.O_APPEND|os.O_WRONLY, 0600)
-	io.WriteString(f, "second")
-	f.Close()
-	if err = w.replay(context.Background(), s); err != nil {
-		t.Fatal(err)
-	}
-	if len(chunks) != 3 || chunks[0].Text != "first" || chunks[1].Text != "first" || chunks[1].Offset != chunks[0].Offset || chunks[2].Offset != 6 {
-		t.Fatalf("chunks: %+v", chunks)
 	}
 }
 

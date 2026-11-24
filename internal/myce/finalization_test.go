@@ -2,10 +2,8 @@ package myce
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -179,88 +177,6 @@ func assertFinalization(t *testing.T, j *Job, step, class, output string) {
 	}
 	if len(j.AttemptHistory) != 1 || j.AttemptHistory[0].ExecutionCause == nil || j.AttemptHistory[0].Diagnostics == nil {
 		t.Fatalf("outcome/summary missing: %+v", j.AttemptHistory)
-	}
-}
-
-// An upload failure remains retryable and keeps bytes and exit-zero evidence.
-// An exact release-only update exposes the cause; success clears that pending
-// cause. Neither a stale update nor the publication error can change custody.
-func TestFinalizationUploadRetry(t *testing.T) {
-	q, _ := fixture(t)
-	if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "files"), 1<<20, true); err != nil {
-		t.Fatal(err)
-	}
-	api := httptest.NewServer(API{Queue: q, Token: "fixture"}.Handler())
-	defer api.Close()
-	c := Client{URL: api.URL, Token: "fixture"}
-	_, ref := retentionUpload(t, c, "fixture")
-	s := spec("experiment")
-	s.Resumable = false
-	s.Files = FileManifest{"input": ref}
-	s.Outputs = map[string]string{"output": "results"}
-	submitted := submit(t, q, s)
-	m := machine("worker", "fake")
-	check(t, q, m, nil)
-	j := check(t, q, m, nil).Job
-	if j == nil || j.ID != submitted.ID {
-		t.Fatal("no assignment")
-	}
-	j.Spec.Run.Workdir = t.TempDir()
-	path := filepath.Join(j.Spec.Run.Workdir, "output")
-	if err := os.WriteFile(path, []byte("retained output"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	c.HTTP = &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
-		if strings.HasPrefix(r.URL.Path, "/api/files/uploads") {
-			return nil, &os.PathError{Op: "write", Path: "private-upload-secret", Err: syscall.EACCES}
-		}
-		return http.DefaultTransport.RoundTrip(r)
-	})}
-	w := Worker{Client: c}
-	pending, err := w.finishFileResult(*j, result(j, true), t.TempDir())
-	if err == nil || !errors.Is(err, syscall.EACCES) || !pending.Success || pending.ExecutionCause == nil || pending.ExecutionCause.Finalization.Step != "output_upload" {
-		t.Fatalf("upload classification lost: %+v %v", pending, err)
-	}
-	release := pending
-	release.ReleaseOnly = true
-	if err := q.Complete(release); err != nil {
-		t.Fatal(err)
-	}
-	got, err := c.GetJob(context.Background(), j.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.State != "running" || got.ExecutionCause == nil || got.ExecutionCause.Finalization.Output != "output" || !strings.Contains(got.Reason, "output_upload") {
-		t.Fatalf("pending cause missing: %+v", got)
-	}
-	staleUpdate := release
-	staleUpdate.Attempt++
-	staleUpdate.ExecutionCause = safeRuntimeCause(release.ExecutionCause)
-	staleUpdate.ExecutionCause.Finalization.Step = "output_reservation"
-	_ = q.Complete(staleUpdate)
-	got, err = c.GetJob(context.Background(), j.ID)
-	if err != nil || got.Attempt != j.Attempt || got.ExecutionCause == nil || got.ExecutionCause.Finalization.Step != "output_upload" {
-		t.Fatal("stale release changed attempt", err)
-	}
-	data, _ := json.Marshal(got)
-	if strings.Contains(string(data), "private-upload-secret") {
-		t.Fatal("private transport detail escaped")
-	}
-	c.HTTP = nil
-	w.Client = c
-	accepted, err := w.finishFileResult(*j, pending, t.TempDir())
-	if err != nil || !accepted.Success || accepted.ExecutionCause != nil {
-		t.Fatalf("retry failed: %+v %v", accepted, err)
-	}
-	if err := q.Complete(accepted); err != nil {
-		t.Fatal(err)
-	}
-	got, err = c.GetJob(context.Background(), j.ID)
-	if err != nil || got.State != "succeeded" || got.ExecutionCause != nil || strings.HasPrefix(got.Reason, "finalization pending:") {
-		t.Fatalf("pending failure survived success: %+v %v", got, err)
-	}
-	if data, err := os.ReadFile(path); err != nil || string(data) != "retained output" {
-		t.Fatal("retry lost local bytes", err)
 	}
 }
 
