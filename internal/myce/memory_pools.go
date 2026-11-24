@@ -209,7 +209,14 @@ func (q *Queue) resolvePooledSize(j *Job, m *Machine) pooledCandidateSize {
 		pools.RAM.TypicalGB = min(pools.RAM.TypicalGB, pools.LimitGB)
 		pools.RAM.ChargeGB = min(pools.RAM.ChargeGB, pools.LimitGB)
 	}
-	fitPoolCharge(&pools.RAM, q.poolAllowance(m), evidence.exact[key].Lower)
+	if gb := j.HostMemoryOverrideGB; gb > 0 {
+		// An owner resize fixes both the reservation and the hard ceiling.
+		// Card sizing still uses its independent evidence on discrete hosts.
+		pools.LimitGB = gb
+		pools.RAM = memoryPoolEstimate{TypicalGB: gb, ChargeGB: gb}
+	} else {
+		fitPoolCharge(&pools.RAM, q.poolAllowance(m), evidence.exact[key].Lower)
+	}
 	size := pooledCandidateSize{pools: pools}
 	if !n.cpuOnly() && !m.UnifiedMemory {
 		key.Pool = "card"

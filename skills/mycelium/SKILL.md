@@ -185,6 +185,12 @@ queue's `queue_capabilities` list contains `paused_start_window_frozen`. Read it
 from `myce status --json` or `GET /api/status`. Treat an absent field or entry as
 unsupported.
 
+An operator can set a queued job's RAM charge and hard limit in place with
+`myce job resize --project NAME --host-memory-gb GIB --by REQUESTER --reason TEXT JOB_ID...`.
+Keep the same job IDs and submission keys. A batch containing an assigned,
+active or unreleased attempt is refused. See
+[queue maintenance](https://github.com/1kuna/mycelium/blob/main/docs/operations.md#set-a-queued-jobs-host-ram-charge-and-limit).
+
 `myce cancel --wait JOB_ID` waits for exclusion and release. A timeout before
 acknowledgement leaves the outcome uncertain. A pending release at the deadline
 exits 75 with the last acknowledgement. Retry by the same ID or project/key.

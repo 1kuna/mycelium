@@ -17,6 +17,7 @@ type JobLedgerInfo struct {
 }
 
 type JobLedgerEntry struct {
+	Resize                     *JobResizeAudit     `json:"resize,omitempty"`
 	Placement                  *PlacementDecision  `json:"placement,omitempty"`
 	WorkLearning               *WorkLearningChange `json:"work_learning,omitempty"`
 	Sequence                   int                 `json:"sequence"`
@@ -166,6 +167,10 @@ func (q *Queue) JobLedger(id string, after, highWater, limit int, requestContext
 	copy(entries, source[:count])
 	// Timestamp pointers belong to immutable entries and are copied for callers.
 	for i := range entries {
+		if entries[i].Resize != nil {
+			resize := *entries[i].Resize
+			entries[i].Resize = &resize
+		}
 		if entries[i].WorkLearning != nil {
 			change := *entries[i].WorkLearning
 			entries[i].WorkLearning = &change
