@@ -29,6 +29,8 @@
         "job_memory_invalid",
         "job_platform_invalid",
         "job_docker_retired",
+        "job_resident_retired",
+        "model_intervals_retired",
         "job_environment_invalid",
         "job_environment_platform_mismatch",
         "job_placement_invalid",

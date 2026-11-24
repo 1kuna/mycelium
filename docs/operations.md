@@ -1777,7 +1777,6 @@ Older links to these anchors land here; each entry points to the section's curre
 - <a id="sqlite-backup-and-commit-limits"></a>[SQLite backup and commit limits](reference/queue-io.md#sqlite-backup-and-commit-limits)
 - <a id="standard-systemd-policy"></a>[Standard systemd policy](reference/queue-io.md#standard-systemd-policy)
 - <a id="laptop-experiment-and-native-acceptance"></a>[Laptop experiment and native acceptance](reference/queue-io.md#laptop-experiment-and-native-acceptance)
-- <a id="durable-model-engine-interval-history-663"></a>[Durable model-engine interval history (#663)](reference/models.md#durable-model-engine-interval-history-663)
 - <a id="completion-observer-upgrade-and-recovery-next-release"></a>[Completion observer upgrade and recovery](reference/completion-observer.md#completion-observer-upgrade-and-recovery-next-release)
 - <a id="completion-and-health-delivery-acceptance"></a>[Completion and health delivery acceptance](reference/completion-observer.md#completion-and-health-delivery-acceptance)
 

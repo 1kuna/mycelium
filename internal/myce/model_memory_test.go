@@ -27,7 +27,7 @@ func (e *measuredFakeEngine) Call(ctx context.Context, path string, data []byte)
 	return response, err
 }
 
-func TestModelMemoryPeaksThroughStatusAndIntervals(t *testing.T) {
+func TestModelMemoryPeaksThroughStatus(t *testing.T) {
 	q, clock, machine := modelFixture(t)
 	model, _ := q.model("test")
 	memory := &modelMemoryTracker{clock: clock, deviceUnavailable: modelMemoryNoSample}
@@ -109,10 +109,9 @@ func TestModelMemoryPeaksThroughStatusAndIntervals(t *testing.T) {
 		t.Fatal("missing request ID")
 		return ""
 	}
-	first := runCall(`{"model":"test","stream":true}`)
+	runCall(`{"model":"test","stream":true}`)
 	last := runCall(`{"model":"test"}`)
-	// Both calls finished between check-ins. The live snapshot keeps the
-	// latest call, while the ledger must be able to recover either call.
+	// Both calls finished between check-ins. The snapshot keeps the latest call.
 	report("ready")
 	stale := ModelReport{Name: model.Name, Device: slot.Device, Attempt: ID(), State: "ready", MemoryPeaks: &ModelMemoryPeaks{}}
 	if _, err := q.Checkin(Checkin{Machine: machine, ModelReports: []ModelReport{stale}}); err != nil {
@@ -142,53 +141,6 @@ func TestModelMemoryPeaksThroughStatusAndIntervals(t *testing.T) {
 		t.Fatal("lost constrained or unavailable request evidence", peaks.Request)
 	}
 
-	clock.Advance(q.models.Idle)
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
-	}
-	memory.stop()
-	report("unloaded")
-	var page ModelIntervalPage
-	if err := client.Call(t.Context(), "GET", "/api/models/intervals", nil, &page); err != nil {
-		t.Fatal(err)
-	}
-	requests := map[string]*ModelMemoryWindow{}
-	for _, event := range page.Entries {
-		if event.Kind == "memory_request" && event.Attempt == slot.Attempt {
-			requests[event.MemoryPeaks.Request.RequestID] = event.MemoryPeaks.Request
-		}
-	}
-	if len(requests) != 2 || requests[first] == nil || requests[last] == nil {
-		t.Fatal("request windows lost between heartbeats", requests)
-	}
-	assertPeak(requests[first].Host, 10, modelMemoryHostCgroup)
-	assertPeak(requests[first].Device, 6, modelMemoryDevicePID)
-	release := page.Entries[len(page.Entries)-1]
-	if release.Kind != "released" || release.Attempt != slot.Attempt || release.Device != slot.Device || release.ReleasedAt == nil ||
-		release.MemoryPeaks.Request.RequestID != last || release.MemoryPeaks.Steady.EndedAt == nil {
-		t.Fatal("unload did not retain interval evidence", release)
-	}
-	assertPeak(release.MemoryPeaks.Load.Host, 8, modelMemoryHostCgroup)
-	assertPeak(release.MemoryPeaks.Steady.Device, 2, modelMemoryDevicePID)
-
-	var sequence int
-	var name, path string
-	if err := q.db.QueryRow("PRAGMA database_list").Scan(&sequence, &name, &path); err != nil {
-		t.Fatal(err)
-	}
-	server.Close()
-	if err := q.Close(); err != nil {
-		t.Fatal(err)
-	}
-	reopened, err := Open(path, q.root, clock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
-	durable := intervalPage(t, reopened, release.Sequence-1, page.HighWater, 1)
-	if len(durable.Entries) != 1 || durable.Entries[0].MemoryPeaks.Request.RequestID != last {
-		t.Fatal("engine measurement lost across queue reopen", durable)
-	}
 }
 
 func TestModelMemoryDeviceSamplerWindowsAndOverlap(t *testing.T) {

@@ -71,13 +71,6 @@ func (q *Queue) modelUsableMachine(model Model, m *Machine) bool {
 }
 
 func (q *Queue) callPlacementAllowed(c *ModelCall, m *Machine) bool {
-	if c.ResidentAttempt != nil {
-		a := *c.ResidentAttempt
-		j := q.s.Jobs[a.Job]
-		if !q.residentAttemptLive(a) || m.ID != a.Machine || m.Session != a.Session || len(j.AllocatedDevices) > 0 && !contains(j.AllocatedDevices, targetDevice(m)) {
-			return false
-		}
-	}
 	// Routing/demand checks do not launch a model or write its cache files.
 	return !q.deviceAdmissionBlocked(m) && q.placementPolicyAllowed(callJob(c), m, true)
 }

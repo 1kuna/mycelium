@@ -149,7 +149,9 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		respondOperation(w, report, e, "usage_unavailable")
 	})
 	mux.HandleFunc("/models/{name}/{path...}", a.modelCall)
-	mux.HandleFunc("/api/workers/resident/{id}/{path...}", a.residentCall)
+	mux.HandleFunc("/api/workers/resident/{id}/{path...}", func(w http.ResponseWriter, r *http.Request) {
+		respond(w, nil, retiredResidentError())
+	})
 	mux.HandleFunc("GET /api/workers/{id}/events", a.workerEvent)
 	mux.HandleFunc("POST /api/models/sync", func(w http.ResponseWriter, r *http.Request) {
 		var s SyncRequest
@@ -325,7 +327,9 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		}
 		respondOperation(w, reply, err, "status_unavailable")
 	})
-	a.registerModelIntervals(mux)
+	mux.HandleFunc("GET /api/models/intervals", func(w http.ResponseWriter, r *http.Request) {
+		respond(w, nil, &HTTPError{Status: http.StatusGone, Code: "model_intervals_retired", Message: "read loaded_models from /api/status for current model state"})
+	})
 	mux.HandleFunc("GET /api/jobs/{id}/ledger", func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		values := []int{0, -1, 0}

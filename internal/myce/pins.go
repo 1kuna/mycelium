@@ -209,7 +209,6 @@ func (q *Queue) maintainPins() {
 		}
 		q.s.ModelSlots[key] = &ModelSlot{Project: p.Project, Model: p.Model, Device: targetDevice(m), Machine: m.ID, Session: m.Session, State: "loading", Attempt: ID(), Priority: "production", LastUsed: now}
 		q.initEnginePreemption(q.s.ModelSlots[key])
-		q.recordModelInterval(q.s.ModelSlots[key], "assigned")
 		if q.s.Machines[m.ID] == m {
 			q.touchMachine(m.ID)
 		}

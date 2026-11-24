@@ -47,17 +47,15 @@ type state struct {
 	DeviceUse map[string]DeviceUse `json:"device_use,omitempty"`
 	// Frozen accepted-contact validity is only for stopped-queue conversion.
 	// A running/restarted queue always requires live session contact evidence.
-	ContactEvidence        map[string]contactEvidence    `json:"contact_evidence,omitempty"`
-	EfficiencyAt           time.Time                     `json:"efficiency_at,omitempty"`
-	EfficiencyHosts        map[string]EfficiencyHost     `json:"efficiency_hosts,omitempty"`
-	EfficiencyHealth       map[string]efficiencyBaseline `json:"efficiency_health,omitempty"`
-	StrandedDemand         []StrandedDemand              `json:"stranded_demand,omitempty"`
-	PublicationHorizon     time.Duration                 `json:"publication_horizon,omitempty"`
-	PublicationTimings     *filePublicationTimings       `json:"publication_timings,omitempty"`
-	ToolInventories        map[string]toolInventoryFence `json:"tool_inventories,omitempty"`
-	FileInputClaims        map[string]FileInputClaim     `json:"file_input_claims,omitempty"`
-	ModelIntervalSince     *time.Time                    `json:"model_interval_since,omitempty"`
-	ModelIntervalHighWater int                           `json:"model_interval_high_water,omitempty"`
+	ContactEvidence    map[string]contactEvidence    `json:"contact_evidence,omitempty"`
+	EfficiencyAt       time.Time                     `json:"efficiency_at,omitempty"`
+	EfficiencyHosts    map[string]EfficiencyHost     `json:"efficiency_hosts,omitempty"`
+	EfficiencyHealth   map[string]efficiencyBaseline `json:"efficiency_health,omitempty"`
+	StrandedDemand     []StrandedDemand              `json:"stranded_demand,omitempty"`
+	PublicationHorizon time.Duration                 `json:"publication_horizon,omitempty"`
+	PublicationTimings *filePublicationTimings       `json:"publication_timings,omitempty"`
+	ToolInventories    map[string]toolInventoryFence `json:"tool_inventories,omitempty"`
+	FileInputClaims    map[string]FileInputClaim     `json:"file_input_claims,omitempty"`
 	// Read-only parked policy. Preserve retained DB records; these fields no
 	// longer activate admission or replace the configured file-store guards.
 	StorageMigration       json.RawMessage                `json:"storage_migration,omitempty"`
@@ -162,8 +160,7 @@ type Queue struct {
 	evidenceGeneration     uint64
 	evidenceMaintenance    evidenceMaintenance
 	evidenceRetention      *EvidenceRetention
-	waitStates             *waitStateIndex // scalar committed wait observations; separate reader mutex.
-	modelIntervalWrites    []ModelIntervalEvent
+	waitStates             *waitStateIndex   // scalar committed wait observations; separate reader mutex.
 	efficiencyView         *EfficiencyReport // immutable maintenance projection; published only after commit.
 	nasInspections         *resolveNASCache  // ephemeral evidence shared by every listener for this queue.
 	// Qualification removes occupancy, but retains diagnostic history/inventory.
@@ -392,7 +389,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 			return nil, err
 		}
 	}
-	if _, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS model_intervals (seq INTEGER PRIMARY KEY, data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS enrollment_tickets (digest TEXT PRIMARY KEY, pin TEXT NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS queue_state (key TEXT PRIMARY KEY, data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY CHECK(id=1), data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, attempt INTEGER NOT NULL, text TEXT NOT NULL); CREATE TABLE IF NOT EXISTS log_offsets (job TEXT, attempt INTEGER, offset INTEGER, PRIMARY KEY(job,attempt,offset)); CREATE TABLE IF NOT EXISTS environment_log_offsets (job TEXT, machine TEXT, session TEXT, key TEXT, offset INTEGER, PRIMARY KEY(job,machine,session,key,offset)); CREATE TABLE IF NOT EXISTS environment_build_logs (machine TEXT, session TEXT, key TEXT, offset INTEGER, text TEXT, PRIMARY KEY(machine,session,key,offset)); CREATE INDEX IF NOT EXISTS logs_job ON logs(job,seq); CREATE TABLE IF NOT EXISTS job_summaries (id TEXT PRIMARY KEY, finished INTEGER NOT NULL, summary BLOB NOT NULL, learned BLOB); CREATE TABLE IF NOT EXISTS usage_samples (at INTEGER NOT NULL, span INTEGER NOT NULL, machine TEXT NOT NULL, device TEXT NOT NULL, project TEXT NOT NULL, job TEXT NOT NULL, model TEXT NOT NULL, busy REAL NOT NULL, idle REAL NOT NULL, pinned REAL NOT NULL, memory_seconds REAL NOT NULL, observed REAL NOT NULL, PRIMARY KEY(at,span,machine,device,project,job,model));`); err != nil {
+	if _, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS enrollment_tickets (digest TEXT PRIMARY KEY, pin TEXT NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS queue_state (key TEXT PRIMARY KEY, data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY CHECK(id=1), data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, attempt INTEGER NOT NULL, text TEXT NOT NULL); CREATE TABLE IF NOT EXISTS log_offsets (job TEXT, attempt INTEGER, offset INTEGER, PRIMARY KEY(job,attempt,offset)); CREATE TABLE IF NOT EXISTS environment_log_offsets (job TEXT, machine TEXT, session TEXT, key TEXT, offset INTEGER, PRIMARY KEY(job,machine,session,key,offset)); CREATE TABLE IF NOT EXISTS environment_build_logs (machine TEXT, session TEXT, key TEXT, offset INTEGER, text TEXT, PRIMARY KEY(machine,session,key,offset)); CREATE INDEX IF NOT EXISTS logs_job ON logs(job,seq); CREATE TABLE IF NOT EXISTS job_summaries (id TEXT PRIMARY KEY, finished INTEGER NOT NULL, summary BLOB NOT NULL, learned BLOB); CREATE TABLE IF NOT EXISTS usage_samples (at INTEGER NOT NULL, span INTEGER NOT NULL, machine TEXT NOT NULL, device TEXT NOT NULL, project TEXT NOT NULL, job TEXT NOT NULL, model TEXT NOT NULL, busy REAL NOT NULL, idle REAL NOT NULL, pinned REAL NOT NULL, memory_seconds REAL NOT NULL, observed REAL NOT NULL, PRIMARY KEY(at,span,machine,device,project,job,model));`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -419,17 +416,11 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 	for _, m := range q.s.Machines {
 		m.ToolInventory = nil
 	}
-	// A previous binary can rewrite away new state fields while retaining this
-	// additive table. Recover allocation before any startup transaction emits an
-	// event; the retained SQLite sequence is authoritative across re-upgrades.
-	if err = db.QueryRow("SELECT COALESCE(MAX(seq),0) FROM model_intervals").Scan(&q.s.ModelIntervalHighWater); err != nil {
-		db.Close()
-		return nil, err
-	}
 	if err = q.loadPersistedState(); err != nil {
 		db.Close()
 		return nil, err
 	}
+	q.ignoreRetiredResidentSpecs()
 	q.memoryEvidence, err = loadMemoryEvidence(db, q.s)
 	if err != nil {
 		db.Close()
@@ -645,6 +636,23 @@ func (q *Queue) Close() error {
 	return err
 }
 
+func (q *Queue) ignoreRetiredResidentSpecs() {
+	found := false
+	for _, job := range q.s.Jobs {
+		spec := &job.Spec
+		if spec.Resident != nil || spec.Advanced != nil && spec.Advanced.Resident != nil {
+			found = true
+			spec.Resident = nil
+			if spec.Advanced != nil {
+				spec.Advanced.Resident = nil
+			}
+		}
+	}
+	if found {
+		log.Print("ignoring retired resident binding in saved job specs; use /v1 or native sidecars (docs/services.md)")
+	}
+}
+
 // Every mutation is atomic and durable; failed writes restore the previous state.
 func (q *Queue) update(fn func() error) error {
 	return q.updateTimed(fn, nil)
@@ -773,7 +781,6 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	oldEnvironmentRevision := q.environmentRevision
 	hold.next(holdUsage)
 	q.usageWrites = nil
-	q.modelIntervalWrites = nil
 	q.accountUsage(q.clock.Now())
 	hold.next(holdBody)
 	err = fn()
@@ -786,9 +793,6 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	if err == nil {
 		q.settleMaintenance()
 		q.refreshEfficiency()
-	}
-	if err == nil {
-		q.observeModelIntervals()
 	}
 	if err == nil {
 		q.detectHealth()
@@ -902,9 +906,6 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 	// Direct API callers may send the MY-54 authoring form; store it flat.
 	if _, err := s.FoldAdvanced(); err != nil {
 		return nil, err
-	}
-	if s.Resident != nil {
-		s.Resident = &ResidentBinding{Model: s.Resident.Model}
 	}
 	if s.SubmissionKey != "" {
 		if err := validateSubmissionKey(s.SubmissionKey); err != nil {
@@ -1166,8 +1167,10 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		// do not keep a second copy in every stored job spec.
 		j.Spec.Environment.Files = nil
 		j.EnvironmentLock = frozenLock
-		if err := q.freezeResident(j); err != nil {
-			return rejectFieldRule("job_resident_invalid", err)
+		for _, extension := range j.Extensions {
+			if extension.Resident != nil {
+				return retiredResidentError()
+			}
 		}
 		j.ModelLimits = modelLimits
 		j.PlacementIntent = submissionPlacementIntent(submitted, j)
@@ -1912,16 +1915,6 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		acceptHostHygiene(&m)
 		if old != nil && (old.Gone || old.Session != m.Session) {
 			q.clearPreemptionPlacements(old.ID, old.Session)
-		}
-		// Fresh workers attest cleanup only for their exact previous session.
-		// Record that accepted evidence before reconciliation discards old slots
-		// and before replacing the old inventory used to identify their cards.
-		if c.Fresh && c.PreviousSession != "" && c.PreviousSession != m.Session {
-			for _, slot := range q.s.ModelSlots {
-				if slot.Machine == m.ID && slot.Session == c.PreviousSession {
-					q.recordModelInterval(slot, "released")
-				}
-			}
 		}
 		q.acceptEnvironmentFailures(&m, old)
 		// Assess the previous fleet before this arrival or replacement can
@@ -3398,7 +3391,6 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	if q.s.Machines[m.ID] == m {
 		q.touchMachine(m.ID)
 	}
-	q.reserveResident(j, m)
 	m.FreeMemoryGB = max(0, m.FreeMemoryGB-j.Spec.Needs.MemoryGB)
 	// Starts plus admission requeues is the issued-attempt high-water mark, so
 	// an uncounted refusal or a recovered older copy never reissues a number.

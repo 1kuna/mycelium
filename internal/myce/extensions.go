@@ -39,7 +39,7 @@ var extensionName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 // Extension is one small folder. Files and Digest are immutable transport data,
 // not extra authoring fields in extension.yaml. Downloads live in its cache.
 type Extension struct {
-	Resident           *ResidentBinding  `json:"resident,omitempty" yaml:"resident,omitempty"`
+	Resident           *retiredField     `json:"resident,omitempty" yaml:"resident,omitempty"`
 	RequirementReasons map[string]string `json:"requirement_reasons,omitempty" yaml:"requirement_reasons,omitempty"`
 	Isolation          string            `json:"isolation,omitempty" yaml:"isolation,omitempty"`
 	Reason             string            `json:"reason,omitempty" yaml:"reason,omitempty"`
@@ -136,8 +136,8 @@ func (e Extension) handles(s Spec) bool {
 	return slices.Contains(e.Kinds, s.Kind)
 }
 func (e Extension) validate() error {
-	if e.Resident != nil && (strings.TrimSpace(e.Resident.Model) == "" || e.Resident.Engine != nil || e.Resumable) {
-		return errors.New("extension resident requires a catalog model and non-resumable stages")
+	if e.Resident != nil {
+		return retiredResidentError()
 	}
 	if err := ValidateNativeIsolation(e.Isolation, e.Reason); err != nil {
 		return err

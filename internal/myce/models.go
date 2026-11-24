@@ -200,8 +200,6 @@ type ModelSlot struct {
 	PriorityPolicy       *PriorityMatch      `json:"priority_policy,omitempty"`
 	Custody              *ModelCustody       `json:"custody,omitempty"`
 	URL                  string              `json:"url,omitempty"`
-	Resident             *ResidentEngine     `json:"resident,omitempty"`
-	Interval             *ModelInterval      `json:"interval,omitempty"`
 	Device               string              `json:"device,omitempty"`
 	PreemptionCount      int                 `json:"preemption_count,omitempty"`
 	RunSince             *time.Time          `json:"run_since,omitempty"`
@@ -256,7 +254,6 @@ type ModelReport struct {
 	Error                  string `json:"error,omitempty"`
 }
 type ModelCall struct {
-	ResidentAttempt                  *residentAttempt
 	FanOut                           string
 	Workload                         *Workload
 	Device                           string
@@ -359,7 +356,7 @@ func (q *Queue) model(name string) (Model, bool) {
 			return m, true
 		}
 	}
-	return q.residentModelByName(name)
+	return Model{}, false
 }
 func (q *Queue) modelMemory(machine string) float64 {
 	n := 0.0
@@ -607,15 +604,9 @@ func (q *Queue) maintainModels() {
 			s.Class, s.Project = c.Class, c.Project
 		} else {
 			s = &ModelSlot{Project: c.Project, Model: c.Model, Device: targetDevice(m), Machine: m.ID, Session: m.Session, State: "loading", Attempt: ID(), Priority: c.Priority, Class: c.Class, ProductionUsed: c.Priority == "production", LastUsed: now}
-			// A still-running client can call again after its idle engine was
-			// reclaimed. Reload the same frozen runtime, never a catalog alias.
-			if c.ResidentAttempt != nil {
-				s.Resident = q.s.Jobs[c.ResidentAttempt.Job].Spec.Resident.Engine
-			}
 			q.s.ModelSlots[targetSlotKey(m, c.Model)] = s
 		}
 		q.initEnginePreemption(s)
-		q.recordModelInterval(s, "assigned")
 		if q.s.Machines[m.ID] == m {
 			q.touchMachine(m.ID)
 		}
@@ -706,9 +697,6 @@ func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 // fence in every GPU/RAM release estimate and action; active work and loading
 // attempts retain the existing strictly-lower-tier preemption rule.
 func (q *Queue) slotReclaimableFor(s *ModelSlot, demand Spec) bool {
-	if ownsResidentSlot(demand, s) {
-		return false
-	}
 	if s.State == "unload_failed" || s.State == "failed" {
 		return false
 	}
@@ -735,11 +723,7 @@ func (q *Queue) modelPlan(machine string) []ModelSlot {
 				continue
 			}
 			slot.Placement = q.modelPlacement(model)
-			if s.Resident != nil {
-				if recipe, ok := s.Resident.Environments[slotMachine(q.s.Machines[machine], s).GPU]; ok {
-					slot.EnvironmentRecipe = &recipe
-				}
-			} else if model.Environment != "" {
+			if model.Environment != "" {
 				recipe := q.environments.Environments[model.Environment][slotMachine(q.s.Machines[machine], s).GPU]
 				slot.EnvironmentRecipe = &recipe
 			}
@@ -771,9 +755,6 @@ func (q *Queue) addCall(c *ModelCall, requestContexts ...context.Context) error 
 		if !q.simulation || c.ID == "" {
 			c.ID = ID()
 		}
-		if c.ResidentAttempt != nil && !q.residentAttemptLive(*c.ResidentAttempt) {
-			return ErrStale
-		}
 		c.Queued = q.clock.Now()
 		q.calls[c.ID] = c
 		q.maintain()
@@ -794,7 +775,6 @@ func (q *Queue) finishCallWithMemory(id string, memory *ModelMemoryWindow, ctx c
 					}
 					peaks.Request = newestModelMemoryRequest(peaks.Request, memory)
 					s.MemoryPeaks = &peaks
-					q.recordModelInterval(s, "memory_request", memory)
 				}
 			}
 			delete(q.calls, id)
@@ -844,7 +824,7 @@ func modelError(w http.ResponseWriter, status int, message string) {
 // A declared call group runs one call per engine at a time; other calls use
 // the model's in-flight bound.
 func declaredCallLimit(c *ModelCall, model Model) int {
-	if c.FanOut != "" || c.ResidentAttempt != nil {
+	if c.FanOut != "" {
 		return 1
 	}
 	return model.MaxInFlight
@@ -852,19 +832,7 @@ func declaredCallLimit(c *ModelCall, model Model) int {
 
 func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 	c := &ModelCall{Project: r.Header.Get("X-Myce-Project"), Priority: r.Header.Get("X-Myce-Priority"), Class: r.Header.Get("X-Myce-Class")}
-	if bound, ok := r.Context().Value(residentAttemptKey{}).(residentAttempt); ok {
-		unlock := requestReadLock(r.Context(), &a.Queue.mu)
-		if !a.Queue.residentAttemptLive(bound) {
-			unlock()
-			modelError(w, 409, "resident job attempt is no longer authorized")
-			return
-		}
-		j := a.Queue.s.Jobs[bound.Job]
-		c.Project, c.Priority, c.Class = j.Spec.Project, j.Spec.Priority, j.Spec.Class
-		c.ResidentAttempt = &bound
-		unlock()
-	}
-	if group := r.Header.Get("X-Myce-Fan-Out"); group != "" && c.ResidentAttempt == nil {
+	if group := r.Header.Get("X-Myce-Fan-Out"); group != "" {
 		units, err := strconv.ParseFloat(r.Header.Get("X-Myce-Work-Units"), 64)
 		if err != nil {
 			modelError(w, 400, "declared calls require positive work units")
@@ -948,7 +916,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	retrySafe := c.ResidentAttempt == nil && (!generic || model.RetrySafe)
+	retrySafe := (!generic || model.RetrySafe)
 	var requestUntil time.Time
 	c.Model = body.Model
 	if !generic && body.Stream && r.URL.Path != "/v1/chat/completions" {
@@ -977,9 +945,6 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 		e = a.Queue.updateRequest(r.Context(), func() error {
 			a.Queue.maintain()
 			call = *a.Queue.calls[c.ID]
-			if call.ResidentAttempt != nil && !a.Queue.residentAttemptLive(*call.ResidentAttempt) {
-				call.Error = "resident job attempt is no longer authorized"
-			}
 			timedOut = a.Queue.models.Wait > 0 && a.Queue.clock.Now().Sub(call.Queued) >= a.Queue.models.Wait
 			requestExpired = !requestUntil.IsZero() && !a.Queue.clock.Now().Before(requestUntil)
 			engineLost = a.Queue.engineAttemptLost(&call)
@@ -1046,7 +1011,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 						live := a.Queue.calls[c.ID]
 						expired := !a.Queue.clock.Now().Before(requestUntil)
 						preempted := live != nil && live.PriorityStop != nil && live.Error != ""
-						lost := m == nil || m.Gone || m.Session != call.Session || live != nil && live.Error != "" || !a.Queue.callAttemptLive(&call) || call.ResidentAttempt != nil && !a.Queue.residentAttemptLive(*call.ResidentAttempt)
+						lost := m == nil || m.Gone || m.Session != call.Session || live != nil && live.Error != "" || !a.Queue.callAttemptLive(&call)
 						requestUnlock3()
 						if expired {
 							cancelCause(errModelRequestTimeout)

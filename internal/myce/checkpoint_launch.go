@@ -52,9 +52,7 @@ func (w Worker) startAssignedAttempt(ctx context.Context, s *workerStore, j Job)
 			startErr = &executionEvidenceError{startErr, safeExecutionEvidence(s.startExecutionEvidence(j), j.Attempt)}
 		}
 	}()
-	// Resident bridges depend on the check-in worker's model runtime. This
-	// includes qualification attempts carrying the frozen resident binding.
-	if j.Spec.Resident == nil && w.detachesAssignedAttempts() {
+	if w.detachesAssignedAttempts() {
 		return w.startCustodian(ctx, s, j)
 	}
 	timing := s.launchRecorder(w.Clock)

@@ -238,11 +238,9 @@ emulated links resolve to verified blob bytes or refuse with
 intact rather than copying weights. See
 [model snapshots](https://github.com/1kuna/mycelium/blob/main/docs/files.md#declared-model-snapshots-553).
 
-Fetch a model master file by file with
-`myce model fetch BUNDLE/FILE --model-root PARENT --url URL --size-bytes BYTES --sha256 HASH`.
-It stages beside the root, resumes interruptions and publishes only verified
-files; invalid bytes stay in the reported quarantine. Loading never downloads
-weights. See [master downloads](https://github.com/1kuna/mycelium/blob/main/docs/services.md#explicit-master-download-and-pins).
+Stage catalog model masters under the configured model root with the upstream
+download client. `myce model fetch` returns `model_fetch_retired`. Loading
+verifies the staged weights and does not download them.
 
 Model loads have no fixed total cutoff while copy, load or health signals
 advance; keep the same request while it progresses. Custom servers report

@@ -89,30 +89,6 @@ func TestRequestBudgetProjectionLivesThroughResponse(t *testing.T) {
 	}
 }
 
-func TestRequestBudgetIntervalVariablePayload(t *testing.T) {
-	q, _ := fixture(t)
-	budgetHost(q, 128<<10, 1)
-	for i, project := range []string{"small", strings.Repeat("x", 16000)} {
-		data, _ := json.Marshal(ModelIntervalEvent{Sequence: i + 1, ModelInterval: ModelInterval{Project: project}})
-		if _, err := q.db.Exec("INSERT INTO model_intervals(seq,data) VALUES(?,?)", i+1, data); err != nil {
-			t.Fatal(err)
-		}
-	}
-	q.s.ModelIntervalHighWater = 2
-	first, err := q.ModelIntervals(t.Context(), 0, -1, 100)
-	if err != nil || len(first.Entries) != 1 || !first.HasMore || first.Next != 1 {
-		t.Fatal(first, err)
-	}
-	_, err = q.ModelIntervals(t.Context(), first.Next, first.HighWater, 100)
-	var refusal *HTTPError
-	if !errors.As(err, &refusal) || refusal.Status != 503 || refusal.Code != "projection_capacity_exceeded" {
-		t.Fatal("large row bypassed memory allowance", err)
-	}
-	if q.requestBudgets.held != 0 {
-		t.Fatal("interval capacity leaked")
-	}
-}
-
 func TestRequestBudgetCachedPeerAndUnavailableRefusals(t *testing.T) {
 	q, _ := fixture(t)
 	budgetHost(q, 64<<20, 2)

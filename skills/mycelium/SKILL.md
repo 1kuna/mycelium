@@ -84,8 +84,9 @@ sizing. Use a pin only for a [hard requirement](references/submit.md#explicit-pl
   runtime bindings, `pieces:` and extension fan-out. Submit known later
   stages with `after:` so the queue sees the pipeline and starts them on
   accepted producer outputs. See [dependent stages](https://github.com/1kuna/mycelium/blob/main/docs/jobs.md#start-a-consumer-after-every-producer-piece-succeeds).
-- [Resident engines](https://github.com/1kuna/mycelium/blob/main/docs/services.md#resident-engines-for-independent-stage-jobs)
-  covers reusing a catalog model across independent inputs.
+- [Catalog model serving](https://github.com/1kuna/mycelium/blob/main/docs/services.md#calling-openai-models)
+  loads on demand for `/v1` calls and unloads idle engines. `advanced.resident`
+  returns `job_resident_retired`. Call `/v1` or declare a native sidecar.
 - [Ephemeral worker data](https://github.com/1kuna/mycelium/blob/main/docs/files.md#ephemeral-worker-data)
   covers compatibility, cleanup receipts and release. Check the cleanup receipt
   for the exact attempt before claiming local removal.

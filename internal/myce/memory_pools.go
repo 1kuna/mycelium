@@ -438,9 +438,6 @@ func (q *Queue) poolCustodyConflicts(j *Job, m *Machine, obligation HostObligati
 	}
 	pools := memoryPools(j)
 	if e := obligation.Engine; e != nil {
-		if slot := q.s.ModelSlots[slotKey(e.Machine, e.Model, e.Device)]; slot != nil && e.Machine == m.ID && ownsResidentSlot(j.Spec, slot) {
-			return false
-		}
 		return pools.RAM.Alone || pools.Card != nil && pools.Card.Alone && e.Machine == m.ID && (e.Device == "" || slices.Contains(targetDevices(m), e.Device))
 	}
 	peer := q.s.Jobs[obligation.Result.ID]
@@ -640,10 +637,6 @@ func checkMemoryPool(typical, available, keep, pending float64, known bool) erro
 
 func localPooledAdmission(w Worker, jobs []Job, next Job, models []ModelReport, preparationCores []int) error {
 	pools := memoryPools(&next)
-	residentModel := ""
-	if r := next.Spec.Resident; r != nil && r.Engine != nil {
-		residentModel = r.Engine.Model.Name
-	}
 	cores := next.Spec.Needs.cores()
 	for _, n := range preparationCores {
 		cores += n
@@ -673,7 +666,7 @@ func localPooledAdmission(w Worker, jobs []Job, next Job, models []ModelReport, 
 				charge := hostNeed(allocationMachine(&w.Machine, []string{model.Device}), budget.MemoryGB, budget.HostMemoryGB)
 				held, pending = held+charge, pending+charge
 			}
-			if pools.RAM.Alone && model.Name != residentModel {
+			if pools.RAM.Alone {
 				return checkMemoryPool(pools.RAM.TypicalGB, 0, 0, pending, false)
 			}
 		}
@@ -700,7 +693,7 @@ func localPooledAdmission(w Worker, jobs []Job, next Job, models []ModelReport, 
 		}
 		for _, model := range models {
 			if model.Device == id && (model.State == "ready" || model.State == "loading" || model.State == "draining") {
-				if pools.Card.Alone && model.Name != residentModel {
+				if pools.Card.Alone {
 					return checkMemoryPool(pools.Card.TypicalGB, 0, 0, used, false)
 				}
 				if budget, ok := w.localModelBudget(model); ok {

@@ -8,14 +8,16 @@ import (
 	"fmt"
 	"mycelium/internal/myce"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 )
 
 func modelCommand(args []string) error {
+	if len(args) > 0 && args[0] == "fetch" {
+		return &myce.HTTPError{Code: "model_fetch_retired", Message: "download the model with its upstream client and stage it under the configured model root (docs/services.md)"}
+	}
 	if len(args) == 0 {
-		return errors.New("usage: myce model fetch|approve-local|sync|pin|unpin [flags]")
+		return errors.New("usage: myce model approve-local|sync|pin|unpin [flags]")
 	}
 	f := flag.NewFlagSet("model "+args[0], flag.ContinueOnError)
 	authority := installedClientFlags(f)
@@ -28,10 +30,6 @@ func modelCommand(args []string) error {
 	end := f.String("end", "", "window end HH:MM")
 	timezone := f.String("timezone", "UTC", "IANA time zone")
 	weekdays := f.String("weekdays", "", "comma-separated 0=Sunday through 6=Saturday")
-	url := f.String("url", "", "Hugging Face HTTPS file URL")
-	root := f.String("model-root", "", "model folder on NAS or local disk")
-	size := f.Int64("size-bytes", 0, "expected size")
-	sum := f.String("sha256", "", "expected SHA-256")
 	approvalRoot := f.String("model-approval-root", "", "worker-local approval directory")
 	localPath := f.String("path", "", "exact local model folder to approve")
 	approvedRoot := f.String("approved-root", "", "root bounding model folder and symlinked blobs")
@@ -43,7 +41,7 @@ func modelCommand(args []string) error {
 		return e
 	}
 	if f.NArg() != 1 {
-		return errors.New("supply one model name (or NAS-relative destination for fetch)")
+		return errors.New("supply one model name")
 	}
 	if args[0] == "approve-local" {
 		m, err := myce.ApproveLocalModel(context.Background(), *approvalRoot, f.Arg(0), *localPath, *approvedRoot)
@@ -56,13 +54,6 @@ func modelCommand(args []string) error {
 			SizeBytes   int64            `json:"size_bytes"`
 			SHA256      string           `json:"sha256"`
 		}{m.LocalSource, m.Files, m.SizeBytes, m.SHA256})
-	}
-	if args[0] == "fetch" {
-		p := filepath.Clean(f.Arg(0))
-		if *root == "" || filepath.IsAbs(p) || p == ".." || strings.HasPrefix(p, ".."+string(filepath.Separator)) {
-			return errors.New("fetch needs --model-root and a relative destination")
-		}
-		return myce.FetchModel(context.Background(), *url, *root, p, *size, *sum)
 	}
 	client, err := authority.ownerClient()
 	if err != nil {

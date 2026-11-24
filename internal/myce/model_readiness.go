@@ -231,10 +231,7 @@ func (q *Queue) noteModelLoaded(s *ModelSlot) {
 }
 
 func (q *Queue) modelIdleExpired(s *ModelSlot) bool {
-	if q.residentJobDemand(s) {
-		return false
-	}
-	if q.models.Idle > 0 && s.Resident == nil {
+	if q.models.Idle > 0 {
 		return q.clock.Now().Sub(s.LastUsed) >= q.models.Idle
 	}
 	for _, c := range q.calls {

@@ -329,26 +329,6 @@ records await acknowledgement, including closings waiting for steady recovery.
 The hook receives no fleet token. Its acknowledgement proves receiver acceptance.
 Job-completion delivery is independent.
 
-## Durable model interval API
-
-`GET /api/models/intervals` is the supported paginated history for resident model
-attempts, including engines assigned and removed between status reads. See the
-[interval contract](../reference/models.md#durable-model-engine-interval-history-663).
-Events expose `assigned_at`, first-authorized `load_started_at`, stop-intent
-`stopped_at`, exact-cleanup `released_at`, card identity and class/resolved tier
-with policy revision. `class_changed` events timestamp in-place tier changes,
-including effective production pins. `coverage_since` bounds the current
-uninterrupted coverage period; a rollback through an older binary can create
-a gap even though older events remain readable. Unknown legacy times remain absent.
-A status snapshot's `loaded_models` alone cannot rule out transient arrivals.
-`loaded_models[].memory_peaks` reports `load`, `steady` idle and the latest
-completed `request` window for the exact engine attempt. Each phase labels its
-host and device sources, sample coverage, constraint evidence and any
-unavailability. `memory_load` and `memory_request` events retain reported
-windows, and the `released` event retains the final accepted snapshot. See
-[resident engine memory peaks](../reference/models.md#resident-engine-memory-peaks)
-for request correlation and coverage.
-
 ## Local completion observer diagnostics
 
 `myce wait --observer-status` reads the user registry's `observer.status` and

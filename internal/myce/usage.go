@@ -254,9 +254,6 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 		}
 	}
 
-	if e = q.persistModelIntervals(tx); e != nil {
-		return e
-	}
 	if e = q.memoryEvidencePending.persist(tx); e != nil {
 		return e
 	}

@@ -358,27 +358,6 @@ func TestWireSchemas(t *testing.T) {
 	ledgerValidation := compileWireSchema(t, "job-ledger-v1.schema.json")
 	validateWireValue(t, ledgerValidation, JobLedgerPage{JobID: "job", Complete: true, Entries: []JobLedgerEntry{}})
 	r := generate.Reflector{Anonymous: true, AllowAdditionalProperties: true}
-	intervalSchema, err := json.MarshalIndent(r.Reflect(&ModelIntervalPage{}), "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	intervalSchema = append(intervalSchema, '\n')
-	intervalName := "model-intervals-v1.schema.json"
-	intervalPath := filepath.Join(schemaRoot, intervalName)
-	if os.Getenv("MYCE_UPDATE_SCHEMAS") == "1" {
-		if err := os.WriteFile(intervalPath, intervalSchema, 0644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	actualIntervals, err := os.ReadFile(intervalPath)
-	if err != nil || !bytes.Equal(actualIntervals, intervalSchema) {
-		t.Fatal("model intervals schema drift: regenerate with MYCE_UPDATE_SCHEMAS=1", err)
-	}
-	validateWireValue(t, compileWireSchema(t, intervalName), ModelIntervalPage{Entries: []ModelIntervalEvent{{
-		Kind: "released", ModelInterval: ModelInterval{MemoryPeaks: &ModelMemoryPeaks{Load: &ModelMemoryWindow{
-			Host: ModelMemoryMeasurement{Unavailable: modelMemoryNoSample},
-		}}},
-	}}})
 	pageSchema, err := json.MarshalIndent(r.Reflect(&StatusJobsPage{}), "", "  ")
 	if err != nil {
 		t.Fatal(err)

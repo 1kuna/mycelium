@@ -40,7 +40,7 @@ func (q *Queue) callExcludes(c *ModelCall, machine string, device ...string) boo
 
 func (q *Queue) callAttemptLive(c *ModelCall) bool {
 	s := q.s.ModelSlots[slotKey(c.Machine, c.Model, c.Device)]
-	return (c.ResidentAttempt == nil || q.residentAttemptLive(*c.ResidentAttempt)) && c.Error == "" && s != nil && s.Session == c.Session && s.Attempt == c.Attempt && (s.State == "ready" || s.State == "draining")
+	return c.Error == "" && s != nil && s.Session == c.Session && s.Attempt == c.Attempt && (s.State == "ready" || s.State == "draining")
 }
 
 func (q *Queue) engineAttemptLost(c *ModelCall) bool {
@@ -69,15 +69,10 @@ func (q *Queue) applyEngineReport(key string, s *ModelSlot, r ModelReport) {
 	// takeover, but never reroutes an already dispatched call through a worker.
 	if r.MemoryPeaks != nil {
 		peaks := *r.MemoryPeaks
-		loadComplete := peaks.Load != nil && peaks.Load.EndedAt != nil
-		alreadyComplete := s.MemoryPeaks != nil && s.MemoryPeaks.Load != nil && s.MemoryPeaks.Load.EndedAt != nil
 		if s.MemoryPeaks != nil {
 			peaks.Request = newestModelMemoryRequest(s.MemoryPeaks.Request, peaks.Request)
 		}
 		s.MemoryPeaks = &peaks
-		if loadComplete && !alreadyComplete {
-			q.recordModelInterval(s, "memory_load")
-		}
 	}
 	s.Custody = nil
 	if validModelCustody(r.Custody) && validModelBridgeURL(r.URL) {
@@ -118,7 +113,6 @@ func (q *Queue) applyEngineReport(key string, s *ModelSlot, r ModelReport) {
 			s.RetryReserved = q.slotPinned(s)
 		}
 		s.RuntimeFailed = r.RuntimeFailed
-		q.recordModelInterval(s, "released")
 		s.State = "failed"
 		s.Error = ceilingDiagnostic(r.Error, "model load or unload failed")
 		// Reports confirm process/group cleanup; old call completions must not
@@ -163,7 +157,6 @@ func (q *Queue) applyEngineReport(key string, s *ModelSlot, r ModelReport) {
 		}
 	case "unloaded":
 		if (s.State == "draining" || s.State == "unloading") && (s.InFlight == 0 || r.CallsMeasured && r.InFlight == 0) {
-			q.recordModelInterval(s, "released")
 			delete(q.s.ModelSlots, key)
 		}
 	}
@@ -269,7 +262,6 @@ func (q *Queue) maintainEngineRetry(key string, s *ModelSlot, m *Machine, model 
 	if !q.clock.Now().Before(*s.RetryAt) {
 		q.beginEngineAttempt(s, priority)
 		s.Project = project
-		q.recordModelInterval(s, "assigned")
 	}
 }
 

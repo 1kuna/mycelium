@@ -50,7 +50,6 @@ func (q *Queue) publicStatusSnapshot(options *statusOptions, contexts ...context
 
 func publicStatusValue(s Snapshot) Snapshot {
 	for i := range s.LoadedModels {
-		s.LoadedModels[i].Resident = nil
 		s.LoadedModels[i].EnvironmentRecipe = nil
 		s.LoadedModels[i].Error = modelReadinessDiagnostic(s.LoadedModels[i].Error)
 	}

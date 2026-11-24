@@ -308,7 +308,7 @@ func (q *Queue) deviceTiersSettled(m *Machine, demand *Job, engine bool) bool {
 	}
 	for _, card := range cards {
 		for _, s := range q.s.ModelSlots {
-			if slotOnTarget(s, card) && slotReservesMemory(s) && (!engine || s.Model != demand.Spec.Needs.Model) && !ownsResidentSlot(demand.Spec, s) && q.comparePriority(q.slotSpec(s), demand.Spec) != 0 {
+			if slotOnTarget(s, card) && slotReservesMemory(s) && (!engine || s.Model != demand.Spec.Needs.Model) && q.comparePriority(q.slotSpec(s), demand.Spec) != 0 {
 				return false
 			}
 		}

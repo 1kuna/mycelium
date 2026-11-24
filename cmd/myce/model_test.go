@@ -1,12 +1,9 @@
 package main
 
 import (
-	"crypto/sha256"
 	"encoding/json"
-	"fmt"
-	"io"
+	"errors"
 	"mycelium/internal/myce"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -14,33 +11,6 @@ import (
 	"testing"
 	"time"
 )
-
-func TestModelFetchNestedBundleCLI(t *testing.T) {
-	root := t.TempDir()
-	old := http.DefaultClient
-	http.DefaultClient = &http.Client{Transport: waitTransport(func(*http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("weights"))}, nil
-	})}
-	t.Cleanup(func() { http.DefaultClient = old })
-	if err := run([]string{"model", "fetch", "bundle/nested/model.bin", "--model-root", root,
-		"--url", "https://huggingface.co/repo/resolve/revision/file", "--size-bytes", "7", "--sha256", fmt.Sprintf("%x", sha256.Sum256([]byte("weights")))}); err != nil {
-		t.Fatal(err)
-	}
-	var files []string
-	err := filepath.WalkDir(filepath.Join(root, "bundle"), func(p string, entry os.DirEntry, err error) error {
-		if err == nil && !entry.IsDir() {
-			files = append(files, p)
-		}
-		return err
-	})
-	if err != nil || len(files) != 1 || files[0] != filepath.Join(root, "bundle/nested/model.bin") {
-		t.Fatalf("bundle contains extra files: %v, %v", files, err)
-	}
-	data, err := os.ReadFile(files[0])
-	if err != nil || string(data) != "weights" {
-		t.Fatalf("master = %q, %v", data, err)
-	}
-}
 
 func TestModelSyncCLI(t *testing.T) {
 	dir := t.TempDir()
@@ -87,8 +57,9 @@ func TestModelSyncCLI(t *testing.T) {
 	if e != nil || len(snap.Pins) != 0 {
 		t.Fatal("pin not removed")
 	}
-	if e := run([]string{"model", "fetch", "../outside", "--model-root", dir}); e == nil {
-		t.Fatal("fetch traversal accepted")
+	var refusal *myce.HTTPError
+	if err := run([]string{"model", "fetch"}); !errors.As(err, &refusal) || refusal.Code != "model_fetch_retired" || !strings.Contains(refusal.Message, "upstream client") {
+		t.Fatalf("model fetch refusal = %v", err)
 	}
 }
 

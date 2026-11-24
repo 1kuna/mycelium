@@ -721,13 +721,6 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if err := w.checkAvailability(); err != nil {
 		return nil, err
 	}
-	residentEnv, residentClose, residentErr := w.startResidentBridge(ctx, j, executionWork)
-	if residentErr != nil {
-		return nil, s.startFailure(j, launchRefused, residentErr)
-	}
-	oldSharedRelease := sharedRelease
-	sharedRelease = func() { residentClose(); oldSharedRelease() }
-	s.sharedRelease = sharedRelease
 	env := jobBaseEnvironment()
 	if compilerPath != "" {
 		env["GOCACHE"] = compilerPath
@@ -739,9 +732,6 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		env[k] = v
 	}
 	for k, v := range extensionEnv {
-		env[k] = v
-	}
-	for k, v := range residentEnv {
 		env[k] = v
 	}
 	if compilerPath != "" && env["GOCACHE"] != compilerPath {
@@ -802,7 +792,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if memoryAttempt != nil {
 		ceilingBytes = memoryAttempt.bytes
 		memoryAttempt.oomScore = attemptOOMScore(j)
-		if !j.Spec.Needs.cpuOnly() && j.Spec.Resident == nil && memoryPools(&j).RAM.Alone {
+		if !j.Spec.Needs.cpuOnly() && memoryPools(&j).RAM.Alone {
 			if available, ok := memoryAttempt.hostAvailable(); ok {
 				memoryAttempt.availableAtLaunch = &available
 			}

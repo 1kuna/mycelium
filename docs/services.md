@@ -9,98 +9,12 @@ local secret handling and no replay after streaming output begins. Environment
 locks live in [environments](environments.md); trust limits in
 [native isolation](native-isolation.md).
 
-## Resident engines for independent stage jobs
+## Reusing a catalog model
 
-Use `advanced.resident: {model: catalog-name}` on an entry to reuse a loaded
-catalog engine across independent inputs. A registered extension declares
-`resident: {model: catalog-name}` beside its variants. The catalog model must
-already describe a foreground server, its health check, exact model/runtime,
-locked environment and measured memory budget (see [general servers](#calling-general-model-servers)).
-An arbitrary command that exits cannot become a resident model automatically:
-split model initialization into that server and make the stage command its client.
-
-```yaml
-project: example
-entries:
-  infer:
-    source: {git: HEAD}
-    needs: {platform: cuda, cpu_cores: 1, memory: auto}
-    inputs: {input.bin: samples/input.bin}
-    run:
-      command: [sh, -ec, '"$MYCE_RESIDENT_CLIENT" resident --path /infer --input input.bin > result.json']
-    outputs: {result.json: results}
-    advanced:
-      isolation: sandboxed
-      resident: {model: speech-engine}
-```
-
-Submit with `myce run --entry infer --out accepted`.
-Use `pieces` for many inputs; each piece remains a separate durable job and
-publishes its own verified outputs. All children inherit the parent's frozen
-resident binding before per-piece arguments and inputs are applied. For an
-extension entry or registered extension, declare serial pieces with:
-
-```yaml
-advanced: {resident: {model: speech-engine}} # Omit if the extension declares resident.
-workload: {input_shape: audio, units: 1}
-fan_out:
-  max_concurrency: 1
-  pieces: [{key: a, args: [a]}, {key: b, args: [b]}, {key: c, args: [c]}]
-```
-
-This runs one child at a time, back-to-back on one warm copy when capacity
-remains available. Plain-command entries use `pieces:` with per-piece `inputs`
-and `args`, without `max_concurrency`; their jobs are placed independently and
-calls serialize within each host/card's engine copy. Resident jobs and their
-children must be non-resumable and single-device, without CPU fallback.
-Existing ordinary-producer and per-piece
-`after` dependencies become ready only after exact-attempt output acceptance.
-Keep production target declarations and MY-19 parity checks for the client and
-server contract. This example's CUDA requirement is illustrative; select the
-platforms supported by the catalog runtime and the consumer's qualified code.
-An extension's qualification check inherits its resident binding too, so its
-check command can exercise that same client/server contract before useful work.
-
-The worker supplies `MYCE_RESIDENT_CLIENT`, the path to its matching executable.
-Its `resident` command streams stdin (or `--input FILE`) to `--path /endpoint`,
-with `--method POST` and `--content-type application/octet-stream` by default,
-and writes successful response bytes to stdout. Non-success HTTP status or an
-interrupted exchange fails the command; there is no transport replay. It reads
-only `MYCE_RESIDENT_PIPE` and `MYCE_RESIDENT_KEY`, which grant this attempt access
-to its frozen engine. It never reads installed credentials. Make calls sequentially
-within one attempt; interrupted exchanges require the normal job retry policy.
-No network opt-in is required. The existing sandbox stays in force.
-
-Reuse identity includes project, stage/entry or extension, immutable source,
-environment and exact catalog model/runtime. Per-item input bytes, arguments
-and memory-learning keys do not split an entry's engine. A different kind,
-environment or model gets a different identity; each host/card owns its copy.
-The queue admits the cold engine and client together, charging the engine once
-and each client's staging/CPU memory separately. The catalog budget must cover
-weights, runtime and the measured peak of one request, including host RAM.
-Calls serialize per resident engine, so concurrent request activations cannot
-spend that budget twice. The existing enforced ceilings and physical-host ledger
-continue to apply, including conservative unified-memory accounting.
-
-Known queued/running/dependent demand keeps the engine warm. After that demand
-ends, the existing measured load-cost and interarrival policy determines idle
-retention, overriding the catalog's fixed idle interval for this opt-in. Memory
-pressure and higher-priority demand can reclaim it earlier; memory remains
-charged until exact engine unload acknowledgement. Only the engine survives:
-work directories, accepted results, cancellation, retries and release custody
-remain attempt-specific. A failed input does not invalidate accepted siblings;
-plain pieces let other siblings settle, while extension fan-out retains its
-fail-fast policy for unfinished work. Engine death interrupts calls without
-silently replaying their request.
-
-`worker_data: ephemeral` remains unsupported with resident engines and receives
-`job_worker_data_unsupported`: request spools and shared server memory are outside
-attempt-only cleanup. Do not use this bridge to promise shared-server data erasure.
-Workers advertise `resident_jobs_v1`; older workers cannot run these jobs.
-Resident attempts use natural drain during worker upgrade until detached bridge
-custody is qualified. CPU fixture proof does not establish native model parity,
-hardware peaks, coexistence or production load amortization; measure those for
-the exact model/runtime before production adoption.
+Call the queue's `/v1` endpoint to load and reuse a catalog model on demand.
+For a server scoped to one job, declare a [native sidecar](#native-job-sidecars).
+`advanced.resident`, the registered extension's `resident` field and
+`myce resident` return `job_resident_retired`.
 
 ## Calling OpenAI models
 
@@ -375,39 +289,15 @@ no peer registry, leases, containers, or continuously reserved app GPUs.
 model's worker, loading/ready/draining state, idle seconds, calls in flight, and
 unload errors. In-flight calls show zero idle seconds.
 
-## Explicit master download and pins
+## Stage model masters and pin a model
 
-From the release implementing MY-44, `myce model fetch` accepts any HTTPS file
-URL; it does not require a preapproved download host. Exact size and SHA-256
-verification remain required.
-
-For a multi-file master, keep `--model-root` at the directory **containing**
-the bundle and include the bundle name in each destination, including nested
-paths (for example `bundle/weights/model.bin`). Fetch downloads into a stable
-staging directory beside the bundle, on the same filesystem, and atomically
-renames each file into the bundle only after size and SHA-256 verification.
-The bundle contains neither partial downloads nor Trash. Run fetch for every
-manifest file before verifying or using the immutable master.
-
-Interrupted downloads resume from staging. If a server ignores `Range`, fetch
-restarts that file from its full response. Invalid partials move into a
-quarantine inside staging; fetch reports their preserved paths. A corrupt
-resumed file retries once from zero; a corrupt fresh response fails visibly.
-Fetch flushes files and directory entries before returning success. A directory
-sync failure rolls publication back into staging for a later retry. Repeating
-fetch verifies an already published file without overwriting it. Concurrent
-fetches of one bundle fail with an in-use error; retry when its active fetch
-finishes. Staging directories remain as stable lock locations and to retain
-quarantined bytes; do not remove them while a fetch is active.
+Download catalog model masters with the upstream download client and stage
+them under the configured model root. Each catalog entry declares the exact
+size and SHA-256 of its file or bundle. `myce model fetch` returns
+`model_fetch_retired`.
 
 ```sh
-myce model fetch chat.gguf --model-root /shared/models \
-  --url https://huggingface.co/OWNER/REPO/resolve/REVISION/chat.gguf \
-  --size-bytes EXACT_BYTES --sha256 APPROVED_HASH
 myce model pin chat --project atlas --machine gpu-host-a
-# Or choose one eligible machine on a platform, optionally during work hours:
-myce model pin chat --project atlas --platform cuda \
-  --weekdays 1,2,3,4,5 --start 08:00 --end 20:00 --timezone America/New_York
 myce status
 myce model unpin chat --project atlas
 ```

@@ -159,9 +159,6 @@ func TestAPIJobReplyRedactsExecutionPayload(t *testing.T) {
 		stored.Spec.Args = []string{"private-args"}
 		stored.Spec.Environment = Environment{LockFile: "/private/recipe.lock"}
 		stored.EnvironmentRecipes = map[string]EnvironmentRecipe{"fake": {LockFile: "/private/recipe.lock"}}
-		engine := &ResidentEngine{Model: Model{Name: "resident-private", StartCommand: []string{"private-engine-command"}, Env: map[string]string{"PRIVATE": "private-engine-env"}}, Environments: map[string]EnvironmentRecipe{"cpu": {LockFile: "/private/engine.lock"}}}
-		stored.Spec.Resident = &ResidentBinding{Model: "authored-model", Engine: engine}
-		q.s.ModelSlots = map[string]*ModelSlot{"private": {Model: "resident-private", State: "unloaded", Resident: engine}}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -243,9 +240,6 @@ func TestAPIJobReplyRedactsExecutionPayload(t *testing.T) {
 	if len(status.Jobs) != 1 || status.Jobs[0].SpecProjection == nil {
 		t.Fatal("status must declare its spec projection")
 	}
-	if a := status.Jobs[0].Advanced; a == nil || a.Resident == nil || a.Resident.Model != "authored-model" || a.Resident.Engine != nil {
-		t.Fatalf("status must show resident opt-in without the execution snapshot: %s", wireJSON(t, a))
-	}
 	if slices.Contains(status.Jobs[0].SpecProjection.Omitted, "submission_key") || status.Jobs[0].Spec.SubmissionKey != s.SubmissionKey {
 		t.Error("status must retain submission_key without declaring it omitted")
 	}
@@ -254,7 +248,7 @@ func TestAPIJobReplyRedactsExecutionPayload(t *testing.T) {
 	}
 	q.mu.Lock()
 	stored := q.s.Jobs[j.ID]
-	unchanged := stored.Spec.Files["private-input.txt"] == ref && stored.Spec.Run.Env["MYCE_TOKEN"] == "private-token" && stored.Spec.Resident.Engine != nil && q.s.ModelSlots["private"].Resident != nil
+	unchanged := stored.Spec.Files["private-input.txt"] == ref && stored.Spec.Run.Env["MYCE_TOKEN"] == "private-token"
 	q.mu.Unlock()
 	if !unchanged {
 		t.Fatal("projection changed submitted payload")
@@ -267,7 +261,7 @@ func TestAPIJobReplyRedactsExecutionPayload(t *testing.T) {
 	}
 	body, _ := json.Marshal(reply)
 	statusBody, _ := json.Marshal(status)
-	for _, private := range []string{"private-command", "private-env", "private-token", "private-args", "/private/recipe.lock", "private-input.txt", ref.SHA256, "private-engine-command", "private-engine-env", "/private/engine.lock"} {
+	for _, private := range []string{"private-command", "private-env", "private-token", "private-args", "/private/recipe.lock", "private-input.txt", ref.SHA256} {
 		if strings.Contains(string(body), private) {
 			t.Errorf("GET exposed %q", private)
 		}
