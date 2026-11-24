@@ -62,6 +62,12 @@ func TestUnifiedProductionPreemptsDeadlineHostMemory(t *testing.T) {
 // all the ledger charges account for. Production can still reclaim the pool.
 func TestUnifiedProductionReclaimsPooledMemory(t *testing.T) {
 	q, clock := fixture(t)
+	policy := defaultPriorityPolicy()
+	policy.Tiers[2].Selectors = []string{"*/experiment"}
+	policy.Tiers = append(policy.Tiers, PriorityTier{"background", []string{"*/*"}})
+	if _, err := q.SetPriorityPolicy(0, policy); err != nil {
+		t.Fatal(err)
+	}
 	m := sharedUnifiedMachine()
 	m.Capabilities = append(m.Capabilities, pooledMemoryCapability, sampledMemoryCapability)
 	m.CapabilityProfile.LogicalCPUs = 20
@@ -72,7 +78,6 @@ func TestUnifiedProductionReclaimsPooledMemory(t *testing.T) {
 	production.Name, production.Project, production.Resumable = "production", "customer", false
 	production.Needs.Memory, production.Needs.HostMemoryGB, production.Needs.CPUCores = "auto", 0, 4
 	production.StartWindow = "10m"
-	seedPoolReplay(q, &Job{Spec: production}, allocationMachine(&m, []string{"0"}), "ram", need/2, need)
 
 	holders := []struct {
 		class                    string
@@ -110,6 +115,9 @@ func TestUnifiedProductionReclaimsPooledMemory(t *testing.T) {
 			s.Needs.HostMemoryGB, s.Needs.CPUCores = holder.charge, 6
 		}
 		s.Name, s.Class, s.Resumable = fmt.Sprintf("holder-%d", i), holder.class, holder.resumable
+		if s.Class == "test" {
+			s.Priority = ""
+		}
 		s.Needs.Memory = "auto"
 		queued := submit(t, q, s)
 		run := assignedJob(pull())
@@ -128,6 +136,7 @@ func TestUnifiedProductionReclaimsPooledMemory(t *testing.T) {
 	if math.Abs(ledger.ReservedGB-66.096595) > .001 || math.Abs(ledger.GrowthGB-52.343395) > .001 || math.Abs(ledger.SignedRoomGB-33.523049) > .001 {
 		t.Fatalf("unexpected replay ledger: %+v", ledger)
 	}
+	seedPoolReplay(q, &Job{Spec: production}, allocationMachine(&m, []string{"0"}), "ram", need/2, need)
 	demand := submit(t, q, production)
 	for _, victim := range []int{0, 4, 3, 1} {
 		clock.Advance(time.Second)
