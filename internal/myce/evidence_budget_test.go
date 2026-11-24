@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -61,7 +62,7 @@ func TestEvidenceRetentionCapacityValueAndPins(t *testing.T) {
 				for range 100 {
 					j.AttemptHistory = append(j.AttemptHistory, AttemptOutcome{Attempt: 1, Machine: "synthetic", Session: "session", EndedAt: clock.Now(), Reason: "same diagnosis"})
 				}
-				j.LedgerEntries = []JobLedgerEntry{{Kind: "custody_released", CustodyID: id, Release: "confirmed"}}
+				j.LedgerEntries = []JobLedgerEntry{{Kind: "custody_released", CustodyID: id, Release: "confirmed", Reason: strings.Repeat("retained custody evidence ", 200)}}
 				return j
 			}
 			if err := q.update(func() error {
@@ -83,6 +84,9 @@ func TestEvidenceRetentionCapacityValueAndPins(t *testing.T) {
 				return nil
 			}); err != nil {
 				t.Fatal(err)
+			}
+			if q.coldRecords["jobs/0"].size == 0 {
+				t.Fatal("settled history fixture did not exercise the disk-backed record")
 			}
 			ledger := append([]JobLedgerEntry(nil), q.s.Jobs["0"].LedgerEntries...)
 			clock.Advance(1000 * 24 * time.Hour)

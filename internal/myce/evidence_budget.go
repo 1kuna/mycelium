@@ -241,6 +241,7 @@ func (q *Queue) maintainEvidence(ctx context.Context) error {
 			break
 		}
 		data := q.persisted[key]
+		_, cold := q.coldRecords[key]
 		revision := q.fileReferenceRevision
 		open := len(q.records.live) > 0 || len(q.calls) > 0
 		id := strings.TrimPrefix(key, "work_observations/")
@@ -261,6 +262,16 @@ func (q *Queue) maintainEvidence(ctx context.Context) error {
 		fingerprint, alreadyPlanned := m.plannedExternal[key]
 		drift := false
 		deferWork := false
+		if cold && err == nil && report.RetainedBytes > report.BudgetBytes {
+			var readErr error
+			data, readErr = q.readColdQueueRecord(ctx, key)
+			if readErr != nil {
+				unlock = requestLock(ctx, &q.mu)
+				q.enqueueEvidence(key)
+				unlock()
+				return readErr
+			}
+		}
 		switch {
 		case len(data) == 0: // Removed independently; nothing to decode.
 		case external && !due && !revisit && alreadyPlanned && fingerprint == sha256.Sum256(data):

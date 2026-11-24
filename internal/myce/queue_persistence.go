@@ -195,16 +195,21 @@ func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (*que
 		return err
 	}
 	putData := func(key string, data []byte) error {
+		old := q.persisted[key]
+		cold, wasCold := q.coldRecords[key]
+		if wasCold && cold.matches(data) {
+			return nil
+		}
 		next[key] = data
-		if bytes.Equal(data, q.persisted[key]) {
+		if !wasCold && bytes.Equal(data, old) {
 			next[key] = q.persisted[key]
 			return nil
 		}
 		// Ordinary records fit one page and retain the original compact row.
 		// No fragment preparation or extra B-tree keys are needed for them.
-		compact := len(data) <= q.persistencePageBytes && len(q.persisted[key]) <= q.persistencePageBytes
+		compact := len(data) <= q.persistencePageBytes && len(old) <= q.persistencePageBytes && !wasCold
 		if splitPersistenceKey(key) && !compact {
-			return q.writeFields(key, q.persisted[key], data, measured, exec, nil)
+			return q.writeFields(key, old, data, measured, exec, nil)
 		}
 		return putCompact(key, data)
 	}
@@ -586,8 +591,9 @@ func (q *Queue) writeFields(key string, old, data []byte, measured *queuePersist
 		return err
 	}
 	prefix := fieldPrefix(key)
+	cold := q.coldRecords[key]
 	for field, value := range next {
-		if bytes.Equal(before[field], value) {
+		if bytes.Equal(before[field], value) || cold.fieldMatches(field, value) {
 			continue
 		}
 		measured.Bytes += int64(len(value))
@@ -597,6 +603,14 @@ func (q *Queue) writeFields(key string, old, data []byte, measured *queuePersist
 		}
 	}
 	for field := range before {
+		if _, ok := next[field]; !ok {
+			measured.Records++
+			if _, err := exec("DELETE FROM queue_state WHERE key=?", prefix+field); err != nil {
+				return err
+			}
+		}
+	}
+	for field := range cold.fields {
 		if _, ok := next[field]; !ok {
 			measured.Records++
 			if _, err := exec("DELETE FROM queue_state WHERE key=?", prefix+field); err != nil {

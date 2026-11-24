@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"net"
-	"os"
 	"strings"
 	"time"
 
@@ -23,8 +22,7 @@ func queueStartupTrace(clock myce.Clock, logf func(string, ...any)) func(string)
 
 // systemd waits for READY=1 for the queue's Type=notify unit. Foreground queues
 // and launchd have no notification socket and keep the same startup behavior.
-func notifyQueueReady() error {
-	path := os.Getenv("NOTIFY_SOCKET")
+func notifyQueueReady(path string) error {
 	if path == "" {
 		return nil
 	}

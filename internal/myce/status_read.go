@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"container/list"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -14,7 +15,15 @@ import (
 	"time"
 )
 
+// Retain a working set of pollers, with encoded bytes capped independently
+// so a few large receipts cannot pin the cache. The 8 MiB budget fits 256
+// receipts at 32 KiB each, above the measured retained-record p95.
+const jobSnapshotCacheEntries = 256
+const jobSnapshotCacheBytes = jobSnapshotCacheEntries * 32 << 10
+
 type jobSnapshotCache struct {
+	position      *list.Element // jobSnapshotsMu
+	size          int           // Encoded bytes; jobSnapshotsMu.
 	hitCost       time.Duration
 	mu            sync.Mutex        // Completed response metadata only; never held during projection.
 	refresh       sync.Mutex        // Never acquired by a queue writer or a cache hit.
@@ -82,6 +91,21 @@ func (q *Queue) invalidateJobSnapshot(id string) {
 		q.readInvalidations = map[string]bool{}
 	}
 	q.readInvalidations[id] = true
+}
+
+// Cache operations below hold jobSnapshotsMu, including commit invalidation.
+func (q *Queue) evictJobSnapshot(id string) {
+	if entry := q.jobSnapshots[id]; entry != nil {
+		q.jobSnapshotLRU.Remove(entry.position)
+		q.jobSnapshotBytes -= entry.size
+		delete(q.jobSnapshots, id)
+	}
+}
+
+func (q *Queue) trimJobSnapshots() {
+	for q.jobSnapshotLRU.Len() > jobSnapshotCacheEntries || q.jobSnapshotBytes > jobSnapshotCacheBytes {
+		q.evictJobSnapshot(q.jobSnapshotLRU.Back().Value.(string))
+	}
 }
 
 // Calls are ephemeral rather than persisted job records. Match their existing
@@ -420,6 +444,13 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 								input := entry.inputs
 								if v.observationSelection != nil && !v.observationSelection.ids[key] {
 									input = entry.dependency
+									if input == nil {
+										input = statusDependencyJob(j)
+									}
+								} else if input == nil {
+									// Large cold publications already own immutable job data.
+									view := statusJobInputs(j)
+									input = &view
 								}
 								s.Jobs[key], frozen[key] = input, input
 								continue
@@ -685,8 +716,11 @@ func (q *Queue) jobSnapshotReceipt(id string, contexts ...context.Context) (*Job
 	}
 	entry := q.jobSnapshots[id]
 	if entry == nil {
-		entry = &jobSnapshotCache{dependsOnJobs: true}
+		entry = &jobSnapshotCache{dependsOnJobs: true, position: q.jobSnapshotLRU.PushFront(id)}
 		q.jobSnapshots[id] = entry
+		q.trimJobSnapshots()
+	} else {
+		q.jobSnapshotLRU.MoveToFront(entry.position)
 	}
 	q.jobSnapshotsMu.Unlock()
 	entry.mu.Lock()
@@ -722,10 +756,18 @@ func (q *Queue) jobSnapshotReceipt(id string, contexts ...context.Context) (*Job
 				cached = &jobSnapshotReply{data: data}
 			}
 			if valid && captureErr == nil {
-				entry.dependsOnJobs = out.State == "queued" || out.FanOut != nil || out.CancelledAt != nil
-				entry.mu.Lock()
-				entry.data, entry.reply, entry.captured, entry.expires = data, cached, captured, q.clock.Now().Add(q.observationCacheBudget.lease(q.clock.Now().Sub(now), entry.hitCost))
-				entry.mu.Unlock()
+				if len(data) > jobSnapshotCacheBytes {
+					q.evictJobSnapshot(id)
+				} else {
+					q.jobSnapshotBytes += len(data) - entry.size
+					entry.size = len(data)
+					q.jobSnapshotLRU.MoveToFront(entry.position)
+					q.trimJobSnapshots()
+					entry.dependsOnJobs = out.State == "queued" || out.FanOut != nil || out.CancelledAt != nil
+					entry.mu.Lock()
+					entry.data, entry.reply, entry.captured, entry.expires = data, cached, captured, q.clock.Now().Add(q.observationCacheBudget.lease(q.clock.Now().Sub(now), entry.hitCost))
+					entry.mu.Unlock()
+				}
 			}
 			q.jobSnapshotsMu.Unlock()
 			unlock()

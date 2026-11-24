@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -59,6 +60,38 @@ func TestJobSnapshotCacheCallDependsOnBatchCommit(t *testing.T) {
 	got, err = q.jobSnapshot(call.ID)
 	if err != nil || strings.Contains(got.Reason, "concurrent work cap") {
 		t.Fatal("call retained committed batch blocker", got, err)
+	}
+}
+
+func TestJobSnapshotCacheBounds(t *testing.T) {
+	q, clock := fixture(t)
+	// Half the cache's byte allowance leaves room for only one large receipt.
+	large := strings.Repeat("x", jobSnapshotCacheBytes/2)
+	count := jobSnapshotCacheEntries + 1
+	if err := q.update(func() error {
+		for i := range count + 2 {
+			id := fmt.Sprint(i)
+			reason := ""
+			if i >= count {
+				reason = large
+			}
+			q.putJob(id, &Job{ID: id, State: "succeeded", Spec: spec("experiment"), Queued: clock.Now(), Reason: reason})
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i := range count + 2 {
+		id := fmt.Sprint(i)
+		if got, err := q.jobSnapshot(id); err != nil || got.ID != id {
+			t.Fatalf("receipt %s failed: %v", id, err)
+		}
+		if i == count-1 && (len(q.jobSnapshots) != jobSnapshotCacheEntries || q.jobSnapshots["0"] != nil) {
+			t.Fatal("cache did not evict the oldest entry at the count limit")
+		}
+	}
+	if q.jobSnapshotBytes > jobSnapshotCacheBytes || len(q.jobSnapshots) != 1 || q.jobSnapshots[fmt.Sprint(count+1)] == nil {
+		t.Fatal("cache did not evict older entries at the byte limit", q.jobSnapshotBytes, len(q.jobSnapshots))
 	}
 }
 

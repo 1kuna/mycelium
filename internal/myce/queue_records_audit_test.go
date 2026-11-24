@@ -70,7 +70,11 @@ func init() {
 }
 
 func checkQueueRecords(q *Queue) error {
-	return checkQueueRecordsAgainst(q, q.persisted, true)
+	records, err := readQueueRecordsVisit(q.db, nil)
+	if err != nil {
+		return err
+	}
+	return checkQueueRecordsAgainst(q, records, true)
 }
 
 // Stored machine records hold only the durable half; the in-memory audit
