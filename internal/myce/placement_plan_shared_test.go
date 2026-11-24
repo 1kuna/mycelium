@@ -628,7 +628,9 @@ func TestSharedDeviceMultiCardDemandStopsEveryCoTenant(t *testing.T) {
 	}
 	// Each card holds a 3 GiB and a 2 GiB experiment; stopping the 3 GiB one
 	// alone would free the 6 GiB share a 12 GiB two-card job needs per card.
-	production := submit(t, q, bigSpec("production", 12))
+	s := bigSpec("production", 12)
+	s.Name = "two-card-production"
+	production := submit(t, q, s)
 	machineCheck(t, q, m, running...)
 	for _, r := range running {
 		if got := job(t, q, r.ID); got.State != "stopping" {
