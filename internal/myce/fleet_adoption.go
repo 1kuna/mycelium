@@ -2,6 +2,7 @@ package myce
 
 import (
 	"runtime"
+	"slices"
 	"time"
 )
 
@@ -38,9 +39,9 @@ func workerAdoptionProof(actors map[attemptKey]*attemptSupervisor, now time.Time
 		// g.read already verified the exact custodian birth and manager scope.
 		// A locally released attempt can still owe the queue logs or results.
 		// Its durable snapshot survives the swap and needs no live heartbeat.
-		r := v.State.Result
-		resultReady := v.Finished && r != nil && !r.ReleasePending && r.ID == a.job.ID && r.Attempt == a.job.Attempt && r.Machine == a.job.Machine && r.Session == a.job.Session
-		live := !v.Finished && r == nil && !released && !now.Before(v.At) && now.Sub(v.At) <= max(3*interval, attemptLivenessMaxAge)
+		record := attemptRecordFor(&a.job, a.job.Machine)
+		resultReady := v.Finished && record.readyToRelease(v.State.Result, false)
+		live := !v.Finished && v.State.Result == nil && !released && !now.Before(v.At) && now.Sub(v.At) <= max(3*interval, attemptLivenessMaxAge)
 		if !observed || !resultReady && !live {
 			if released {
 				continue // An unrelated, already released actor cannot veto takeover.
@@ -55,7 +56,7 @@ func workerAdoptionProof(actors map[attemptKey]*attemptSupervisor, now time.Time
 
 func (q *Queue) fleetAdoptionReason(h *fleetUpgradeHost) string {
 	m := q.s.Machines[h.Machine]
-	if m == nil || !q.fleetProofFresh(m.Fleet) || m.Fleet.Adoption == nil || m.Fleet.Adoption.Protocol != custodianProtocol {
+	if m == nil || !q.fleetProofFresh(m.Fleet) || m.Fleet.Session != m.Session || m.Fleet.Adoption == nil || m.Fleet.Adoption.Protocol != custodianProtocol {
 		return "worker has no current live takeover proof"
 	}
 	proof := m.Fleet.Adoption
@@ -81,14 +82,11 @@ func (q *Queue) fleetAdoptionReason(h *fleetUpgradeHost) string {
 			// goroutine/cache writer, unlike staging inside an exact attempt.
 			return "preparation has no detached custodian"
 		}
-		if p.Result.Machine != m.ID || p.Result.Session != m.Session {
+		owner := attemptRecord{key: attemptKey{p.Result.ID, p.Result.Attempt, p.Result.Session}, machine: p.Result.Machine}
+		if !owner.sameWorker(m.ID, m.Session) {
 			return "an older or different worker session retains execution custody"
 		}
-		found := false
-		for _, e := range proof.Attempts {
-			found = found || e.ID == p.Result.ID && e.Attempt == p.Result.Attempt
-		}
-		if !found {
+		if !slices.ContainsFunc(proof.Attempts, owner.key.matches) {
 			return "a retained attempt is absent from the live takeover proof"
 		}
 	}

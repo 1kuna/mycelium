@@ -255,7 +255,6 @@ func (q *Queue) hydrateReply(reply *Reply, requestContexts ...context.Context) e
 			*j = nil
 		}
 	}
-	hydrate(&reply.Job)
 	for i := range reply.Attempts {
 		hydrate(&reply.Attempts[i].Job)
 	}

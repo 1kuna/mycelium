@@ -26,17 +26,6 @@ func normalizeAttemptCheckin(c Checkin) (Checkin, error) {
 	return c, nil
 }
 
-func attemptReply(c Checkin, reply Reply) Reply {
-	reply.AttemptProtocol = keyedAttemptProtocol
-	if len(reply.Attempts) == 0 && reply.Job != nil {
-		reply.Attempts = []AttemptDirective{{Execution: Execution{ID: reply.Job.ID, Attempt: reply.Job.Attempt}, Session: reply.Job.Session, Job: reply.Job, Hold: reply.Hold, Stop: reply.Stop, Kill: reply.Kill, GraceSeconds: reply.GraceSeconds, PriorityStop: reply.PriorityStop, UserCancel: reply.UserCancel}}
-	}
-	// Never send an unaddressed assignment or stop to a keyed worker.
-	reply.Job, reply.PriorityStop = nil, nil
-	reply.Hold, reply.Stop, reply.Kill, reply.UserCancel, reply.GraceSeconds = false, false, false, false, 0
-	return reply
-}
-
 func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	if w.Client.publicationWire != nil && !w.Client.publicationWire.Load() {
 		c.Machine.ResultPublications = nil
@@ -172,4 +161,10 @@ type attemptKey struct {
 	job     string
 	attempt int
 	session string
+}
+
+func (k attemptKey) matches(e Execution) bool { return k.job == e.ID && k.attempt == e.Attempt }
+
+func attemptOffer(j *Job) AttemptDirective {
+	return AttemptDirective{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Job: j}
 }
