@@ -167,7 +167,6 @@ type Queue struct {
 	efficiencyView         *EfficiencyReport // immutable maintenance projection; published only after commit.
 	nasInspections         *resolveNASCache  // ephemeral evidence shared by every listener for this queue.
 	// Qualification removes occupancy, but retains diagnostic history/inventory.
-	memoryOrigin *Queue
 	// Only detached observation views set this page selection.
 	observationSelection *statusSelection
 	deliveryRoot         string
@@ -296,16 +295,11 @@ type Queue struct {
 	observeSubmissionAdvice func(submissionAdviceTiming)
 	observeMemoryHistory    func(int, bool) // Test observer: jobs visited by a full evidence scan.
 
-	memoryPlanning          *memoryPlanningCache // Only while a read-only placement scan is active.
-	memoryObservationIndex  *memoryObservationCatalog
-	retainedMemoryIndex     retainedMemoryIndex // Immutable cold facts; record mutations invalidate.
-	retainedMemoryRevision  uint64
-	expiredMemory           []learnedMemoryFact // Memory evidence of expired job records; append-only.
-	checkinMemoryIdentities map[*Job]string     // Fenced, transaction-local planner input.
-	memoryEvidence          *memoryEvidence     // Immutable committed estimates and calibration.
-	memoryEvidencePending   *memoryEvidence     // Staged with the result transaction.
-	poolAvailability        map[string]poolAvailability
-	poolLastStop            map[string]time.Time
+	memoryPlanning        *memoryPlanningCache // Only while a read-only placement scan is active.
+	memoryEvidence        *memoryEvidence      // Immutable committed estimates and calibration.
+	memoryEvidencePending *memoryEvidence      // Staged with the result transaction.
+	poolAvailability      map[string]poolAvailability
+	poolLastStop          map[string]time.Time
 }
 
 func ID() string {
@@ -471,7 +465,6 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		q.migrateParityKinds()
 		q.mirrorProjectParity()
 		q.convertJobRecords()
-		q.repairSuccessfulConstrainedMemory()
 		return nil
 	}); err != nil {
 		db.Close()
@@ -749,8 +742,6 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	q.admissionWaitPending = false
 	q.admissionWaitDecisions = nil
 	q.admissionTrace = nil
-	q.memoryObservationIndex = nil
-	defer func() { q.memoryObservationIndex = nil }()
 	defer func() { q.memoryEvidencePending = nil }()
 	old, err := q.beginRecords()
 	if err != nil {
@@ -797,7 +788,6 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	}
 	if err == nil {
 		q.detectHealth()
-		q.invalidateWorkObservations()
 	}
 	if err == nil {
 		q.closeChangedAdmissionWaits()
@@ -1201,7 +1191,6 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 			_ = normalizeResources(&hintSpec) // submitted.Validate already checked it.
 			j.MemoryFallback = &SizeHint{MemoryGB: max(hintSpec.Needs.MemoryGB, submitted.SizeHint.MemoryGB), HostMemoryGB: max(hintSpec.Needs.HostMemoryGB, submitted.SizeHint.HostMemoryGB)}
 		}
-		q.applyLearnedNeeds(j)
 		if err := q.sharedInputCapacityRefusal(j); err != nil {
 			return err
 		}
@@ -1445,14 +1434,13 @@ func (q *Queue) maintain() {
 	q.maintainFileExpiry()
 	q.maintainHostMaintenance()
 	q.maintainSharedHosts()
-	q.yieldMemoryOvercommit()
+
 	q.yieldPooledMemory()
 	q.maintainDeviceMaintenance()
 	q.maintainExtensionQualifications()
 	now := q.clock.Now()
 	for _, j := range q.liveJobs() {
 		if j.State == "queued" {
-			q.applyLearnedNeeds(j)
 		}
 		if j.State == "running" || j.State == "stopping" {
 			q.retainRelease(j)
@@ -1728,7 +1716,6 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			}
 		}
 	}
-	identities := q.snapshotCheckinMemoryIdentities(ctx)
 	var releaseStops []AttemptDirective
 	err = q.updateRequest(ctx, func() error {
 		body := q.startBodyPhase("checkin_inventory")
@@ -1736,9 +1723,6 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		identities.installRetainedMemory(q)
-		q.checkinMemoryIdentities = identities.current(q)
-		defer func() { q.checkinMemoryIdentities = nil }()
 		m := preparedMachine
 		m.ExternalMemory = nil // Summary is queue-owned, never worker-supplied.
 		m.HostMemoryDerivation = nil
@@ -2011,7 +1995,10 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			}
 			// Onboarding reports health and exact custody before any ordinary
 			// admission. Do not return offers that this startup phase cannot run.
-			if c.Recovering || q.workerSuspect(&m, q.clock.Now()) {
+			if hold := workerMemoryHold(&m); hold != nil {
+				m.AdmissionReason = hold.Kind + ": " + hold.Reason
+			}
+			if c.Recovering || q.workerSuspect(&m, q.clock.Now()) || workerMemoryHold(&m) != nil {
 				// Preserve retained engines and deliver their cleanup deadlines.
 				// A retention-only plan cannot start a missing engine: the worker
 				// starts only loading plans. New launch authorization also refuses
@@ -2120,7 +2107,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		} else if c.Recovering {
 			q.skipAdmissionSelection(&m, predicateRecovering)
 		}
-		if !m.Leaving && !c.Recovering {
+		if !m.Leaving && !c.Recovering && workerMemoryHold(&m) == nil {
 			q.skipAdmissionSelection(&m, predicateSelectionNotReached)
 			scan := q.placementScan()
 			j := q.plannedPick(&m, scan)
@@ -2488,14 +2475,8 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 	ceilingFailure := !r.Success && strings.HasPrefix(ceilingDiagnostic(r.Error, ""), "exceeded its ")
 	oomFailure := !r.Success && (r.OutOfMemory || ceilingFailure)
 	outcome.OutOfMemory = oomFailure
-	// Native ceiling pressure censors true need even when the payload succeeds.
-	// Invalidate comparable memory without changing that successful outcome.
-	// Unenforced process-group pressure never invalidates; a real OOM still does.
-	if !pooledMemory(j) && (oomFailure || r.MemoryPeak.constrained() && r.MemoryPeak.Source != processGroupMemorySource) {
-		q.recordWorkOOM(j, r, oomFailure)
-	}
 	stageFailure := (j.Spec.Priority == "production" || plannedPriorityStop(j)) && !r.Success && !r.Interrupted
-	poolPressure := pooledMemory(j) && (j.Reason == memoryPressureCause || r.ExecutionCause != nil && r.ExecutionCause.Class == memoryPressureCause)
+	poolPressure := j.Reason == memoryPressureCause || r.ExecutionCause != nil && r.ExecutionCause.Class == memoryPressureCause
 	// Bridge cleanup-to-inventory telemetry with the same absolute bound as
 	// pending cleanup. Completion and heartbeats cannot renew planning credit.
 	if j.State == "stopping" && !r.ReleasePending && j.StopAt != nil {
@@ -2565,14 +2546,17 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 		if j.State == "queued" {
 			admissionRequeueOutcome(&outcome)
 		}
-	} else if oomFailure && pooledMemory(j) && memoryPools(j).LimitGB > 0 {
-		j.State, j.Reason = "failed", "command exceeded explicit memory limit"
-	} else if oomFailure && j.Spec.Needs.Memory == "auto" {
-		q.retryOOM(j)
-	} else if (j.Spec.Priority == "production" || plannedPriorityStop(j)) && (stageFailure || oomFailure) {
+
+	} else if oomFailure {
+		if pooledMemory(j) && memoryPools(j).LimitGB > 0 {
+			j.State, j.Reason = "failed", "command exceeded explicit memory limit"
+		} else if j.StartedAt != nil && (r.MemoryPeak != nil || poolPressure) {
+			q.requeueMemoryPressure(j)
+		} else {
+			j.State, j.Reason = "failed", "command failed: "+r.Error
+		}
+	} else if (j.Spec.Priority == "production" || plannedPriorityStop(j)) && stageFailure {
 		j.State, j.Reason = "failed", "command failed: "+r.Error
-	} else if oomFailure && j.Spec.extensionJob() {
-		q.retryOOM(j)
 	} else if r.ExtensionUnavailable && j.Spec.extensionJob() && j.StartedAt == nil && j.Extension != nil {
 		if m := q.s.Machines[r.Machine]; m != nil {
 			q.touchMachine(m.ID)
@@ -3482,11 +3466,6 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j.CPUFallbackFrom = selected.CPUFallbackFrom
 	j.MemoryEnvelope, j.MemoryFallback = selected.MemoryEnvelope, selected.MemoryFallback
 	j.Memory = selected.Memory
-	if e := j.MemoryEnvelope; !pooledMemory(j) && e != nil && e.LimitHostGB > 0 && e.ChargeHostGB == j.Spec.Needs.HostMemoryGB {
-		// Admission used the learned charge; the typed figure stays the limit.
-		j.Spec.Needs.HostMemoryGB = e.LimitHostGB
-	}
-	q.recordLearnedMemory(j, m)
 	if selected.Batch != nil {
 		j.Batch = selected.Batch
 	}
@@ -3569,7 +3548,6 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	if j.Spec.ephemeral() {
 		j.WorkerDataCleanup = &WorkerDataCleanup{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session, State: "pending", CheckedAt: q.clock.Now()}
 	}
-	q.claimMemoryExploration(j, m)
 	j.StorageEnvelope = q.storageEnvelope(j, m)
 	j.Reason = ""
 	if measured {

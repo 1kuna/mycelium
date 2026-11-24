@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
 	"time"
@@ -204,4 +205,81 @@ func (s *workerStore) recoverRSSCause(machine string) error {
 		return nil
 	}
 	return nil
+}
+
+type MemoryRoomDecision struct {
+	RoomGB           float64  `json:"room_gb"`
+	FloorGB          float64  `json:"floor_gb"`
+	AllowanceGB      float64  `json:"allowance_gb"`
+	CapacityGB       float64  `json:"capacity_gb"`
+	CapacitySource   string   `json:"capacity_source"`
+	ChargeGB         float64  `json:"charges_gb"`
+	PendingGB        float64  `json:"pending_gb"`
+	AvailableGB      *float64 `json:"available_gb,omitempty"`
+	ReserveGB        float64  `json:"reserve_gb"`
+	OwnGrowthGB      float64  `json:"own_growth_gb"`
+	HostLossGB       float64  `json:"host_loss_gb"`
+	LedgerReadFailed bool     `json:"ledger_read_failed,omitempty"`
+}
+
+func safeMemoryRoom(d *MemoryRoomDecision) *MemoryRoomDecision {
+	if d == nil || math.IsNaN(d.RoomGB) || math.IsInf(d.RoomGB, 0) {
+		return nil
+	}
+	for _, v := range []float64{d.FloorGB, d.AllowanceGB, d.CapacityGB, d.ChargeGB, d.PendingGB, d.ReserveGB, d.OwnGrowthGB, d.HostLossGB} {
+		if !validMemoryValue(v) {
+			return nil
+		}
+	}
+	if d.CapacitySource != "physical RAM" && d.CapacitySource != "host allowance" && d.CapacitySource != "unavailable" {
+		return nil
+	}
+	out := *d
+	if d.AvailableGB != nil {
+		if !validMemoryValue(*d.AvailableGB) {
+			return nil
+		}
+		v := *d.AvailableGB
+		out.AvailableGB = &v
+	}
+	return &out
+}
+
+const footprintGuardQuality = "owned_session_footprint"
+const metalFootprintGuardCapability = "metal_footprint_guard_v1"
+
+func (w Worker) reportsProcessSample(j Job) bool {
+	return w.processMemory != nil
+}
+
+func (w Worker) jobCeilingBytes(j Job) (int64, error) {
+	if pooledMemory(&j) {
+		return memoryBytes(memoryPools(&j).LimitGB)
+	}
+	if j.Spec.MemoryLimitGB != nil {
+		return memoryBytes(*j.Spec.MemoryLimitGB)
+	}
+	return 0, nil
+}
+
+type processResidentSample struct {
+	gb, growth, rate float64
+	at               time.Time
+	observed         bool
+}
+
+// Reuse the probe forecast without granting anonymous-resident credit to RSS.
+// Shared pages may be counted repeatedly: they can increase a charge, never
+// reduce live growth room. The actor ages this sample through the common path.
+func (p *process) currentProcessHostMemory() *CurrentHostMemory {
+	if p.custodian != nil {
+		return p.custodian.snapshot().Memory
+	}
+	s := p.rssMemory.Load()
+	if s == nil {
+		return nil
+	}
+	gb := s.gb
+	return &CurrentHostMemory{GrowthObserved: s.observed, GrowthRateGB: s.rate,
+		FootprintGB: &gb, GrowthGB: s.growth, sampledAt: s.at}
 }

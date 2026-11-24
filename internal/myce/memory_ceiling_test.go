@@ -328,7 +328,10 @@ func TestMemoryCeilingTierScores(t *testing.T) {
 						}
 					}()
 					j := recoveryJob(t, []string{"sh", "-c", `while [ ! -f "$1" ]; do sleep 0.01; done`, "sh", release})
-					j.Spec.Class, j.Spec.Priority, j.Spec.Needs.HostMemoryGB = class, "", 1
+					j.Spec.Class, j.Spec.Priority = class, ""
+					j.Spec.Needs = ResourceNeeds{CPUCores: 1, HostMemoryGB: 1, Platform: Platform{Required: []string{"cpu"}}}
+					limit := 1.0
+					j.Spec.MemoryLimitGB = &limit
 					w = workerWithPreparedCheckpoint(t, w, store, j)
 					p, err = startAfterFixtureInputs(t, w, store, j)
 					if err == nil {
@@ -576,7 +579,7 @@ func TestMemoryCeilingWorkerOOMBeforeExecApproval(t *testing.T) {
 			j.Spec.Resumable = false
 			j.Spec.Needs.Platform = Platform{Required: []string{"cpu"}}
 			j.Spec.Needs.MemoryGB = 0
-			j.Spec.Needs.HostMemoryGB = firstRunStartupGB
+			j.Spec.Needs.HostMemoryGB = minimumHostMemoryGB
 			j.Spec.Run.Env = map[string]string{"MYCE_TEST_EXIT_BEFORE_COMMAND_READY": "1"}
 			deadline := w.Clock.Now().Add(testWaitTimeout)
 			j.Spec.StartBy = &deadline

@@ -417,46 +417,6 @@ func TestExtensionQualificationSmokeFailureClearsPriorSuccess(t *testing.T) {
 // Same-host RAM evidence can fit a sibling even when cross-machine transfer
 // would not. An oversized learned estimate waits for evidence or capacity;
 // neither case can bypass live admission.
-func TestExtensionCheckSiblingMemoryCapacity(t *testing.T) {
-	for _, peak := range []float64{13.08499526977539, 25} {
-		t.Run(fmt.Sprint(peak), func(t *testing.T) {
-			q, _, m, s := floorFreeFitFixture(t, 24)
-			sibling := m.Devices[0]
-			sibling.ID, sibling.Identity = "1", "sibling-card"
-			sibling.ExtensionFingerprint = "sibling-backend-v1"
-			m.Devices = append(m.Devices, sibling)
-			m.HostAvailableMemoryGB = 1
-			machineCheck(t, q, m)
-			for id, p := range q.s.WorkObservations {
-				delete(q.s.WorkObservations, id)
-				p.Key.Component, p.Key.Hardware = "1", "sibling-card"
-				p.Key.Fingerprint, p.Key.Check = sibling.ExtensionFingerprint, true // a sibling card's check
-				p.MemoryPeak.HostGB, p.MemoryPeak.CgroupGB = &peak, &peak
-				q.s.WorkObservations[identityHash(p.Key)] = p
-			}
-			// Physical capacity exceeds the operator's allowance, and live occupancy
-			// is temporary. Qualification must compare against the whole allowance.
-			s.Workload = nil
-			s.ExtensionDigest = registeredExtension(t, q, s.Extension).Digest
-			s.RequireTarget = true
-			s.AllowedMachines = []string{m.ID}
-			s.Needs = ResourceNeeds{Memory: "auto", GPU: &GPUSelection{Devices: []string{"0"}}}
-			s.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
-			j, err := q.Submit(s)
-			if err != nil || j == nil || j.State != "queued" {
-				t.Fatalf("learned sizing rejected a check: err=%v", err)
-			}
-			if peak+minimumHostMemoryGB > 24 {
-				if why := memoryEvidenceReason(t, q, j); !strings.HasPrefix(why, memoryEvidenceRecovering+":") || !strings.Contains(why, "exceeds allowance 24 GiB") {
-					t.Fatalf("oversized sibling estimate lost its typed wait: %q", why)
-				}
-			}
-			if got := assignedJob(machineCheck(t, q, m)); got != nil {
-				t.Fatalf("check bypassed live admission: %s", got.ID)
-			}
-		})
-	}
-}
 
 func TestExtensionCheckProductionHoldStillQueues(t *testing.T) {
 	q, clock, m, s := floorFreeFitFixture(t, 24)

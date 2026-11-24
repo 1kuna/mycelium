@@ -245,11 +245,7 @@ func (q *Queue) hasQualifiedTarget(j *Job) bool {
 }
 
 func (q *Queue) qualifiedTarget(j *Job) (bool, string) {
-	ok, reason := q.qualifiedTargetSized(j)
-	if !ok && q.memorySizingRecoverable(j) {
-		return true, ""
-	}
-	return ok, reason
+	return q.qualifiedTargetSized(j)
 }
 
 func (q *Queue) qualifiedTargetSized(j *Job) (bool, string) {
@@ -285,7 +281,7 @@ func (q *Queue) qualifiedTargetMemory(j *Job, sizeMemory bool) (bool, string) {
 		return true, ""
 	}
 	if best != nil && (best.first == "host memory" || best.first == "GPU memory" || best.first == "memory envelope") {
-		reason += "; " + memoryCapacityRemedies
+		reason += "; " + "Choose another machine or check the requested memory."
 	}
 	return false, reason
 }
@@ -300,12 +296,7 @@ func (q *Queue) evaluateTargets(j *Job, visit func(fit targetFit, candidate *Job
 func (q *Queue) evaluateTargetsMemory(j *Job, sizeMemory bool, visit func(fit targetFit, candidate *Job, m *Machine) bool) {
 	// Resolve envelopes with the planner's code, but without temporary
 	// occupancy or release holds. Retain observations for learned needs.
-	capacity := Queue{clock: q.clock, s: q.s, memoryOrigin: q, memoryPlanning: newMemoryPlanningCache()}
-	if q.memoryPlanning != nil {
-		// Retained lower bounds depend on origin history and identity, not
-		// the temporary capacity fields removed by this view.
-		capacity.memoryPlanning.history = q.memoryPlanning.history
-	}
+	capacity := Queue{clock: q.clock, s: q.s, memoryEvidence: q.memoryEvidence, memoryPlanning: newMemoryPlanningCache()}
 	capacity.s.Jobs, capacity.s.ModelSlots, capacity.s.HostReleases = nil, nil, nil
 	for _, m := range q.s.Machines {
 		if !q.jobAllowsMachine(j, m.ID) {

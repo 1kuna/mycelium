@@ -59,7 +59,10 @@ func recoveryWorker(t *testing.T) Worker {
 		handler.ServeHTTP(w, r)
 		return w.Result(), nil
 	})}
-	return Worker{EnvironmentLimit: 1 << 20, Client: Client{URL: "http://worker-test.invalid", HTTP: client}, Machine: machine("recovery-worker", "fake"), StateDir: newTestStateRoot(t), Interval: time.Millisecond, Clock: RealClock{}}
+	return Worker{EnvironmentLimit: 1 << 20,
+		HostMemorySource: func(context.Context) (float64, error) { return 64, nil },
+		MemorySource:     func(context.Context) (float64, error) { return 8, nil },
+		Client:           Client{URL: "http://worker-test.invalid", HTTP: client}, Machine: machine("recovery-worker", "fake"), StateDir: newTestStateRoot(t), Interval: time.Millisecond, Clock: RealClock{}}
 }
 func recoveryJob(t *testing.T, command []string) Job {
 	t.Helper()

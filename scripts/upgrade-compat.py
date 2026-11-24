@@ -403,14 +403,14 @@ def queue_rollback(candidate, previous, scratch):
     with sqlite3.connect(database) as db:
         marker, = db.execute("SELECT data FROM queue WHERE id=1").fetchone()
         assert json.loads(marker) == "myce-normalized-state-v3", "rollback seed did not write v3"
-    with process(previous[0], "queue-rollback-open", root) as child:
+    with process(previous[0], "queue-rollback-previous", root) as child:
         if child.wait(timeout=20):
             raise RuntimeError("previous release did not preserve IDs, decisions and custody")
     # A rollback remains reversible: current startup can consume previous writes.
     with process(candidate[0], "queue-rollback-open", root) as child:
         if child.wait(timeout=20):
             raise RuntimeError("re-upgrade did not preserve IDs, decisions and custody")
-    print("upgrade-compat: PASS candidate v3 -> exact previous Open -> current Open; queued/paused/running/terminal IDs and pending custody intact", flush=True)
+    print("upgrade-compat: PASS candidate v3 -> exact previous read/write -> current reopen; job states, pending custody and untouched explicit RAM limit intact", flush=True)
 
 
 def inspect_queue(binary, root):

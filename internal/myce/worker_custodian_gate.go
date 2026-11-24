@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"errors"
+	"math"
 	"strconv"
 	"time"
 )
@@ -94,5 +95,18 @@ func (w Worker) serveCustodianGate(ctx context.Context, g *attemptCustodian, j J
 	}
 	if ctx.Err() == nil && (w.serviceStop == nil || w.serviceStop.Err() == nil) {
 		_ = saveWorkerJSON(g.dir, custodianName(g.id, "gate-receipt"), receipt)
+	}
+}
+
+func custodianHostCharges(dir, id string) func(attemptKey) (float64, float64) {
+	return func(attemptKey) (float64, float64) {
+		var ledger struct {
+			Charge  *float64 `json:"charge"`
+			Pending *float64 `json:"pending"`
+		}
+		if readCustodianJSON(dir, custodianName(id, "ledger"), &ledger) != nil || ledger.Charge == nil || ledger.Pending == nil || !validMemoryValue(*ledger.Charge) || !validMemoryValue(*ledger.Pending) {
+			return math.NaN(), math.NaN() // Unknown, never fabricated full-allowance charges.
+		}
+		return *ledger.Charge, *ledger.Pending
 	}
 }

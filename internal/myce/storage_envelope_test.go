@@ -187,8 +187,8 @@ func TestStorageEnvelopeStatusAndUngatedWriter(t *testing.T) {
 	}
 	before := onlyStorage(t, q)
 	// The same runtime validity marker protects the new accepted writer too.
-	q.recordStorageNeeds(eligibleMemorySample{})
-	q.recordStorageNeeds(eligibleMemorySample{job: q.s.Jobs[first.ID], result: r, storageKey: first.StorageEnvelope.Key})
+	q.recordStorageNeeds(eligibleStorageSample{})
+	q.recordStorageNeeds(eligibleStorageSample{job: q.s.Jobs[first.ID], result: r, storageKey: first.StorageEnvelope.Key})
 	if !reflect.DeepEqual(before, onlyStorage(t, q)) {
 		t.Fatal("ungated storage writer accepted evidence")
 	}

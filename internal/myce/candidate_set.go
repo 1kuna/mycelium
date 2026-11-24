@@ -51,19 +51,6 @@ func (q *Queue) buildCandidates(m *Machine, scans ...*placementScan) *candidateS
 			q.endAdmissionCandidate(j, m, nil, previousDecision, previousJob)
 			continue
 		}
-		if j.State == "queued" && plainMemoryWork(j.Spec) && j.Spec.FanOut == nil {
-			if scan.memoryIdentities == nil {
-				scan.memoryIdentities = map[*Job]string{}
-			}
-			identity, ok := scan.memoryIdentities[j]
-			if !ok {
-				identity = profileMemoryIdentity(j)
-				scan.memoryIdentities[j] = identity
-			}
-			copy := *j
-			copy.planningMemoryIdentity = identity
-			j = &copy
-		}
 		// A host fence can only withhold an otherwise fitting candidate. Fully
 		// occupied targets need no global backlog/target memory-sizing pass.
 		candidate := q.batchCandidateWithResources(j, m, s.resources, scan)

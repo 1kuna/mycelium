@@ -298,7 +298,6 @@ func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[ba
 	variants := extensionJobs(j, m, true)
 	q.admissionPass(j, m, len(variants) > 0, predicateExtensionCandidates)
 	for _, candidate := range variants {
-		q.applyLearnedNeeds(candidate)
 		// These final eligibility predicates cannot be changed by memory
 		// sizing. Reject incompatible routes before reducing their evidence;
 		// live room, reclaim, fairness and all remaining checks still follow.
@@ -342,8 +341,6 @@ type batchResourceKey struct {
 	gpu, host                float64
 	cores                    int
 	shares                   bool
-	xpuSharing               bool
-	censoredOOMRecovery      bool
 }
 type batchResourceRoom struct {
 	machine  Machine
@@ -358,14 +355,10 @@ func resourceKey(j *Job) batchResourceKey {
 	if j.Spec.Resident != nil || len(j.LaunchCapacityWait) > 0 || len(j.Spec.RequirementReasons) > 0 || len(j.Extensions) > 0 {
 		id = j.ID
 	}
-	return batchResourceKey{j.Spec.Project, j.Spec.Class, j.Spec.Priority, id, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Needs.cores(), sharesDevice(j), fanOutDeviceSharing(j), j.MemoryCensoredOOMGrowthGB != nil}
+	return batchResourceKey{j.Spec.Project, j.Spec.Class, j.Spec.Priority, id, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Needs.cores(), sharesDevice(j)}
 }
 
 func (q *Queue) batchResourcesFitWithScan(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) bool {
-	// This hold belongs to the exact yielded job, before any vector-only cache.
-	if !q.admissionHold(j, m, q.memoryYieldHold(j, m), predicateReleasePlan) {
-		return false
-	}
 	if !q.admissionHold(j, m, q.variantParityHold(j, m), predicateVariantParity) {
 		return false
 	}
@@ -733,9 +726,7 @@ func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
 	if h := q.memoryPoolHold(j, machines); h != nil {
 		return h
 	}
-	if h := q.memoryWait(j, machines); h != nil {
-		return h
-	}
+
 	if reason := q.hostBackfillWaitingReason(j, q.placementScan(scans...)); reason != "" {
 		if strings.HasPrefix(reason, memoryWaitReason+":") {
 			return newHold(memoryWaitReason, reason)

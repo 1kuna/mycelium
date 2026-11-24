@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 func TestAttemptMemoryDeviceQueryInheritedPipe(t *testing.T) {
@@ -85,84 +84,6 @@ func (f *nonreclaimableSamplingFS) ReadFile(path string) ([]byte, error) {
 	return b, err
 }
 
-func TestAttemptMemoryNonreclaimableRequiresCompleteSampling(t *testing.T) {
-	for _, missing := range []bool{false, true} {
-		t.Run(strconv.FormatBool(missing), func(t *testing.T) {
-			a, err := fakeCeilings(t).create("attempt-complete", 16<<30, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(a.path, "memory.stat"), []byte("anon 4021977088\nkernel 17985536\nshmem 4096\nunevictable 0\nfile_dirty 0\nfile_writeback 0\n"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			f := &nonreclaimableSamplingFS{memoryFS: a.fs, sampled: make(chan struct{}), missing: missing}
-			a.fs = f
-			spec := cpuSpec(1, 0)
-			spec.Needs.Platform = Platform{Required: []string{"cpu"}}
-			finish := (Worker{}).observeAttemptMemory(a, Job{Spec: spec}, nil)
-			defer finish()
-			select {
-			case <-f.sampled:
-			case <-time.After(testWaitTimeout):
-				t.Fatal("host sampler did not produce a sample")
-			}
-			p := finish()
-			if (p.NonreclaimableGB == nil) != missing {
-				t.Fatalf("complete=%v peak=%+v", !missing, p)
-			}
-			if !missing && *p.NonreclaimableGB != float64(4021977088+17985536+4096)/(1<<30) {
-				t.Fatal("wrong sampled peak")
-			}
-		})
-	}
-}
-
-func TestAttemptMemoryCachePressureAndMemberCaps(t *testing.T) {
-	for _, tc := range []struct {
-		name                string
-		resident, cap       int64
-		member, constrained bool
-	}{
-		{"file-backed pressure despite resident headroom", 8 << 30, 10 << 30, false, true},
-		{"near parent ceiling", 19 << 29, 10 << 30, false, true},
-		{"binding member cap", 19 << 29, 10 << 30, true, true},
-		{"member file-backed pressure", 2 << 30, 10 << 30, true, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			a, err := fakeCeilings(t).create("attempt-parent", tc.cap, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			observed := a
-			if tc.member {
-				a.bytes = 40 << 30
-				children, err := a.children()
-				if err != nil {
-					t.Fatal(err)
-				}
-				observed, err = children.create("main", tc.cap, 0)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(a.path, "memory.stat"), []byte("anon 10737418240\nkernel 0\nshmem 0\n"), 0600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			for name, value := range map[string]string{
-				"memory.stat":   "anon " + strconv.FormatInt(tc.resident, 10) + "\nkernel 0\nshmem 0\n",
-				"memory.events": "max 559\noom 0\noom_kill 0\n",
-			} {
-				if err := os.WriteFile(filepath.Join(observed.path, name), []byte(value), 0600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if p := a.peak(); p == nil || p.Constrained != tc.constrained {
-				t.Fatalf("resident pressure misclassified: %+v; want constrained=%v", p, tc.constrained)
-			}
-		})
-	}
-}
-
 func TestAttemptMemoryDeviceAccounting(t *testing.T) {
 	peak, foreign, err := cudaAttemptMemoryReading([]byte("GPU-one, 7, 2048\nGPU-one, 9, 4096\nGPU-two, 7, 8192\n"), "GPU-one", map[int]bool{7: true}, nil)
 	if err != nil || peak != 2 || !foreign {
@@ -222,42 +143,5 @@ func TestAttemptMemoryDeviceUnavailable(t *testing.T) {
 	}
 	if p := sampledMemoryPeak(nil, &AttemptMemoryPeak{DeviceUnavailable: "private-command-output"}); p.DeviceUnavailable != "" {
 		t.Fatal("published an unrecognized device diagnostic", p)
-	}
-}
-
-func TestAttemptMemoryNonreclaimableRetainsLockedPages(t *testing.T) {
-	a, err := fakeCeilings(t).create("attempt-cache", 16<<30, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// A live-shaped sample: 3.746 GiB anon, 1.103 GiB file, 17 MiB
-	// kernel. Include locked file pages and shmem without counting file cache.
-	for name, value := range map[string]string{
-		"memory.stat":   "anon 4021977088\nfile 1183789056\nkernel 17985536\nshmem 4096\nunevictable 67108864\nfile_dirty 134217728\nfile_writeback 33554432\nslab_reclaimable 3814504\n",
-		"memory.events": "max 0\nhigh 0\noom 0\noom_kill 0\noom_group_kill 0\n",
-	} {
-		if err := os.WriteFile(filepath.Join(a.path, name), []byte(value), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	p := a.peak()
-	want := float64(4021977088+17985536+4096+67108864+134217728+33554432) / (1 << 30)
-	if p.nonreclaimableSampleGB == nil || *p.nonreclaimableSampleGB != want || p.constrained() {
-		t.Fatalf("bad non-reclaimable measurement: %+v", p)
-	}
-	if p.NonreclaimableGB != nil {
-		t.Fatal("raw/release-only counter read claimed a complete peak")
-	}
-	if err := os.WriteFile(filepath.Join(a.path, "memory.stat"), []byte("anon 4021977088\nkernel 17985536\nshmem 4096\nunevictable 0\nfile_dirty 0\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if p := a.peak(); p.nonreclaimableSampleGB != nil {
-		t.Fatal("missing writeback counter became zero")
-	}
-	if err := os.WriteFile(filepath.Join(a.path, "memory.stat"), []byte("anon 4021977088\nkernel 17985536\nshmem 4096\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if p := a.peak(); p.nonreclaimableSampleGB != nil {
-		t.Fatalf("missing locked-page counter became zero: %+v", p)
 	}
 }

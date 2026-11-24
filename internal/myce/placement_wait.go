@@ -10,9 +10,6 @@ import (
 // resolved envelopes as placement. Network and preparation failures are useful
 // diagnostics; unrelated platforms, devices and qualifications are not.
 func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
-	if why := q.memoryEvidenceWaitingReason(j); why != "" {
-		return newHold(memoryEvidenceRecovering, why)
-	}
 	var reasons []string
 	var ephemeralRefusals []string
 	targets := 0
@@ -74,8 +71,8 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 			if candidate.MemoryEnvelope != nil && candidate.MemoryEnvelope.Refusal != "" {
 				block("memory", targetFitReason("memory envelope", candidate, m))
 			}
-			if h := q.memoryYieldHold(candidate, m); h != nil {
-				block("memory", h.Detail)
+			if hold := workerMemoryHold(m); hold != nil {
+				block(hold.Kind, hold.Reason)
 			}
 			// A reservation cannot explain a job that cannot use this target's
 			// software or network. Preserve those actionable reasons instead.
@@ -117,7 +114,7 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 				if why != "host memory" {
 					detail += "; " + why
 				}
-				block("memory", detail)
+				block(memoryWaitReason, detail)
 			}
 			if len(blocked) == 0 {
 				return nil // Another target can serve it; retain ordinary queue ordering.
@@ -193,7 +190,6 @@ func (q *Queue) cardWaitingReason(j *Job, m *Machine) string {
 // queued for days. Capacity, preparation, qualification the queue runs itself,
 // dependencies and holds all stay waits. Runs once per queue tick.
 func (q *Queue) maintainDeadEndWaits() {
-	q.releaseUnusedMemoryExplorations()
 	now := q.clock.Now()
 	for _, j := range q.liveJobs() {
 		// A fan-out parent is the placement unit until its first piece exists.
@@ -218,17 +214,11 @@ func (q *Queue) maintainDeadEndWaits() {
 const deadEndWait = "dead_end_wait"
 
 func (q *Queue) deadEndReason(j *Job) (string, []NativeCheckFailure) {
-	if j.Spec.ExtensionCheck != nil {
-		return q.checkMemoryCapacityDeadEnd(j), nil
-	}
-	if why := q.oomCapacityDeadEnd(j); why != "" {
-		return why, nil
-	}
 	if why, failures := q.extensionDeadEnd(j); why != "" {
 		return why, failures
 	}
 	if why := q.environmentDeadEnd(j); why != "" {
 		return why, nil
 	}
-	return q.memorySizingDeadEnd(j), nil
+	return "", nil
 }

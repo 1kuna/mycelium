@@ -53,24 +53,18 @@ type memoryCeilings struct {
 	clock           Clock
 }
 type memoryAttempt struct {
-	oomScore         int
-	accountingRoots  []string
-	currentMu        sync.Mutex
-	currentGrowth    memoryGrowth
-	fs               memoryFS
-	path             string
-	bytes            int64
-	pageSize         int
-	hostBaseline     *gpuHostState // Captured while the attempt cgroup is still empty.
-	pressureStart    time.Time
-	pressureBaseline *uint64
-	// Resident memory of every attempt under the delegated root, read with
-	// hostBaseline, so host drops outside Mycelium's cgroups are attributable.
-	rootBaseline *float64
-	clock        Clock
+	oomScore        int
+	accountingRoots []string
+	fs              memoryFS
+	path            string
+	bytes           int64
+	pageSize        int
+	clock           Clock
 	// Latest per-process device sample, for live planning credit (#596).
 	device atomic.Pointer[hostMemorySample]
 }
+
+const cgroupMemoryEnforcement = "memory ceilings enforced (cgroup v2)"
 
 const jointMemoryCapability = "joint_memory_v1"
 
@@ -263,24 +257,7 @@ func (c *memoryCeilings) createAttempt(id string, bytes, swap int64, account boo
 			return nil, errors.New("memory ceiling write did not take effect")
 		}
 	}
-	// Baselines precede every payload/sidecar launch. Exclude baseline-read
-	// overhead from the denominator, conservatively overcounting stalls if
-	// those reads themselves stall. All elapsed decisions use the worker Clock.
 	a.clock = c.clock
-	if a.clock == nil {
-		a.clock = RealClock{}
-	}
-	a.hostBaseline, _ = readGPUHostState(c.fs)
-	if gb, ok := a.accountingResidentGB(); ok {
-		a.rootBaseline = &gb
-	}
-	if b, err := c.fs.ReadFile(filepath.Join(a.path, "memory.pressure")); err == nil {
-		_, avgErr := sharedMemoryPSI(b)
-		if total, err := memoryPSITotal(b); err == nil && avgErr == nil {
-			a.pressureBaseline = &total
-		}
-	}
-	a.pressureStart = a.clock.Now()
 	return a, nil
 }
 func (a *memoryAttempt) attach(pid int) error {

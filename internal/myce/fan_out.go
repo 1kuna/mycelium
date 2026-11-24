@@ -218,7 +218,6 @@ func (q *Queue) fanOutCandidateWithResources(j *Job, m *Machine, resources map[b
 	candidates, _ := extensionCandidates(j, m, true, true)
 	for _, candidate := range candidates {
 		candidate.Spec.Args = append(slices.Clone(candidate.Spec.Args), j.Spec.FanOut.Pieces[j.FanOut.Next].Args...)
-		q.applyLearnedNeeds(candidate)
 		candidate = q.memoryCandidateOwned(candidate, m)
 		if q.capReasonFor(candidate, m) == "" && q.batchResourcesFitWithScan(candidate, m, resources) {
 			candidate.Spec.FanOut = j.Spec.FanOut

@@ -381,8 +381,9 @@ freeze work that had memory to run. This design sets no per-job
 `memory.high`. A slice-level `memory.high` just under the slice's `memory.max`
 is a possible later refinement and is not part of this proposal.
 
-**Hosts where the slice ceiling is unavailable** (older service units outside
-the slice; `myce dev` foreground workers) use the sampled path, as macOS does.
+Linux workers without a confirmed slice ceiling refuse fresh assignments.
+Darwin and the fake development runner have admission paths for their local
+memory observations.
 
 **Two open issues are prerequisites on Linux.** Workers installed by earlier
 releases sit outside the slice and need a supported unit migration (#1771).
@@ -576,55 +577,29 @@ checked at implementation.
 
 ## 4. Migration
 
-Queue state and learned evidence persist in SQLite, production runs twice a
-week, and only the adjacent release interoperates (MY-42). Preserve exact
-attempt custody and existing observations during rollout. The approved rollout
-uses quick, targeted and replay evidence in place of the original extended
-shadow window described below.
+Upgrade workers first and the queue host last. The new queue gates fresh
+offers on `pooled_memory_v1` and reports `worker_release_floor` for an older
+worker. On Linux, it also requires a confirmed positive slice ceiling.
+Workers without one report `memory_containment_unavailable`. Darwin uses
+sampled pressure protection. The fake inventory development runner supports
+laptop testing.
 
-The implementation projects legacy peaks into a separate `memory_evidence`
-table. It retains the `myce-normalized-state-v3` marker and legacy observation
-rows. During an adjacent-release rollback, keep pooled workers in place while
-their running attempts settle. The old queue reads the persisted envelope and
-custody, and new pooled offers require the new queue. A subsequent upgrade
-recovers the separately stored pooled evidence. Linux workers without verified
-slice containment continue using the legacy assignment contract.
+During the workers-first window, new workers interpret r6.35 envelopes as
+soft estimates for fresh assignments. Running attempts retain their original
+cgroup and exact execution identity. The new queue accepts their existing
+reports, results and release acknowledgements. The old envelope remains
+readable during the adjacent release.
 
-The original staging plan proposed a `memory_model` field in the durable queue policy (revision CAS, like
-`learned_memory` today) takes `legacy`, `shadow` or `pooled`, with a per-tier
-override. Workers advertise a `pooled_memory_v1` capability. A worker without
-it keeps legacy envelopes, so a mixed fleet is safe.
+Startup projects retained observations into a separate SQLite
+`memory_evidence` table. Its projection marker and rows commit together.
+The queue retains the `myce-normalized-state-v3` marker and existing
+observation rows. r6.35 can reopen the upgraded database and write ordinary
+queue state. It ignores the new explicit RAM limit. Rewriting that job from
+r6.35 can discard the field. A later upgrade reads the independent evidence
+table again.
 
-1. **Project the evidence. No behaviour change.** A re-runnable projection
-   reads the existing observation rows and writes the new store (identity
-   levels, platform family, peak, clean or limited). Old rows are not
-   rewritten. The 944 rows discarded for a driver fingerprint change become
-   usable again.
-2. **Shadow. No behaviour change.** With `shadow`, the queue computes the new
-   estimate beside every legacy envelope and records both on the job. At
-   completion it records the peak. Status reports, per platform family: the
-   share of runs within the new `charge`, new and legacy charged GiB per GiB
-   used, and how often each launch check would have refused. Exit when the
-   report covers every platform family in use and two production windows, and
-   coverage meets `c` within sampling error.
-3. **Pooled for non-production tiers, host by host.** A host qualifies when
-   its worker advertises the capability and, on Linux, its slice ceiling is
-   confirmed and tier scoring works unprivileged (#1771, #1762). A Linux host
-   that has not reached that state uses the sampled path or stays on legacy.
-   Attempts already running keep the containment they started with;
-   in the room formula a legacy attempt's `held` is its envelope. Production
-   stays on legacy.
-4. **Pooled for production**, after a production window in which shadow shows
-   no production job outside its charge-plus-room and no memory wait caused
-   by a lower tier.
-5. **Delete** the legacy code, wire fields and old rows once every
-   installation and the production database are past the adjacent-release
-   floor (MY-42).
-
-Rollback through step 4 is setting the policy back. No data conversion is
-involved, because legacy evidence is untouched until step 5. Worker upgrades
-use live takeover as now (MY-55). Fixes to legacy paths that are still live,
-such as #1969 and #1974, keep landing until step 5.
+The rollout uses quick, targeted tests and incident replays. Native acceptance
+runs after deployment. [Maintainer decisions](DECISIONS.md)
 
 ## 5. Validation
 
@@ -649,7 +624,7 @@ one table case.
 | Shortage | Two experiment jobs and one production job; one experiment passes its charge; available falls | That experiment stops with `memory_pressure`, no retry charge, and its floor doubles; production and the innocent job are untouched |
 | Kernel backstop | A slice OOM event from the fake filesystem | The lowest tier is killed as a unit and requeued through the same path |
 | Runaway | A job that doubles until no pool fits | Fails with the typed capacity reason after at most `log₂` attempts |
-| Mixed fleet | One legacy and one pooled worker | Legacy keeps envelopes; neither over-admits |
+| Adjacent release | Running old envelope, old and new worker reports | The old attempt retains custody and completes. Fresh offers require the new worker. A new worker reads an r6.35 offer as an estimate. |
 
 ### 5.2 Estimator replay over retained evidence
 
@@ -679,8 +654,8 @@ Limits of this replay:
 
 Native acceptance is separately authorized, as the approved design requires.
 
-- **Shadow report** (step 2): coverage meets `c`; new charged ÷ used is below
-  legacy on the same jobs.
+- **Takeover:** a detached attempt keeps its execution key and cgroup across a
+  worker upgrade. Completion, output custody and release settle once.
 - **Linux cgroup host:** a non-production test job that outgrows its estimate
   is not killed while the pool has room. Under induced shortage the stop order
   holds. With the worker paused, the kernel kills the lowest tier first and

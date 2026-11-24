@@ -73,7 +73,6 @@ func TestLastDurationIdentityFencesAndRestart(t *testing.T) {
 	q, clock, m, _, s := lastDurationFixture(t)
 	first := teachDuration(t, q, clock, m, s, 2*time.Second)
 	base := &Job{Spec: first.Spec, State: "queued"}
-	q.applyLearnedNeeds(base)
 	if e, ok := q.estimateCompletion(base, q.s.Machines[m.ID]); !ok || e.seconds != 2 {
 		t.Fatal("missing last accepted duration", e, ok)
 	}

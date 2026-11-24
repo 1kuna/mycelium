@@ -153,7 +153,6 @@ func (s *submissionAdviceSnapshot) planner(ctx context.Context) (*Queue, error) 
 		return nil, err
 	}
 	v.memoryPlanning = newMemoryPlanningCache()
-	v.memoryObservationIndex = v.memoryObservationCatalog()
 	v.observationScan = v.placementScan()
 	v.observationScan.observationOwner = v
 	v.observationScan.memory = v.memoryPlanning

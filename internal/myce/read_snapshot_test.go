@@ -303,7 +303,6 @@ func BenchmarkReadStages(b *testing.B) {
 								if mode == "published" {
 									v.memoryPlanning = newMemoryPlanningCache()
 								}
-								v.memoryObservationIndex = v.memoryObservationCatalog()
 								if mode == "published" {
 									v.observationScan = v.placementScan()
 									v.observationScan.observationOwner = v

@@ -279,7 +279,6 @@ func (q *Queue) maintainEvidence(ctx context.Context) error {
 						q.touchCatalog("work_observations/" + id)
 						delete(q.s.WorkObservations, id)
 						q.evidenceGeneration++
-						q.memoryObservationIndex = nil
 					}
 					drift = true
 				}

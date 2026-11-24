@@ -286,7 +286,7 @@ func (q *Queue) yieldAlternative(v *Job, scarce string, loads map[string][]*Job)
 }
 
 func (q *Queue) scarceYieldPlan(d *Job, m *Machine) (*placementPlan, string) {
-	if d.MemoryCensoredOOMGrowthGB != nil || !finiteYieldJob(d) || len(d.Spec.RequirementReasons) == 0 && len(d.Extensions) == 0 {
+	if !finiteYieldJob(d) || len(d.Spec.RequirementReasons) == 0 && len(d.Extensions) == 0 {
 		return nil, ""
 	}
 	host, why := q.scarceDemandHost(d)

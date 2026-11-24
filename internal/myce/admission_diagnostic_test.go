@@ -166,8 +166,8 @@ func TestAdmissionDiagnosticRetained(t *testing.T) {
 func TestAdmissionDiagnosticUnavailableAndPrivacy(t *testing.T) {
 	w := Worker{Machine: machine("probe", "fake"), HostMemorySource: func(context.Context) (float64, error) { return 123, errors.New("private-secret/path") }}
 	j := Job{Spec: spec("experiment"), MemoryEnvelope: &JobMemoryEnvelope{Source: "private-secret/path", HostGB: 22, DeviceGB: 8}}
-	d := admissionDetail(w.checkHostRAM(8, 22), j)
-	if d == nil || d.Subcheck != "live_host_ram" || !d.Unavailable || d.Available != nil || d.Required != 22 {
+	d := admissionDetail(w.checkJobRAM(context.Background(), j), j)
+	if d == nil || d.Subcheck != memoryWaitReason || !d.Unavailable || d.Available != nil || d.Required != 22 {
 		t.Fatal("probe fabricated availability", d)
 	}
 	c := safeRuntimeCause(&RuntimeCause{Operation: "launch", Class: "resource_limit", Predicate: "memory_capacity", Admission: d, Reason: "private-secret/path"})

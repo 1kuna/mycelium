@@ -58,7 +58,12 @@ func memoryPlatform(target ExecutionTarget, unified bool) string {
 }
 
 func appendProjectedMemoryPeaks(out []memoryEvidencePoint, key memoryEvidenceKey, p memoryEvidencePoint, peak *AttemptMemoryPeak) []memoryEvidencePoint {
-	key.Pool, p.Peak = "ram", max(memoryValue(peak.HostGB), memoryValue(peak.CombinedHostGB))
+	key.Pool = "ram"
+	p.Peak = memoryValue(peak.HostGB)
+	if strings.HasSuffix(key.Platform, "/unified") && peak.DeviceSource != ownedFootprintSource {
+		p.Peak += memoryValue(peak.DeviceGB)
+	}
+	p.Peak = max(p.Peak, memoryValue(peak.CombinedHostGB))
 	if validRate(p.Peak) {
 		p.Key = key
 		out = append(out, p)

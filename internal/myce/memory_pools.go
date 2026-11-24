@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"runtime"
 	"slices"
 	"time"
 )
 
 const pooledMemoryCapability = "pooled_memory_v1"
+const sampledMemoryCapability = "sampled_memory_pool_v1"
 
 // MemoryPools is the resolved memory contract for one assignment. A unified
 // machine accounts for accelerator allocations in RAM and has no Card pool.
@@ -39,18 +39,53 @@ func workerUsesMemoryPools(m *Machine) bool {
 	return m != nil && slices.Contains(m.Capabilities, pooledMemoryCapability)
 }
 
-func (w Worker) supportsMemoryPools() bool {
-	if w.HostMemorySource == nil && w.hostRawMemorySource == nil {
-		return false
+const (
+	workerMemoryReleaseReason     = "worker_release_floor"
+	workerMemoryContainmentReason = "memory_containment_unavailable"
+)
+
+func workerMemoryHold(m *Machine) *Hold {
+	// In-process planner fixtures and synthetic targets lack a release report.
+	if m.Release == nil {
+		return nil
 	}
-	switch runtime.GOOS {
-	case "linux":
-		return w.memoryCeilings != nil && w.Machine.MemoryContainment != nil && w.Machine.MemoryContainment.State == "available"
-	case "darwin":
-		return w.processMemory != nil && w.processMemory.OwnedFootprint != nil
-	default:
-		return false
+	if !workerUsesMemoryPools(m) {
+		return newHold(workerMemoryReleaseReason, "worker must upgrade before receiving new work")
 	}
+	if !slices.Contains(m.Capabilities, sampledMemoryCapability) &&
+		(m.MemoryContainment == nil || m.MemoryContainment.State != "available" || m.HostMemoryBudgetGB <= 0) {
+		return newHold(workerMemoryContainmentReason, "worker must confirm its memory slice ceiling before receiving new work")
+	}
+	return nil
+}
+
+// The r6.35 queue supplies an envelope. Keep its figures as estimates for
+// newly offered work. Existing worker stores keep the cgroups they started in.
+func (w Worker) acceptMemoryOffer(j *Job) {
+	if j.Memory != nil {
+		return
+	}
+	if pooledMemory(j) {
+		pools := memoryPools(j)
+		j.Memory = &pools
+		return
+	}
+	m := localJobMachine(w, *j)
+	n := j.Spec.Needs
+	host, device := hostNeed(&m, n.MemoryGB, n.HostMemoryGB), n.MemoryGB
+	if e := j.MemoryEnvelope; e != nil {
+		host, device = max(host, e.HostGB), max(device, e.DeviceGB)
+	}
+	pools := MemoryPools{RAM: memoryPoolEstimate{TypicalGB: host, ChargeGB: host}, KeepGB: w.HostMemoryReserveGB}
+	if j.Spec.MemoryLimitGB != nil {
+		pools.LimitGB = *j.Spec.MemoryLimitGB
+	}
+	if !n.cpuOnly() && !m.UnifiedMemory {
+		perCard := device / float64(max(1, len(j.AllocatedDevices)))
+		card := memoryPoolEstimate{TypicalGB: perCard, ChargeGB: perCard}
+		pools.Card = &card
+	}
+	j.Memory = &pools
 }
 
 func pooledEvidenceKey(j *Job, m *Machine) memoryEvidenceKey {
@@ -92,8 +127,12 @@ func (q *Queue) pooledMemoryCandidate(j *Job, m *Machine) *Job {
 	if j.MemoryFallback == nil {
 		j.MemoryFallback = &SizeHint{HostMemoryGB: n.HostMemoryGB, MemoryGB: n.MemoryGB}
 	}
-	confidence := q.memoryEvidence.confidence()
-	pools := MemoryPools{RAM: q.memoryEvidence.estimate(key, hostHint, confidence), KeepGB: q.pooledKeep(m)}
+	evidence := q.memoryEvidence
+	if evidence == nil {
+		evidence = &memoryEvidence{}
+	}
+	confidence := evidence.confidence()
+	pools := MemoryPools{RAM: evidence.estimate(key, hostHint, confidence), KeepGB: q.pooledKeep(m)}
 	if j.Spec.MemoryLimitGB != nil {
 		pools.LimitGB = *j.Spec.MemoryLimitGB
 		pools.RAM.TypicalGB = min(pools.RAM.TypicalGB, pools.LimitGB)
@@ -103,7 +142,7 @@ func (q *Queue) pooledMemoryCandidate(j *Job, m *Machine) *Job {
 	if !n.cpuOnly() && !m.UnifiedMemory {
 		key.Pool = "card"
 		count := max(1, len(m.groupMembers))
-		card := q.memoryEvidence.estimate(key, deviceHint/float64(count), confidence)
+		card := evidence.estimate(key, deviceHint/float64(count), confidence)
 		pools.Card, n.MemoryGB = &card, card.ChargeGB*float64(count)
 	}
 	// The adjacent planner carries a positive scalar RAM declaration. Pool
@@ -150,7 +189,7 @@ func (q *Queue) addPoolBackfillHeads(scan *placementScan, demands []*Job, live m
 	byHost := map[string][]*hostBackfillDemand{}
 	for _, m := range scan.machines {
 		host := hostID(m)
-		if !workerUsesMemoryPools(m) || !live[m.ID] || scan.hostBackfill[host] != nil || q.preparationActive(m) || q.preparationStopping(m) {
+		if workerMemoryHold(m) != nil || !live[m.ID] || scan.hostBackfill[host] != nil || q.preparationActive(m) || q.preparationStopping(m) {
 			continue
 		}
 		capacity := q.qualificationCapacity(m)
@@ -214,7 +253,7 @@ func (q *Queue) memoryPoolHold(j *Job, machines map[string]*Machine) *Hold {
 	var blocked *Hold
 	for _, key := range slices.Sorted(maps.Keys(machines)) {
 		m := machines[key]
-		if !workerUsesMemoryPools(m) || !q.placementAllowed(j, m) {
+		if workerMemoryHold(m) != nil || !q.placementAllowed(j, m) {
 			continue
 		}
 		capacity := q.qualificationCapacity(m)
@@ -288,6 +327,9 @@ func pooledHostCharge(j *Job, m *Machine, sample hostMemorySample, now time.Time
 	}
 	current := pooledFootprint(sample, unifiedCUDA(m))
 	held = max(charge, sample.peakGB, current, retainedHostCharge(j))
+	if j.Memory != nil {
+		held = max(held, j.Memory.RAM.PeakGB)
+	}
 	if !sample.freshAt(now) {
 		current = 0
 	}
@@ -330,7 +372,13 @@ func (q *Queue) recordPoolEvidence(j *Job, r Result) {
 	limited := r.OutOfMemory || pressure || pooledSampleLimited(r.MemoryPeak)
 	points := appendProjectedMemoryPeaks(nil, key, memoryEvidencePoint{At: q.clock.Now(), Limited: limited}, r.MemoryPeak)
 	if j.Memory != nil {
-		retainPoolPeaks(j, memoryValue(r.MemoryPeak.HostGB), memoryValue(r.MemoryPeak.DeviceGB))
+		for _, point := range points {
+			if point.Key.Pool == "ram" {
+				retainPoolPeaks(j, point.Peak, 0)
+			} else {
+				retainPoolPeaks(j, 0, point.Peak)
+			}
+		}
 	}
 	if len(points) == 0 {
 		return
@@ -380,12 +428,21 @@ func (q *Queue) requeueMemoryPressure(j *Job) {
 			key := pooledEvidenceKey(j, m)
 			lower := e.exact[key].Lower
 			allowance := q.poolAllowance(m)
-			if allowance <= 0 || !workerUsesMemoryPools(m) || 2*lower <= allowance {
+			if workerMemoryHold(m) != nil {
+				continue
+			}
+			card := key
+			card.Pool = "card"
+			cardLower := 0.0
+			if !j.Spec.Needs.cpuOnly() && !m.UnifiedMemory {
+				cardLower = e.exact[card].Lower
+			}
+			if (allowance <= 0 || 2*lower <= allowance) && (cardLower == 0 || 2*cardLower <= m.TotalMemoryGB) {
 				q.requeue(j, memoryPressureCause, false)
 				return
 			}
 			routes++
-			largestLowerBound = max(largestLowerBound, lower)
+			largestLowerBound = max(largestLowerBound, lower, cardLower)
 		}
 	}
 	if routes == 0 {
@@ -393,7 +450,7 @@ func (q *Queue) requeueMemoryPressure(j *Job) {
 		return
 	}
 	j.State, j.DiagnosticCode = "failed", "memory_capacity"
-	j.Reason = fmt.Sprintf("memory_capacity: %.3f GiB measured under memory pressure, and the retry charge exceeds every eligible RAM pool", largestLowerBound)
+	j.Reason = fmt.Sprintf("memory_capacity: %.3f GiB measured under memory pressure, and the retry charge exceeds every eligible memory pool", largestLowerBound)
 }
 
 func checkMemoryPool(typical, available, keep, pending float64, known bool) error {
@@ -420,7 +477,7 @@ func localPooledAdmission(w Worker, jobs []Job, next Job, models []ModelReport, 
 		}
 		cores += j.Spec.Needs.cores()
 		owner := allocationMachine(&w.Machine, j.AllocatedDevices)
-		_, growth := memoryCharge(&j, owner, localJobHostNeed(w, j), w.hostMemorySamples[jobKey(j)], w.Clock.Now())
+		_, growth := pooledHostCharge(&j, owner, w.hostMemorySamples[jobKey(j)], w.Clock.Now(), localJobHostNeed(w, j))
 		pending += growth
 		if pools.RAM.Alone || pooledMemory(&j) && memoryPools(&j).RAM.Alone {
 			return checkMemoryPool(pools.RAM.TypicalGB, 0, 0, pending, false)
@@ -480,4 +537,56 @@ func localPooledAdmission(w Worker, jobs []Job, next Job, models []ModelReport, 
 		}
 	}
 	return nil
+}
+
+func memoryIntent(j *Job) *Job {
+	copy := *j
+	copy.MemoryEnvelope = nil
+	copy.Spec.Needs.Memory = ""
+	n := &copy.Spec.Needs
+	n.HostMemoryGB = max(n.HostMemoryGB, minimumHostMemoryGB, j.Spec.Run.MemoryGB)
+	for _, side := range j.Spec.Run.Sidecars {
+		n.HostMemoryGB = max(n.HostMemoryGB, side.MemoryGB)
+	}
+	n.MemoryGB = max(n.MemoryGB, j.DeviceMemoryFloorGB)
+	return &copy
+}
+
+const declareMemory = "declare positive memory_gb (host RAM for CPU work, GPU memory otherwise)"
+
+// A plain job that states no usable memory figure, judged on normalized needs
+// as Validate does. Partial figures stay hints, as with an explicit auto.
+func (s Spec) memoryOmitted() bool {
+	if normalizeResources(&s) != nil {
+		return false // Submission reports the invalid field itself.
+	}
+	n := s.Needs
+	return !s.extensionJob() && n.Memory == "" && (!n.cpuOnly() && n.MemoryGB <= 0 || n.cpuOnly() && n.HostMemoryGB <= 0)
+}
+
+// Omitted memory means auto: agents state needs, Mycelium learns footprints.
+func (q *Queue) defaultMemory(s *Spec) error {
+	if !s.memoryOmitted() {
+		return nil
+	}
+
+	s.Needs.Memory = "auto"
+	return nil
+}
+
+// Plain jobs share memory evidence by project and name, extension jobs by
+// extension and work type, across configurations. It only bounds a first run.
+func memoryFamily(j *Job) string {
+	if j.Spec.extensionJob() {
+		digest := ""
+		if j.Extension != nil {
+			digest = j.Extension.Digest
+		}
+		work := j.Spec.workType()
+		if j.Spec.ExtensionCheck != nil {
+			work = "check:" + work // checks and workloads learn separately (#618)
+		}
+		return identityHash(struct{ Extension, Work string }{digest, work})
+	}
+	return identityHash(struct{ Project, Name string }{j.Spec.Project, j.Spec.Name})
 }

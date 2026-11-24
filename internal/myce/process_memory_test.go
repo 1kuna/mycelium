@@ -3,63 +3,13 @@ package myce
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
-
-func TestProcessMemoryPressureEligibility(t *testing.T) {
-	for _, mode := range []string{"small swap", "large swap", "warning", "critical", "missing"} {
-		t.Run(mode, func(t *testing.T) {
-			var reads atomic.Int32
-			sampled := make(chan struct{}, 1)
-			w := Worker{processMemory: &processMemoryProbe{
-				Pressure: func(context.Context) (*gpuHostState, error) {
-					n := reads.Add(1)
-					p := &gpuHostState{available: 12, swapOut: 100, level: 1}
-					if n == 2 { // In-flight pressure, followed by a clean final read.
-						switch mode {
-						case "small swap":
-							p.swapOut += 23
-						case "large swap":
-							p.swapOut += uint64((128 << 20) / os.Getpagesize())
-						case "warning":
-							p.level = 2
-						case "critical":
-							p.level = 4
-						case "missing":
-							return nil, errors.New("unavailable")
-						}
-					}
-					return p, nil
-				},
-				Resident: func(map[int]bool) (uint64, int, error) {
-					select {
-					case sampled <- struct{}{}:
-					default:
-					}
-					return 2 << 30, 1, nil
-				},
-			}}
-			finish := w.observeProcessMemory(func() []int { return []int{7} })
-			defer finish()
-			select {
-			case <-sampled:
-			case <-time.After(testWaitTimeout):
-				t.Fatal("process sampler did not run")
-			}
-			p := finish()
-			if p == nil || p.HostGB == nil || *p.HostGB != 2 || p.constrained() != (mode != "small swap") {
-				t.Fatalf("process pressure eligibility %s: %+v", mode, p)
-			}
-		})
-	}
-}
 
 // A worker without cgroups (macOS) samples the attempt's process group.
 func processMemoryWorker(t *testing.T, resident uint64) (Worker, *[]map[int]bool) {
@@ -99,122 +49,8 @@ func runProcessMemoryAttempt(t *testing.T, w Worker) Result {
 	return d5Finish(t, p)
 }
 
-func TestProcessMemoryPeakTeachesComparableReruns(t *testing.T) {
-	w, groups := processMemoryWorker(t, 2<<30)
-	r := runProcessMemoryAttempt(t, w)
-	peak := r.MemoryPeak
-	if !r.Success || peak == nil || peak.HostGB == nil || *peak.HostGB != 2 || peak.Constrained || peak.Source != processGroupMemorySource || peak.Events != nil {
-		data, _ := json.Marshal(r)
-		t.Fatalf("darwin attempt did not record an unenforced process-group peak: %s", data)
-	}
-	if len(*groups) == 0 || len((*groups)[0]) != 1 {
-		t.Fatalf("sampler did not target the attempt process group: %+v", *groups)
-	}
-
-	q, clock, m, s := observationFixture(t)
-	m.MemoryEnforcement = darwinRSSGuardStatus
-	s.Needs.Memory = "auto"
-	first := startObservation(t, q, m, s)
-	if first.MemoryEnvelope.Source != physicalMemoryProbe {
-		t.Fatalf("first darwin auto run must explore: %+v", first.MemoryEnvelope)
-	}
-	clock.Advance(time.Second)
-	done := result(&first, true)
-	done.MemoryPeak = peak
-	if err := q.Complete(done); err != nil {
-		t.Fatal(err)
-	}
-	same := startObservation(t, q, m, s)
-	if same.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB || same.MemoryEnvelope.Source != "accepted peak + measured uncertainty" {
-		t.Fatalf("same-host rerun not sized from the peak: %+v", same.MemoryEnvelope)
-	}
-	clock.Advance(time.Second)
-	if err := q.Complete(result(&same, true)); err != nil {
-		t.Fatal(err)
-	}
-
-	// A new 16 GiB target with 4.6 GiB actually free gets a guarded
-	// first run floored at the source peak, without claiming a transfer bound.
-	m.ID, m.HostID, m.Session = "m4-16", "m4-16-host", "session-m4-16"
-	m.CapabilityProfile.SystemMemoryBytes = 16 << 30
-	m.HostAvailableMemoryGB = 4.6
-	e := first.Extensions[0]
-	report := newExtensionReport(e, &m, "extension:sample")
-	report.Setup, report.Qualified, report.CheckID = true, true, "m4-16-check"
-	m.ExtensionReports = []ExtensionReport{report}
-	check(t, q, m, nil)
-	if seed, why := q.exploratoryMemory(&first, q.s.Machines[m.ID]); why != "" || seed != firstRunStartupGB {
-		t.Fatalf("CPU startup charge used live free room: %v %q", seed, why)
-	}
-	s.AllowedMachines = []string{m.ID}
-	queued := submit(t, q, s)
-	next := check(t, q, m, nil).Job
-	if next == nil {
-		t.Fatalf("16 GiB host refused the learned estimate: %s", job(t, q, queued.ID).Reason)
-	}
-	if next.Spec.Needs.HostMemoryGB != 2 || next.MemoryEnvelope.Basis != "exploratory" {
-		t.Fatalf("uncalibrated same-family transfer lost its measured floor: %+v", next.MemoryEnvelope)
-	}
-	q.mu.Lock()
-	for id, point := range q.s.WorkObservations {
-		point.Key.Target.Arch = "arm64"
-		q.s.WorkObservations[id] = point
-	}
-	q.mu.Unlock()
-	if err := q.Complete(result(next, true)); err != nil {
-		t.Fatal(err)
-	}
-	check(t, q, m, nil)
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	probe := *q.s.Jobs[next.ID]
-	probe.State = "queued"
-	// The altered observation no longer matches its owner's identity. Without
-	// eligible history, this is a new guarded first run, not a transferable peak.
-	if other := q.memoryCandidate(&probe, q.s.Machines[m.ID]); other.Spec.Needs.HostMemoryGB != firstRunStartupGB || other.MemoryEnvelope.Basis != "exploratory" {
-		t.Fatalf("invalidated history did not fall back to small guarded startup: %+v", other.Spec.Needs)
-	}
-}
-
 // Host-wide macOS swap or pressure cannot say this attempt was constrained, so
 // a darwin attempt must never wipe peaks other hosts learned (#211 review).
-func TestProcessMemoryPeakNeverInvalidatesLearnedPeaks(t *testing.T) {
-	q, clock, linux, s := observationFixture(t)
-	s.Needs.Memory = "auto"
-	learn := startObservation(t, q, linux, s)
-	clock.Advance(time.Second)
-	done := result(&learn, true)
-	two := 2.0
-	done.MemoryPeak = &AttemptMemoryPeak{HostGB: &two}
-	if err := q.Complete(done); err != nil {
-		t.Fatal(err)
-	}
-
-	darwin := linux
-	darwin.ID, darwin.HostID, darwin.Session = "m4", "m4-host", "session-m4"
-	darwin.MemoryEnforcement = darwinRSSGuardStatus
-	report := newExtensionReport(learn.Extensions[0], &darwin, "extension:sample")
-	report.Setup, report.Qualified, report.CheckID = true, true, "m4-check"
-	darwin.ExtensionReports = []ExtensionReport{report}
-	check(t, q, darwin, nil)
-	onDarwin := s
-	onDarwin.AllowedMachines = []string{darwin.ID}
-	squeezed := startObservation(t, q, darwin, onDarwin)
-	clock.Advance(time.Second)
-	done = result(&squeezed, true)
-	six := 6.0
-	done.MemoryPeak = &AttemptMemoryPeak{HostGB: &six, Source: processGroupMemorySource, Constrained: true}
-	if err := q.Complete(done); err != nil {
-		t.Fatal(err)
-	}
-
-	onLinux := s
-	onLinux.AllowedMachines = []string{linux.ID}
-	next := startObservation(t, q, linux, onLinux)
-	if next.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB || next.MemoryEnvelope.Source != "accepted peak + measured uncertainty" {
-		t.Fatalf("darwin attempt invalidated the Linux peak: %+v", next.MemoryEnvelope)
-	}
-}
 
 func TestProcessGroupResident(t *testing.T) {
 	out := []byte("  10   10  1024\n  11   10  2048\n  12   99  4096\n")

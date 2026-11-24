@@ -546,11 +546,9 @@ func TestFileReleaseAPIPlanRefusalNamesFailedCheck(t *testing.T) {
 	}
 	selection := releaseSelection(a, b)
 	q.mu.RLock()
-	revision := q.retainedMemoryRevision
 	_, err = q.fileReleaseMetadata(selection, true)
-	revisionChanged := q.retainedMemoryRevision != revision
 	q.mu.RUnlock()
-	if err != nil || revisionChanged {
+	if err != nil {
 		t.Fatalf("reading retained jobs must not invalidate queue state: %v", err)
 	}
 	p, err := plan(selection)

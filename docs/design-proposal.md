@@ -99,11 +99,10 @@ preemptions, each resumed batch, build or desired engine gets at least that grac
 of runtime before another priority stop. Strict higher tiers may still starve
 lower tiers before admission.
 
-Host RAM release planning considers signed reservation debt before deciding
-that demand cannot fit (MY-56). Existing lower-tier releases may repay that
-debt; no stopping attempt counts as free before exact release. Backfill cannot
-deepen ready production's RAM/CPU deficit, including across independent cards
-on one host. Compatible other hosts remain available.
+When a production charge fits beside existing production work, the planner
+can reclaim lower-tier memory. Free room reflects confirmed releases. The
+highest-ranked blocked job protects its charge on the host, leaving unused
+capacity for backfill. [Memory admission](design-memory-admission.md#24-admission)
 
 Each planned stop carries `priority_preemption`, exact demand/victim identity
 and policy match/revision. Stop intent never proves delivery or release.
@@ -187,12 +186,9 @@ host's scarcity vector and usable RAM, or why its value is unknown. Fake-clock
 inventory evidence establishes laptop behavior, not native fleet
 qualification. The explicit speed/deadline tradeoff is later work.
 
-Ready queued accelerator commands also protect their resolved host CPU/RAM
-vector against CPU backfill while a finite execution occupies their device.
-The existing capacity-accumulation planner chooses one target, leaves excess
-capacity usable and releases the fence when demand disappears. This predicts
-known queued demand from real executions, with no idle GPU core reservation.
-Running work keeps its stop contract and exact release still gates admission.
+The host's highest-ranked blocked job keeps a memory reservation. Backfill
+uses the surplus beyond its charge through the
+[pool reservation rule](design-memory-admission.md#211-backfill).
 
 ## Scarce-host yield
 <a id="amendment-scarce-host-yield-327-328-my-26"></a>
@@ -593,21 +589,9 @@ Agents state needs, and Mycelium learns memory from its own measurements
 (MY-31). Its limits are measured or physical (MY-34).
 
 [Memory admission from physical pools](design-memory-admission.md) specifies
-the estimates, containment, launch waits and backfill rule for workers that
-advertise pooled memory support. The earlier envelope rules below cover
-running legacy attempts and adjacent-release workers during the transition.
-
-### Per-attempt RAM ceilings
-
-Declared batch/model host RAM is enforced on Linux cgroup v2 workers with
-systemd memory delegation. Each execution remains inside its worker service's
-cgroup, so ordinary service stop still contains every native descendant.
-Workers report unsupported enforcement plainly and keep laptop admission-only
-execution. An optional physical-host budget caps the sum of declared ceilings,
-including configurable slack, and retains unconfirmed allocations after loss.
-OOM is a
-normal failure rather than infrastructure loss. The configuration, unsupported
-cases and qualification limits are in [operations](reference/host-capacity.md#host-ram-admission-and-ceilings).
+the estimate, containment, launch wait and backfill rules. The
+[memory reference](reference/memory-mechanisms.md) describes the consumer
+fields and adjacent release behavior.
 
 ### Host roles and measured capacity
 <a id="amendment-host-roles-and-measured-capacity-2026-11-11"></a>
@@ -624,29 +608,6 @@ the hosts with the shared-interactive profile and keeps the existing rule and
 limits, as do workers declaring owner use or running on a laptop. The explicit
 reserve remains the operator's named override for overshoot not yet measured;
 no new fixed reserve is introduced.
-
-### Unified CUDA free-RAM floor
-<a id="amendment-count-the-idle-footprint-once-2026-11-11"></a>
-
-See [unified cuda free-ram floor](reference/memory-mechanisms.md#unified-cuda-free-ram-floor) for the
-approved mechanism and its constraints.
-
-### Charging running attempts by use
-
-See [charging running attempts by use](reference/memory-mechanisms.md#charging-running-attempts-by-use) for the
-approved mechanism and its constraints.
-
-### Job memory envelopes
-<a id="amendment-job-memory-envelopes-146"></a>
-
-See [job memory envelopes](reference/memory-mechanisms.md#job-memory-envelopes) for the
-approved mechanism and its constraints.
-
-### Learned memory by default and bounded first runs
-<a id="amendment-learned-memory-by-default-and-bounded-first-runs-585-559"></a>
-
-See [learned memory by default and bounded first runs](reference/memory-mechanisms.md#learned-memory-by-default-and-bounded-first-runs) for the
-approved mechanism and its constraints.
 
 ## Native job isolation
 <a id="amendment-minimum-native-job-isolation-177-219-248"></a>

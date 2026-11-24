@@ -32,33 +32,6 @@ type HostAdmissions struct {
 
 // Record the learned comparison once per assignment, from in-memory
 // observations only, so explicit figures show what evidence would reserve.
-func (q *Queue) recordLearnedMemory(j *Job, m *Machine) {
-	if j != nil && q.s.Jobs[j.ID] == j {
-		q.touchJob(j.ID)
-	}
-	if j.MemoryEnvelope == nil || pooledMemory(j) {
-		return
-	}
-	estimate := q.memoryEstimate(j, m)
-	if estimate.host == nil || estimate.samples == 0 {
-		return
-	}
-	host := hostMemoryPeakGB(estimate.host) * estimate.hostFactor
-	if estimate.measuredHostGB > 0 {
-		host = estimate.measuredHostGB
-	}
-	learned := &LearnedMemory{HostGB: max(minimumHostMemoryGB, host), Evidence: estimate.samples, Source: estimate.source}
-	if p := estimate.device; !j.Spec.Needs.cpuOnly() && p != nil && p.DeviceGB != nil && validRate(*p.DeviceGB*estimate.deviceFactor) {
-		gb := *p.DeviceGB * estimate.deviceFactor
-		learned.DeviceGB = &gb
-		if estimate.exact && !estimate.uncalibrated && !estimate.deviceUncalibrated && estimate.source != spentMemoryExploration && validRate(*p.DeviceGB) {
-			learned.PeakHostGB, learned.PeakDeviceGB = hostMemoryPeakGB(estimate.host), *p.DeviceGB
-		}
-	}
-	envelope := *j.MemoryEnvelope
-	envelope.Learned = learned
-	j.MemoryEnvelope = &envelope
-}
 
 func jobResources(j *Job) []ResourceBasis {
 	n, e := j.Spec.Needs, j.MemoryEnvelope
@@ -78,7 +51,7 @@ func jobResources(j *Job) []ResourceBasis {
 	if e != nil {
 		basis := cmp.Or(e.Basis, "unknown")
 		host.Used, host.Basis = value(e.HostGB), basis
-		host.Note = "used is the charged figure, including ceiling slack and on unified hosts the device share"
+		host.Note = "used is the RAM estimate, including the device share on unified hosts"
 		device.Used, device.Basis = value(e.DeviceGB), basis
 		if l := e.Learned; l != nil {
 			host.Learned, host.Evidence = value(l.HostGB), l.Evidence

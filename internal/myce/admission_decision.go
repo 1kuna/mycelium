@@ -344,6 +344,7 @@ const (
 	predicateSelectionSkipped     AdmissionPredicate = "selection_skipped"
 	predicateSelected             AdmissionPredicate = "selected"
 	predicateSharedHostBackoff    AdmissionPredicate = "shared_host_backoff"
+	predicateWorkerMemoryContract AdmissionPredicate = "worker_memory_contract"
 	predicateSharedHostProfile    AdmissionPredicate = "shared_host_profile"
 	predicateStagingHostRetry     AdmissionPredicate = "staging_host_retry"
 	predicateStartupRelease       AdmissionPredicate = "startup_release"

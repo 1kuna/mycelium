@@ -34,7 +34,7 @@ func (q *Queue) machineTargets(m *Machine) []*Machine {
 		reserved := 0.0
 		for _, j := range q.liveJobs() {
 			if batchReservesCapacity(j) && batchOnTarget(j, &target) {
-				charge := sampledDeviceCharge(j, &target, q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now())
+				charge := max(deviceShareGB(j), q.hostMemorySamples[j.Machine][jobKey(*j)].devicePeakGB)
 				reserved += charge
 				target.batchTenants++
 			}
@@ -210,17 +210,17 @@ func batchOnTarget(j *Job, m *Machine) bool {
 // its card when memory fits (MY-30/31, #538). Model-server,
 // extension-check, default fan-out, exploratory and multi-card work keeps the card, as
 // does a hint naming no device memory: its device figure is only a default.
+
 func sharesDevice(j *Job) bool {
-	n, e := j.Spec.Needs, j.MemoryEnvelope
-	if pooledMemory(j) {
-		p := memoryPools(j)
-		return !n.cpuOnly() && !p.RAM.Alone && (p.Card == nil || !p.Card.Alone) && n.Model == "" && len(j.AllocatedDevices) <= 1
+	n := j.Spec.Needs
+	if n.cpuOnly() || n.Model != "" || len(j.AllocatedDevices) > 1 {
+		return false
 	}
-	unstated := e != nil && (e.Basis == "exploratory" || e.Basis == "hint" && (j.MemoryFallback == nil || j.MemoryFallback.MemoryGB <= 0))
-	// Host-only learning can retain a recipe default for device memory. The
-	// attempt keeps the card until that vector is measured.
-	unstated = unstated || e != nil && e.Basis == "learned" && strings.Contains(e.Source, "GPU recipe default")
-	return !n.cpuOnly() && n.MemoryGB > 0 && n.Model == "" && j.Spec.ExtensionCheck == nil && (j.Spec.FanOut == nil || fanOutDeviceSharing(j)) && len(j.AllocatedDevices) <= 1 && !unstated
+	if !pooledMemory(j) {
+		return false // Recovered envelope holders keep exclusive card custody.
+	}
+	p := memoryPools(j)
+	return !p.RAM.Alone && (p.Card == nil || !p.Card.Alone)
 }
 
 // XPU teardown can reset shared engines (#652). CUDA co-tenants can grow past
@@ -240,8 +240,6 @@ func (q *Queue) deviceCoTenants(m *Machine, demand *Job, joining bool) (int, boo
 		return 0, false
 	}
 	n := 0
-	fanOut := fanOutDeviceSharing(demand)
-	var holders []*Job
 	for _, j := range q.liveJobs() {
 		if j.ID == demand.ID || !batchOnTarget(j, m) || !batchReservesCapacity(j) {
 			continue
@@ -250,26 +248,15 @@ func (q *Queue) deviceCoTenants(m *Machine, demand *Job, joining bool) (int, boo
 		if !sharesDevice(j) || joining && (tier < 0 || isolatesDeviceTiers(m) && tier != 0) {
 			return 0, false
 		}
-		if joining && fanOutDeviceSharing(demand) != fanOutDeviceSharing(j) {
-			return 0, false // Opt-in work cannot enlist an ordinary or default-off tenant.
-		}
-		if joining && unifiedCUDA(m) && !(pooledMemory(j) && pooledMemory(demand)) && !sharedDeviceSampleReady(q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now()) {
-			return 0, false
-		}
 		n++
-		fanOut = fanOut || fanOutDeviceSharing(j)
-		holders = append(holders, j)
 	}
 	for _, r := range q.s.HostReleases {
 		if !q.batchReleaseOnTarget(r, m) {
 			continue
 		}
-		if j := q.s.Jobs[r.Job]; j == nil || r.Device == "" || len(r.Devices) > 1 || !sharesDevice(j) || joining && fanOutDeviceSharing(demand) != fanOutDeviceSharing(j) {
+		if j := q.s.Jobs[r.Job]; j == nil || r.Device == "" || len(r.Devices) > 1 || !sharesDevice(j) {
 			return 0, false
 		}
-	}
-	if joining && n > 0 && fanOut && !q.fanOutDeviceHeadroom(m, demand, holders) {
-		return 0, false
 	}
 	return n, true
 }
@@ -476,6 +463,10 @@ func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, prog
 	}
 	// Refuse admission before assign creates an attempt or history. Refunding
 	// an offered identity would allow stale results to match a reused attempt.
+	if workerMemoryHold(m) != nil {
+		q.skipAdmissionSelection(m, predicateWorkerMemoryContract)
+		return
+	}
 	if recovering || cleanup {
 		if recovering {
 			q.skipAdmissionSelection(m, predicateRecovering)

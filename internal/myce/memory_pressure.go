@@ -72,7 +72,7 @@ func (q *Queue) yieldPooledMemory() {
 					continue
 				}
 			}
-			if cancelled(j) || plannedStop(j) || j.StartedAt == nil || !pooledMemory(j) {
+			if cancelled(j) || plannedStop(j) || j.StartedAt == nil {
 				continue
 			}
 			if victim == nil || q.poolPressureBefore(j, victim, machine) {
@@ -82,17 +82,7 @@ func (q *Queue) yieldPooledMemory() {
 		if pending || victim == nil || jobClass(victim.Spec) == "production" && production < 2 {
 			continue
 		}
-		q.touchJob(victim.ID)
-		for i := range victim.Copies {
-			c := &victim.Copies[i]
-			if c.Attempt == victim.Attempt && c.Machine == victim.Machine && c.Session == victim.Session {
-				c.StopCause = memoryPressureCause
-				c.PriorityStop = &PriorityPreemption{Cause: memoryPressureCause, Demand: "host/" + host, Victim: victim.ID, Policy: q.priorityMatch(victim.Spec)}
-				c.Recoverable = false
-			}
-		}
-		q.stopFor(victim, "host", "memory")
-		victim.Reason = memoryPressureCause
+		q.stopForPoolPressure(victim, "host/"+host)
 		if q.poolLastStop == nil {
 			q.poolLastStop = map[string]time.Time{}
 		}
@@ -106,7 +96,7 @@ func (q *Queue) poolPressureBefore(a, b *Job, m *Machine) bool {
 	}
 	overage := func(j *Job) float64 {
 		sample := q.hostMemorySamples[j.Machine][jobKey(*j)]
-		return max(0, pooledFootprint(sample, unifiedCUDA(m))-memoryPools(j).RAM.ChargeGB)
+		return max(0, pooledFootprint(sample, unifiedCUDA(m))-hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB))
 	}
 	if av, bv := overage(a), overage(b); av != bv {
 		return av > bv
@@ -118,4 +108,18 @@ func (q *Queue) poolPressureBefore(a, b *Job, m *Machine) bool {
 		return a.ID < b.ID
 	}
 	return a.StartedAt.After(*b.StartedAt)
+}
+
+func (q *Queue) stopForPoolPressure(victim *Job, demand string) {
+	q.touchJob(victim.ID)
+	for i := range victim.Copies {
+		c := &victim.Copies[i]
+		if c.Attempt == victim.Attempt && c.Machine == victim.Machine && c.Session == victim.Session {
+			c.StopCause = memoryPressureCause
+			c.PriorityStop = &PriorityPreemption{Cause: memoryPressureCause, Demand: demand, Victim: victim.ID, Policy: q.priorityMatch(victim.Spec)}
+			c.Recoverable = false
+		}
+	}
+	q.stopFor(victim, "memory pool", "memory")
+	victim.Reason = memoryPressureCause
 }

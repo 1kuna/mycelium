@@ -313,12 +313,23 @@ func TestMemoryPoolMixedFleetKeepsRunningEnvelope(t *testing.T) {
 	pooled := machine("pooled", "cpu")
 	pooled.HostMemoryMeasured, pooled.HostAvailableMemoryGB, pooled.HostMemoryBudgetGB = true, 24, 24
 	pooled.Capabilities = append(pooled.Capabilities, pooledMemoryCapability)
+	pooled.Release = &RunningRelease{Version: "candidate"}
+	pooled.MemoryContainment = &MemoryContainment{State: "available"}
 	s := cpuSpec(1, 4)
 	s.AllowedMachines = []string{legacy.ID}
 	old := submit(t, q, s)
 	a := assignedJob(machineCheck(t, q, legacy))
-	if a == nil || a.ID != old.ID || a.Memory != nil || a.MemoryEnvelope == nil || a.MemoryEnvelope.HostGB != 4 {
-		t.Fatal("legacy worker did not receive its ordinary envelope")
+	if a == nil || a.ID != old.ID {
+		t.Fatal("could not seed running custody")
+	}
+	envelope := &JobMemoryEnvelope{Basis: "declared", HostGB: 4, LimitHostGB: 4}
+	a.Memory, a.MemoryEnvelope = nil, envelope
+	if err := q.update(func() error {
+		running := q.touchJob(a.ID)
+		running.Memory, running.MemoryEnvelope = nil, envelope
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 	r := result(a, true)
 	if err := q.Started(r); err != nil {
@@ -335,8 +346,17 @@ func TestMemoryPoolMixedFleetKeepsRunningEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy.Capabilities = append(legacy.Capabilities, pooledMemoryCapability)
-	machineCheck(t, q, legacy, a)
+	legacy.Release = &RunningRelease{Version: "v3.1.0-rc.20261123.s087r6.35"}
+	submit(t, q, cpuSpec(1, 2))
+	reply := machineCheck(t, q, legacy, a)
+	if assignedJob(reply) != nil || workerMemoryHold(&legacy).Kind != workerMemoryReleaseReason {
+		t.Fatal("previous-release worker received new work")
+	}
+	uncontained := pooled
+	uncontained.MemoryContainment = nil
+	if hold := workerMemoryHold(&uncontained); hold == nil || hold.Kind != workerMemoryContainmentReason {
+		t.Fatalf("uncontained Linux worker did not receive a typed refusal: %+v", hold)
+	}
 	stored := job(t, q, old.ID)
 	if stored.State != "running" || stored.Attempt != a.Attempt || stored.Session != a.Session || stored.Memory != nil || stored.MemoryEnvelope == nil || stored.MemoryEnvelope.HostGB != 4 {
 		t.Fatalf("restart rewrote a running legacy envelope: %+v", stored)
@@ -355,5 +375,14 @@ func TestMemoryPoolMixedFleetKeepsRunningEnvelope(t *testing.T) {
 	}
 	if got := evidence.exact[pooledEvidenceKey(a, &legacy)].Peaks; len(got) != 1 || got[0] != peak {
 		t.Fatalf("legacy completion was not projected durably: %v", got)
+	}
+	w := Worker{Machine: pooled, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 24, nil }}
+	offered := *a
+	w.acceptMemoryOffer(&offered)
+	if offered.Memory.RAM.ChargeGB != 4 || offered.Memory.LimitGB != 0 {
+		t.Fatalf("old envelope was not interpreted as a soft estimate: %+v", offered.Memory)
+	}
+	if err := localAttemptAdmission(w, nil, offered, nil); err != nil {
+		t.Fatal(err)
 	}
 }

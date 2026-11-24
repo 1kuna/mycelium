@@ -87,43 +87,6 @@ print(json.dumps(Client(sys.argv[1], "test").get(sys.argv[2])["memory_attempts"]
 
 // #210: a first constrained observation has no comparable learned point. It
 // must still survive SQLite reload and job GET, without becoming a learned peak.
-func TestAttemptMemoryFactsConstrainedFirstRunGET(t *testing.T) {
-	q, clock, m, s := observationFixture(t)
-	s.Needs.Memory = "auto"
-	s.Args = []string{"private-memory-command"}
-	j := startObservation(t, q, m, s)
-	if len(q.s.WorkObservations) != 0 {
-		t.Fatal("regression requires a first run without comparable points")
-	}
-	a, err := fakeCeilings(t).create("constrained-first", 5<<29, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	memoryFactsFile(t, a, "memory.stat", "anon 2684354560\nkernel 0\nshmem 0\n")
-	memoryFactsFile(t, a, "memory.peak", "3221225472")
-	memoryFactsFile(t, a, "memory.events", "high 7\nmax 6264\noom 2\noom_kill 1\noom_group_kill 1\n")
-	memoryFactsFile(t, a, "memory.swap.peak", "536870912")
-	peak := a.peak()
-	if peak == nil || !peak.Constrained || peak.Events == nil || peak.Events.Max != 6264 || peak.SwapGB == nil || *peak.SwapGB != .5 {
-		t.Fatalf("missing constrained observations: %+v", peak)
-	}
-	clock.Advance(time.Second)
-	r := result(&j, true)
-	r.MemoryPeak = sampledMemoryPeak(nil, peak)
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.Complete(r); err != nil {
-		t.Fatal("completion replay", err)
-	}
-	for _, point := range q.s.WorkObservations {
-		if point.MemoryPeak != nil {
-			t.Fatal("constrained first run seeded learning", point)
-		}
-	}
-	q = memoryFactsRestart(t, q, clock)
-	memoryFactsGET(t, q, j, peak, false)
-}
 
 func TestAttemptMemoryFactsAcceptedGET(t *testing.T) {
 	q, clock, m, s := observationFixture(t)
@@ -168,57 +131,6 @@ func TestAttemptMemoryFactsAcceptedGET(t *testing.T) {
 	q = memoryFactsRestart(t, q, clock)
 	memoryFactsGET(t, q, j, peak, true)
 	memoryFactsGET(t, q, next, unread, false)
-}
-
-func TestAttemptMemoryFactsGB10Accounting(t *testing.T) {
-	for _, available := range []bool{true, false} {
-		t.Run(map[bool]string{true: "process counters", false: "unavailable"}[available], func(t *testing.T) {
-			q, clock, m, s := unifiedAutoFixture(t, 0)
-			queued := submit(t, q, s)
-			first := assignedJob(machineCheck(t, q, m))
-			if first == nil || first.ID != queued.ID {
-				t.Fatal("CUDA exploration not assigned")
-			}
-			if err := q.Started(result(first, false)); err != nil {
-				t.Fatal(err)
-			}
-			// Synchronized read-only GB10 evidence: process device memory can
-			// far exceed CURRENT cgroup use. Retain the lifetime cgroup peak
-			// independently; neither that peak nor shared RAM proves overlap.
-			host := float64(2387402752+53055488+54992896) / (1 << 30)
-			total, device, swap := float64(21502136320)/(1<<30), 18556.0/1024, 0.0
-			peak := &AttemptMemoryPeak{HostGB: &host, CgroupGB: &total, SwapGB: &swap, Events: &MemoryEventCounts{}}
-			if available {
-				peak.DeviceGB = &device
-			} else {
-				peak.DeviceUnavailable = deviceMemoryUnsupported
-			}
-			clock.Advance(time.Second)
-			r := result(first, true)
-			r.MemoryPeak = peak
-			if err := q.Complete(r); err != nil {
-				t.Fatal(err)
-			}
-			q = memoryFactsRestart(t, q, clock)
-			memoryFactsGET(t, q, *first, peak, !available)
-			// Re-establish live component/qualification evidence after restart
-			// before requesting reuse; startup deliberately marks it unavailable.
-			machineCheck(t, q, m)
-			queued = submit(t, q, s)
-			next := assignedJob(machineCheck(t, q, m))
-			if next == nil || next.ID != queued.ID {
-				t.Fatal("next CUDA attempt not assigned")
-			}
-			if available {
-				want := total + device + 2*minimumHostMemoryGB + m.MemoryCeilingSlackGB
-				if next.MemoryEnvelope.Source != "accepted peak + measured uncertainty" || next.MemoryEnvelope.HostGB != want || next.Spec.Needs.HostMemoryGB != total+minimumHostMemoryGB || next.Spec.Needs.MemoryGB != device+minimumHostMemoryGB {
-					t.Fatalf("GB10 memory lost a host/device floor: %+v; %+v", next.MemoryEnvelope, next.Spec.Needs)
-				}
-			} else if !strings.HasPrefix(next.MemoryEnvelope.Source, "exploratory first run") {
-				t.Fatalf("unknown device use enabled a smaller unified charge: %+v", next.MemoryEnvelope)
-			}
-		})
-	}
 }
 
 // Native grace-expired cleanup reports its stored peak as release-only, even

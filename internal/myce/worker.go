@@ -130,7 +130,6 @@ type Worker struct {
 	batchAdmission    func(context.Context, HostLaunch) error
 	// The worker ledger without one attempt: others' charges and pending growth.
 	hostChargesExcept     func(attemptKey) (charge, pending float64)
-	firstRunAdmission     *MemoryRoomDecision
 	stopAdmission         func()
 	DeviceBinding         string
 	EnvironmentSourceRoot string
@@ -439,6 +438,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 }
 
 func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (startedProcess *process, startErr error) {
+	w.acceptMemoryOffer(&j)
 	timing := s.launchRecorder(w.Clock)
 	w.launchTiming = timing
 	timing.enter(launchStaging)
@@ -514,23 +514,6 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	}
 	if err := w.checkJobRAM(ctx, j); err != nil {
 		return nil, s.recordMemoryWait(j, err)
-	}
-	if floorCharged(j.MemoryEnvelope) {
-		decision, err := w.firstRunMemoryAdmission(ctx, j)
-		if err != nil {
-			return nil, s.startFailure(j, launchRefused, err)
-		}
-		w.firstRunAdmission = decision
-		admit := w.batchAdmission
-		w.batchAdmission = func(ctx context.Context, launch HostLaunch) error {
-			if admit != nil {
-				if err := admit(ctx, launch); err != nil {
-					return err
-				}
-			}
-			_, err := w.firstRunMemoryAdmission(ctx, j)
-			return err
-		}
 	}
 	phaseDone(nil)
 	phaseDone = stagingMeasure(ctx, stageRoots)
@@ -810,11 +793,6 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		return nil, err
 	}
 	timing.enter(launchCommandSetup)
-	if !pooledMemory(&j) {
-		if err := w.checkHostMemoryBudget(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
-			return nil, err
-		}
-	}
 	identity := ID()
 	memoryAttempt, err := w.executionCeilings().createAttempt("attempt-"+identity, ceilingBytes, w.MemorySwapMaxBytes, pooledMemory(&j))
 	if err != nil {
@@ -1701,9 +1679,7 @@ func (w Worker) String() string {
 }
 
 func (w Worker) checkJobRAM(ctx context.Context, j Job) error {
-	if !pooledMemory(&j) {
-		return w.checkHostRAM(j.Spec.Needs.MemoryGB, chargedHostGB(&j))
-	}
+	w.acceptMemoryOffer(&j)
 	return w.checkJobRAMWithPending(ctx, j, 0)
 }
 
@@ -1715,22 +1691,4 @@ func (w Worker) checkJobRAMWithPending(ctx context.Context, j Job, pending float
 		free, known = raw, err == nil && validMemoryValue(raw)
 	}
 	return checkMemoryPool(pools.RAM.TypicalGB, free, pools.KeepGB, pending, known)
-}
-
-func (w Worker) checkHostRAM(gpu, host float64) error {
-	if err := w.checkHostMemoryBudget(gpu, host); err != nil {
-		return err
-	}
-	if host == 0 && (!unifiedCUDA(&w.Machine) || gpu == 0) {
-		return nil
-	}
-	if w.HostMemorySource == nil {
-		return refuseAdmission("live_host_ram", "GiB", hostNeed(&w.Machine, gpu, host), 0, true)
-	}
-	free, err := w.sharedHostLiveMemory(context.Background())
-	need := hostNeed(&w.Machine, gpu, host)
-	if err != nil || !hostMemoryAvailableFits(&w.Machine, gpu, host, free) {
-		return refuseAdmission("live_host_ram", "GiB", need, free, err != nil)
-	}
-	return nil
 }

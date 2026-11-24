@@ -23,8 +23,8 @@ for logical cores. For CPU jobs, `--mem 8G` sizes host RAM. With
 `--gpu cuda|xpu|metal`, `--mem` sizes device memory and `--host-mem` sizes
 additional host RAM. Omit memory to use automatic sizing. In a plain spec or
 entry, size CPU RAM with `needs.memory_gb` and additional GPU host RAM with
-`needs.host_memory_gb`. On pooled-memory workers those figures seed an
-estimate. Use `advanced.memory_limit_gb` only for an explicit host RAM cap.
+`needs.host_memory_gb`. Those figures seed an estimate. Use
+`advanced.memory_limit_gb` for an explicit host RAM cap.
 `advanced.size_hint` is for extension work. See
 [needs and sizing](references/submit.md#needs-targets-and-variants).
 

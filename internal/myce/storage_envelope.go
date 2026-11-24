@@ -261,7 +261,7 @@ func storageOutputEligible(reason string) bool {
 	return reason == "eligible" || reason == "storage_incomplete" || reason == "storage_peak_unavailable"
 }
 
-func storageLearningReason(sample *eligibleMemorySample, reason string, j *Job, r Result) string {
+func storageLearningReason(sample *eligibleStorageSample, reason string, j *Job, r Result) string {
 	if sample == nil {
 		return reason
 	}
@@ -292,7 +292,7 @@ func (q *Queue) recordAttemptStorage(j *Job, r Result) {
 	if r.ReleaseOnly || j.StartedAt == nil && r.StoragePeak == nil {
 		return
 	}
-	sample, reason := q.memoryLearningSample(j, r)
+	sample, reason := q.storageLearningSample(j, r)
 	reason = storageLearningReason(sample, reason, j, r)
 	facts := AttemptStorageFacts{Execution: r.Execution, Machine: r.Machine, Session: r.Session, Peak: r.StoragePeak, Envelope: j.StorageEnvelope, LearningReason: reason, OutputLearned: storageOutputEligible(reason)}
 	j.StorageAttempts = append(slices.Clone(j.StorageAttempts), facts)

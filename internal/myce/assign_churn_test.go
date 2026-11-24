@@ -2,9 +2,6 @@ package myce
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"math"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
@@ -14,77 +11,6 @@ import (
 // #1565: the queue has accepted Started while the worker still owns the
 // original assignment. Replay the retained envelope/credit and comparison;
 // the sensor sequence before that comparison was not retained.
-func TestAssignChurnRetainedUnifiedMemory(t *testing.T) {
-	q, clock := fixture(t)
-	m := sharedUnifiedMachine()
-	m.MemoryEnforcement = cgroupMemoryEnforcement
-	m.MemoryCeilingSlackGB = .125
-	m.HostAvailableMemoryGB, m.HostMemoryBudgetGB = 88.79421997070312, 113.85746002197266
-	m.Devices[0].ReserveMemoryGB = 4
-	m.Devices[0].BudgetGB, m.Devices[0].FreeMemoryGB = 96, 96
-	machineCheck(t, q, m)
-	co := Job{ID: "co-tenant", Machine: m.ID, Session: m.Session, Attempt: 2, State: "running", AllocatedDevices: []string{"0"}, Spec: spec("production")}
-	co.Spec.Needs.Memory, co.Spec.Needs.HostMemoryGB, co.Spec.Needs.MemoryGB = "auto", 38.73198699951172, 44.519424227328635
-	co.MemoryEnvelope = &JobMemoryEnvelope{HostGB: 83.37641122684036, DeviceGB: co.Spec.Needs.MemoryGB, Basis: "learned", Learned: &LearnedMemory{Evidence: 184, HostGB: co.Spec.Needs.HostMemoryGB, PeakHostGB: 20.391857147216797, PeakDeviceGB: 22.318359375}}
-	other := Job{ID: "other", Machine: m.ID, Session: m.Session, Attempt: 13, State: "running", Spec: cpuSpec(1, 6)}
-	if err := normalizeResources(&other.Spec); err != nil {
-		t.Fatal(err)
-	}
-	for _, j := range []*Job{&co, &other} {
-		copy := *j
-		now := clock.Now()
-		copy.StartedAt = &now
-		q.s.Jobs[j.ID] = &copy
-	}
-	device, footprint := 22.318359375, .329437255859375
-	reports := []AttemptReport{
-		{Execution: Execution{ID: co.ID, Attempt: co.Attempt}, Session: co.Session, Started: true, CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: footprint, FootprintGB: &footprint, GrowthObserved: true, DeviceGB: &device, AgeSeconds: .04776011}},
-		{Execution: Execution{ID: other.ID, Attempt: other.Attempt}, Session: other.Session, Started: true, CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: .9172134399414062, AgeSeconds: .075639487}},
-	}
-	next := submit(t, q, cpuSpec(2, 10))
-	reply, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: reports})
-	if err != nil {
-		t.Fatal(err)
-	}
-	offer := assignedJob(reply)
-	if offer == nil || offer.ID != next.ID {
-		t.Fatal("fitting consumer was not assigned", job(t, q, next.ID).Reason)
-	}
-	samples := currentHostMemorySamples(reports, clock.Now())
-	// The assignment has no StartedAt. Without the accepted report, its full
-	// envelope reproduces the historical refusing worker comparison exactly.
-	helper := reports[0]
-	helper.Started = false
-	unstarted := currentHostMemorySamples([]AttemptReport{helper}, clock.Now())[jobKey(co)]
-	_, pending := memoryCharge(&co, allocationMachine(&m, co.AllocatedDevices), co.MemoryEnvelope.HostGB, unstarted, clock.Now())
-	if math.Abs(pending-83.04697397098099) > 1e-9 {
-		t.Fatalf("retained pending growth changed: %g", pending)
-	}
-	rt := modelRuntime{clock: clock, machine: m.ID, memoryMachine: m, batchJobs: []Job{co, other, *offer}, batchHostMemorySamples: samples,
-		hostMemorySource: func(context.Context) (float64, error) { return m.HostAvailableMemoryGB, nil }}
-	rt.batchSupervisors = map[attemptKey]*attemptSupervisor{}
-	for _, j := range rt.batchJobs {
-		rt.batchSupervisors[jobKey(j)] = &attemptSupervisor{job: j, admissionMu: &rt.admissionMu}
-	}
-	launch := HostLaunch{Machine: m.ID, Session: offer.Session, Key: offer.ID, Attempt: "1"}
-	if err := rt.checkBatchLaunchMemory(t.Context(), launch); err != nil {
-		d := admissionDetail(err, *offer)
-		if d != nil && (d.Subcheck != "live_host_growth" || math.Abs(d.Required-98.37976053103958) > 1e-9) {
-			t.Fatalf("unexpected comparison: %+v", d)
-		}
-		t.Fatal("placement and prelaunch disagree on identical inputs:", err)
-	}
-	// Initial local admission and the final exec gate must use the same rule.
-	w := Worker{Machine: m, Clock: clock, hostMemorySamples: samples, HostMemorySource: rt.hostMemorySource}
-	if err := localAttemptAdmission(w, []Job{co, other}, *offer, nil); err != nil {
-		t.Fatal("local admission disagreed:", err)
-	}
-	charge, growth := memoryCharge(&co, allocationMachine(&m, co.AllocatedDevices), co.MemoryEnvelope.HostGB, samples[jobKey(co)], clock.Now())
-	queueCharge, queueGrowth := q.hostJobChargeGrowth(q.s.Jobs[co.ID])
-	if charge != queueCharge || growth != queueGrowth {
-		t.Fatalf("different co-tenant figures: worker %g/%g queue %g/%g", charge, growth, queueCharge, queueGrowth)
-	}
-}
 
 // A positive preflight refusal must reach the real queue immediately, without
 // waiting for an experiment's start window or a simulated hour to elapse.
@@ -138,116 +64,6 @@ func TestAssignChurnPreflightRefusalReturnsPromptly(t *testing.T) {
 // The retained incident has the worker comparison but not its matching queue
 // snapshot. Replay both numbers without attributing the difference to a sensor,
 // transport delay or changing reservations that the evidence cannot distinguish.
-func TestAssignChurnPrelaunchGrowthBoundary(t *testing.T) {
-	for _, pair := range [][2]float64{{17.106637954711914, 17.005722045898438}, {16.86988639831543, 16.814495086669922}} {
-		q, clock := fixture(t)
-		m := cpuMachine("worker", "host", "cpu", 16, 32)
-		m.Devices = []MachineDevice{}
-		holder := submit(t, q, cpuSpec(4, pair[0]-4))
-		running := assignedJob(machineCheck(t, q, m))
-		if running == nil || running.ID != holder.ID {
-			t.Fatal("missing holder")
-		}
-		next := submit(t, q, cpuSpec(1, 4))
-		m.HostAvailableMemoryGB = pair[0]
-		report := AttemptReport{Execution: Execution{ID: running.ID, Attempt: running.Attempt}, Session: running.Session, Started: true}
-		r, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{report}})
-		if err != nil || assignedJob(r) == nil || assignedJob(r).ID != next.ID {
-			t.Fatalf("boundary assignment missing: %v", err)
-		}
-		w := Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return pair[0], nil }}
-		if err := localAttemptAdmission(w, []Job{*running}, *assignedJob(r), nil); err != nil {
-			t.Fatalf("identical inputs disagree (own charge must occur once): %v", err)
-		}
-		clock.Advance(2 * time.Second)
-		w.HostMemorySource = func(context.Context) (float64, error) { return pair[1], nil }
-		err = localAttemptAdmission(w, []Job{*running}, *assignedJob(r), nil)
-		var refusal *admissionError
-		if !errors.As(err, &refusal) || refusal.detail.Subcheck != "live_host_growth" || refusal.detail.Required != pair[0] || *refusal.detail.Available != pair[1] {
-			t.Fatalf("did not replay retained comparison: %v", err)
-		}
-	}
-}
-
-func TestAssignChurnLiveGrowthWaitsForMeasuredRoom(t *testing.T) {
-	for _, pair := range [][2]float64{{8.827884674, 8.754188538}, {17.0485, 17.0116}} {
-		t.Run(fmt.Sprint(pair[0]), func(t *testing.T) {
-			q, clock := fixture(t)
-			m := cpuMachine("worker", "host", "cpu", 16, 32)
-			m.Devices = []MachineDevice{}
-			s := cpuSpec(4, pair[0]-4)
-			s.Priority = "production"
-			holder := submit(t, q, s)
-			running := assignedJob(machineCheck(t, q, m))
-			if running == nil || running.ID != holder.ID {
-				t.Fatal("missing co-tenant", running)
-			}
-			s = cpuSpec(2, 4)
-			s.SubmissionKey = "live-growth-wait"
-			j := submit(t, q, s)
-			m.HostAvailableMemoryGB = pair[0] + 0.125
-			first := assignedJob(machineCheck(t, q, m, running))
-			if first == nil || first.ID != j.ID || first.Attempt != 1 {
-				t.Fatal("missing initial offer", first)
-			}
-			clock.Advance(time.Second)
-			w := Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return pair[1], nil }}
-			d := admissionDetail(localAttemptAdmission(w, []Job{*running}, *first, nil), *first)
-			if d == nil || d.Subcheck != "live_host_growth" || d.Required != pair[0] || d.Available == nil || *d.Available != pair[1] {
-				t.Fatalf("prelaunch did not reproduce the recorded comparison: %+v", d)
-			}
-			r := capacityResult(first, true)
-			r.ExecutionCause.Admission = d
-			if err := q.Complete(r); err != nil {
-				t.Fatal(err)
-			}
-			baseline := m.HostAvailableMemoryGB
-			deficit := pair[0] - pair[1]
-			m.HostAvailableMemoryGB = baseline + 2*deficit
-			if next := assignedJob(machineCheck(t, q, m, running)); next != nil {
-				t.Fatal("new room bypassed exact release", next)
-			}
-			if got := job(t, q, j.ID); got.Copies[0].ReleaseConfirmed {
-				t.Fatal("check-in acknowledged the refused copy without release proof")
-			}
-			m.HostAvailableMemoryGB = baseline
-			machineCheck(t, q, m, running)
-			release := result(first, false)
-			release.ReleaseOnly = true
-			if err := q.Complete(release); err != nil {
-				t.Fatal(err)
-			}
-			for i, change := range []float64{-deficit / 2, 0, deficit / 4, deficit / 2} {
-				clock.Advance(time.Second)
-				m.HostAvailableMemoryGB = baseline + change
-				m.MemoryUsedGB = float64(i)
-				if next := assignedJob(machineCheck(t, q, m, running)); next != nil {
-					t.Fatalf("check-in %d reissued with %.5f GiB change and %.5f GiB shortfall: attempt %d", i, change, deficit, next.Attempt)
-				}
-				got, err := q.jobSnapshotGeneration(j.ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if got.State != "queued" || got.Attempt != 1 || got.Losses != 0 || got.InfrastructureRetries != 0 || got.Hold == nil || got.Hold.Kind != "launch_capacity" {
-					t.Fatalf("lost capacity wait or charged a retry: state=%s attempt=%d losses=%d retries=%d hold=%+v", got.State, got.Attempt, got.Losses, got.InfrastructureRetries, got.Hold)
-				}
-			}
-			m.HostAvailableMemoryGB = baseline + 2*deficit
-			second := assignedJob(machineCheck(t, q, m, running))
-			if second == nil || second.ID != j.ID || second.Attempt != 2 || submit(t, q, s).ID != j.ID {
-				t.Fatal("sufficient room did not resume the same submission", second)
-			}
-			w.HostMemorySource = func(context.Context) (float64, error) { return pair[1] + 2*deficit, nil }
-			if err := localAttemptAdmission(w, []Job{*running}, *second, nil); err != nil {
-				t.Fatal("fresh offer refused after room recovered", err)
-			}
-			if err := q.Complete(r); !errors.Is(err, ErrStale) {
-				t.Fatal("earlier refusal changed the new attempt", err)
-			}
-			finish(t, q, second, true)
-		})
-	}
-}
 
 func assignChurnWaveFixture(t *testing.T, ram float64) (*Queue, *workerFakeClock, Machine, Spec) {
 	t.Helper()
@@ -336,28 +152,5 @@ func TestAssignChurnProductionWaveUsesFreeTarget(t *testing.T) {
 				t.Fatal("production did not use free target", got)
 			}
 		})
-	}
-}
-
-func TestAssignChurnExistingConsumerStillYields(t *testing.T) {
-	q, _, m, wave := assignChurnWaveFixture(t, 32)
-	h := cpuSpec(2, 16)
-	h.Priority = "production"
-	submit(t, q, h)
-	holder := assignedJob(machineCheck(t, q, m))
-	submit(t, q, cpuSpec(1, 4))
-	consumer := assignedJob(machineCheck(t, q, m, holder))
-	if holder == nil || consumer == nil {
-		t.Fatal("missing initial executions")
-	}
-	demand := submit(t, q, wave)
-	finish(t, q, holder, true)
-	stopped := job(t, q, consumer.ID)
-	if stopped.State != "stopping" || priorityStop(stopped) == nil || priorityStop(stopped).Demand != demand.ID {
-		t.Fatal("production did not preempt existing lower-tier work", stopped.State)
-	}
-	finishInterrupted(t, q, consumer)
-	if got := assignedJob(machineCheck(t, q, m)); got == nil || got.Batch == nil || got.Batch.Parent != demand.ID {
-		t.Fatal("production did not start after exact release", got)
 	}
 }

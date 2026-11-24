@@ -171,7 +171,7 @@ func TestFootprintGuardStopsMetalAttempt(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := recoveryWorker(t)
-			w.Machine.GPU, w.Machine.MemoryCeilingSlackGB = "metal", .125
+			w.Machine.GPU, w.Machine.UnifiedMemory = "metal", true
 			clock := &workerFakeClock{now: time.Unix(100, 0)}
 			w.Clock = clock
 			w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
@@ -184,9 +184,6 @@ func TestFootprintGuardStopsMetalAttempt(t *testing.T) {
 					return tc.footprint, 64 << 20, 1, nil
 				},
 			}
-			if !w.footprintGuarded(Job{Spec: Spec{Needs: ResourceNeeds{MemoryGB: 4, HostMemoryGB: 1, Platform: Platform{Required: []string{"metal"}}}}}) {
-				t.Fatal("declared Metal job not footprint guarded")
-			}
 			store, err := w.openStore()
 			if err != nil {
 				t.Fatal(err)
@@ -198,6 +195,8 @@ func TestFootprintGuardStopsMetalAttempt(t *testing.T) {
 			}
 			j := recoveryJob(t, []string{"sleep", duration})
 			j.Spec.Resumable = false
+			limit := 5.0
+			j.Spec.MemoryLimitGB = &limit
 			j.Spec.Needs = ResourceNeeds{MemoryGB: 4, HostMemoryGB: 1, Platform: Platform{Required: []string{"metal"}}}
 			p, err := startAfterFixtureInputs(t, w, store, j)
 			if err != nil {
@@ -205,8 +204,8 @@ func TestFootprintGuardStopsMetalAttempt(t *testing.T) {
 			}
 			t.Cleanup(func() { p.stopDirective(clock.Now(), 0, true, true) })
 			r := d5Finish(t, p)
-			// RSS is the host share; the footprint beyond it is the device share.
-			if p := r.MemoryPeak; p == nil || p.HostGB == nil || *p.HostGB != 1.0/16 || p.DeviceGB == nil || *p.DeviceGB != float64(tc.footprint)/(1<<30)-1.0/16 || p.DeviceSource != deviceFootprintSource {
+			// The complete footprint belongs to the unified RAM pool.
+			if p := r.MemoryPeak; p == nil || p.HostGB == nil || *p.HostGB != float64(tc.footprint)/(1<<30) || p.DeviceGB != nil || p.DeviceSource != ownedFootprintSource {
 				t.Fatalf("peak: %+v", r.MemoryPeak)
 			}
 			if !tc.stopped {
@@ -216,7 +215,7 @@ func TestFootprintGuardStopsMetalAttempt(t *testing.T) {
 				return
 			}
 			e := r.ExecutionCause
-			if r.Success || !r.OutOfMemory || e == nil || e.Class != rssLimitExceeded || e.RSSLimit == nil || e.RSSLimit.Quality != footprintGuardQuality || e.RSSLimit.LimitBytes != int64(5.125*(1<<30)) {
+			if r.Success || !r.OutOfMemory || e == nil || e.Class != rssLimitExceeded || e.RSSLimit == nil || e.RSSLimit.Quality != footprintGuardQuality || e.RSSLimit.LimitBytes != 5<<30 {
 				t.Fatalf("footprint guard outcome: %+v %+v", r, e)
 			}
 		})

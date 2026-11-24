@@ -416,7 +416,7 @@ maps link to their element types; timestamps are JSON time strings.
 | <a id="fields-preemptionplacement"></a>**PreemptionPlacement** | `machine`: string; `session`: string; `device`: string; `releases?`: array of string |
 | <a id="fields-pressurestall"></a>**PressureStall** | `avg10`: number; `avg60`: number; `avg300`: number; `total_usec`: number |
 | <a id="fields-prioritymatch"></a>**PriorityMatch** | `tier`: string; `index`: number; `selector`: string; `revision`: number |
-| <a id="fields-prioritypolicy"></a>**PriorityPolicy** | `version`: number; `tiers`: array of [PriorityTier](#fields-prioritytier); `projects`: map of [ProjectPolicy](#fields-projectpolicy); `models?`: [ModelPolicy](#fields-modelpolicy); `hosts?`: map of [HostPolicy](#fields-hostpolicy); `learned_memory?`: boolean |
+| <a id="fields-prioritypolicy"></a>**PriorityPolicy** | `version`: number; `tiers`: array of [PriorityTier](#fields-prioritytier); `projects`: map of [ProjectPolicy](#fields-projectpolicy); `models?`: [ModelPolicy](#fields-modelpolicy); `hosts?`: map of [HostPolicy](#fields-hostpolicy) |
 | <a id="fields-prioritypolicyrecord"></a>**PriorityPolicyRecord** | `revision`: number; `policy`: [PriorityPolicy](#fields-prioritypolicy); `warnings?`: array of string |
 | <a id="fields-prioritypreemption"></a>**PriorityPreemption** | `cause`: string; `demand`: string; `victim`: string; `policy`: [PriorityMatch](#fields-prioritymatch) |
 | <a id="fields-prioritytier"></a>**PriorityTier** | `name`: string; `selectors`: array of string |

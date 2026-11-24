@@ -443,11 +443,11 @@ func TestHostMemoryPressureStatusAdmissionAgreement(t *testing.T) {
 			held = candidate
 		}
 	}
-	if held == nil || held.State != "queued" || held.DiagnosticCode != "host_memory_headroom" || !strings.Contains(held.Reason, "live available 3.0 GiB; reserved 0.0 GiB") {
+	if held == nil || held.State != "queued" || held.DiagnosticCode != memoryWaitReason || !strings.Contains(held.Reason, "available 3.000 GiB") {
 		t.Fatalf("typed pressure status: %+v", held)
 	}
 	w := Worker{Machine: m, HostMemorySource: func(context.Context) (float64, error) { return 3, nil }}
-	if err := w.checkHostRAM(s.Needs.MemoryGB, s.Needs.HostMemoryGB); err == nil {
+	if err := w.checkJobRAM(context.Background(), Job{Spec: s}); err == nil {
 		t.Fatal("launch ignored pressure")
 	}
 	m.HostAvailableMemoryGB = 12
@@ -455,7 +455,7 @@ func TestHostMemoryPressureStatusAdmissionAgreement(t *testing.T) {
 		t.Fatal("recovered headroom did not admit queued job")
 	}
 	w.HostMemorySource = func(context.Context) (float64, error) { return 12, nil }
-	if err := w.checkHostRAM(s.Needs.MemoryGB, s.Needs.HostMemoryGB); err != nil {
+	if err := w.checkJobRAM(context.Background(), Job{Spec: s}); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -168,9 +168,6 @@ func (q *Queue) roomPlan(j *Job, m *Machine, batch bool) *placementPlan {
 // yield decisions also belong to the exact demand, so keep that fallback out
 // of the shared projection used by an immutable candidate pass.
 func (q *Queue) ordinaryRoomPlan(j *Job, m *Machine, batch bool) (*placementPlan, bool) {
-	if batch && q.memoryYieldHold(j, m) != nil {
-		return nil, false
-	}
 	if m.Recovering {
 		return nil, false
 	}
@@ -194,15 +191,6 @@ func (q *Queue) ordinaryRoomPlan(j *Job, m *Machine, batch bool) (*placementPlan
 	}
 	if best != nil && !q.addDeviceTierStops(best, j) {
 		return nil, false
-	}
-	if batch && j.MemoryCensoredOOMGrowthGB != nil {
-		// This retry waits for ordinary admission. A larger envelope grants
-		// no authority to stop another attempt, residency or preparation.
-		if best == nil || best.stops > 0 || len(best.jobs)+len(best.slots)+len(best.calls) > 0 {
-			return nil, false
-		}
-		best.preparations = false
-		return best, false
 	}
 	return best, best == nil && batch
 }

@@ -842,3 +842,12 @@ func TestAdmissionWaitExperimentSelectionAndLifecycle(t *testing.T) {
 		t.Fatal("terminal failure left wait open")
 	}
 }
+
+type coldProbeAdvancingClock struct{ *fakeClock }
+
+func (c coldProbeAdvancingClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(time.Nanosecond)
+	return c.now
+}

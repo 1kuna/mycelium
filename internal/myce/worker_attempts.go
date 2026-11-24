@@ -919,111 +919,9 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 	if w.Machine.SharedHost != nil && !sharedHostJobFits(&next, &w.Machine) {
 		return fmt.Errorf("shared host requires a native CPU command with a prepared environment")
 	}
-	if pooledMemory(&next) {
-		return localPooledAdmission(w, jobs, next, models, preparationCores)
-	}
-	cores, why := cpuCapacity(&w.Machine)
-	usedCores, usedRAM := next.Spec.Needs.cores(), localJobCharge(w, next)
-	for _, n := range preparationCores {
-		usedCores += n
-	}
-	growth := usedRAM
-	var union deviceResidentUnion
-	if len(jobs) > 0 {
-		union = residentUnion(jobs, &w.Machine, w.hostMemorySamples, w.Clock.Now())
-	}
-	for _, j := range jobs {
-		usedCores += j.Spec.Needs.cores()
-		need := localJobHostNeed(w, j)
-		charge, pending := memoryChargeForGrace(&j, allocationMachine(&w.Machine, j.AllocatedDevices), need, w.hostMemorySamples[jobKey(j)], w.Clock.Now(), w.AcceleratorStopGrace, union.credit(jobKey(j)))
-		usedRAM += charge
-		growth += pending
-		sharedCard := !next.Spec.Needs.cpuOnly() && !j.Spec.Needs.cpuOnly() && slices.ContainsFunc(attemptCards(next, w.Machine), func(id string) bool { return slices.Contains(j.AllocatedDevices, id) })
-		if sharedCard && unifiedCUDA(allocationMachine(&w.Machine, j.AllocatedDevices)) && !sharedDeviceSampleReady(w.hostMemorySamples[jobKey(j)], w.Clock.Now()) {
-			return errors.New(deviceUnifiedUncertain)
-		}
-		if sharedCard && fanOutDeviceSharing(&next) != fanOutDeviceSharing(&j) {
-			return errors.New("XPU fan-out sharing requires every tenant to opt in")
-		}
-		if sharedCard && (fanOutDeviceSharing(&next) || fanOutDeviceSharing(&j)) {
-			card := allocationMachine(&w.Machine, j.AllocatedDevices)
-			sample, telemetry := w.hostMemorySamples[jobKey(j)], cardTelemetry(card)
-			if !backendFor(card.GPU).deviceHostMemory || card.UnifiedMemory || !deviceTelemetryReady(telemetry, w.Clock.Now()) || *telemetry.ActivePercent >= 100 ||
-				!fanOutDeviceSampleReady(sample, w.Clock.Now()) {
-				return errors.New("fan-out sharing requires fresh discrete XPU headroom evidence")
-			}
-		}
-		if !next.Spec.Needs.cpuOnly() && slices.ContainsFunc(attemptCards(next, w.Machine), func(id string) bool { return slices.Contains(j.AllocatedDevices, id) }) && !(sharesDevice(&next) && sharesDevice(&j)) {
-			return refuseAdmission("local_device_reservation", "slots", 1, 0, false)
-		}
-	}
-	if w.Machine.MaxJobs > 0 && len(jobs) >= w.Machine.MaxJobs {
-		return refuseAdmission("local_max_jobs", "jobs", float64(len(jobs)+1), float64(w.Machine.MaxJobs), false)
-	}
-	for _, r := range models {
-		if r.State == "ready" || r.State == "draining" || r.State == "loading" {
-			usedCores++
-			m, ok := w.localModelBudget(r)
-			if ok {
-				need := hostNeed(allocationMachine(&w.Machine, []string{r.Device}), m.MemoryGB, m.HostMemoryGB)
-				usedRAM += need
-				growth += need
-			}
-		}
-	}
-	// Each assigned card carries an equal share beside its resident models.
-	for _, d := range w.Machine.Devices {
-		id := d.ID
-		if next.Spec.Needs.cpuOnly() || !slices.Contains(attemptCards(next, w.Machine), id) {
-			continue
-		}
-		usedGPU := deviceShareGB(&next)
-		fanOut, deviceGrowth := fanOutDeviceSharing(&next), deviceShareGB(&next)
-		for _, j := range jobs {
-			if !j.Spec.Needs.cpuOnly() && slices.Contains(j.AllocatedDevices, id) {
-				card := d.machine(w.Machine)
-				charge := sampledDeviceCharge(&j, &card, w.hostMemorySamples[jobKey(j)], w.Clock.Now())
-				usedGPU += charge // A co-tenant sharing this card (#538).
-				fanOut = fanOut || fanOutDeviceSharing(&j)
-				s := w.hostMemorySamples[jobKey(j)]
-				deviceGrowth += max(0, deviceShareGB(&j)-s.deviceGB) + s.deviceGrowthGB + s.deviceRateGB*w.Clock.Now().Sub(s.deviceAt).Seconds()
-			}
-		}
-		for _, r := range models {
-			if r.State == "ready" || r.State == "draining" || r.State == "loading" {
-				m, ok := w.localModelBudget(r)
-				if ok && (r.Device == id || r.Device == "" && (m.Device == id || m.Device == "" && id == w.Machine.Device)) {
-					usedGPU += m.MemoryGB
-				}
-			}
-		}
-		if usedGPU > d.BudgetGB {
-			return refuseAdmission("device_budget", "GiB", usedGPU, d.BudgetGB, false)
-		}
-		if fanOut && usedGPU > deviceShareGB(&next) && (d.Telemetry == nil || d.Telemetry.FreeGB == nil || *d.Telemetry.FreeGB < deviceGrowth) {
-			return refuseAdmission("live_device_growth", "GiB", deviceGrowth, 0, true)
-		}
-	}
-	if why != "" || usedCores > cores {
-		return refuseAdmission("aggregate_cpu_allowance", "cores", float64(usedCores), float64(cores), why != "")
-	}
-	if (w.Machine.HostMemoryBudgetGB > 0 || w.Machine.HostMemoryBudgetMeasured) && usedRAM > w.Machine.HostMemoryBudgetGB {
-		return refuseAdmission("aggregate_host_allowance", "GiB", usedRAM, w.Machine.HostMemoryBudgetGB, false)
-	}
-	if err := w.checkHostMemoryBudget(next.Spec.Needs.MemoryGB, next.Spec.Needs.HostMemoryGB); err != nil {
-		return err
-	}
-	if next.Spec.Needs.HostMemoryGB > 0 || unifiedCUDA(&w.Machine) && next.Spec.Needs.MemoryGB > 0 {
-		if w.HostMemorySource == nil {
-			return refuseAdmission("live_host_growth", "GiB", growth, 0, true)
-		}
-		free, err := w.sharedHostLiveMemory(context.Background())
-		if err != nil || !validMemoryValue(free) || free < growth {
-			return refuseAdmission("live_host_growth", "GiB", growth, free, err != nil)
-		}
-	}
-	return nil
+	return localPooledAdmission(w, jobs, next, models, preparationCores)
 }
+
 func localJobHostNeed(w Worker, j Job) float64 {
 	m := localJobMachine(w, j)
 	return hostNeed(&m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
@@ -1285,7 +1183,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				log.Print(progress.String())
 			}
 			ctx := observeCtx
-			inventory.requestTelemetry(slices.ContainsFunc(jobs, func(j Job) bool { return !j.Spec.Needs.cpuOnly() && fanOutDeviceSharing(&j) }))
+			inventory.requestTelemetry(slices.ContainsFunc(jobs, func(j Job) bool { return !j.Spec.Needs.cpuOnly() }))
 			m := cloneMachine(&w.Machine)
 			m.HygieneCollection = w.hygieneCollector.snapshot()
 			if w.modelSnapshots != nil {
@@ -1446,8 +1344,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
 			m.Capabilities = append(slices.Clone(w.Machine.Capabilities), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1", "nas_inspection_v1", residentJobsCapability, scarceHostYieldCapability, localFirstProtocol)
-			if w.supportsMemoryPools() {
-				m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
+			m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
+			if w.devEnvironmentSizing || w.Machine.GPU == "fake" && w.ServiceConfig == nil || runtime.GOOS == "darwin" && w.processMemory != nil && w.processMemory.OwnedFootprint != nil {
+				m.Capabilities = append(m.Capabilities, sampledMemoryCapability)
 			}
 			if w.modelSnapshots != nil {
 				// Any worker with a snapshot cache fetches missing snapshots itself.
@@ -1466,10 +1365,6 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 					m.Capabilities = append(m.Capabilities, ephemeralSnapshotsCapability)
 				}
 			}
-			if w.memoryCeilings != nil || w.processMemory != nil && w.processMemory.OwnedResident != nil {
-				m.Capabilities = append(m.Capabilities, learnedMemoryGuardCapability, firstRunFloorCapability)
-			}
-			m.Capabilities = append(m.Capabilities, measuredMemoryChargeCapability)
 			if w.processMemory != nil && w.processMemory.OwnedFootprint != nil && backendFor(w.Machine.GPU).processFootprint {
 				m.Capabilities = append(m.Capabilities, metalFootprintGuardCapability)
 			}
@@ -1592,6 +1487,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				// cache discoveries out of the configured environment list.
 				admissionWorker := w
 				admissionWorker.Machine.Environments = m.Environments
+				admissionWorker.Machine.Capabilities, admissionWorker.Machine.Release = m.Capabilities, m.Release
 				admissionWorker.Machine.UnavailableRoots = w.sampleStorageRoots(ctx, root.state.CheckpointRoot)
 				admissionWorker.Machine.HostHealth = health.snapshot(m.DiskVolumes)
 				applyHostMountHealth(w, &admissionWorker.Machine)
@@ -1599,6 +1495,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 					key := attemptKey{d.ID, d.Attempt, d.Session}
 					if d.Job != nil {
 						j := *d.Job
+						admissionWorker.acceptMemoryOffer(&j)
 						j.LaunchTimings = &LaunchTimings{AssignmentReceivedAt: received, ObservedAt: received, CurrentPhase: launchDispatch}
 						if !j.Spec.Needs.cpuOnly() && len(j.AllocatedDevices) == 0 {
 							j.AllocatedDevices = []string{firstDevice(j, w.Machine)}
@@ -1622,7 +1519,12 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 							r := Result{Machine: m.ID, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Interrupted: true, Error: "worker leaving before command started"}
 							s.state.Result = &r
 						}
-						if e = localAttemptAdmission(admissionWorker, activeJobs(), j, modelReports, environments.cores()); e != nil {
+						if hold := workerMemoryHold(&admissionWorker.Machine); hold != nil {
+							e = refuseAdmission(hold.Kind, "controllers", 1, 0, true)
+						} else {
+							e = localAttemptAdmission(admissionWorker, activeJobs(), j, modelReports, environments.cores())
+						}
+						if e != nil {
 							e = s.startFailure(j, launchRefused, e)
 							r := startFailureOutcome(Result{Machine: m.ID, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: e.Error()}, e)
 							s.state.Result = &r

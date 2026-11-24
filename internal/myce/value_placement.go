@@ -179,20 +179,19 @@ type placementScan struct {
 	livenessBuilds   int
 	candidateBuilds  int
 
-	memoryIdentities map[*Job]string
-	memory           *memoryPlanningCache
-	hostBackfill     map[string]*hostBackfillDemand
-	unreleasableCPU  map[batchCPUKey]int
+	memory          *memoryPlanningCache
+	hostBackfill    map[string]*hostBackfillDemand
+	unreleasableCPU map[batchCPUKey]int
 }
 
 func (q *Queue) placementScan(scans ...*placementScan) *placementScan {
-	if len(scans) > 0 {
+	if len(scans) > 0 && scans[0] != nil {
 		return scans[0]
 	}
 	if scan := q.observationScan; scan != nil && scan.observationOwner == q {
 		return scan
 	}
-	return &placementScan{machines: q.plannerMachines(), sets: map[string]*candidateSet{}, memoryIdentities: q.checkinMemoryIdentities}
+	return &placementScan{machines: q.plannerMachines(), sets: map[string]*candidateSet{}}
 }
 
 // A supplied scan already owns this inventory for its immutable pass. Reason
