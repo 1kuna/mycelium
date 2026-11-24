@@ -67,7 +67,8 @@ func (q *Queue) captureSubmissionAdvice() *submissionAdviceSnapshot {
 		simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts,
 		productionInfrastructureRetries: q.productionInfrastructureRetries,
 		networkQuiet:                    q.networkQuiet, root: q.root,
-		hostMemorySamples: q.readSamples, detachedRead: true}
+		hostMemorySamples: q.readSamples, hostMemoryLedgers: q.hostMemoryLedgers,
+		memoryEvidence: q.memoryEvidence, detachedRead: true}
 	// Policy records are replaced, never mutated. Keep this small fallback even
 	// when cold decoding cannot fit the post-commit request allowance.
 	v.s.PriorityPolicy = q.s.PriorityPolicy

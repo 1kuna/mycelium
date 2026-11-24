@@ -67,7 +67,7 @@ func (q *Queue) jobHold(j *Job, resolving bool) (blocker *Hold) {
 	if wait == nil {
 		wait = q.waitHold(j)
 	}
-	if wait.Kind == checkpointInputExpiryDue {
+	if wait.Kind == checkpointInputExpiryDue || wait.Kind == "fan_out_dispatched" {
 		return wait
 	}
 	if !dependencyReady(j) {

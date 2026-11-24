@@ -14,8 +14,9 @@ Unified-memory accelerator allocations share the host's RAM pool.
 For each pool, Mycelium estimates typical use and a cautious admission charge.
 It learns from comparable runs on the same platform family and falls back to
 broader evidence or the supplied hint. A new discrete-card workload gets
-exclusive card access until it has measured device evidence. Unknown
-estimates run alone on their pool.
+exclusive card access until it has measured device evidence. Accelerator jobs
+can share host RAM from the first run. With sparse accelerator RAM history,
+Mycelium uses available platform peaks, then same-OS CPU peaks.
 When a run has been measured but there is too little evidence to calibrate
 its charge, an existing hint remains a floor alongside the observed peak.
 
@@ -25,8 +26,10 @@ Each attempt holds the larger of its charge and its observed peak. For
 discrete cards, placement also respects the device's reported free memory.
 Cards configured with a fixed budget use that budget less known reservations
 when the worker has no live free-memory counter.
-The worker checks typical use against fresh room before releasing the
-payload. Relative start budgets pause during `memory_wait`.
+If the cautious charge exceeds a target's entire allowance, the queue can
+admit using the typical estimate, subject to any measured retry floor. The
+worker checks typical use against fresh room before releasing the payload.
+Relative start budgets pause during `memory_wait`.
 
 The highest-ranked blocked job on a host reserves enough pool capacity for
 its charge. Later jobs can use the surplus the head job will leave. Production

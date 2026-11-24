@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -24,6 +26,132 @@ func seedPoolReplay(q *Queue, job *Job, m *Machine, pool string, typical, charge
 		e.observe(memoryEvidencePoint{Key: family, Peak: peak})
 	}
 	q.memoryEvidence = e
+}
+
+func TestMemoryPoolChargeAboveAllowance(t *testing.T) {
+	for _, tc := range []struct {
+		name, backend           string
+		typical, charge, budget float64
+	}{
+		{"cold Metal", "metal", 3, 5.651, 5.618},
+		{"Darwin CPU", "cpu", 6, 14.560, 13.212},
+		{"typical exceeds allowance", "metal", 6, 7, 5.618},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, clock := fixture(t)
+			s := cpuSpec(1, 0)
+			s.Needs.Memory = "auto"
+			m := cpuMachine("small", "small", tc.backend, 8, 2)
+			m.CapabilityProfile.OS, m.CapabilityProfile.Arch = "darwin", "arm64"
+			m.HostMemoryBudgetGB = tc.budget
+			m.Capabilities = append(m.Capabilities, pooledMemoryCapability, sampledMemoryCapability)
+			if tc.backend == "metal" {
+				m.UnifiedMemory = true
+				m.CapabilityProfile.MemoryLayout = "unified"
+				s.Needs.Platform = Platform{Required: []string{"metal"}}
+			} else {
+				s.Needs.Platform = Platform{Required: []string{"cpu"}}
+			}
+			seedPoolReplay(q, &Job{Spec: s}, &m, "ram", tc.typical, tc.charge)
+			machineCheck(t, q, m)
+			demand := submit(t, q, s)
+			if got := assignedJob(machineCheck(t, q, m)); got != nil {
+				t.Fatal("admitted below the typical estimate", got.ID)
+			}
+			stored, err := q.jobSnapshot(demand.ID)
+			if err != nil || stored.Hold == nil || stored.Starts != 0 {
+				t.Fatalf("queued receipt = %+v, %v", stored, err)
+			}
+			if tc.typical > tc.budget {
+				if stored.Hold.Kind != "memory_capacity" || stored.Hold.Owner != ownerConsumer ||
+					!strings.Contains(stored.Hold.Detail, "typical 6.000 GiB") ||
+					!strings.Contains(stored.Hold.Detail, "host allowance 5.618 GiB") {
+					t.Fatalf("permanent pool shortage = %+v", stored.Hold)
+				}
+				return
+			}
+			if stored.Hold.Kind != memoryWaitReason || stored.Hold.Owner != ownerQueue ||
+				!strings.Contains(stored.Hold.Detail, "available 2.000 GiB") {
+				t.Fatalf("temporary physical shortage = %+v", stored.Hold)
+			}
+			// Room reaches the typical estimate but remains below the original
+			// platform charge. Both the queue and worker must admit it now.
+			m.HostAvailableMemoryGB = tc.typical + 0.25
+			offered := assignedJob(machineCheck(t, q, m))
+			if offered == nil || offered.ID != demand.ID || offered.Attempt != 1 ||
+				offered.Memory.RAM.ChargeGB != tc.typical || offered.Memory.RAM.Evidence.Level != "platform" {
+				t.Fatalf("admission with typical room = %+v", offered)
+			}
+			w := Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) {
+				return m.HostAvailableMemoryGB, nil
+			}}
+			if err := localAttemptAdmission(w, nil, *offered, nil); err != nil {
+				t.Fatal(err)
+			}
+			if limit, err := w.jobCeilingBytes(*offered); limit != 0 || err != nil {
+				t.Fatalf("estimate set a kill limit: %d, %v", limit, err)
+			}
+		})
+	}
+}
+
+func TestMemoryPoolUnifiedAcceleratorSharesWithoutPrior(t *testing.T) {
+	q, clock := fixture(t)
+	m := sharedUnifiedMachine()
+	holder := submit(t, q, sharedSpec("experiment", 2))
+	first := assignedJob(machineCheck(t, q, m))
+	if first == nil || first.ID != holder.ID {
+		t.Fatal("fixture did not admit holder")
+	}
+	cold := sharedSpec("experiment", 0)
+	cold.Name, cold.Needs.HostMemoryGB, cold.Needs.Memory = "cold", 0, "auto"
+	waiter := submit(t, q, cold)
+	second := assignedJob(machineCheck(t, q, m, first))
+	if second == nil || second.ID != waiter.ID || second.Memory.Card != nil || second.Memory.RAM.Alone {
+		t.Fatalf("cold unified job did not share: %+v, %s", second, job(t, q, waiter.ID).Reason)
+	}
+	if err := localAttemptAdmission(sharedWorker(m, clock), []Job{*first}, *second, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMemoryPoolColdDiscreteCardAndSharedRAM(t *testing.T) {
+	q, _ := fixture(t)
+	m := m3Machine()
+	m.HostMemoryBudgetGB, m.HostAvailableMemoryGB = 12, 12
+	cold := func(name, id string) Spec {
+		s := spec("experiment")
+		s.Name, s.Needs.MemoryGB, s.Needs.Memory = name, 0, "auto"
+		s.Needs.Platform = Platform{Required: []string{"fake"}}
+		s.Needs.GPU = &GPUSelection{Devices: []string{id}}
+		return s
+	}
+	s := cold("holder", "0")
+	s.Needs.HostMemoryGB = 2
+	holder := submit(t, q, s)
+	first := assignedJob(machineCheck(t, q, m))
+	if first == nil || first.ID != holder.ID || !first.Memory.Card.Alone {
+		t.Fatalf("missing cold-card holder: %+v", first)
+	}
+	waiter := submit(t, q, cold("same-card", "0"))
+	if offered := assignedJob(machineCheck(t, q, m, first)); offered != nil {
+		t.Fatal("cold work joined an occupied discrete card", offered.ID)
+	}
+	stored, err := q.jobSnapshot(waiter.ID)
+	if err != nil || stored.Hold == nil || stored.Hold.Kind != "capacity" || stored.Hold.Owner != ownerQueue ||
+		!strings.Contains(stored.Hold.Detail, "device 0 held by "+first.ID) {
+		t.Fatalf("occupied card receipt = %+v, %v", stored.Hold, err)
+	}
+	other := submit(t, q, cold("other-card", "1"))
+	second := assignedJob(machineCheck(t, q, m, first))
+	if second == nil || second.ID != other.ID || !slices.Equal(second.AllocatedDevices, []string{"1"}) ||
+		!second.Memory.Card.Alone || second.Memory.RAM.Alone {
+		t.Fatalf("cold card incorrectly required the host to itself: %+v", second)
+	}
+	finish(t, q, first, true)
+	if offered := assignedJob(machineCheck(t, q, m, second)); offered == nil || offered.ID != waiter.ID {
+		t.Fatalf("card waiter did not start when its holder released: %+v", offered)
+	}
 }
 
 func TestMemoryPoolReplay1967(t *testing.T) {

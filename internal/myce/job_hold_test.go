@@ -600,7 +600,7 @@ func TestDeviceCapacityHoldUsesAdvertisedCapacity(t *testing.T) {
 	}{
 		{"unmeasured with known holder", 0, true, true, "capacity", "queue", "wait; keep other work moving"},
 		{"unattributed occupancy", 12, false, false, memoryWaitReason, "queue", "wait; Mycelium retries admission automatically"},
-		{"over capacity", 17, true, false, "no_eligible_host", "consumer", "check the job's needs and allowed machines"},
+		{"over capacity", 17, true, false, "memory_capacity", "consumer", "check the job's memory estimate and allowed machines"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, clock := fixture(t)
@@ -608,7 +608,7 @@ func TestDeviceCapacityHoldUsesAdvertisedCapacity(t *testing.T) {
 			m.Devices = m.Devices[:1]
 			m.Devices[0].TotalMemoryGB, m.Devices[0].BudgetGB, m.Devices[0].FreeMemoryGB = 16, 16, 16
 			machineCheck(t, q, m)
-			if tc.kind == "no_eligible_host" {
+			if tc.kind == "memory_capacity" {
 				other := m3Machine()
 				other.ID, other.HostID, other.Session = "excluded-worker", "excluded-worker", "excluded-session"
 				other.Devices[0].TotalMemoryGB, other.Devices[0].BudgetGB, other.Devices[0].FreeMemoryGB = 32, 32, 32
@@ -658,6 +658,10 @@ func TestDeviceCapacityHoldUsesAdvertisedCapacity(t *testing.T) {
 			if tc.kind == memoryWaitReason && !strings.Contains(got.Hold.Detail, "card needs 12.000 GiB, available 8.000 GiB") {
 				t.Errorf("memory wait omitted the need and available figures: %+v", got.Hold)
 			}
+			if tc.kind == "memory_capacity" && (!strings.Contains(got.Hold.Detail, "card needs 17.000 GiB") ||
+				!strings.Contains(got.Hold.Detail, "card allowance 16.000 GiB") || strings.Contains(got.Hold.Detail, "excluded-worker")) {
+				t.Errorf("capacity hold omitted the limiting card comparison: %+v", got.Hold)
+			}
 
 			clock.Advance(time.Second)
 			if running != nil {
@@ -665,10 +669,10 @@ func TestDeviceCapacityHoldUsesAdvertisedCapacity(t *testing.T) {
 			}
 			m.Devices[0].FreeMemoryGB = 16
 			assignment := assignedJob(machineCheck(t, q, m))
-			if tc.kind == "capacity" && (assignment == nil || assignment.ID != demand.ID || assignment.Attempt != 1) {
+			if tc.kind != "memory_capacity" && (assignment == nil || assignment.ID != demand.ID || assignment.Attempt != 1) {
 				t.Fatalf("release did not admit the feasible job: %+v", assignment)
 			}
-			if tc.kind == "no_eligible_host" && assignment != nil {
+			if tc.kind == "memory_capacity" && assignment != nil {
 				t.Fatalf("released capacity admitted an oversized job: %+v", assignment)
 			}
 		})

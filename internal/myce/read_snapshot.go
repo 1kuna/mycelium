@@ -902,6 +902,7 @@ func (q *Queue) freezeReadCapture() *committedReadCapture {
 	source := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable, evidenceRetention: q.evidenceRetention, checkpointExpiryStatus: q.checkpointExpiryStatus, efficiencyView: q.efficiencyView,
 		simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts, productionInfrastructureRetries: q.productionInfrastructureRetries,
 		networkQuiet: q.networkQuiet, root: q.root, files: q.files, diskHost: q.diskHost, fileRetention: q.fileRetention, hostMemorySamples: q.readSamples, memoryEvidence: q.memoryEvidence, detachedRead: true}
+	source.hostMemoryLedgers = q.hostMemoryLedgers
 	ledgers := make(map[string]observationMachineLedger, len(q.s.Machines))
 	fresh := make(map[string]readFreshness, len(q.s.Machines))
 	for key, m := range q.s.Machines {
@@ -1048,6 +1049,7 @@ func (capture *committedReadCapture) detachedQueue(ctx context.Context, readAt t
 		simulation: base.simulation, productionGrace: base.productionGrace, lossTimeouts: base.lossTimeouts, productionInfrastructureRetries: base.productionInfrastructureRetries,
 		restartUntil: contact.restartUntil, restartGraceDuration: contact.restartGraceDuration, restartService: contact.restartService, networkQuiet: base.networkQuiet, root: base.root, files: base.files, fileRetention: base.fileRetention, hostMemorySamples: base.hostMemorySamples,
 		contacts: contact.contacts, memoryEvidence: base.memoryEvidence, detachedRead: true}
+	source.hostMemoryLedgers = base.hostMemoryLedgers
 	if contact.mu.control != nil {
 		source.mu.control = &controlClock{clock: source.clock.Now, at: source.clock.Now(), opportunity: contact.controlNow()}
 	}
