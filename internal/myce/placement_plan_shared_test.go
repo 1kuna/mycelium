@@ -685,10 +685,13 @@ func sharedCUDA40GiBCard() Machine {
 
 func submitMeasuredCardJob(t *testing.T, q *Queue, m Machine, spec Spec) *Job {
 	t.Helper()
-	if len(m.Devices) == 0 || m.Devices[0].UnifiedMemory || spec.Needs.MemoryGB <= 0 {
+	card := m
+	if len(m.Devices) > 0 {
+		card = m.Devices[0].machine(m)
+	}
+	if card.UnifiedMemory || spec.Needs.cpuOnly() || spec.Needs.MemoryGB <= 0 {
 		return submit(t, q, spec)
 	}
-	card := m.Devices[0].machine(m)
 	key := pooledEvidenceKey(&Job{Spec: spec}, &card)
 	key.Pool = "card"
 	if err := q.update(func() error {

@@ -27,6 +27,7 @@ func cudaStage() ProductionStage {
 
 func cudaProductionSpec() Spec {
 	s := spec("production")
+	s.Needs.HostMemoryGB = 1
 	s.Needs.Platform = Platform{Required: []string{"cuda"}}
 	return s
 }

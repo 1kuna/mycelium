@@ -239,7 +239,7 @@ func TestPriorityPreemptionLeastCostUsefulRelease(t *testing.T) {
 			low := spec("experiment")
 			low.Needs.MemoryGB = 4
 			low.Needs.HostMemoryGB = 8
-			submit(t, q, low)
+			submitMeasuredCardJob(t, q, m, low)
 			batch := check(t, q, m, nil).Job
 			if batch == nil {
 				t.Fatal("no batch")
@@ -260,7 +260,8 @@ func TestPriorityPreemptionLeastCostUsefulRelease(t *testing.T) {
 				high := spec("experiment")
 				high.Project = "urgent"
 				high.Needs.HostMemoryGB = 8
-				submit(t, q, high)
+				high.Needs.MemoryGB = 4
+				submitMeasuredCardJob(t, q, m, high)
 			}
 			if job(t, q, batch.ID).State != "stopping" {
 				t.Fatal("least-cost resumable batch not selected")

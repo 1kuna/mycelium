@@ -147,7 +147,7 @@ func fleetCompleteStartProbe(t *testing.T, q *Queue) {
 	}
 	j = q.s.Jobs[h.StartProbe]
 	if j.Attempt != 1 || j.Machine != h.Machine || j.State != "running" {
-		t.Fatalf("start probe not assigned: %+v", j)
+		t.Fatalf("start probe not assigned: state=%s attempt=%d reason=%s", j.State, j.Attempt, job(t, q, j.ID).Reason)
 	}
 	r := cloneJob(j)
 	if err := q.Started(result(&r, true)); err != nil {
