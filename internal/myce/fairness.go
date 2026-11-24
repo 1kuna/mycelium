@@ -297,18 +297,14 @@ func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[ba
 	}
 	variants := extensionJobs(j, m, true)
 	q.admissionPass(j, m, len(variants) > 0, predicateExtensionCandidates)
-	for _, candidate := range variants {
+	for i, candidate := range variants {
 		// These final eligibility predicates cannot be changed by memory
 		// sizing. Reject incompatible routes before reducing their evidence;
 		// live room, reclaim, fairness and all remaining checks still follow.
 		if !q.admissionPass(j, m, memorySizingTargetFits(candidate, m), predicateMemoryTarget) || !q.admissionPass(j, m, toolsFit(candidate, m), predicateTools) || !q.admissionPass(j, m, nativeNetworkFits(candidate, m), predicateNativeNetwork) || !q.admissionPass(j, m, q.batchCPUCeilingFits(candidate, m, scans...), predicateCPUCeiling) {
 			continue
 		}
-		if candidate == j {
-			candidate = q.memoryCandidate(candidate, m)
-		} else {
-			candidate = q.memoryCandidateOwned(candidate, m)
-		}
+		candidate = q.sizeQualifiedCandidate(j, candidate, m, i)
 		if q.admissionPass(j, m, q.capReasonFor(candidate, m) == "", predicateProjectCapacity) && q.batchResourcesFitWithScan(candidate, m, resources) {
 			return candidate
 		}

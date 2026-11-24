@@ -139,8 +139,9 @@ func pooledEvidenceKeyForExtension(j *Job, m *Machine, extension *Extension) mem
 }
 
 type pooledSizeKey struct {
-	job    *Job
-	target *Machine
+	job     *Job
+	target  *Machine
+	variant int
 }
 
 type pooledCandidateSize struct {
@@ -150,18 +151,19 @@ type pooledCandidateSize struct {
 	hasCard bool
 }
 
-func (q *Queue) pooledSize(j *Job, m *Machine) pooledCandidateSize {
+func (q *Queue) pooledSize(source, candidate *Job, m *Machine, variant int) pooledCandidateSize {
 	cache := q.memoryPlanning
-	// Only the stored job is the same input each time. Lowered extensions
-	// and hypothetical jobs may have different needs under the same ID.
-	if cache == nil || q.s.Jobs[j.ID] != j {
-		return q.resolvePooledSize(j, m)
+	// The qualified variants of a stored job are stable within the pass.
+	// Hypothetical jobs and fan-out pieces can have different needs under
+	// the same job ID and have no shared sizing entry.
+	if cache == nil || q.s.Jobs[source.ID] != source {
+		return q.resolvePooledSize(candidate, m)
 	}
-	key := pooledSizeKey{job: j, target: m}
+	key := pooledSizeKey{job: source, target: m, variant: variant}
 	if size, ok := cache.pooledSizes[key]; ok {
 		return size
 	}
-	size := q.resolvePooledSize(j, m)
+	size := q.resolvePooledSize(candidate, m)
 	if cache.pooledSizes == nil {
 		cache.pooledSizes = map[pooledSizeKey]pooledCandidateSize{}
 	}
