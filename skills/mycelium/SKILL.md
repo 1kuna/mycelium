@@ -225,8 +225,9 @@ main without placing the fleet token in any job process.
 
 Inspect the parent's `fan_out.results` for accepted keys. Fetch them as
 `KEY/OUTPUT_NAME` with `myce result PARENT --out DIR`, including partial
-results. An interrupted attempt can resume at the first unsettled key. Use
-repeatable item work and, for resumable submissions, publish complete
+results. When `next()` returns `None`, main exits. This also happens at a
+planned stop, when the next attempt resumes at the first unsettled key.
+Use repeatable item work and, for resumable submissions, publish complete
 file-store generations from the active item's checkpoint directory. A
 reported item failure settles the key and the loop continues. Plan the full
 attempt reservation for CPU or one device. See the

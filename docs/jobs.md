@@ -1467,7 +1467,8 @@ entries:
 
 Submit with `myce run --entry score` and retain the parent ID. Main opens
 `mycelium.warm_pieces.WarmPieces()` in its own process, initializes the
-model, then calls `next()` until it returns `None`. Each item supplies
+model, then calls `next()` until it returns `None` at completion or a
+planned stop. Main exits when it receives `None`. Each item supplies
 its key, arguments, absolute input paths and an output directory. Write
 each declared output in that directory and call `success()` to verify and
 accept it, or call `failure()` to record an item error and continue. If
@@ -1481,8 +1482,10 @@ first unsettled key. Use repeatable operations for each key because a
 worker can lose an item before accepting its receipt. With `resumable: true`
 and file-store checkpoints, write a complete generation to
 `item.checkpoint_dir` and call `checkpoint()` to publish it while main is
-active. The next attempt restores that generation for the same unsettled
-item. See [the checkpoint contract](files.md#resumable-jobs).
+active. The worker also tries to publish a complete final save before
+acknowledging release and retries a transient publication error while the
+attempt remains current. The next attempt restores the last accepted
+generation for the same unsettled item. See [the checkpoint contract](files.md#resumable-jobs).
 
 Fixed warm pieces require a worker that advertises support, synchronous
 file-store outputs, and CPU or one accelerator device. Plain pieces' input

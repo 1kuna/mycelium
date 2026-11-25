@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -276,6 +280,114 @@ func TestWarmPiecesPreemptionFencesItemStartAndResumes(t *testing.T) {
 	}
 }
 
+func TestWarmPiecesNextAfterPriorityStop(t *testing.T) {
+	q, _, m, s := warmFixture(t)
+	parent := submit(t, q, s)
+	run := warmStart(t, q, m, parent.ID)
+	receipt := warmSuccess(t, q, run, warmNext(t, q, run, "a"))
+	demand := submit(t, q, spec("production"))
+	if got := job(t, q, parent.ID); got.State != "stopping" || !plannedPriorityStop(got) {
+		t.Fatalf("expected production stop before the next request: %s %q", got.State, got.Reason)
+	}
+	if got := warmCall(t, q, warmRequest(run, "next", nil)); !got.End || got.Delivery != nil {
+		t.Fatalf("stop boundary returned an item: %+v", got)
+	}
+	// Main can exit cleanly before the worker receives the stop directive.
+	if err := q.Complete(result(run, true)); err != nil {
+		t.Fatal(err)
+	}
+	if got := job(t, q, parent.ID); got.State != "queued" || got.FanOut.Next != 1 ||
+		got.OutputRefs["a/out"] != receipt.OutputRefs["out"] || len(got.FanOut.Warm.Failures) != 0 ||
+		got.Losses != 0 || got.InfrastructureRetries != 0 {
+		t.Fatalf("boundary exit did not retain the unsettled tail: %s %+v", got.State, got.FanOut)
+	}
+	first := check(t, q, m, nil).Job
+	if first == nil || first.ID != demand.ID {
+		t.Fatalf("production did not get the released turn: %+v", first)
+	}
+	if err := q.Complete(result(first, true)); err != nil {
+		t.Fatal(err)
+	}
+	warmNext(t, q, warmStart(t, q, m, parent.ID), "b")
+}
+
+func TestWarmPiecesFinalCheckpointRetriesBeforeRelease(t *testing.T) {
+	q, clock, m, s := warmFixture(t)
+	s.Resumable = true
+	parent := submit(t, q, s)
+	run := warmStart(t, q, m, parent.ID)
+	warmSuccess(t, q, run, warmNext(t, q, run, "a"))
+	b := warmNext(t, q, run, "b")
+	submit(t, q, spec("production"))
+	stopping := job(t, q, parent.ID)
+	stop := priorityStop(stopping)
+	if stopping.State != "stopping" || stop == nil {
+		t.Fatalf("expected a priority stop, got %s", stopping.State)
+	}
+	handler := API{Queue: q, Token: "test"}.Handler()
+	var publications atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/files/checkpoint" && publications.Add(1) == 1 {
+			http.Error(w, "fixture checkpoint service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(api.Close)
+	w := recoveryWorker(t)
+	w.Machine, w.Clock, w.control = m, clock, &processControl{clock: clock}
+	w.Client = Client{URL: api.URL, Token: "test"}
+	root, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.close()
+	run.Checkpoint = t.TempDir()
+	store, err := newAttemptStore(root, *run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := result(run, false)
+	r.Interrupted, r.PriorityStop = true, stop
+	store.state.Result = &r
+	save := warmCheckpointPath(*run, b.Key)
+	publication := attemptPublicationRoot(*run, store.dir)
+	for _, dir := range []string{save, publication} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(save, "progress.json"), []byte(`{"myce_checkpoint":{"generation":7}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(publication, "warm-checkpoint.json"), []byte("2"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.save(); err != nil {
+		t.Fatal(err)
+	}
+	a := &attemptSupervisor{store: store, job: *run, worker: w, connected: true, publication: &publicationProgress{},
+		directive: AttemptDirective{Stop: true, PriorityStop: stop}, done: make(chan struct{}), wake: make(chan struct{}, 1)}
+	ctx, cancel := context.WithCancel(t.Context())
+	go a.run(ctx)
+	defer func() { cancel(); <-a.done }()
+	await(t, func() bool {
+		clock.Advance(5 * time.Millisecond)
+		select {
+		case <-a.done:
+			return true
+		default:
+			return false
+		}
+	})
+	final := job(t, q, parent.ID)
+	if a.err != nil || publications.Load() < 2 || final.State != "queued" || final.FanOut.Next != 1 ||
+		final.FileCheckpoints[run.Attempt].Generation != 7 {
+		t.Fatalf("checkpoint lost across publication retry: state=%s reason=%q posts=%d generation=%d actor=%v",
+			final.State, final.Reason, publications.Load(), final.FileCheckpoints[run.Attempt].Generation, a.err)
+	}
+}
+
 type warmRefusal struct {
 	name, reason string
 	change       func(*Spec)
@@ -364,6 +476,43 @@ func TestWarmPiecesSameTierBoundaryYield(t *testing.T) {
 	warmNext(t, q, next, "b")
 	if got := job(t, q, j.ID); got.Losses != 0 || got.InfrastructureRetries != 0 {
 		t.Fatalf("boundary yield charged a failure: %+v", got.FanOut)
+	}
+}
+
+func TestWarmPiecesBoundaryYieldsSharedRAMAcrossCards(t *testing.T) {
+	q, clock, _, s := warmFixture(t)
+	m := m3Machine()
+	m.Capabilities = append(m.Capabilities, warmPiecesCapability)
+	machineCheck(t, q, m)
+	s.Needs.HostMemoryGB = 24
+	s.Needs.GPU = &GPUSelection{Devices: []string{"0"}}
+	s.AllowedMachines = []string{m.ID}
+	j := submit(t, q, s)
+	run := warmStart(t, q, m, j.ID)
+	if !slices.Equal(run.AllocatedDevices, []string{"0"}) {
+		t.Fatalf("warm attempt is on %v, want card 0", run.AllocatedDevices)
+	}
+	a := warmNext(t, q, run, "a")
+	peer := spec("experiment")
+	peer.Project = "another-project"
+	peer.Needs.HostMemoryGB = 16
+	peer.Needs.GPU = &GPUSelection{Devices: []string{"1"}}
+	peer.AllowedMachines = []string{m.ID}
+	waiting := submit(t, q, peer)
+	clock.Advance(time.Second)
+	warmSuccess(t, q, run, a)
+	if got := warmCall(t, q, warmRequest(run, "next", nil)); !got.End || got.Delivery != nil {
+		t.Fatalf("warm continuation did not yield shared host RAM: %+v", got)
+	}
+	if got := assignedJob(machineCheck(t, q, m, run)); got != nil {
+		t.Fatalf("peer admitted before exact release: %+v", got)
+	}
+	if err := q.Complete(result(run, true)); err != nil {
+		t.Fatal(err)
+	}
+	next := assignedJob(machineCheck(t, q, m))
+	if next == nil || next.ID != waiting.ID || !slices.Equal(next.AllocatedDevices, []string{"1"}) {
+		t.Fatalf("peer did not get the released host RAM on card 1: %+v", next)
 	}
 }
 

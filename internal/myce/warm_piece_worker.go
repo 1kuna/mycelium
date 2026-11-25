@@ -16,7 +16,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const warmPieceFD = "MYCE_WARM_PIECES_FD"
+const (
+	warmPieceFD     = "MYCE_WARM_PIECES_FD"
+	warmBootstrapFD = 5 // The native launcher reserves 3 and 4 for start receipts.
+)
 
 type warmPieceItem struct {
 	Key           string            `json:"key"`
@@ -66,34 +69,79 @@ func (g *nativeGroup) warmCall(ctx context.Context, req warmPieceRequest) (warmP
 	return reply, err
 }
 
-// A caller sends the operation byte and one endpoint of a fresh Unix
-// socketpair over the inherited channel. The kernel identifies the process
-// that owns the other endpoint. Inheriting or opening a copy of the bootstrap
-// descriptor does not give another process main's identity or any replies.
-func readWarmRequest(conn *net.UnixConn, payloadPID int) (byte, net.Conn, error) {
+// Protect the receive and close-on-exec setup with the same lock as Go's
+// process launcher. In particular, Darwin cannot set CLOEXEC in recvmsg.
+// The callback only runs a nonblocking read while holding the lock.
+func receiveWarmRequest(conn *net.UnixConn) (byte, []int, bool, error) {
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		return 0, nil, false, err
+	}
 	var op [1]byte
 	var control [128]byte
-	_, n, flags, _, err := conn.ReadMsgUnix(op[:], control[:])
-	if err != nil {
-		return 0, nil, err
-	}
-	messages, err := unix.ParseSocketControlMessage(control[:n])
-	if err != nil {
-		return 0, nil, err
-	}
 	var fds []int
-	for _, message := range messages {
-		rights, err := unix.ParseUnixRights(&message)
-		if err == nil {
-			fds = append(fds, rights...)
+	var valid bool
+	var recvErr error
+	err = raw.Read(func(fd uintptr) bool {
+		syscall.ForkLock.RLock()
+		defer syscall.ForkLock.RUnlock()
+		var size, n, flags int
+		for {
+			size, n, flags, _, recvErr = unix.Recvmsg(int(fd), op[:], control[:], unix.MSG_DONTWAIT)
+			if recvErr != unix.EINTR {
+				break
+			}
 		}
+		if recvErr == unix.EAGAIN || recvErr == unix.EWOULDBLOCK {
+			return false
+		}
+		if recvErr != nil {
+			return true
+		}
+		if size == 0 && n == 0 {
+			recvErr = io.EOF
+			return true
+		}
+		messages, parseErr := unix.ParseSocketControlMessage(control[:n])
+		if parseErr != nil {
+			recvErr = parseErr
+			return true
+		}
+		for _, message := range messages {
+			rights, err := unix.ParseUnixRights(&message)
+			if err == nil {
+				for _, received := range rights {
+					if _, err := unix.FcntlInt(uintptr(received), unix.F_SETFD, unix.FD_CLOEXEC); err != nil {
+						_ = unix.Close(received)
+						recvErr = err
+						continue
+					}
+					fds = append(fds, received)
+				}
+			}
+		}
+		valid = size == 1 && len(messages) == 1 && len(fds) == 1 && flags&unix.MSG_CTRUNC == 0
+		return true
+	})
+	if err != nil {
+		recvErr = err
 	}
+	return op[0], fds, valid, recvErr
+}
+
+// Each request carries a fresh reply endpoint whose kernel peer PID and
+// process birth must match the main process captured by the launch gate.
+func readWarmRequest(conn *net.UnixConn, payloadPID int, payloadBirth string) (byte, net.Conn, error) {
+	op, fds, valid, err := receiveWarmRequest(conn)
 	defer func() {
 		for _, fd := range fds {
 			_ = unix.Close(fd)
 		}
 	}()
-	if len(fds) != 1 || len(messages) != 1 || flags&unix.MSG_CTRUNC != 0 {
+	if err != nil {
+		return 0, nil, err
+	}
+	if !valid {
 		return 0, nil, nil
 	}
 	fd := fds[0]
@@ -102,22 +150,26 @@ func readWarmRequest(conn *net.UnixConn, payloadPID int) (byte, net.Conn, error)
 		return 0, nil, nil
 	}
 	pid, err := warmPeerPID(fd)
-	if err != nil || pid != payloadPID {
+	if err != nil || pid != payloadPID || payloadBirth == "" {
+		return 0, nil, nil
+	}
+	birth, err := processBirth(pid)
+	if err != nil || birth != payloadBirth {
 		return 0, nil, nil
 	}
 	fds = nil
 	file := os.NewFile(uintptr(fd), "warm-piece-response")
 	defer file.Close()
 	reply, err := net.FileConn(file)
-	return op[0], reply, err
+	return op, reply, err
 }
 
-func (g *nativeGroup) serveWarmPieces(ctx context.Context, conn *net.UnixConn, j Job, payloadPID int) error {
+func (g *nativeGroup) serveWarmPieces(ctx context.Context, conn *net.UnixConn, j Job, payloadPID int, payloadBirth string) error {
 	defer conn.Close()
 	var delivery *WarmPieceDelivery
 	var item *warmPieceItem
 	for {
-		op, reply, err := readWarmRequest(conn, payloadPID)
+		op, reply, err := readWarmRequest(conn, payloadPID, payloadBirth)
 		if err != nil {
 			if errors.Is(err, io.EOF) || ctx.Err() != nil {
 				return nil

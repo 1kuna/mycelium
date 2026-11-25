@@ -358,7 +358,9 @@ approval and leaves the MY-40 study on its own approval path.
 
 - The inherited bootstrap descriptor travels only to main. Each request
   passes a fresh Unix socket endpoint for the reply. Linux and macOS verify
-  the peer PID against the payload PID recorded by the native launch gate.
+  the peer PID and process birth against the identity recorded by the native
+  launch gate. Received reply descriptors are marked close-on-exec before
+  another worker launch can inherit them.
   The Python helper closes the bootstrap descriptor across fork and exec.
   A command wrapper must exec main in place so its PID remains valid.
 - The worker stages piece inputs under their declared key at attempt start.
@@ -373,7 +375,8 @@ approval and leaves the MY-40 study on its own approval path.
 - With `resumable: true`, the helper exposes a directory for the active
   item's ordinary file-store checkpoint generations and can publish one
   during execution. The worker can publish a final generation on orderly
-  stop. A settled receipt clears that item's resume data in the same queue
+  stop and retries transient publication failures before acknowledging
+  release. A settled receipt clears that item's resume data in the same queue
   transaction. Explicit `advanced.checkpoint` policies and NAS checkpoint
   transport are refused for this mode.
 - A reported failure records the failed key and exact attempt. Application
@@ -382,7 +385,8 @@ approval and leaves the MY-40 study on its own approval path.
   run its item checks before reporting success.
 - Fixed-mode boundary continuation keeps affinity within the selected
   project. A competing ready job must need this attempt's resources and
-  outrank continuation before the worker yields. Its admission still
+  outrank continuation before the worker yields. Host RAM and CPU contention
+  can come from work assigned to another device on the host. Its admission still
   waits for exact release. A new attempt gets its first item under its
   ordinary placement turn. An empty remaining list runs the ordinary
   start, cleanup and final-result path without launching main or sidecars.

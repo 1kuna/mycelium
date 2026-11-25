@@ -820,7 +820,7 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	if main && len(warmFD) == 1 {
 		// The native namespace uses 3/4 for its launch receipts.
 		cmd.ExtraFiles = []*os.File{nil, nil, warmFD[0]}
-		env[warmPieceFD] = "5"
+		env[warmPieceFD] = strconv.Itoa(warmBootstrapFD)
 	}
 	bound, e := g.worker.deviceEnvironment()
 	if e != nil {
@@ -1209,11 +1209,11 @@ func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string,
 			<-done
 		}()
 		warmDone = done
-		payloadPID := main.PID
+		payloadPID, payloadBirth := main.PID, main.Birth
 		if main.PayloadPID != 0 {
-			payloadPID = main.PayloadPID
+			payloadPID, payloadBirth = main.PayloadPID, main.PayloadBirth
 		}
-		go func() { done <- g.serveWarmPieces(ctx, conn, j, payloadPID); close(done) }()
+		go func() { done <- g.serveWarmPieces(ctx, conn, j, payloadPID, payloadBirth); close(done) }()
 	}
 	wake := time.NewTicker(10 * time.Millisecond)
 	defer wake.Stop()
