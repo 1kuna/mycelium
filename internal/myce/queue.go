@@ -1722,7 +1722,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			if save, ok := j.FileCheckpoints[j.Attempt]; ok {
 				progress.durable = save.Generation
 			}
-		} else if j != nil && (j.State == "queued" || j.State == "running" || j.State == "stopping") && j.Spec.Resumable && j.Attempt != report.Attempt && !belowCheckpointFloor(j, report.Progress) {
+		} else if j != nil && (j.State == "queued" || j.State == "running" || j.State == "stopping") && j.Spec.Resumable && j.Attempt != report.Attempt && !knownBelowCheckpointFloor(j, report.Progress) {
 			// Only a known recoverable execution can open a resume decision.
 			// Ordinary or already rejected stale heartbeats do no share I/O.
 			for _, copy := range j.Copies {
@@ -3225,7 +3225,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 		j.LocalCheckpointGeneration = max(j.LocalCheckpointGeneration, report.LocalCheckpointGeneration)
 	}
 	if j != nil && (j.State == "queued" || j.State == "running" || j.State == "stopping") && !cancelled(j) &&
-		!belowCheckpointFloor(j, report.Progress) && (j.State == "queued" || j.Attempt != report.Attempt || j.Machine != m.ID || j.Session != m.Session) {
+		!knownBelowCheckpointFloor(j, report.Progress) && (j.State == "queued" || j.Attempt != report.Attempt || j.Machine != m.ID || j.Session != m.Session) {
 		for _, copy := range j.Copies {
 			canRecover := q.machineRecoveryFits(m, j, copy)
 			if canRecover && q.placementPolicyAllowed(j, allocationMachine(m, copy.AllocatedDevices), false) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && ((!j.Spec.localFirst() && (m.CheckpointUnavailable || !q.checkpointsAvailable())) || progress.err != nil || (progress.path != "" && progress.path != attemptCheckpoint(*j))) {

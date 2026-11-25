@@ -49,6 +49,13 @@ func belowCheckpointFloor(j *Job, generation int64) bool {
 	return floor > 0 && generation < floor
 }
 
+// A report of -1 means the attempt has not published a generation yet; its
+// durable save may still be at or above the floor. Only a confirmed lower
+// generation may skip recovery comparison.
+func knownBelowCheckpointFloor(j *Job, generation int64) bool {
+	return generation >= 0 && belowCheckpointFloor(j, generation)
+}
+
 // The caller checks exact attempt ownership. A scan result can hold only an
 // unstarted NAS resume with confirmed release and the same accepted floor.
 func missingCheckpointFloor(j *Job, r Result) *CheckpointFloorMissing {

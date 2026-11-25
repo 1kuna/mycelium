@@ -182,3 +182,40 @@ func TestLateReturnBelowAcceptedCheckpointFloor(t *testing.T) {
 		})
 	}
 }
+
+// A returning attempt that has not published a generation (-1) is not known to
+// be below the floor. With the replacement lost, the job is queued and the
+// returning execution may be recovered as before the floor existed.
+func TestLateReturnWithUnknownGenerationIsNotKilledByFloor(t *testing.T) {
+	q, clock := fixture(t)
+	submit(t, q, spec("experiment"))
+	oldWorker := machine("first", "fake")
+	old := check(t, q, oldWorker, nil).Job
+	clock.Advance(LossAfter)
+	check(t, q, observer(), nil)
+	newWorker := machine("replacement", "fake")
+	replacement := check(t, q, newWorker, nil).Job
+	if replacement == nil || replacement.Attempt <= old.Attempt {
+		t.Fatal("missing replacement assignment")
+	}
+	writeSave(t, attemptCheckpoint(*replacement), "7")
+	if _, err := q.CheckinKeyed(Checkin{Machine: newWorker, AttemptProtocol: keyedAttemptProtocol,
+		Attempts: []AttemptReport{{Execution: Execution{ID: replacement.ID, Attempt: replacement.Attempt, Progress: 7}, Session: replacement.Session, Started: true}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	advanceReportingPeer(t, q, clock, observer(), LossAfter)
+	before := job(t, q, old.ID)
+	if before.State != "queued" || before.CheckpointTarget == nil || before.CheckpointTarget.Generation != 7 {
+		t.Fatal("replacement did not establish a floor", before.State, before.CheckpointTarget)
+	}
+	reply, err := q.CheckinKeyed(Checkin{Machine: oldWorker, AttemptProtocol: keyedAttemptProtocol,
+		Attempts: []AttemptReport{{Execution: Execution{ID: old.ID, Attempt: old.Attempt, Progress: -1}, Session: old.Session, Started: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reply.Attempts) == 1 && reply.Attempts[0].Kill {
+		t.Fatalf("unknown generation was killed as below the floor: %+v", reply.Attempts)
+	}
+}
