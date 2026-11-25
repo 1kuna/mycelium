@@ -521,8 +521,11 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			publicationStarted := w.Clock.Now()
 			var err error
 			resultReady := p == nil && s.state.Result != nil
-			warmSave := a.job.Spec.warmPieces() && a.job.Spec.Resumable && !d.UserCancel
-			stopWithoutPublication := d.Stop && d.Kill && !scarceYieldStop(s.state.PriorityStop) && !warmSave
+			// Report a warm stop with its actual result. A release-only report
+			// would requeue before the queue can classify pressure or completion.
+			warmResult := a.job.Spec.warmPieces() && !d.UserCancel
+			warmSave := warmResult && a.job.Spec.Resumable
+			stopWithoutPublication := d.Stop && d.Kill && !scarceYieldStop(s.state.PriorityStop) && !warmResult
 			var resultAcknowledged, discarded bool
 			if stopWithoutPublication {
 				if canRelease {
@@ -547,7 +550,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			if err == nil && !floorRefusal && (!stopWithoutPublication || !resultReady) && (a.job.storedFileResults() || resultReady && scarceYieldStop(s.state.Result.PriorityStop)) {
 				w.storageObserver = s.storageObserver
 				if resultReady {
-					if canRelease && !releaseSent && !warmSave {
+					if canRelease && !releaseSent && !warmResult {
 						err = w.ackAttemptRelease(ioCtx, *s.state.Result)
 						releaseSent = err == nil
 						if stale(err) {

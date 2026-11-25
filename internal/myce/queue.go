@@ -588,7 +588,7 @@ func (q *Queue) checkpointReady(j *Job, m *Machine) bool {
 	if j.Spec.localFirst() {
 		return contains(m.Capabilities, localFirstProtocol)
 	}
-	return !needsCheckpoint(j) || (!m.CheckpointUnavailable && q.checkpointsAvailable())
+	return !needsNASCheckpoint(j) || (!m.CheckpointUnavailable && q.checkpointsAvailable())
 }
 
 // checkpointAvailable proves root is a directory whose fixed per-host probe
@@ -2564,7 +2564,7 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 		if j.State == "queued" && j.Reason == memoryWaitReason {
 			admissionRequeueOutcome(&outcome)
 		}
-	} else if poolPressure && !r.Success && !oomFailure {
+	} else if poolPressure && (!r.Success || warmTail) && !oomFailure {
 		q.requeueMemoryPressure(j)
 	} else if !r.Success && !oomFailure && cancelledPreparation(r) {
 		// Started is an authorization fence, not proof main executed. A worker

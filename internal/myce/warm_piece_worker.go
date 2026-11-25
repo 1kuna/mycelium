@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -19,6 +21,10 @@ import (
 const (
 	warmPieceFD     = "MYCE_WARM_PIECES_FD"
 	warmBootstrapFD = 5 // The native launcher reserves 3 and 4 for start receipts.
+	// The peer is executing a synchronous call once it starts a frame. Bound
+	// partial headers and unread replies independently of model and item time.
+	warmFrameTimeout = 5 * time.Second
+	warmReplyLimit   = 4 << 20
 )
 
 type warmPieceItem struct {
@@ -69,183 +75,131 @@ func (g *nativeGroup) warmCall(ctx context.Context, req warmPieceRequest) (warmP
 	return reply, err
 }
 
-// Protect the receive and close-on-exec setup with the same lock as Go's
-// process launcher. In particular, Darwin cannot set CLOEXEC in recvmsg.
-// The callback only runs a nonblocking read while holding the lock.
-func receiveWarmRequest(conn *net.UnixConn) (byte, []int, bool, error) {
-	raw, err := conn.SyscallConn()
-	if err != nil {
-		return 0, nil, false, err
+// Read ordinary stream bytes only, so the kernel never installs ancillary
+// descriptors in the worker. The complete request body is one operation byte.
+func readWarmRequest(conn *net.UnixConn, clock Clock) (byte, error) {
+	var frame [5]byte
+	// Between requests main can be loading or running an item. The channel
+	// goroutine can wait here until attempt cancellation closes the socket.
+	if _, err := io.ReadFull(conn, frame[:1]); err != nil {
+		return 0, err
 	}
-	var op [1]byte
-	var control [128]byte
-	var fds []int
-	var valid bool
-	var recvErr error
-	err = raw.Read(func(fd uintptr) bool {
-		syscall.ForkLock.RLock()
-		defer syscall.ForkLock.RUnlock()
-		var size, n, flags int
-		for {
-			size, n, flags, _, recvErr = unix.Recvmsg(int(fd), op[:], control[:], unix.MSG_DONTWAIT)
-			if recvErr != unix.EINTR {
-				break
-			}
-		}
-		if recvErr == unix.EAGAIN || recvErr == unix.EWOULDBLOCK {
-			return false
-		}
-		if recvErr != nil {
-			return true
-		}
-		if size == 0 && n == 0 {
-			recvErr = io.EOF
-			return true
-		}
-		messages, parseErr := unix.ParseSocketControlMessage(control[:n])
-		if parseErr != nil {
-			recvErr = parseErr
-			return true
-		}
-		for _, message := range messages {
-			rights, err := unix.ParseUnixRights(&message)
-			if err == nil {
-				for _, received := range rights {
-					if _, err := unix.FcntlInt(uintptr(received), unix.F_SETFD, unix.FD_CLOEXEC); err != nil {
-						_ = unix.Close(received)
-						recvErr = err
-						continue
-					}
-					fds = append(fds, received)
-				}
-			}
-		}
-		valid = size == 1 && len(messages) == 1 && len(fds) == 1 && flags&unix.MSG_CTRUNC == 0
-		return true
-	})
-	if err != nil {
-		recvErr = err
+	if err := conn.SetReadDeadline(clock.Now().Add(warmFrameTimeout)); err != nil {
+		return 0, err
 	}
-	return op[0], fds, valid, recvErr
+	if _, err := io.ReadFull(conn, frame[1:4]); err != nil {
+		return 0, err
+	}
+	if binary.BigEndian.Uint32(frame[:4]) != 1 {
+		return 0, errors.New("invalid warm request frame size")
+	}
+	if _, err := io.ReadFull(conn, frame[4:]); err != nil {
+		return 0, err
+	}
+	return frame[4], conn.SetReadDeadline(time.Time{})
 }
 
-// Each request carries a fresh reply endpoint whose kernel peer PID and
-// process birth must match the main process captured by the launch gate.
-func readWarmRequest(conn *net.UnixConn, payloadPID int, payloadBirth string) (byte, net.Conn, error) {
-	op, fds, valid, err := receiveWarmRequest(conn)
-	defer func() {
-		for _, fd := range fds {
-			_ = unix.Close(fd)
-		}
-	}()
+func writeWarmReply(conn *net.UnixConn, clock Clock, reply warmHelperReply) error {
+	data, err := json.Marshal(reply)
 	if err != nil {
-		return 0, nil, err
+		return err
 	}
-	if !valid {
-		return 0, nil, nil
+	if len(data) > warmReplyLimit {
+		return errors.New("warm reply exceeds frame size limit")
 	}
-	fd := fds[0]
-	addr, err := unix.Getpeername(fd)
-	if _, unixPeer := addr.(*unix.SockaddrUnix); err != nil || !unixPeer {
-		return 0, nil, nil
+	if err := conn.SetWriteDeadline(clock.Now().Add(warmFrameTimeout)); err != nil {
+		return err
 	}
-	pid, err := warmPeerPID(fd)
-	if err != nil || pid != payloadPID || payloadBirth == "" {
-		return 0, nil, nil
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], uint32(len(data)))
+	if _, err := conn.Write(header[:]); err != nil {
+		return err
 	}
-	birth, err := processBirth(pid)
-	if err != nil || birth != payloadBirth {
-		return 0, nil, nil
-	}
-	fds = nil
-	file := os.NewFile(uintptr(fd), "warm-piece-response")
-	defer file.Close()
-	reply, err := net.FileConn(file)
-	return op, reply, err
+	_, err = conn.Write(data)
+	return err
 }
 
-func (g *nativeGroup) serveWarmPieces(ctx context.Context, conn *net.UnixConn, j Job, payloadPID int, payloadBirth string) error {
+func (g *nativeGroup) serveWarmPieces(ctx context.Context, conn *net.UnixConn, j Job) error {
 	defer conn.Close()
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
 	var delivery *WarmPieceDelivery
 	var item *warmPieceItem
 	for {
-		op, reply, err := readWarmRequest(conn, payloadPID, payloadBirth)
-		if err != nil {
-			if errors.Is(err, io.EOF) || ctx.Err() != nil {
+		op, err := readWarmRequest(conn, g.worker.Clock)
+		if err != nil || ctx.Err() != nil {
+			return nil // Transport failure ends just this channel.
+		}
+		var end bool
+		var response warmHelperReply
+		switch op {
+		case 'N':
+			if delivery != nil {
 				return nil
 			}
+			delivery, item, end, err = g.beginWarmItem(ctx, j)
+			response.Item = item
+		case 'C':
+			if item == nil || item.CheckpointDir == "" {
+				return nil
+			}
+			_, err = g.worker.publishFileCheckpointContext(ctx, j, g.dir)
+		case 'S', 'F':
+			if delivery == nil {
+				return nil
+			}
+			err = g.settleWarmItem(ctx, j, *delivery, *item, op == 'S')
+			if err == nil {
+				g.retireWarmItem(j, *delivery, *item)
+				delivery, item = nil, nil
+			}
+		default:
+			return nil
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err != nil {
+			// Keep worker and queue internals outside the authored payload.
+			_ = writeWarmReply(conn, g.worker.Clock, warmHelperReply{Error: "warm piece operation refused"})
 			return err
 		}
-		if reply == nil {
-			continue
-		}
-		closeOnStop := context.AfterFunc(ctx, func() { reply.Close() })
-		end, responseErr := func() (bool, error) {
-			respond := func(response warmHelperReply) error {
-				return json.NewEncoder(reply).Encode(response)
-			}
-			switch op {
-			case 'N':
-				if delivery != nil {
-					return false, errors.New("settle the current warm item before requesting another")
-				}
-				offered, err := g.warmCall(ctx, warmPieceRequest{Op: "next"})
-				if err != nil {
-					return false, err
-				}
-				if offered.End && offered.Delivery == nil {
-					return true, respond(warmHelperReply{})
-				}
-				delivery = offered.Delivery
-				item, err = prepareWarmItem(j, g.dir, delivery)
-				if err != nil {
-					return false, err
-				}
-				started, err := g.warmCall(ctx, warmPieceRequest{Op: "start", Key: delivery.Key, Sequence: delivery.Sequence})
-				if err != nil {
-					return false, err
-				}
-				if started.Delivery == nil || started.Delivery.Key != delivery.Key || started.Delivery.Sequence != delivery.Sequence || started.Delivery.StartedAt == nil {
-					return false, errors.New("missing warm item start authorization")
-				}
-				return false, respond(warmHelperReply{Item: item})
-			case 'C', 'S', 'F':
-				if delivery == nil {
-					return false, errors.New("warm item operation requires an active delivery")
-				}
-				if op == 'C' {
-					if item.CheckpointDir == "" {
-						return false, errors.New("warm item checkpoint requires a resumable job")
-					}
-					if _, err := g.worker.publishFileCheckpoint(j, g.dir); err != nil {
-						return false, err
-					}
-				} else {
-					if err := g.settleWarmItem(ctx, j, *delivery, *item, op == 'S'); err != nil {
-						return false, err
-					}
-					g.retireWarmItem(j, *delivery, *item)
-					delivery, item = nil, nil
-				}
-				return false, respond(warmHelperReply{})
-			default:
-				return false, errors.New("unknown warm helper operation")
-			}
-		}()
-		if responseErr != nil && ctx.Err() == nil {
-			// Keep worker and queue internals, including server responses,
-			// outside the authored payload.
-			_ = json.NewEncoder(reply).Encode(warmHelperReply{Error: "warm piece operation refused"})
-		}
-		closeOnStop()
-		_ = reply.Close()
-		if end || responseErr != nil {
-			return responseErr
+		if err := writeWarmReply(conn, g.worker.Clock, response); err != nil || end {
+			return nil
 		}
 	}
 }
 
-func prepareWarmItem(j Job, state string, d *WarmPieceDelivery) (*warmPieceItem, error) {
+func (g *nativeGroup) beginWarmItem(ctx context.Context, j Job) (*WarmPieceDelivery, *warmPieceItem, bool, error) {
+	offered, err := g.warmCall(ctx, warmPieceRequest{Op: "next"})
+	if err != nil || offered.End {
+		return nil, nil, offered.End, err
+	}
+	delivery := offered.Delivery
+	item, err := prepareWarmItem(j, delivery)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	started, err := g.warmCall(ctx, warmPieceRequest{Op: "start", Key: delivery.Key, Sequence: delivery.Sequence})
+	if err != nil || started.End {
+		return nil, nil, started.End, err
+	}
+	if started.Delivery == nil || started.Delivery.Key != delivery.Key || started.Delivery.Sequence != delivery.Sequence || started.Delivery.StartedAt == nil {
+		return nil, nil, false, errors.New("missing warm item start authorization")
+	}
+	if item.CheckpointDir != "" {
+		root := attemptPublicationRoot(j, g.dir)
+		if err := os.MkdirAll(root, 0700); err != nil {
+			return nil, nil, false, err
+		}
+		if err := saveWorkerJSON(root, "warm-checkpoint.json", delivery.Sequence); err != nil {
+			return nil, nil, false, err
+		}
+	}
+	return delivery, item, false, nil
+}
+
+func prepareWarmItem(j Job, d *WarmPieceDelivery) (*warmPieceItem, error) {
 	if d == nil || d.Sequence < 1 || d.Sequence > len(j.Spec.FanOut.Pieces) || d.Attempt != j.Attempt {
 		return nil, errors.New("invalid warm item delivery")
 	}
@@ -269,13 +223,6 @@ func prepareWarmItem(j Job, state string, d *WarmPieceDelivery) (*warmPieceItem,
 	if j.Spec.Resumable {
 		item.CheckpointDir = warmCheckpointPath(j, p.Key)
 		if err := os.MkdirAll(item.CheckpointDir, 0700); err != nil {
-			return nil, err
-		}
-		root := attemptPublicationRoot(j, state)
-		if err := os.MkdirAll(root, 0700); err != nil {
-			return nil, err
-		}
-		if err := saveWorkerJSON(root, "warm-checkpoint.json", d.Sequence); err != nil {
 			return nil, err
 		}
 	}

@@ -179,10 +179,8 @@ for source in ('fleet_adoption', 'fleet_handover'):
         'fleet_normal_test.go', 'fleet_critical_test.go')
 
 
-# Warm item checkpoint, transport and per-platform peer authentication are
-# covered by the same fake-clock queue and real dev worker journeys.
-for source in ('warm_piece_checkpoint', 'warm_piece_worker', 'warm_piece_peer_darwin',
-               'warm_piece_peer_linux', 'warm_piece_peer_other'):
+# Warm item transport and checkpoints share queue and dev coverage.
+for source in ('warm_piece_checkpoint', 'warm_piece_worker'):
     SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = (
         'warm_pieces_test.go', 'warm_pieces_dev_test.go')
 

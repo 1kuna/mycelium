@@ -157,7 +157,8 @@ func (q *Queue) warmPiece(ctx context.Context, r warmPieceRequest) (reply warmPi
 			return ErrStale
 		}
 		if j.State != "running" {
-			if r.Op == "next" && r.Key == "" && r.Sequence == 0 && j.State == "stopping" {
+			if j.State == "stopping" && (r.Op == "next" && r.Key == "" && r.Sequence == 0 ||
+				r.Op == "start" && warmPieceMatches(j, r)) {
 				reply.End = true
 				return nil
 			}
@@ -329,10 +330,13 @@ func (q *Queue) warmPieceYields(j *Job) bool {
 	continuation := *j
 	continuation.State = "queued"
 	continuation.PreemptionPlacement = nil
+	original := map[string]*Machine{}
+	projectedByMachine := map[string][]*Machine{}
 	for _, m := range scan.machines {
 		if hostID(m) != hostID(owner) || len(m.groupMembers) > 0 {
 			continue
 		}
+		original[targetKey(m)] = m
 		// RAM and cores are host-wide. VRAM is released only on the card
 		// occupied by this attempt.
 		projected := q.afterReleases(m, []*Job{j}, nil)
@@ -342,15 +346,32 @@ func (q *Queue) warmPieceYields(j *Job) bool {
 				projected.FreeMemoryGB = min(m.TotalMemoryGB, projected.FreeMemoryGB)
 			}
 		}
-		// Rank after restoring custody so active usage still counts.
-		set, eligible := q.warmProjectedContenders(j, &projected, waiting)
-		set.jobs = append(set.jobs, &continuation)
-		for _, candidate := range eligible {
-			if q.immediateCandidate(candidate, m) != nil && q.batchSlotFree(m, candidate) {
-				continue
+		projectedByMachine[m.ID] = append(projectedByMachine[m.ID], &projected)
+	}
+	for id, targets := range projectedByMachine {
+		// Rebuild group shapes from the projected cards. Equal shares are
+		// capped by the smallest member, and release can change card ordering.
+		groups := q.cardGroupTargets(q.s.Machines[id], targets)
+		for _, projected := range append(targets, groups...) {
+			m := original[targetKey(projected)]
+			if m == nil {
+				members := make([]*Machine, 0, len(projected.groupMembers))
+				for _, card := range projected.groupMembers {
+					members = append(members, original[targetKey(card)])
+				}
+				m = groupView(members)
+				m.groupFloorGB = projected.groupFloorGB
 			}
-			if set.before(candidate, &continuation) {
-				return true
+			// Rank after restoring custody so active usage still counts.
+			set, eligible := q.warmProjectedContenders(j, projected, waiting)
+			set.jobs = append(set.jobs, &continuation)
+			for _, candidate := range eligible {
+				if q.immediateCandidate(candidate, m) != nil && q.batchSlotFree(m, candidate) {
+					continue
+				}
+				if set.before(candidate, &continuation) {
+					return true
+				}
 			}
 		}
 	}

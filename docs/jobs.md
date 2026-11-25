@@ -1471,9 +1471,10 @@ model, then calls `next()` until it returns `None` at completion or a
 planned stop. Main exits when it receives `None`. Each item supplies
 its key, arguments, absolute input paths and an output directory. Write
 each declared output in that directory and call `success()` to verify and
-accept it, or call `failure()` to record an item error and continue. If
-main starts through a launcher, use `exec` to preserve its process
-identity. Sidecars and subprocesses cannot operate the helper.
+accept it, or call `failure()` to record an item error and continue. The
+worker gives the helper descriptor to main. Main may deliberately pass
+it to a descendant acting for the same job. Keep one caller at a time
+on the stream. Sidecars receive no helper descriptor.
 
 `myce result PARENT --out DIR` fetches the accepted `KEY/OUTPUT_NAME`
 files, including a partial result. A failed item fails the parent after
@@ -1484,8 +1485,11 @@ and file-store checkpoints, write a complete generation to
 `item.checkpoint_dir` and call `checkpoint()` to publish it while main is
 active. The worker also tries to publish a complete final save before
 acknowledging release and retries a transient publication error while the
-attempt remains current. The next attempt restores the last accepted
-generation for the same unsettled item. See [the checkpoint contract](files.md#resumable-jobs).
+attempt remains current. If the final save is invalid, the worker records
+the reason and releases the attempt. The next attempt restores the last
+accepted generation for the same unsettled item. File-store checkpoints
+remain available when the worker's NAS is absent.
+See [the checkpoint contract](files.md#resumable-jobs).
 
 Fixed warm pieces require a worker that advertises support, synchronous
 file-store outputs, and CPU or one accelerator device. Plain pieces' input

@@ -1209,11 +1209,7 @@ func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string,
 			<-done
 		}()
 		warmDone = done
-		payloadPID, payloadBirth := main.PID, main.Birth
-		if main.PayloadPID != 0 {
-			payloadPID, payloadBirth = main.PayloadPID, main.PayloadBirth
-		}
-		go func() { done <- g.serveWarmPieces(ctx, conn, j, payloadPID, payloadBirth); close(done) }()
+		go func() { done <- g.serveWarmPieces(ctx, conn, j); close(done) }()
 	}
 	wake := time.NewTicker(10 * time.Millisecond)
 	defer wake.Stop()

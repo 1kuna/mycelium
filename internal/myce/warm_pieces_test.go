@@ -1,8 +1,11 @@
 package myce
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -255,15 +258,18 @@ func TestWarmPiecesPreemptionFencesItemStartAndResumes(t *testing.T) {
 	if got := job(t, q, j.ID); got.State != "stopping" || priorityStop(got) == nil {
 		t.Fatalf("production did not request a fenced stop: %s %q", got.State, got.Reason)
 	}
-	if _, err := q.warmPiece(t.Context(), warmRequest(run, "start", b)); !errors.Is(err, ErrStale) {
-		t.Fatalf("stopped delivery was authorized again: %v", err)
+	if reply, err := q.warmPiece(t.Context(), warmRequest(run, "start", b)); err != nil || !reply.End || reply.Delivery != nil {
+		t.Fatalf("stopped delivery should end the loop: %+v, %v", reply, err)
+	}
+	wrong := warmRequest(run, "start", b)
+	wrong.Sequence++
+	if _, err := q.warmPiece(t.Context(), wrong); !errors.Is(err, ErrStale) {
+		t.Fatalf("mismatched start was treated as a clean stop: %v", err)
 	}
 	if _, err := q.warmPiece(t.Context(), warmRequest(run, "failure", b)); !errors.Is(err, ErrStale) {
 		t.Fatalf("stopped item settled as a failure: %v", err)
 	}
-	rel := result(run, false)
-	rel.ReleaseOnly = true
-	if err := q.Complete(rel); err != nil {
+	if err := q.Complete(result(run, true)); err != nil {
 		t.Fatal(err)
 	}
 	first := check(t, q, m, nil).Job
@@ -312,22 +318,25 @@ func TestWarmPiecesNextAfterPriorityStop(t *testing.T) {
 }
 
 func TestWarmPiecesFinalCheckpointRetriesBeforeRelease(t *testing.T) {
+	testWarmPiecesFinalCheckpoint(t, false)
+}
+
+func TestWarmPiecesInvalidFinalCheckpointReleases(t *testing.T) {
+	testWarmPiecesFinalCheckpoint(t, true)
+}
+
+func testWarmPiecesFinalCheckpoint(t *testing.T, invalid bool) {
+	t.Helper()
 	q, clock, m, s := warmFixture(t)
 	s.Resumable = true
 	parent := submit(t, q, s)
 	run := warmStart(t, q, m, parent.ID)
 	warmSuccess(t, q, run, warmNext(t, q, run, "a"))
 	b := warmNext(t, q, run, "b")
-	submit(t, q, spec("production"))
-	stopping := job(t, q, parent.ID)
-	stop := priorityStop(stopping)
-	if stopping.State != "stopping" || stop == nil {
-		t.Fatalf("expected a priority stop, got %s", stopping.State)
-	}
 	handler := API{Queue: q, Token: "test"}.Handler()
 	var publications atomic.Int32
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/files/checkpoint" && publications.Add(1) == 1 {
+		if r.URL.Path == "/api/files/checkpoint" && publications.Add(1) == 1 && !invalid {
 			http.Error(w, "fixture checkpoint service unavailable", http.StatusServiceUnavailable)
 			return
 		}
@@ -347,9 +356,6 @@ func TestWarmPiecesFinalCheckpointRetriesBeforeRelease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := result(run, false)
-	r.Interrupted, r.PriorityStop = true, stop
-	store.state.Result = &r
 	save := warmCheckpointPath(*run, b.Key)
 	publication := attemptPublicationRoot(*run, store.dir)
 	for _, dir := range []string{save, publication} {
@@ -363,11 +369,46 @@ func TestWarmPiecesFinalCheckpointRetriesBeforeRelease(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(publication, "warm-checkpoint.json"), []byte("2"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	if invalid {
+		if generation, err := w.publishFileCheckpoint(*run, store.dir); err != nil || generation != 7 {
+			t.Fatalf("publish initial checkpoint: generation=%d, err=%v", generation, err)
+		}
+		if err := os.WriteFile(filepath.Join(save, "progress.json"), []byte(`{"myce_checkpoint":{"generation":-1}}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	submit(t, q, spec("production"))
+	stopping := job(t, q, parent.ID)
+	stop := priorityStop(stopping)
+	if stopping.State != "stopping" || stop == nil {
+		t.Fatalf("expected a priority stop, got %s", stopping.State)
+	}
+	r := result(run, false)
+	r.Interrupted, r.PriorityStop = true, stop
+	actorErr := runWarmAttemptResult(t, w, store, clock, r, AttemptDirective{Stop: true, PriorityStop: stop})
+	final := job(t, q, parent.ID)
+	if invalid && (publications.Load() != 1 || final.CleanupCause == nil || final.CleanupCause.Finalization == nil ||
+		final.CleanupCause.Finalization.Error != "invalid_checkpoint_generation" || !slices.ContainsFunc(final.Copies, func(copy Copy) bool {
+		return copy.Attempt == run.Attempt && copy.Machine == run.Machine && copy.Session == run.Session && copy.ReleaseConfirmed
+	})) {
+		t.Fatalf("invalid save did not release with a checkpoint diagnostic: copies=%+v cause=%+v posts=%d",
+			final.Copies, final.CleanupCause, publications.Load())
+	}
+	if actorErr != nil || !invalid && publications.Load() < 2 || final.State != "queued" || final.FanOut.Next != 1 ||
+		final.FileCheckpoints[run.Attempt].Generation != 7 {
+		t.Fatalf("checkpoint lost across publication retry: state=%s reason=%q posts=%d generation=%d actor=%v",
+			final.State, final.Reason, publications.Load(), final.FileCheckpoints[run.Attempt].Generation, actorErr)
+	}
+}
+
+func runWarmAttemptResult(t *testing.T, w Worker, store *workerStore, clock *fakeClock, r Result, directive AttemptDirective) error {
+	t.Helper()
+	store.state.Result = &r
 	if err := store.save(); err != nil {
 		t.Fatal(err)
 	}
-	a := &attemptSupervisor{store: store, job: *run, worker: w, connected: true, publication: &publicationProgress{},
-		directive: AttemptDirective{Stop: true, PriorityStop: stop}, done: make(chan struct{}), wake: make(chan struct{}, 1)}
+	a := &attemptSupervisor{store: store, job: *store.state.Job, worker: w, connected: true, publication: &publicationProgress{},
+		directive: directive, done: make(chan struct{}), wake: make(chan struct{}, 1)}
 	ctx, cancel := context.WithCancel(t.Context())
 	go a.run(ctx)
 	defer func() { cancel(); <-a.done }()
@@ -380,12 +421,7 @@ func TestWarmPiecesFinalCheckpointRetriesBeforeRelease(t *testing.T) {
 			return false
 		}
 	})
-	final := job(t, q, parent.ID)
-	if a.err != nil || publications.Load() < 2 || final.State != "queued" || final.FanOut.Next != 1 ||
-		final.FileCheckpoints[run.Attempt].Generation != 7 {
-		t.Fatalf("checkpoint lost across publication retry: state=%s reason=%q posts=%d generation=%d actor=%v",
-			final.State, final.Reason, publications.Load(), final.FileCheckpoints[run.Attempt].Generation, a.err)
-	}
+	return a.err
 }
 
 type warmRefusal struct {
@@ -553,5 +589,137 @@ func TestWarmPiecesSuccessObservedBeforePriorityStopDelivery(t *testing.T) {
 	warmCall(t, q, r)
 	if got := job(t, q, j.ID); got.State != "stopping" || got.FanOut.Results["a"].Execution != r.Execution {
 		t.Fatalf("completion changed either the stop or the accepted receipt: %s %+v", got.State, got.FanOut)
+	}
+}
+
+func TestWarmPiecesCleanPressureStopRequeues(t *testing.T) {
+	q, _, m, s := warmFixture(t)
+	parent := submit(t, q, s)
+	run := warmStart(t, q, m, parent.ID)
+	receipt := warmSuccess(t, q, run, warmNext(t, q, run, "a"))
+	if err := q.updateRequest(t.Context(), func() error {
+		q.stopForPoolPressure(q.s.Jobs[parent.ID], "fixture demand")
+		return nil
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if reply := warmCall(t, q, warmRequest(run, "next", nil)); !reply.End {
+		t.Fatalf("pressure stop offered more work: %+v", reply)
+	}
+	if err := q.Complete(result(run, true)); err != nil {
+		t.Fatal(err)
+	}
+	got := job(t, q, parent.ID)
+	if got.State != "queued" || got.FanOut.Next != 1 ||
+		got.OutputRefs["a/out"] != receipt.OutputRefs["out"] || len(got.FanOut.Warm.Failures) != 0 || got.Losses != 0 {
+		t.Fatalf("clean pressure stop = %s (%s), progress=%+v", got.State, got.Reason, got.FanOut)
+	}
+	warmNext(t, q, warmStart(t, q, m, parent.ID), "b")
+}
+
+func TestWarmPiecesCleanPressureStopReportsFullResult(t *testing.T) {
+	q, clock, m, s := warmFixture(t)
+	s.Resumable = false
+	parent := submit(t, q, s)
+	run := warmStart(t, q, m, parent.ID)
+	warmSuccess(t, q, run, warmNext(t, q, run, "a"))
+	if err := q.updateRequest(t.Context(), func() error {
+		q.stopForPoolPressure(q.s.Jobs[parent.ID], "fixture demand")
+		return nil
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	handler := API{Queue: q, Token: "test"}.Handler()
+	var reports atomic.Int32
+	var releaseOnly atomic.Bool
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/workers/complete" {
+			data, err := io.ReadAll(r.Body)
+			var got Result
+			if err != nil || json.Unmarshal(data, &got) != nil {
+				http.Error(w, "invalid completion fixture", http.StatusBadRequest)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(data))
+			reports.Add(1)
+			if got.ReleaseOnly {
+				releaseOnly.Store(true)
+			}
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(api.Close)
+	w := recoveryWorker(t)
+	w.Machine, w.Clock, w.control = m, clock, &processControl{clock: clock}
+	w.Client = Client{URL: api.URL, Token: "test"}
+	root, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.close()
+	store, err := newAttemptStore(root, *run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runWarmAttemptResult(t, w, store, clock, result(run, true), AttemptDirective{}); err != nil {
+		t.Fatal(err)
+	}
+	final := job(t, q, parent.ID)
+	if reports.Load() != 1 || releaseOnly.Load() || final.State != "queued" || final.FanOut.Next != 1 {
+		t.Fatalf("pressure completion bypassed result classification: reports=%d release-only=%t state=%s next=%d",
+			reports.Load(), releaseOnly.Load(), final.State, final.FanOut.Next)
+	}
+}
+
+func TestWarmPiecesBoundaryYieldsToCardGroup(t *testing.T) {
+	q, clock, _, s := warmFixture(t)
+	m := m3Machine()
+	m.Capabilities = append(m.Capabilities, warmPiecesCapability)
+	s.Needs.MemoryGB = 6
+	s.Needs.GPU = &GPUSelection{Devices: []string{"0"}}
+	s.AllowedMachines = []string{m.ID}
+	parent := submit(t, q, s)
+	run := assignedJob(machineCheck(t, q, m))
+	if run == nil || run.ID != parent.ID || !slices.Equal(run.AllocatedDevices, []string{"0"}) {
+		t.Fatalf("expected warm work on card 0, got %+v", run)
+	}
+	if err := q.Started(result(run, true)); err != nil {
+		t.Fatal(err)
+	}
+	a := warmNext(t, q, run, "a")
+	peer := spec("experiment")
+	peer.Project, peer.AllowedMachines = "another-project", []string{m.ID}
+	peer.Needs.MemoryGB = 12 // Six GiB on each eight-GiB card.
+	waiting := submit(t, q, peer)
+	clock.Advance(time.Second)
+	warmSuccess(t, q, run, a)
+	if reply := warmCall(t, q, warmRequest(run, "next", nil)); !reply.End || reply.Delivery != nil {
+		t.Fatalf("warm work did not yield to the two-card contender: %+v", reply)
+	}
+	if got := assignedJob(machineCheck(t, q, m, run)); got != nil {
+		t.Fatalf("card group was assigned before exact release: %+v", got)
+	}
+	if err := q.Complete(result(run, true)); err != nil {
+		t.Fatal(err)
+	}
+	got := assignedJob(machineCheck(t, q, m))
+	if got == nil || got.ID != waiting.ID || !slices.Equal(got.AllocatedDevices, []string{"0", "1"}) {
+		t.Fatalf("two-card contender did not get the released group: %+v", got)
+	}
+}
+
+func TestWarmPiecesFileCheckpointWithoutNAS(t *testing.T) {
+	q, _, m, s := warmFixture(t)
+	fakeCheckpointAvailability(t, q, false)
+	m.CheckpointUnavailable = true
+	m.UnavailableRoots = []UnavailableRoot{{Root: "checkpoint"}}
+	s.Resumable = true
+	parent := submit(t, q, s)
+	if !parent.FileTransport {
+		t.Fatal("warm checkpoint was submitted without file transport")
+	}
+	workerReason := (Worker{Machine: m}).storageRootReason(parent)
+	if got := check(t, q, m, nil).Job; got == nil || got.ID != parent.ID || workerReason != "" {
+		t.Fatalf("file-store checkpoint required the NAS: assigned=%t worker reason=%q", got != nil, workerReason)
 	}
 }

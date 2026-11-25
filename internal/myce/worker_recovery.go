@@ -857,6 +857,9 @@ func cleanupAttemptGroups(st workerState, clock Clock, memoryFiles ...memoryFS) 
 func attemptCheckpoint(j Job) string {
 	return filepath.Join(j.Checkpoint, fmt.Sprintf("attempt-%d", j.Attempt))
 }
+
+var errInvalidCheckpointGeneration = errors.New("invalid checkpoint generation")
+
 func checkpointProgress(dir string) (int64, error) {
 	return scanCheckpointProgress(dir, false)
 }
@@ -865,9 +868,16 @@ func scanCheckpointProgress(dir string, jobRoot bool) (int64, error) {
 }
 
 func scanCheckpointProgressWalk(dir string, jobRoot bool, walk func(string, fs.WalkDirFunc) error) (int64, error) {
+	return scanCheckpointProgressContext(context.Background(), dir, jobRoot, walk, false)
+}
+
+func scanCheckpointProgressContext(ctx context.Context, dir string, jobRoot bool, walk func(string, fs.WalkDirFunc) error, boundedJSON bool) (int64, error) {
 	latest := int64(-1)
 	err := walk(dir, func(path string, e os.DirEntry, err error) error {
 		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		// Outputs are not checkpoints. Prune before Info or enumeration so
@@ -894,17 +904,30 @@ func scanCheckpointProgressWalk(dir string, jobRoot bool, walk func(string, fs.W
 		if info.Mode().IsRegular() {
 			latest = max(latest, 0) // Unsequenced legacy saves rank below every generation.
 			if strings.HasSuffix(e.Name(), ".json") {
-				data, err := os.ReadFile(path)
-				if err != nil {
-					return err
-				}
 				var save map[string]json.RawMessage
-				if json.Unmarshal(data, &save) == nil && save["myce_checkpoint"] != nil {
+				if !boundedJSON {
+					data, err := os.ReadFile(path)
+					if err != nil {
+						return err
+					}
+					if json.Unmarshal(data, &save) != nil {
+						save = nil
+					}
+				} else if err := readCheckpointJSON(path, &save); err != nil {
+					// Other JSON payloads need not use the generation format.
+					var syntax *json.SyntaxError
+					var shape *json.UnmarshalTypeError
+					if !errors.As(err, &syntax) && !errors.As(err, &shape) {
+						return err
+					}
+					save = nil
+				}
+				if save["myce_checkpoint"] != nil {
 					var metadata map[string]json.RawMessage
 					if json.Unmarshal(save["myce_checkpoint"], &metadata) == nil && metadata["generation"] != nil {
 						var generation int64
 						if err := json.Unmarshal(metadata["generation"], &generation); err != nil || generation <= 0 {
-							return fmt.Errorf("invalid checkpoint generation: %s", path)
+							return fmt.Errorf("%w: %s", errInvalidCheckpointGeneration, path)
 						}
 						latest = max(latest, generation)
 					}

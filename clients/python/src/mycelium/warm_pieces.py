@@ -1,13 +1,17 @@
-"""Main-process helper for a fixed warm-pieces attempt."""
+"""Attempt-local helper for a fixed warm-pieces attempt."""
 
 from __future__ import annotations
 
-import array
 import json
 import os
 import socket
+import struct
 from dataclasses import dataclass
 from pathlib import Path
+
+
+_REPLY_LIMIT = 4 << 20
+_HEADER = struct.Struct("!I")
 
 
 @dataclass(frozen=True)
@@ -20,16 +24,14 @@ class WarmItem:
 
 
 class WarmPieces:
-    """Open in main before starting subprocesses. Settle each item before next."""
+    """Use one reader at a time and settle each item before calling next."""
 
     def __init__(self):
         fd = int(os.environ.pop("MYCE_WARM_PIECES_FD"))
         os.set_inheritable(fd, False)
         self._channel = socket.socket(fileno=fd)
-        self._pid = os.getpid()
         self._active = False
         self._ended = False
-        os.register_at_fork(after_in_child=self._channel.close)
 
     def __enter__(self):
         return self
@@ -37,19 +39,22 @@ class WarmPieces:
     def __exit__(self, *_):
         self._channel.close()
 
+    def _read_exactly(self, size):
+        data = bytearray()
+        while len(data) < size:
+            chunk = self._channel.recv(size - len(data))
+            if not chunk:
+                raise RuntimeError("warm piece channel closed before acknowledgement")
+            data.extend(chunk)
+        return data
+
     def _call(self, operation):
-        if os.getpid() != self._pid:
-            raise RuntimeError("warm pieces are available only in main")
-        local, worker = socket.socketpair()
-        with local, worker:
-            rights = array.array("i", [worker.fileno()])
-            self._channel.sendmsg([operation], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, rights)])
-            worker.close()
-            with local.makefile("rb") as reply:
-                line = reply.readline()
-        if not line:
-            raise RuntimeError("warm piece channel closed before acknowledgement")
-        response = json.loads(line)
+        self._channel.sendall(_HEADER.pack(len(operation)) + operation)
+        (size,) = _HEADER.unpack(self._read_exactly(_HEADER.size))
+        if not 0 < size <= _REPLY_LIMIT:
+            self._channel.close()
+            raise RuntimeError("invalid warm piece reply frame size")
+        response = json.loads(self._read_exactly(size))
         if "error" in response:
             raise RuntimeError(response["error"])
         return response

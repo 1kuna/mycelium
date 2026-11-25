@@ -158,7 +158,7 @@ func needsCheckpoint(j *Job) bool {
 }
 
 func needsNASCheckpoint(j *Job) bool {
-	return needsCheckpoint(j) && !j.Spec.localFirst()
+	return needsCheckpoint(j) && !j.Spec.localFirst() && !(j.Spec.warmPieces() && j.FileTransport)
 }
 
 // Background availability uses the installer's measured per-operation stall

@@ -17,26 +17,29 @@ import (
 )
 
 const warmDevMain = `
-import json, os, signal, socket, subprocess, sys, urllib.request
+import json, os, signal, socket, struct, subprocess, sys, urllib.request
 from pathlib import Path
 from warm_pieces import WarmPieces
 
 assert "MYCE_TOKEN" not in os.environ
-fd = int(os.environ["MYCE_WARM_PIECES_FD"])
-# A subprocess with a deliberately inherited bootstrap FD must get no reply.
+mode = sys.argv[1]
+if mode == "child":
+    fd = int(os.environ["MYCE_WARM_PIECES_FD"])
+    subprocess.run([sys.executable, "-u", __file__, "child-payload"], check=True, pass_fds=(fd,), timeout=12)
+    sys.exit(0)
+if mode in ("oversized", "unknown-op", "partial"):
+    with socket.socket(fileno=int(os.environ["MYCE_WARM_PIECES_FD"])) as channel:
+        channel.settimeout(10)
+        if mode == "oversized":
+            channel.sendall(struct.pack("!I", 2))
+        elif mode == "unknown-op":
+            channel.sendall(struct.pack("!I", 1) + b"?")
+        else:
+            channel.sendall(b"\0")
+        assert channel.recv(1) == b""
+        print("channel-closed", flush=True)
+    sys.exit(0)
 with WarmPieces() as pieces:
-    if sys.argv[1] == "success":
-        subprocess.run([sys.executable, "-c", """
-import array, os, socket, sys
-assert "MYCE_TOKEN" not in os.environ and "MYCE_WARM_PIECES_FD" not in os.environ
-bootstrap = socket.socket(fileno=int(sys.argv[1]))
-local, outbound = socket.socketpair()
-with local, outbound, bootstrap:
-    bootstrap.sendmsg([b'N'], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array('i', [outbound.fileno()]))])
-    outbound.close()
-    local.settimeout(5)
-    assert local.recv(1) == b''
-""", str(fd)], check=True, pass_fds=(fd,))
     weights = json.loads(Path("model.json").read_text())
     print("model-loaded", flush=True)
     while item := pieces.next():
@@ -71,6 +74,13 @@ with local, outbound, bootstrap:
 const warmDevSidecar = `
 import http.server, os, sys
 assert "MYCE_TOKEN" not in os.environ and "MYCE_WARM_PIECES_FD" not in os.environ
+try:
+    os.fstat(5)
+except OSError as err:
+    import errno
+    assert err.errno == errno.EBADF
+else:
+    raise AssertionError("sidecar inherited main's warm descriptor")
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -377,19 +387,56 @@ func TestWarmPiecesDevWorkerLoss(t *testing.T) {
 	}
 }
 
-func TestWarmPiecesDevRefusedCombinations(t *testing.T) {
+func TestWarmPiecesDevChildWithChannel(t *testing.T) {
 	d, ctx := startWarmDev(t, 2)
-	for _, tc := range warmRefusals() {
-		t.Run(tc.name, func(t *testing.T) {
-			s := cpuSpec(2, .5)
-			s.WarmPieces = warmPiecesFixed
-			s.FanOut = &FanOut{Pieces: []FanOutPiece{{Key: "a"}}}
-			tc.change(&s)
-			_, err := d.Client().Submit(ctx, s)
-			var reply *HTTPError
-			if !errors.As(err, &reply) || reply.Status != 400 || !strings.Contains(reply.Message, tc.reason) {
-				t.Fatalf("wanted explicit refusal %q, got %v", tc.reason, err)
+	c := d.Client()
+	j, err := c.Submit(ctx, warmDevSpec(t, ctx, c, "child"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := awaitTerminal(t, ctx, c, j.ID)
+	if final.State != "succeeded" || final.Attempt != 1 || len(final.FanOut.Results) != 3 {
+		t.Fatalf("main's child could not settle the attempt: state=%s reason=%q logs=\n%s",
+			final.State, final.Reason, warmDevLogs(t, ctx, c, j.ID))
+	}
+	warmDevCheckOutput(t, ctx, c, j.ID, "c", "c:9:arg-c:False")
+}
+
+func TestWarmPiecesDevInvalidChannelFrames(t *testing.T) {
+	d, ctx := startWarmDev(t, 2)
+	c := d.Client()
+	for _, mode := range []string{"oversized", "unknown-op", "partial"} {
+		t.Run(mode, func(t *testing.T) {
+			j, err := c.Submit(ctx, warmDevSpec(t, ctx, c, mode))
+			if err != nil {
+				t.Fatal(err)
+			}
+			final := awaitTerminal(t, ctx, c, j.ID)
+			if logs := warmDevLogs(t, ctx, c, j.ID); !strings.Contains(logs, "channel-closed") ||
+				final.State != "failed" || job(t, d.Queue, j.ID).Reason != "warm pieces main exited before all items settled" {
+				t.Fatalf("invalid frame should close only its channel: state=%s reason=%q logs=\n%s", final.State, final.Reason, logs)
 			}
 		})
+	}
+	// The same worker can still run a fresh attempt after the refused frames.
+	j, err := c.Submit(ctx, warmDevSpec(t, ctx, c, "success"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final := awaitTerminal(t, ctx, c, j.ID); final.State != "succeeded" || final.Attempt != 1 {
+		t.Fatalf("worker did not finish fresh work: state=%s reason=%q logs=\n%s", final.State, final.Reason, warmDevLogs(t, ctx, c, j.ID))
+	}
+}
+
+func TestWarmPiecesDevHTTPRefusal(t *testing.T) {
+	d, ctx := startWarmDev(t, 2)
+	s := cpuSpec(2, .5)
+	s.WarmPieces = "elastic"
+	s.FanOut = &FanOut{Pieces: []FanOutPiece{{Key: "a"}}}
+	_, err := d.Client().Submit(ctx, s)
+	var reply *HTTPError
+	if !errors.As(err, &reply) || reply.Status != 400 || reply.Code != "job_files_invalid" ||
+		!strings.Contains(reply.Message, "warm_pieces currently accepts fixed") {
+		t.Fatalf("wanted HTTP validation refusal, got %v", err)
 	}
 }

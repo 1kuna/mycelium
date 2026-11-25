@@ -48,6 +48,8 @@ var finalizationErrors = map[string]string{
 	"io_error":                 "I/O failed; exact underlying cause unknown",
 	"no_match":                 "output folder or glob matched no files",
 	"limit_exceeded":           "outputs exceed file-store byte or file-count limits",
+
+	"invalid_checkpoint_generation": "checkpoint generation must be a positive integer",
 }
 
 func safeFinalization(d *FinalizationDetail) *FinalizationDetail {
@@ -133,6 +135,9 @@ func finalizationErrorFor(step, output string, err error) error {
 		d.Error = "limit_exceeded"
 	case "output folder must be a directory":
 		d.Error = "wrong_type"
+	}
+	if errors.Is(err, errInvalidCheckpointGeneration) {
+		d.Error = "invalid_checkpoint_generation"
 	}
 	if errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.EISDIR) {
 		d.Error = "wrong_type"

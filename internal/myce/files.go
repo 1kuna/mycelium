@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/tus/tusd/v2/pkg/filelocker"
@@ -79,7 +80,7 @@ func identifyFileContext(ctx context.Context, path string) (FileRef, error) {
 	if err = noModelSymlinks(path, false); err != nil {
 		return FileRef{}, err
 	}
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return FileRef{}, err
 	}
@@ -1256,7 +1257,7 @@ func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpos
 	if err := verifyFile(ctx, path, ref); err != nil {
 		return err
 	}
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return err
 	}

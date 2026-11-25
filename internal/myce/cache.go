@@ -217,11 +217,18 @@ func verifyModelContext(ctx context.Context, path string, m Model) error {
 	if len(m.Files) > 0 {
 		return verifyModelFiles(ctx, path, m)
 	}
-	f, e := os.Open(path)
+	f, e := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if e != nil {
 		return e
 	}
 	defer f.Close()
+	st, e := f.Stat()
+	if e != nil {
+		return e
+	}
+	if !st.Mode().IsRegular() {
+		return errors.New("file must be regular")
+	}
 	h := sha256.New()
 	n, e := io.Copy(h, contextReader{ctx, f})
 	if e != nil {

@@ -81,9 +81,13 @@ func (q *Queue) placementTargets(m *Machine) []*Machine {
 		// attaching these transient, queue-owned claims.
 		target.sharedInputClaims = claims
 	}
+	return append(targets, q.cardGroupTargets(m, targets)...)
+}
+
+func (q *Queue) cardGroupTargets(m *Machine, targets []*Machine) []*Machine {
 	groups := groupTargets(targets)
 	if len(m.Devices) <= 2 || len(groups) == 0 {
-		return append(targets, groups...)
+		return groups
 	}
 	// Free-memory ordering can change during teardown. Keep an already chosen
 	// group available as a candidate instead of silently substituting cards.
@@ -111,7 +115,7 @@ func (q *Queue) placementTargets(m *Machine) []*Machine {
 			}
 		}
 	}
-	return append(targets, groups...)
+	return groups
 }
 
 // A job uses several cards only when no single card of its host can hold it.

@@ -42,10 +42,13 @@ worker-supplied helper exposes a small loop: get the next item's key,
 arguments and paths, process it, and report success or item failure.
 Common inputs and model snapshots use ordinary staging. Piece inputs
 are staged under their own key and outputs have a private per-delivery
-directory. The helper speaks over an inherited attempt-local duplex
-channel, scoped to main and closed to sidecars and subprocesses. The
-worker authenticates and relays a closed set of operations using its
-existing identity. Every payload member stays free of the fleet token.
+directory. The helper uses one inherited attempt-local duplex stream.
+Possession of its payload endpoint grants the job's helper authority.
+The worker passes it only to main, which may share it with descendants
+that act for the same job. Other jobs, other attempts and sidecars
+receive no endpoint. The worker stamps each operation with its own
+machine, session and execution identity. Every payload member stays
+free of the fleet token.
 Sidecars can serve main locally for the lifetime of this group, within its
 resource limits.
 
@@ -356,13 +359,13 @@ approval and leaves the MY-40 study on its own approval path.
 
 ## Stage 1 implementation choices
 
-- The inherited bootstrap descriptor travels only to main. Each request
-  passes a fresh Unix socket endpoint for the reply. Linux and macOS verify
-  the peer PID and process birth against the identity recorded by the native
-  launch gate. Received reply descriptors are marked close-on-exec before
-  another worker launch can inherit them.
-  The Python helper closes the bootstrap descriptor across fork and exec.
-  A command wrapper must exec main in place so its PID remains valid.
+- The worker passes one stream descriptor to main. Holders use it serially,
+  sending one length-prefixed operation byte and reading one length-prefixed
+  JSON reply before sending another request. The worker reads only stream
+  bytes and accepts no ancillary descriptors. It closes the channel on a
+  malformed frame, a stalled partial request or an unread reply. Time
+  spent loading or processing between calls does not consume the frame
+  timeout. Attempt cancellation closes the channel even when it is idle.
 - The worker stages piece inputs under their declared key at attempt start.
   Each delivery receives a fresh output directory. File manifests use
   the existing verified publication pipeline and are downloadable by key
@@ -376,9 +379,11 @@ approval and leaves the MY-40 study on its own approval path.
   item's ordinary file-store checkpoint generations and can publish one
   during execution. The worker can publish a final generation on orderly
   stop and retries transient publication failures before acknowledging
-  release. A settled receipt clears that item's resume data in the same queue
-  transaction. Explicit `advanced.checkpoint` policies and NAS checkpoint
-  transport are refused for this mode.
+  release. A permanently refused final save records a cleanup diagnostic
+  and releases the attempt with the last accepted generation intact.
+  A settled receipt clears that item's resume data in the same queue
+  transaction. File-store warm checkpoints can run with the NAS absent.
+  Explicit `advanced.checkpoint` policies are refused for this mode.
 - A reported failure records the failed key and exact attempt. Application
   diagnostics belong in job logs. Exhaustion records unfinished keys on
   the failed parent. Adapter result-check wrappers are refused. Main can

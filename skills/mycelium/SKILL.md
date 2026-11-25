@@ -220,8 +220,9 @@ main process can load a model once and handle the items serially. Submit
 normally and keep the parent ID. Main opens the worker helper, loads the
 model, calls `next()` for the key, args and paths, writes the declared
 outputs for that item, and waits for `success()` or reports `failure()`.
-Pass the helper only to main and use an exec-style launcher. It authenticates
-main without placing the fleet token in any job process.
+The worker supplies the attempt's helper descriptor to main. Main can
+delegate it to a descendant for serial use. Sidecars receive no descriptor,
+and job processes never receive the fleet token.
 
 Inspect the parent's `fan_out.results` for accepted keys. Fetch them as
 `KEY/OUTPUT_NAME` with `myce result PARENT --out DIR`, including partial

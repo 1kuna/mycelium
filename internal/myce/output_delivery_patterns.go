@@ -283,7 +283,7 @@ func (w Worker) identifyOutputFiles(ctx context.Context, j Job, step, outputName
 		decl, _ := outputDeclarationFor(j.Spec.Outputs, name)
 		*step, *outputName = "output_validation", decl
 		done := w.Client.publication.begin(w.Client.clock(), "filesystem/output_validation")
-		ref, err := IdentifyFile(sources[name])
+		ref, err := identifyFileContext(ctx, sources[name])
 		done()
 		if err != nil {
 			return nil, true, err
