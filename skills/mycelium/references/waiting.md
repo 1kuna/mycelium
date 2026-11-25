@@ -36,7 +36,12 @@ preparation: `missing_extension` needs a registered implementation;
 for the exact native check the queue runs itself. Before submission, the reason
 can name the accelerator attempt that must release before extension preparation.
 After submission it names the check and its hold. A failed check fails the job
-with its action. `production_parity` or `production_parity_kind` (formerly
+with its action. When a recorded priority stop, maintenance, or validation
+reservation interrupts a check before main-command authorization, the queue
+keeps qualification pending and retries after exact release and restored
+eligibility. Keep the original submission key. An explicit cancellation ends
+the check and requires an explicit check to resume qualification.
+`production_parity` or `production_parity_kind` (formerly
 `production_parity_hosts`) needs reference-output evidence on a machine of a
 kind that can run it, then `myce parity add`. Detailed status also explains a
 single freshly observed compatible host and the project's approved kinds. These
@@ -258,8 +263,9 @@ Use job-bound validation reservations for isolated qualification, not an
 invented project hold or higher class. `myce extension check --reserve` binds
 one; `myce reserve add SELECTOR --job JOB_ID --owner OWNER --reason TEXT` binds
 an existing validation job. Device checks default to their selected device;
-whole-host isolation needs its actual reason. After an unconfirmed write, inspect
-`myce reserve list` before retrying the same explicit `--id`; an empty response
+whole-host isolation needs its actual reason. The reservation can withdraw an
+assigned check during sidecar startup and waits for its exact release. After an
+unconfirmed write, inspect `myce reserve list` before retrying the same explicit `--id`; an empty response
 does not confirm a reservation. See
 [validation reservations](https://github.com/1kuna/mycelium/blob/main/docs/operations.md#reserve-a-host-or-its-devices-for-an-existing-validation-job).
 

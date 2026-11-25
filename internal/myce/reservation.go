@@ -226,6 +226,8 @@ func (q *Queue) ReleaseReservation(id string, revision uint64, reason string, co
 	return out, err
 }
 
+const reservationStopCause = "validation_reservation_withdrawal"
+
 func (q *Queue) maintainReservations() {
 	now := q.clock.Now()
 	for _, r := range q.s.Reservations {
@@ -262,8 +264,9 @@ func (q *Queue) maintainReservations() {
 	// Reuse maintenance's planned, no-retry-charge withdrawal of unstarted
 	// offers. Started commands and started preparations are left alone.
 	for _, j := range q.liveJobs() {
-		if j.State == "running" && j.StartedAt == nil && !q.reservationAllows(j, allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)) {
-			q.maintainHostObligation(HostObligation{Result: resultIdentity(j)}, nil)
+		if j.State == "running" && j.StartedAt == nil && !cancelled(j) && !q.reservationAllows(j, allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)) {
+			q.stopBatchForMaintenance(j, reservationStopCause, nil, false)
+			q.retainRelease(j)
 		}
 	}
 }

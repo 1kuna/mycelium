@@ -274,6 +274,16 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 					t.Fatal(err)
 				}
 				finish(t, q, assigned, true)
+				reconcileQualification(t, w, plan)
+				w.Machine.ExtensionReports = LocalExtensionReports(w.ExtensionRoot, "fake", w.extensionFingerprint, &w.Machine)
+				for _, offered := range check(t, q, w.Machine, nil).ExtensionQualificationPlan {
+					if offered.Report.Work == plan.Report.Work {
+						t.Fatal("user-cancelled check was replaced", offered)
+					}
+				}
+				if got := job(t, q, assigned.ID); got.State != "cancelled" || !got.ReleaseConfirmed {
+					t.Fatal("user cancellation did not remain terminal", got.State, got.Reason)
+				}
 			case "stale":
 				stale := result(assigned, true)
 				stale.Attempt++
@@ -311,7 +321,7 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 			if qualifiedExtension(demand, q.s.Machines[incoming.ID]) != nil {
 				t.Fatal("unsuccessful or obsolete check granted qualification")
 			}
-			if outcome == "failed" || outcome == "cancelled" || retryable || outcome == "unproven refusal" || outcome == "stale refusal" {
+			if outcome == "failed" || retryable || outcome == "unproven refusal" || outcome == "stale refusal" {
 				reconcileQualification(t, w, plan)
 				before := qualificationJob(t, q, plan.Report.CheckID)
 				reconcileQualification(t, w, plan)
@@ -415,6 +425,221 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 				if automaticExtensionCheckID(w.Machine.ID, fresh) == plan.Report.CheckID {
 					t.Fatal("changed identity reused old check key")
 				}
+			}
+		})
+	}
+}
+
+func TestExtensionQualificationWithdrawalDuringStartup(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		stopCause string
+		retry     bool
+	}{
+		{name: "device reservation", stopCause: reservationStopCause, retry: true},
+		{name: "host drain", stopCause: maintenanceStopCause, retry: true},
+		{name: "release only before custody", stopCause: maintenanceStopCause, retry: true},
+		{name: "release only after custody", stopCause: maintenanceStopCause},
+		{name: "independent sidecar failure during drain", stopCause: maintenanceStopCause},
+		{name: "main authorized before maintenance", stopCause: maintenanceStopCause},
+		{name: "user cancel during drain", stopCause: maintenanceStopCause},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := compositionExtension(t, false)
+			e.Variants[0].Execution.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"helper"}, MemoryGB: 0.05}}
+			e = freezeComposition(t, e)
+			q, w := prepareTestWorker(t, e)
+			clock := q.clock.(*fakeClock)
+			dev := m3Machine().Devices[0]
+			dev.ExtensionFingerprint = w.extensionFingerprint
+			w.Machine.Devices = []MachineDevice{dev}
+			w.InventoryProbe = func(context.Context) ([]MachineDevice, error) { return []MachineDevice{dev}, nil }
+			checkin := func() Reply {
+				target := dev.machine(w.Machine)
+				w.Machine.Devices[0].ExtensionReports = LocalExtensionReports(w.ExtensionRoot, "fake", w.extensionFingerprint, &target)
+				return machineCheck(t, q, w.Machine)
+			}
+			demand := submit(t, q, Spec{Name: "demand", Project: "test", SubmissionKey: "useful-work", Extension: extensionKey(e)})
+			cold := checkin()
+			if len(cold.EnvironmentPlan) != 1 {
+				t.Fatal("missing preparation offer", cold.EnvironmentPlan)
+			}
+			if err := w.prepareRegisteredExtension(context.Background(), cold.EnvironmentPlan[0]); err != nil {
+				t.Fatal(err)
+			}
+			var plan ExtensionQualificationPlan
+			for _, p := range checkin().ExtensionQualificationPlan {
+				if p.Report.Work == demand.Spec.workType() {
+					plan = p
+					break
+				}
+			}
+			if plan.Machine == "" {
+				t.Fatal("missing qualification offer")
+			}
+			reconcileQualification(t, w, plan)
+			assigned := assignedJob(checkin())
+			if assigned == nil || assigned.Spec.ExtensionCheck == nil {
+				t.Fatal("missing assigned check")
+			}
+			target := dev.machine(w.Machine)
+			spec := assigned.Spec
+			if err := e.lower(&spec, &target); err != nil || len(spec.Run.Sidecars) != 1 {
+				t.Fatalf("check did not lower to a sidecar group: %v", err)
+			}
+			r := result(assigned, false)
+			custody := NativeCustodyReport{Execution: r.Execution, Machine: r.Machine, Session: r.Session, ProcessID: "check-process", CustodyID: "check-custody"}
+			if tc.name != "release only before custody" {
+				for _, phase := range []string{"reserved", "started"} {
+					custody.Phase = phase
+					if err := q.NativeCustody(custody); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			clock.Advance(time.Second)
+			if tc.name == "main authorized before maintenance" {
+				if err := q.Started(r); err != nil {
+					t.Fatal(err)
+				}
+			}
+			host := hostID(&w.Machine)
+			var reservation Reservation
+			if tc.stopCause == reservationStopCause {
+				bound := submit(t, q, Spec{Name: "owner's validation", Project: "test", Extension: extensionKey(e), ExtensionDigest: e.Digest,
+					AllowedMachines: []string{w.Machine.ID}, Needs: ResourceNeeds{GPU: &GPUSelection{Devices: []string{dev.ID}}},
+					ExtensionCheck: &ExtensionCheckRequest{Work: plan.Report.Work, Directory: t.TempDir()}})
+				var err error
+				reservation, err = q.CreateReservation(reservationRequest("validation", "host="+host+";devices="+dev.ID, bound.ID))
+				if err != nil || reservation.State != "draining" {
+					t.Fatalf("reservation did not wait for custody: %s, %v", reservation.State, err)
+				}
+			} else {
+				req := HostMaintenanceRequest{Action: "drain", DrainOwner: "test"}
+				if tc.name == "main authorized before maintenance" {
+					req = HostMaintenanceRequest{Action: "disable", Stop: true}
+				}
+				if _, err := q.ChangeHostMaintenance(host, req); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stopping := job(t, q, assigned.ID)
+			if c := maintenanceStoppedCopy(stopping); stopping.State != "stopping" || c == nil || c.StopCause != tc.stopCause {
+				t.Fatal("withdrawal lost its exact stop provenance", stopping.State, stopping.Copies)
+			}
+			if err := q.Started(r); !errors.Is(err, ErrStale) {
+				t.Fatal("withdrawal did not fence Started", err)
+			}
+			if tc.name == "user cancel during drain" {
+				if err := q.Cancel(assigned.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			clock.Advance(time.Second)
+			if strings.HasPrefix(tc.name, "release only") {
+				r.ReleaseOnly, r.Error = true, ""
+			} else {
+				r.ExecutionEvidence = unstartedExecution(assigned.Attempt)
+				r.ExecutionEvidence.Sidecars = executionMayHaveRun
+				r.ExecutionCause = &RuntimeCause{Operation: "command", Class: "cancelled"}
+				r.Interrupted = tc.name != "independent sidecar failure during drain"
+				if tc.name == "main authorized before maintenance" {
+					r.ExecutionEvidence.Main = executionMayHaveRun
+				}
+			}
+			if tc.stopCause == reservationStopCause {
+				r.ReleasePending = true
+				stale := r
+				stale.Attempt++
+				if err := q.Complete(stale); !errors.Is(err, ErrStale) {
+					t.Fatal("stale result was accepted", err)
+				}
+			}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			if r.ReleasePending {
+				next := plan.Report
+				next.CheckID = automaticExtensionRetryCheckID(w.Machine.ID, next, plan.Report.CheckID)
+				if got := job(t, q, assigned.ID); got.ReleaseConfirmed || automaticCheckNoVerdict(got) {
+					t.Fatal("check could be retried while its release was pending")
+				}
+				q.mu.Lock()
+				allowed := q.automaticCheckKeyValid(w.Machine.ID, next)
+				q.mu.Unlock()
+				if allowed {
+					t.Fatal("accepted a successor before exact release")
+				}
+				stale := r
+				stale.Session, stale.ReleasePending = "stale-session", false
+				if err := q.Complete(stale); !errors.Is(err, ErrStale) {
+					t.Fatal("stale session released current custody", err)
+				}
+				reservationState(t, q, reservation.ID, "draining")
+				ack := result(assigned, false)
+				ack.ReleaseOnly = true
+				if err := q.Complete(ack); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got := job(t, q, assigned.ID)
+			wantState := "failed"
+			if tc.name == "user cancel during drain" {
+				wantState = "cancelled"
+			}
+			if got.State != wantState || !got.ReleaseConfirmed || automaticCheckNoVerdict(got) != tc.retry {
+				t.Fatalf("unexpected check outcome: %s, released=%t, no verdict=%t, history=%+v", got.State, got.ReleaseConfirmed, automaticCheckNoVerdict(got), got.AttemptHistory)
+			}
+			if !r.ReleaseOnly && !r.Interrupted && len(got.NativeCheckFailures) != 1 {
+				t.Fatal("racing maintenance dropped the independent check failure")
+			}
+			reconcileQualification(t, w, plan)
+			if reservation.ID != "" {
+				if _, err := q.ReleaseReservation(reservation.ID, reservation.Revision, "validation finished"); err != nil {
+					t.Fatal(err)
+				}
+				if err := q.Cancel(reservation.Job); err != nil {
+					t.Fatal(err)
+				}
+			} else if _, err := q.ChangeHostMaintenance(host, HostMaintenanceRequest{Action: "resume"}); err != nil {
+				t.Fatal(err)
+			}
+			var successor *ExtensionQualificationPlan
+			for _, p := range checkin().ExtensionQualificationPlan {
+				if p.Report.Work == plan.Report.Work {
+					successor = &p
+				}
+			}
+			if !tc.retry {
+				if successor != nil {
+					t.Fatal("terminal check was replaced", successor.Report.CheckID)
+				}
+				return
+			}
+			parent, err := q.jobSnapshot(demand.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if parent.State != "queued" || parent.Attempt != 0 || parent.Spec.SubmissionKey != demand.Spec.SubmissionKey ||
+				parent.Hold == nil || parent.Hold.Kind != "native_qualification" {
+				t.Fatalf("parent lost identity or healthy qualification wait: %s attempt %d, key %s, hold %+v", parent.State, parent.Attempt, parent.Spec.SubmissionKey, parent.Hold)
+			}
+			wantKey := automaticExtensionRetryCheckID(w.Machine.ID, plan.Report, plan.Report.CheckID)
+			if successor == nil || successor.Report.CheckID != wantKey {
+				t.Fatalf("expected same-identity successor %s, got %+v", wantKey, successor)
+			}
+			reconcileQualification(t, w, *successor)
+			retry := assignedJob(checkin())
+			if retry == nil || retry.ID == assigned.ID || retry.Spec.SubmissionKey != wantKey {
+				t.Fatal("successor did not get an independent assignment", retry)
+			}
+			if err := q.Started(result(retry, false)); err != nil {
+				t.Fatal(err)
+			}
+			finish(t, q, retry, true)
+			reconcileQualification(t, w, *successor)
+			if useful := assignedJob(checkin()); useful == nil || useful.ID != demand.ID || useful.Spec.SubmissionKey != demand.Spec.SubmissionKey {
+				t.Fatal("successful retry did not unblock original job", useful)
 			}
 		})
 	}
@@ -694,9 +919,17 @@ func TestExtensionQualificationProgressesThroughRestartAndBusyHost(t *testing.T)
 		}
 	}
 	reconcileQualification(t, w, plan)
-	if err := q.Cancel(qualificationJob(t, q, plan.Report.CheckID).ID); err != nil {
-		t.Fatal(err)
+	base := qualificationJob(t, q, plan.Report.CheckID)
+	retire := func(id string) {
+		t.Helper()
+		if err := q.update(func() error {
+			q.cancelJob(q.s.Jobs[id]) // Queue retirement when native demand disappears.
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
+	retire(base.ID)
 	// Another project's job fills the host's one slot.
 	w.Machine.MaxJobs = 1
 	submit(t, q, Spec{Name: "busy", Project: "other", Run: RunSpec{Command: []string{"true"}}, Needs: ResourceNeeds{MemoryGB: 1, Platform: Platform{Any: true}}})
@@ -752,9 +985,7 @@ func TestExtensionQualificationProgressesThroughRestartAndBusyHost(t *testing.T)
 		t.Fatal("restart before identity report cancelled the queue's check", got.State, got.Reason)
 	}
 	// Any other loss of the successor is retried under the next key in its chain.
-	if err := q.Cancel(successor.ID); err != nil {
-		t.Fatal(err)
-	}
+	retire(successor.ID)
 	retried := pendingCheck(nil)
 	if retried.ID == successor.ID {
 		t.Fatal("cancelled successor was not retried")

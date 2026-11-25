@@ -29,6 +29,16 @@ type CancelSubmissionRequest struct {
 
 func cancelled(j *Job) bool { return j.CancelledAt != nil || j.State == "cancelled" }
 
+const explicitNativeCheckCancel = "native check cancelled by request"
+
+func (q *Queue) cancelRequestedJob(j *Job) {
+	explicitNativeCheck := automaticExtensionCheck(j) != nil && !terminal(j.State)
+	q.cancelJob(j)
+	if explicitNativeCheck {
+		j.Reason = explicitNativeCheckCancel
+	}
+}
+
 // Cancel preserves the queue's original Go interface for existing callers.
 func (q *Queue) Cancel(id string) error { _, err := q.CancelJob(id); return err }
 
@@ -55,7 +65,7 @@ func (q *Queue) CancelJob(id string, requestContexts ...context.Context) (Cancel
 			id = resolved.ID
 		}
 		if j := q.retainedJob(id); j != nil {
-			q.cancelJob(j)
+			q.cancelRequestedJob(j)
 			q.maintainExtensionQualifications()
 			out = q.cancellation(j, q.s.Jobs[id] == nil)
 			return nil
@@ -109,7 +119,7 @@ func (q *Queue) CancelSubmission(project, key string, requestContexts ...context
 		if j == nil {
 			return errors.New("submission binding has no retained job")
 		}
-		q.cancelJob(j)
+		q.cancelRequestedJob(j)
 		q.maintainExtensionQualifications()
 		out = q.cancellation(j, removed)
 		return nil
@@ -153,7 +163,9 @@ func (q *Queue) finishCancellation(j *Job) {
 	}
 	outcome := attemptOutcome(j, Result{Interrupted: true})
 	j.State, j.StopAt = "cancelled", nil
-	j.Reason = "cancel requested"
+	if j.Reason != explicitNativeCheckCancel {
+		j.Reason = "cancel requested"
+	}
 	if j.FinishedAt == nil {
 		now := q.clock.Now()
 		j.FinishedAt = &now
