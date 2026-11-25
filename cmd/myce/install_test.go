@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -283,6 +284,7 @@ func TestInstallWorkerDeploymentFlags(t *testing.T) {
 	os.Stdout = out
 	defer func() { os.Stdout = saved; out.Close() }()
 	args := []string{"install", "worker", "--nas", home, "--dry-run", "--name", "b70-gpu1", "--host-id", "b70", "--device", "1", "--gpu", "xpu", "--memory-mode", "fixed", "--memory-gb", "16", "--reserve-memory-gb", "2", "--reserve-host-memory-gb", "4", "--host-memory-budget-gb", "5", "--memory-ceiling-slack-gb", "0", "--memory-swap-max-bytes", "0", "--state-dir", home + "/spool", "--checkpoint-root", home + "/cp", "--model-root", home + "/models", "--environment-root", home + "/envs", "--model-cache", home + "/mc", "--model-cache-bytes", "1111", "--environment-cache", home + "/ec", "--environment-cache-bytes", "2222", "--heartbeat", "2s", "--log-retention", "24h", "--require-memory-ceilings", "--require-mounted-nas=false"}
+	args = append(args, "--queue", "http://queue.example:7331", "--model-listen", ":7332", "--model-advertise", "http://localhost:7332")
 	probe := integratedPCIFixture(myce.MachineProbe{OS: "linux", Arch: "amd64",
 		CommandEnv: func(_ context.Context, _ map[string]string, name string, _ ...string) ([]byte, error) {
 			if name == "python3" {
@@ -312,10 +314,103 @@ func TestInstallWorkerDeploymentFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(out.Name())
+	for _, want := range []string{
+		`"--model-listen" ":7332"`,
+		`"--model-advertise" "http://localhost:7332"`,
+		"Warning: --model-advertise is loopback but the queue URL is not.",
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("dry run missing %q", want)
+		}
+	}
 	for _, want := range []string{"b70-gpu1", "--host-id", `"b70"`, "myce-worker.service", "--device", `"1"`, "--gpu", `"xpu"`, "--memory-mode", `"fixed"`, "--memory-gb", `"16"`, "--reserve-memory-gb", `"2"`, "--reserve-host-memory-gb", `"4"`, "--host-memory-budget-gb", `"5"`, "--memory-ceiling-slack-gb", `"0"`, "--memory-swap-max-bytes", "--state-dir", home + "/spool", "--checkpoint-root", home + "/cp", "--model-root", home + "/models", "--environment-root", home + "/envs", "--model-cache", home + "/mc", "--model-cache-bytes", "1111", "--environment-cache", home + "/ec", "--environment-cache-bytes", "2222", "--heartbeat", "2s", "--log-retention", "24h0m0s", "--require-memory-ceilings", "RestartPreventExitStatus=78"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("missing %q", want)
 		}
+	}
+}
+
+func TestInstallWorkerModelProxyReinstall(t *testing.T) {
+	c, probe := savedInstallFixture(t, "worker")
+	base := []string{"install", "worker", "--config", c.Config}
+	const listen = ":7332"
+	const advertise = "http://worker.example:7332"
+	for _, step := range []struct {
+		name                      string
+		args                      []string
+		wantListen, wantAdvertise string
+	}{
+		{name: "old config"},
+		{name: "configure", args: []string{"--model-listen", listen, "--model-advertise", advertise}, wantListen: listen, wantAdvertise: advertise},
+		{name: "preserve", wantListen: listen, wantAdvertise: advertise},
+		{name: "reset", args: []string{"--model-listen=", "--model-advertise="}},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			if err := setupCommandWithProbe(append(slices.Clone(base), step.args...), probe, c.NAS); err != nil {
+				t.Fatal(err)
+			}
+			saved, err := myce.ReadServiceConfig(c.Config)
+			if err != nil || saved.ModelListen != step.wantListen || saved.ModelAdvertise != step.wantAdvertise {
+				t.Fatal("saved proxy addresses differ from install settings", err)
+			}
+			for flag, want := range map[string]string{"--model-listen": step.wantListen, "--model-advertise": step.wantAdvertise} {
+				args := saved.Args()
+				i := slices.Index(args, flag)
+				if want == "" && i != -1 || want != "" && (i < 0 || args[i+1] != want) {
+					t.Errorf("service arguments did not preserve %s", flag)
+				}
+			}
+			if step.name == "configure" {
+				before, err := os.ReadFile(c.Config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				preview := dryInstallProbe(t, c.NAS, probe)
+				readonly := preview.Command
+				preview.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+					if name == "systemctl" && len(args) == 3 && args[0] == "--user" && args[1] == "show" {
+						return probe.Command(ctx, name, args...)
+					}
+					return readonly(ctx, name, args...)
+				}
+				output := captureJoiningOutput(t, func() error {
+					return setupCommandWithProbe(append(slices.Clone(base), "--dry-run"), preview, c.NAS)
+				})
+				for _, want := range []string{"--model-listen " + listen, "--model-advertise " + advertise} {
+					if !strings.Contains(output, want) {
+						t.Errorf("reinstall preview missing %q", want)
+					}
+				}
+				after, err := os.ReadFile(c.Config)
+				if err != nil || string(after) != string(before) {
+					t.Fatal("reinstall preview changed saved config", err)
+				}
+			}
+		})
+	}
+}
+
+func TestInstallWorkerModelProxyValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name, flag, value, wantError string
+	}{
+		{"relative URL", "--model-advertise", "/models", "absolute HTTP or HTTPS URL"},
+		{"non-HTTP URL", "--model-advertise", "ftp://worker.example", "absolute HTTP or HTTPS URL"},
+		{"missing URL host", "--model-advertise", "http://:7332", "absolute HTTP or HTTPS URL"},
+		{"bad URL port", "--model-advertise", "http://worker.example:65536", "valid TCP port"},
+		{"missing listen port", "--model-listen", "worker.example", "host:port"},
+		{"bad listen host", "--model-listen", "worker/example:7332", "invalid listen host"},
+		{"bad listen port", "--model-listen", ":65536", "numeric TCP port"},
+		{"queue port", "--model-listen", ":07443", "different port from the queue"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			args := []string{"install", "worker", "--nas", home, "--gpu", "fake", "--memory-mode", "fixed", "--memory-gb", "4", "--dry-run", "--queue", "https://queue.example:7443", tc.flag, tc.value}
+			err := setupCommandWithProbe(args, myce.MachineProbe{OS: "linux", Arch: "amd64"}, home)
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("want %q, got %v", tc.wantError, err)
+			}
+		})
 	}
 }
 

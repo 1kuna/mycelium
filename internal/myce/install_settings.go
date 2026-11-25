@@ -6,8 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -176,6 +178,8 @@ func InstallSettings() []InstallSetting {
 			return nil
 		}),
 		installSetting("listen", "Listen", "queue bind address", func(c *ServiceConfig) *string { return &c.Listen }, installName),
+		installContext(installSetting("model-listen", "ModelListen", "worker model proxy listen address", func(c *ServiceConfig) *string { return &c.ModelListen }, installAny[string]), validateInstallModelListen),
+		installContext(installSetting("model-advertise", "ModelAdvertise", "worker model proxy URL reachable by queue", func(c *ServiceConfig) *string { return &c.ModelAdvertise }, installAny[string]), validateInstallModelAdvertise),
 		installSetting("discovery-listen", "DiscoveryListen", "saved TLS joining bind address (empty selects and saves an automatic port)", func(c *ServiceConfig) *string { return &c.DiscoveryListen }, func(v string) error {
 			if v == "" {
 				return nil
@@ -352,6 +356,80 @@ func RegisterInstallFlags(f *flag.FlagSet, values *ServiceConfig) {
 			s.bind(f, values)
 		}
 	}
+}
+
+func validateInstallModelListen(c ServiceConfig) error {
+	if c.ModelListen == "" {
+		return nil
+	}
+	if c.Role != "worker" {
+		return errors.New("requires a worker")
+	}
+	host, port, err := net.SplitHostPort(c.ModelListen)
+	n, portErr := strconv.ParseUint(port, 10, 16)
+	if err != nil || portErr != nil {
+		return errors.New("must be a host:port address with a numeric TCP port")
+	}
+	if strings.HasPrefix(c.ModelListen, "[") {
+		ip, err := netip.ParseAddr(host)
+		if err != nil || !ip.Is6() || strings.IndexFunc(host, unicode.IsSpace) >= 0 {
+			return errors.New("brackets require an IPv6 address")
+		}
+	} else if strings.IndexFunc(host, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && !strings.ContainsRune("._-", r)
+	}) >= 0 {
+		return errors.New("invalid listen host")
+	}
+	queue, err := url.Parse(c.Queue)
+	if err != nil {
+		return nil // The queue setting reports its own validation error.
+	}
+	queuePort, _ := strconv.ParseUint(queue.Port(), 10, 16)
+	if queue.Port() == "" {
+		queuePort = 80
+		if queue.Scheme == "https" {
+			queuePort = 443
+		}
+	}
+	if n != 0 && n == queuePort {
+		return errors.New("must use a different port from the queue")
+	}
+	return nil
+}
+
+func validateInstallModelAdvertise(c ServiceConfig) error {
+	if c.ModelAdvertise == "" {
+		return nil
+	}
+	if c.Role != "worker" {
+		return errors.New("requires a worker")
+	}
+	u, err := url.Parse(c.ModelAdvertise)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil {
+		return errors.New("must be an absolute HTTP or HTTPS URL without credentials")
+	}
+	if port := u.Port(); port != "" {
+		n, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || n == 0 {
+			return errors.New("must specify a valid TCP port")
+		}
+	}
+	return nil
+}
+
+// ModelProxyWarning checks saved address intent without resolving or contacting either host.
+func (c ServiceConfig) ModelProxyWarning() string {
+	if c.Role != "worker" || c.ModelAdvertise == "" {
+		return ""
+	}
+	advertise, adErr := url.Parse(c.ModelAdvertise)
+	queue, queueErr := url.Parse(c.Queue)
+	if adErr == nil && queueErr == nil &&
+		loopbackHost(strings.ToLower(strings.TrimSuffix(advertise.Hostname(), "."))) &&
+		!loopbackHost(strings.ToLower(strings.TrimSuffix(queue.Hostname(), "."))) {
+		return "--model-advertise is loopback but the queue URL is not. A queue on another host cannot call this worker's resident models."
+	}
+	return ""
 }
 
 // OverlayInstallFlags applies only Visit's explicit flags, even empty/zero/false.
