@@ -143,7 +143,7 @@ func (q *Queue) indexJob(id string, j *Job) {
 		q.indexStatusHistory(id, j)
 	}
 	q.records.files.set(id, q.fileExpiryDeadline(j))
-	var history, logs time.Time
+	var history time.Time
 	if terminal(j.State) && !mutableJob(j) {
 		ended := q.clock.Now()
 		if j.FinishedAt != nil {
@@ -151,11 +151,20 @@ func (q *Queue) indexJob(id string, j *Job) {
 		}
 		// pruneJobHistory rechecks every blocker when the record comes due.
 		history = ended.Add(jobRecordRetention)
-		if q.logRetention > 0 && !q.records.logsDone[id] {
-			logs = ended.Add(q.logRetention)
-		}
 	}
 	q.records.history.set(id, history)
+	q.indexJobLogExpiry(id, j)
+}
+
+func (q *Queue) indexJobLogExpiry(id string, j *Job) {
+	var logs time.Time
+	if q.logRetention > 0 && !q.records.logsDone[id] && !mutableJob(j) {
+		ended := q.clock.Now()
+		if j.FinishedAt != nil {
+			ended = *j.FinishedAt
+		}
+		logs = ended.Add(q.logRetention)
+	}
 	q.records.logs.set(id, logs)
 }
 

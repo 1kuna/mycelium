@@ -26,10 +26,8 @@ func (q *Queue) ConfigureLogRetention(age time.Duration) error {
 	q.logRetention = age
 	if q.records != nil {
 		q.records.logsDone = map[string]bool{}
-	}
-	if q.records != nil {
 		for id, j := range q.s.Jobs {
-			q.indexJob(id, j)
+			q.indexJobLogExpiry(id, j)
 		}
 	}
 	q.mu.Unlock()
@@ -79,9 +77,8 @@ func (q *Queue) pruneBatchLogs(requestContexts ...context.Context) error {
 		if complete {
 			requestUnlock2 := requestLock(requestCtx, &q.mu)
 			q.records.logs.set(id, time.Time{})
-			if j := q.s.Jobs[id]; j != nil {
+			if q.s.Jobs[id] != nil {
 				q.records.logsDone[id] = true
-				q.indexJob(id, j)
 			}
 			requestUnlock2()
 		}

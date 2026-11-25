@@ -366,11 +366,10 @@ func (q *Queue) indexStatusHistory(id string, j *Job) {
 		q.records.statusHistory = map[string]statusHistoryEntry{}
 	}
 	inputs := statusJobInputs(j)
-	q.records.statusHistory[id] = statusHistoryEntry{
-		source:     j,
-		inputs:     copyObservationValue(reflect.ValueOf(&inputs)).Interface().(*Job),
-		dependency: copyObservationValue(reflect.ValueOf(statusDependencyJob(j))).Interface().(*Job),
-	}
+	inputs.AdmissionWait = nil
+	frozen := copyObservationValue(reflect.ValueOf(&inputs)).Interface().(*Job)
+	frozen.AdmissionWait = j.AdmissionWait // An immutable generation, like the committed read record.
+	q.records.statusHistory[id] = statusHistoryEntry{source: j, inputs: frozen}
 }
 
 // Copy while protected, then encode and project outside q.mu. No mutable
@@ -381,6 +380,12 @@ func (q *Queue) captureObservation(id string, contexts ...context.Context) (*Que
 }
 
 func (q *Queue) captureStatusObservation(id string, options *statusOptions, contexts ...context.Context) (*Queue, fileStoreObservation, error) {
+	return q.captureObservationInputs(id, options, false, contexts...)
+}
+
+// Efficiency diagnostics only mutate live jobs in their detached view. They can
+// borrow the immutable settled projections across commits, like streamed status.
+func (q *Queue) captureObservationInputs(id string, options *statusOptions, borrowSettled bool, contexts ...context.Context) (*Queue, fileStoreObservation, error) {
 	started := readWallStart(q.observeRead)
 	// Serialize just the memory copy. Parallel read-locked captures can all
 	// consume CPU while a waiting heartbeat writer must wait for every one.
@@ -406,9 +411,9 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	q.freezeContactView(v)
 
 	s := q.s
-	if id == "" {
+	if id == "" && !borrowSettled {
 		v.efficiencyView = q.efficiencyView
-	} else {
+	} else if id != "" {
 		// Job-only reads never return fleet diagnostics or their baselines.
 		s.EfficiencyHosts, s.EfficiencyHealth, s.StrandedDemand = nil, nil, nil
 	}
@@ -465,7 +470,13 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 								if v.observationSelection != nil && !v.observationSelection.ids[key] {
 									input = entry.dependency
 									if input == nil {
-										input = statusDependencyJob(j)
+										// Published inputs are immutable. On the live fallback,
+										// use the already frozen dependency and fan-out facts.
+										source := j
+										if entry.inputs != nil && !q.detachedRead {
+											source = entry.inputs
+										}
+										input = statusDependencyJob(source)
 									}
 								} else if input == nil {
 									// Large cold publications already own immutable job data.
@@ -506,13 +517,13 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 				s.Submissions[key] = r
 			}
 		}
-		if id == "" {
+		if id == "" && !borrowSettled {
 			files = q.captureFileStoreStatus()
 			// One allocation-free pass over every retained job; cheaper under
 			// q.mu than copying each envelope into the detached view (#585).
 			admissions := q.hostAdmissions()
 			v.statusAdmissions = &admissions
-		} else {
+		} else if id != "" {
 			// Receipt diagnostics do not need global usage/event history or
 			// upload and enrollment bookkeeping.
 			s.Preemptions, s.ProductionStarts, s.JobInputUploads, s.BundleUploads = nil, nil, nil, nil
@@ -629,7 +640,7 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 		// mutates it. Share it rather than copying and charging all retained
 		// work to every paged read, which refused pages with
 		// projection_capacity_exceeded once history outgrew a request's share.
-		if options != nil && options.stream || v.observationSelection != nil && !v.observationSelection.ids[key] {
+		if borrowSettled || options != nil && options.stream || v.observationSelection != nil && !v.observationSelection.ids[key] {
 			detached.State.Jobs[key] = input
 			continue
 		}
@@ -654,6 +665,9 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	for key, job := range detached.State.Jobs {
 		if options != nil && options.stream {
 			continue // Project cancellation into the private row, never borrowed history.
+		}
+		if borrowSettled && frozen[key] != nil {
+			continue // Efficiency does not consume cancellation projections.
 		}
 		if original := custody.s.Jobs[key]; original != nil && (v.observationSelection == nil || v.observationSelection.ids[key]) {
 			if original.CancelledAt != nil || original.FanOut != nil {

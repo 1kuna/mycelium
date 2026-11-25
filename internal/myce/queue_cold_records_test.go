@@ -17,6 +17,7 @@ func TestColdJobRecordKeepsCommittedHistory(t *testing.T) {
 		now := clock.Now()
 		stored.State, stored.ReleaseConfirmed, stored.FinishedAt = "failed", true, &now
 		stored.Reason = reason
+		stored.AdmissionWait = &AdmissionWaitEvidence{Latest: &AdmissionWaitSnapshot{Predicate: "capacity"}}
 		q.appendJobLedger(stored, ledgerAttempt(stored, "result", ledgerReason))
 		return nil
 	}); err != nil {
@@ -26,6 +27,22 @@ func TestColdJobRecordKeepsCommittedHistory(t *testing.T) {
 	key := "jobs/" + j.ID
 	if q.persisted[key] != nil || q.coldRecords[key].size == 0 || readGet(before.root, key).data != nil {
 		t.Fatal("large settled job retained a serialized copy")
+	}
+	published, err := before.job(context.Background(), j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := q.s.Jobs[j.ID].AdmissionWait
+	if published.AdmissionWait != evidence || q.records.statusHistory[j.ID].inputs.AdmissionWait != evidence {
+		t.Fatal("settled projections copied immutable admission evidence")
+	}
+	reply, err := q.jobSnapshot(j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply.AdmissionWait.Latest.Predicate = "client change"
+	if evidence.Latest.Predicate != "capacity" {
+		t.Fatal("mutable receipt shared committed admission evidence")
 	}
 
 	sample := func(g *readGeneration, want string) {
@@ -39,7 +56,8 @@ func TestColdJobRecordKeepsCommittedHistory(t *testing.T) {
 	var timing queuePersistenceTiming
 	q.observePersistence = func(observed queuePersistenceTiming) { timing = observed }
 	if err := q.update(func() error {
-		q.touchJob(j.ID).Reason = "small receipt"
+		current := q.touchJob(j.ID)
+		current.Reason = "small receipt"
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -49,6 +67,16 @@ func TestColdJobRecordKeepsCommittedHistory(t *testing.T) {
 	}
 	sample(before, reason)
 	sample(q.readGeneration, "small receipt")
+
+	if err := q.update(func() error {
+		q.touchJob(j.ID).AdmissionWait = &AdmissionWaitEvidence{Latest: &AdmissionWaitSnapshot{Predicate: "host_memory"}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if published.AdmissionWait.Latest.Predicate != "capacity" {
+		t.Fatal("a committed replacement changed the pinned admission generation")
+	}
 
 	expected := errors.New("abort")
 	if err := q.update(func() error {

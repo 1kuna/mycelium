@@ -9,6 +9,44 @@ import (
 	"time"
 )
 
+func TestEfficiencyCaptureSharesOnlySettledJobInputs(t *testing.T) {
+	q, clock := fixture(t)
+	if err := q.update(func() error {
+		now := clock.Now()
+		q.putJob("settled", &Job{
+			ID: "settled", Spec: cpuSpec(1, 2), State: "succeeded",
+			Queued: now, FinishedAt: &now, ReleaseConfirmed: true,
+			Efficiency: &JobEfficiency{WaitSeconds: map[string]float64{"capacity": 12}},
+		})
+		q.putJob("live", &Job{ID: "live", Spec: cpuSpec(1, 2), State: "queued", Queued: now})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	frozen := q.records.statusHistory["settled"].inputs
+	view, _, err := q.captureObservationInputs("", nil, true, context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.s.Jobs["settled"] != frozen || view.s.Jobs["live"] == q.s.Jobs["live"] {
+		t.Fatal("efficiency capture must reuse the settled projection and own live inputs")
+	}
+	if err := q.update(func() error {
+		q.touchJob("settled").Efficiency.WaitSeconds["capacity"] = 24
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	report := view.efficiencyReport()
+	if len(report.Jobs) != 1 || report.Jobs[0].Seconds["capacity"] != 12 {
+		t.Fatalf("retained capture changed across commit: %+v", report.Jobs)
+	}
+	report.Jobs[0].Seconds["capacity"] = 36
+	if frozen.Efficiency.WaitSeconds["capacity"] != 12 || q.s.Jobs["settled"].Efficiency.WaitSeconds["capacity"] != 24 {
+		t.Fatal("report shared mutable wait evidence")
+	}
+}
+
 func TestEfficiencyNovemberReplay(t *testing.T) {
 	q, c := fixture(t)
 	m := cpuMachine("large", "large", "cpu", 64, 121)

@@ -62,7 +62,11 @@ func (q *Queue) coldReadRecord(key string) *readRecord {
 	freeze := func(j *Job) *Job {
 		input := *j
 		input.LedgerEntries = nil
+		input.AdmissionWait = nil
 		copy := cloneJob(&input)
+		// The queue replaces admission evidence as a generation. It is safe
+		// for pinned reads to share the same immutable diagnostic tree.
+		copy.AdmissionWait = j.AdmissionWait
 		return &copy
 	}
 	group, id, _ := strings.Cut(key, "/")
