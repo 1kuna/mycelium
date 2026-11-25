@@ -303,7 +303,7 @@ func (q *Queue) hydrateReply(reply *Reply, requestContexts ...context.Context) e
 		if !replyHasFrozenFiles(reply) {
 			return nil
 		}
-		// A blocked collector cannot stall control. Undelivered offers keep
+		// An exclusive file-lifecycle holder cannot stall control. Undelivered offers keep
 		// their exact custody and can be offered again on a later check-in.
 		if !q.fileLifecycle.TryRLock() {
 			deferSharedFileOffers(reply)

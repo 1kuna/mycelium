@@ -77,9 +77,6 @@ type state struct {
 	BundleUploads map[string]time.Time `json:"bundle_uploads,omitempty"`
 	// Expired blob cleanup survives removal of its job/key answer, deduplicated by hash.
 	RetiredJobFiles map[string]bool `json:"retired_job_files,omitempty"`
-	// Shared-only. An empty claim is a cancellable intent. A nonempty
-	// claim blocks a new keeper until its one unlink actor has finished.
-	SharedBlobReclaims map[string]string `json:"shared_blob_reclaims,omitempty"`
 
 	WorkObservations     map[string]WorkObservation `json:"work_observations,omitempty"`
 	EnrollmentRelease    *EnrollmentRelease         `json:"enrollment_release,omitempty"`
@@ -889,7 +886,6 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 		if !observationOnly {
 			q.maintainSubmissions()
 			q.releaseFileUploadMarkers()
-			err = q.reconcileSharedBlobReferences()
 		}
 		tail.finish()
 		hold.next(holdPersist)

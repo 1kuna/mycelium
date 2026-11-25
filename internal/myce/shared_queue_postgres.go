@@ -4,12 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"iter"
-	"maps"
 	"net"
 	"path/filepath"
-	"slices"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -35,40 +31,6 @@ type sharedQueueAuthority struct {
 	identity string
 	// A fixture can discard the response after PostgreSQL acknowledges COMMIT.
 	commit func(*sql.Tx) error
-
-	// A finished unlink can be acknowledged after its writer retires.
-	reclaimMu        sync.Mutex
-	finishedReclaims map[string]bool
-}
-
-func (a *sharedQueueAuthority) recordFinishedReclaims(claims iter.Seq[string]) {
-	a.reclaimMu.Lock()
-	defer a.reclaimMu.Unlock()
-	for claim := range claims {
-		if a.finishedReclaims == nil {
-			a.finishedReclaims = make(map[string]bool)
-		}
-		a.finishedReclaims[claim] = true
-	}
-}
-
-func (a *sharedQueueAuthority) flushFinishedReclaims(ctx context.Context) error {
-	a.reclaimMu.Lock()
-	claims := slices.Collect(maps.Keys(a.finishedReclaims))
-	a.reclaimMu.Unlock()
-	if len(claims) == 0 {
-		return nil
-	}
-	_, err := a.db.ExecContext(ctx, `INSERT INTO myce_reclaim_finished_v1(claim)
-		SELECT unnest($1::text[]) ON CONFLICT DO NOTHING`, claims)
-	if err == nil {
-		a.reclaimMu.Lock()
-		for _, claim := range claims {
-			delete(a.finishedReclaims, claim)
-		}
-		a.reclaimMu.Unlock()
-	}
-	return err
 }
 
 const sharedQueuePostgresSchema = `
@@ -87,9 +49,6 @@ CREATE TABLE IF NOT EXISTS myce_changes_v1 (
 	handover bigint NOT NULL,
 	operation text UNIQUE NOT NULL,
 	payload bytea NOT NULL
-);
-CREATE TABLE IF NOT EXISTS myce_reclaim_finished_v1 (
-	claim text PRIMARY KEY
 );
 `
 

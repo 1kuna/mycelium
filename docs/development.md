@@ -114,6 +114,8 @@ the worker checks the issuing handover with a fresh PostgreSQL read. The
 turn must still be ready and unexpired. Launch and Started commit under the
 proposed handover and check exact custody in the same decision. If the turn
 changes, the worker probes again with the same attempt and session.
+A PostgreSQL write that fails or times out ends the coordinator turn, and
+the worker retries the same handshake under the next turn.
 
 Coordinator startup and renewal are independent of file-store setup and
 retained-bundle verification. When storage is unavailable, the queue holds
@@ -122,12 +124,11 @@ retryable refusal for new submissions that need file verification or
 publication. Plain work can continue. The local upload spool stays with its
 member across coordinator turns, so retired handlers can drain independently.
 
-Published-blob collection seals a batch of unlink claims in one ordered
-decision. Each sealed digest stays reserved until the unlink actor reports
-completion, including after handover. A live actor retries finished
-reports until PostgreSQL accepts them. A crash with an unreported unlink
-holds that digest for recovery. Recovery for ambiguous unlink and
-interrupted uploads remains cutover work.
+Shared mode never deletes job file bytes. Expiry still updates records, but
+published blobs and interrupted uploads stay on the file store. Another
+coordinator turn may have verified the same bytes for a reference it has
+not yet committed, and one member's lock cannot fence that. Reclaim across
+turns is Stage 3 work.
 
 PostgreSQL stores an ordered versioned row log. Each replica commits the cursor
 with the applied rows. The proof starts from sequence zero or an already bound

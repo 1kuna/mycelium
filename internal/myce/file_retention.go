@@ -652,12 +652,10 @@ func (q *Queue) expiredBlob(hash string, requestContexts ...context.Context) boo
 // holds q.mu. Only positively marked job-input uploads can be orphans.
 func (q *Queue) reclaimJobFilesContext(requestContexts ...context.Context) error {
 	requestCtx := requestContext(requestContexts)
-
 	if q.sharedWriter != nil {
-		// Interrupted upload files have a separate, mutable lifecycle. Until
-		// that lifecycle is fenced across members, leave them for recovery.
-		return q.reclaimPublishedFilesContext(requestCtx)
+		return nil // See reclaimPublishedFilesUntil.
 	}
+
 	return errors.Join(q.reclaimInterruptedUploads(requestCtx), q.reclaimPublishedFilesContext(requestCtx))
 }
 
@@ -674,12 +672,16 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 // idle queue keeps draining; a capacity-refused write passes its need instead,
 // and collection of already authorized bytes continues until it frees that many.
 func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint64) (freed uint64, _ error) {
-	if err := q.clearFinishedSharedReclaims(requestCtx); err != nil {
-		return 0, err
+	// A shared-queue member never unlinks job file bytes. Another coordinator
+	// turn may have verified them for a reference it has yet to commit, and
+	// one member's lifecycle lock cannot fence that. Reclaim is Stage 3 work.
+	if q.sharedWriter != nil {
+		return 0, nil
 	}
+
 	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
 	store := q.files
-	if store == nil || !q.sharedFilesReady() {
+	if store == nil {
 		requestUnlock1()
 		return 0, nil
 	}
@@ -717,7 +719,6 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 	gone := map[string]bool{}
 	deferred, yielded := false, false
 	var reclaimedBlobs uint64
-	var reclaimErr error
 	// Reports false when the fence is busy and the batch was not attempted.
 	reclaimBatch := func(batch []candidate) bool {
 		// The same fence covers tus publication and verify-then-commit callers.
@@ -755,44 +756,10 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 			// An expired/released job owns reclamation of its bundle bytes.
 			// Other custody still wins above; refreshed publication keeps its
 			// ordinary grace below. Only unclaimed bundles need the orphan window.
-			remove = remove && q.s.SharedBlobReclaims[c.hash] == "" && (!trackedBundle || expired || !bundleTime.After(orphanCutoff))
+			remove = remove && (!trackedBundle || expired || !bundleTime.After(orphanCutoff))
 			decisions[i] = decision{remove: remove, marked: c.orphan || trackedBundle, expired: expired}
 		}
 		requestUnlock2()
-		var claims map[string]string
-		var inspected map[string]os.FileInfo
-		if q.sharedWriter != nil {
-			inspected = make(map[string]os.FileInfo, len(batch))
-			var hashes []string
-			var planned uint64
-			for i, c := range batch {
-				if !decisions[i].remove || gone[c.hash] {
-					continue
-				}
-				st, err := os.Lstat(filepath.Join(store.root, "blobs", c.hash))
-				if errors.Is(err, os.ErrNotExist) {
-					gone[c.hash] = true
-				}
-				if err != nil || !age.payloadEligible(st, decisions[i].marked, decisions[i].expired) {
-					continue
-				}
-				hashes = append(hashes, c.hash)
-				inspected[c.hash] = st
-				planned = addDiskBytes(planned, uint64(st.Size()))
-				if need > 0 && addDiskBytes(freed, planned) >= need {
-					break
-				}
-			}
-			if len(hashes) != 0 {
-				claims, reclaimErr = q.claimSharedBlobUnlinks(requestCtx, hashes, revision)
-				if reclaimErr != nil {
-					return false
-				}
-			}
-			// Report all sealed claims, even when an unlink fails. Nothing
-			// can touch these paths once the batch returns.
-			defer q.sharedWriter.authority.recordFinishedReclaims(maps.Values(claims))
-		}
 		// The fence stays held from the recheck through every unlink below, so
 		// no publication can commit a new reference to a hash in this batch.
 		for i, c := range batch {
@@ -803,27 +770,18 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 				continue
 			}
 			path := filepath.Join(store.root, "blobs", c.hash)
-			var st os.FileInfo
-			var err error
-			var eligible bool
-			if q.sharedWriter != nil {
-				if claims[c.hash] == "" {
-					continue
-				}
-				st, eligible = inspected[c.hash], true
-			} else {
-				// A publisher/HEAD may have refreshed mtime since the snapshot.
-				st, err = os.Lstat(path)
-				eligible = err == nil && age.payloadEligible(st, decisions[i].marked, decisions[i].expired)
-			}
-			if eligible {
+			st, err := os.Lstat(path)
+			// Stat inside the publication fence: a publisher/HEAD may have
+			// refreshed mtime since the collection snapshot was taken.
+			if err == nil && age.payloadEligible(st, decisions[i].marked, decisions[i].expired) {
 				err = os.Remove(path)
 				if err == nil {
+					gone[c.hash] = true
 					reclaimedBlobs++
 					freed = addDiskBytes(freed, uint64(st.Size()))
 				}
 			}
-			if eligible && err == nil || errors.Is(err, os.ErrNotExist) {
+			if errors.Is(err, os.ErrNotExist) {
 				gone[c.hash] = true
 				err = nil
 			}
@@ -846,9 +804,6 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 			break
 		}
 	}
-	if q.sharedWriter != nil && reclaimErr == nil {
-		reclaimErr = q.sharedWriter.flushFinishedReclaims(requestCtx)
-	}
 	left := map[string]bool{}
 	for _, c := range items {
 		if !gone[c.hash] {
@@ -865,9 +820,9 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 		log.Printf("file retention deferred: publication or reference verification in progress; retrying next tick")
 	}
 	if len(gone) == 0 {
-		return 0, reclaimErr
+		return 0, nil
 	}
-	return freed, errors.Join(reclaimErr, q.updateRequest(requestCtx, func() error {
+	return freed, q.updateRequest(requestCtx, func() error {
 		if q.files != store {
 			return nil
 		}
@@ -900,7 +855,7 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 			mark(record.Job)
 		}
 		return nil
-	}, nil))
+	}, nil)
 }
 
 // The planner and collector must agree on both publication grace and the

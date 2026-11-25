@@ -210,7 +210,9 @@ func TestSharedQueueRowsReplayLostCommitReply(t *testing.T) {
 	}
 	var unconfirmed queueWriteBatch
 	unconfirmed.add(upsertQueueState, "sample", []byte("unconfirmed"))
-	if err := w.apply(ctx, leader, &unconfirmed, nil); !errors.Is(err, context.DeadlineExceeded) {
+	// The turn ends, so callers retry under the next one instead of
+	// treating the commit deadline as a terminal request timeout.
+	if err := w.apply(ctx, leader, &unconfirmed, nil); !errors.Is(err, errSharedTurn) || errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("unconfirmed write = %v", err)
 	}
 	a.commit = (*sql.Tx).Commit

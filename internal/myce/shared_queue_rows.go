@@ -295,6 +295,11 @@ func (w *sharedQueueWriter) apply(ctx context.Context, db *sql.DB, batch *queueW
 	}
 	if err != nil {
 		w.disabled.Store(true)
+		// This turn is over, so the request is retryable under the next one.
+		// Never surface the commit deadline as a terminal request timeout.
+		if !errors.Is(err, errSharedHead) {
+			err = fmt.Errorf("%w: %v", errSharedTurn, err)
+		}
 		return err
 	}
 	if err := tx.Commit(); err != nil {

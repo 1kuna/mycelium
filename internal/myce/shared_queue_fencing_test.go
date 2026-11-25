@@ -3,6 +3,7 @@ package myce
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"net/http"
@@ -275,7 +276,7 @@ func TestSharedQueuePostgresHoldsFrozenEnvironment(t *testing.T) {
 		t.Run(state, func(t *testing.T) {
 			pg := startProofPostgres(t)
 			a := pg.authority(t)
-			q, turn := proofOpenReclaimQueue(t, a, t.TempDir(), state, proofClock())
+			q, turn := proofOpenSharedQueue(t, a, t.TempDir(), state, proofClock())
 			defer func() { _ = a.renew(t.Context(), turn, 0, false) }()
 			s := proofSpec("locked-environment")
 			s.Environment = Environment{Backend: "uv", LockFile: "uv.lock", Python: "3.12", Platforms: []string{"cpu"},
@@ -308,7 +309,7 @@ func TestSharedQueuePostgresHoldsFrozenEnvironment(t *testing.T) {
 				q.sharedWriter.storageFault.Store(true)
 			}
 
-			// A blocked collector must not gate control while storage is unavailable.
+			// An exclusive file-lifecycle holder must not gate control while storage is unavailable.
 			q.fileLifecycle.Lock()
 			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 			defer cancel()
@@ -560,5 +561,176 @@ func TestSharedQueueMemberRetriesLaunchAcrossHandover(t *testing.T) {
 	got, err := next.client.GetJob(ctx, j.ID)
 	if err != nil || got.Attempt != j.Attempt || got.StartedAt == nil || got.State != "running" {
 		t.Fatalf("successor did not start the original attempt: %v", err)
+	}
+}
+
+// A coordinator row locked past the append deadline ends that turn. The
+// worker's launch and Started handshakes keep the same attempt and session
+// and complete under the next turn instead of reporting a start failure.
+func TestSharedQueueMemberRetriesControlAfterPostgresTimeout(t *testing.T) {
+	pg := startProofPostgres(t)
+	a := pg.authority(t)
+	member := startProofMember(t, t.TempDir(), "only", "127.0.0.1:0", pg.dsn)
+	turn := proofLeader(t, a, member, 0)
+	m := machine("fixture-worker", "cpu", "fixture-host")
+	job := proofSubmit(t, member.client, proofSpec("control-after-timeout"))
+	j := proofAssignment(t, member.client, m, job.ID)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	refused := make(chan struct{}, 1)
+	c := member.client
+	c.HTTP = &http.Client{Timeout: 2 * time.Second, Transport: proofRoundTrip(func(req *http.Request) (*http.Response, error) {
+		res, err := http.DefaultTransport.RoundTrip(req)
+		// A renewal on the same locked row can retire the turn first. The
+		// queue fence then closes the in-flight socket instead of replying.
+		if req.Header.Get(sharedTurnHeader) != "" && (err != nil || res.StatusCode == http.StatusServiceUnavailable) {
+			select {
+			case refused <- struct{}{}:
+			default:
+			}
+		}
+		return res, err
+	})}
+	w := Worker{Client: c, Interval: 25 * time.Millisecond, launchCtx: ctx}
+	handshake := func(path string, in any) {
+		t.Helper()
+		tx, err := a.begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback()
+		if _, _, err := lockedSharedTurn(ctx, tx); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			var reply struct{ OK bool }
+			_, err := w.controlHandshake(path, in, &reply)
+			if err == nil && !reply.OK {
+				err = fmt.Errorf("no positive authorization")
+			}
+			done <- err
+		}()
+		// The authorized request times out on the locked row. Release it only
+		// after the worker has seen that refusal.
+		select {
+		case <-refused:
+		case err := <-done:
+			t.Fatalf("%s ended while PostgreSQL held the coordinator row: %v", path, err)
+		case <-ctx.Done():
+			t.Fatalf("%s never reached the locked append", path)
+		}
+		if err := tx.Rollback(); err != nil {
+			t.Fatal(err)
+		}
+		turn = proofLeader(t, a, member, turn.number)
+		proofCheckin(t, member.client, m)
+		if err := <-done; err != nil {
+			t.Fatalf("%s lost its attempt after a PostgreSQL timeout: %v", path, err)
+		}
+	}
+	handshake("/api/workers/launch", workerLaunchRequest{HostLaunch: HostLaunch{Kind: "batch", Key: j.ID, Attempt: strconv.Itoa(j.Attempt), Machine: m.ID, Session: m.Session}})
+	handshake("/api/workers/started", Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}})
+	got, err := member.client.GetJob(ctx, j.ID)
+	if err != nil || got.Attempt != j.Attempt || got.StartedAt == nil || got.State != "running" {
+		t.Fatalf("the next turn did not start the original attempt: %v %+v", err, got)
+	}
+}
+
+func proofOpenSharedQueue(t *testing.T, a *sharedQueueAuthority, dir, name string, clock Clock) (*Queue, sharedQueueTurn) {
+	t.Helper()
+	path := filepath.Join(dir, name, "queue.db")
+	if err := PrepareStateRoots(filepath.Dir(path)); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := lockQueueDatabase(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lock.Close() })
+	replica, err := openQueueSQLite(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replica.Close()
+	m := &sharedQueueMember{authority: a, replica: replica, timeout: 5 * time.Second}
+	if err := m.bindReplica(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	turn, err := a.acquire(t.Context(), ID(), name, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.pull(t.Context(), turn.head); err != nil {
+		t.Fatal(err)
+	}
+	writer := &sharedQueueWriter{authority: a, turn: turn, timeout: m.timeout, sequence: turn.head}
+	root := filepath.Join(dir, "store")
+	q, err := openQueue(path, dir, clock, writer, lock, WithFileStore(root, 1<<30, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		writer.disabled.Store(true)
+		_ = q.Close()
+	})
+	if err := q.ConfigureFileStore(root, 1<<30, true); err != nil {
+		t.Fatal(err)
+	}
+	return q, turn
+}
+
+// Shared mode has no unlink path. Another coordinator turn may have verified
+// these bytes for a reference it has yet to commit, and no member's local
+// lifecycle lock can fence that turn.
+func TestSharedQueuePostgresNeverUnlinksJobFiles(t *testing.T) {
+	pg := startProofPostgres(t)
+	a := pg.authority(t)
+	dir := t.TempDir()
+	clock := proofClock()
+	old, first := proofOpenSharedQueue(t, a, dir, "old", clock)
+	body := []byte("shared custody fixture")
+	ref := FileRef{SHA256: fmt.Sprintf("%x", sha256.Sum256(body)), SizeBytes: int64(len(body))}
+	path := old.files.blob(ref)
+	if err := os.WriteFile(path, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Single-queue retention collects this unreferenced upload now.
+	at := clock.Now().Add(-2 * DefaultFileRetention)
+	if err := os.Chtimes(path, at, at); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.update(func() error {
+		old.s.JobInputUploads = map[string]time.Time{ref.SHA256: at}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.reclaimJobFilesContext(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if old.reclaimForAdmission(t.Context(), uint64(len(body))) {
+		t.Error("capacity relief reported freed bytes")
+	}
+	if err := old.files.verify(t.Context(), ref); err != nil {
+		t.Fatalf("the current turn unlinked eligible bytes: %v", err)
+	}
+	// The old turn's collector runs after the successor verified and
+	// committed a reference to the same bytes.
+	if err := a.renew(t.Context(), first, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	next, _ := proofOpenSharedQueue(t, a, dir, "next", clock)
+	s := proofSpec("keeper")
+	s.Files = FileManifest{"input": ref}
+	if _, err := next.Submit(s); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.reclaimJobFilesContext(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := next.files.verify(t.Context(), ref); err != nil {
+		t.Fatalf("the successor's committed input lost its bytes: %v", err)
 	}
 }

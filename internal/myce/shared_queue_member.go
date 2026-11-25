@@ -115,11 +115,6 @@ func ServeSharedQueueProof(ctx context.Context, listener net.Listener, cfg Share
 	go func() { serverDone <- server.Serve(listener) }()
 	loopCtx, stopLoop := context.WithCancel(ctx)
 	loopDone := make(chan struct{})
-	reclaimsDone := make(chan struct{})
-	go func() {
-		defer close(reclaimsDone)
-		m.retryFinishedReclaims(loopCtx)
-	}()
 	go func() {
 		defer close(loopDone)
 		m.run(loopCtx)
@@ -132,7 +127,6 @@ func ServeSharedQueueProof(ctx context.Context, listener net.Listener, cfg Share
 		err = errors.Join(server.Close(), <-serverDone)
 	}
 	<-loopDone
-	<-reclaimsDone
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
@@ -176,21 +170,6 @@ func (m *sharedQueueMember) bindReplica(ctx context.Context) error {
 		return err
 	}
 	return tx.Commit()
-}
-
-func (m *sharedQueueMember) retryFinishedReclaims(ctx context.Context) {
-	tick := time.NewTicker(m.cfg.interval)
-	defer tick.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-tick.C:
-			call, cancel := context.WithTimeout(ctx, m.timeout)
-			_ = m.authority.flushFinishedReclaims(call)
-			cancel()
-		}
-	}
 }
 
 func (m *sharedQueueMember) run(ctx context.Context) {
