@@ -231,6 +231,7 @@ Every NAS input, whatever its size, is transferred to the executing machine's lo
 </details>
 
 - <a id="my-47"></a>Finished jobs' files are kept for 3 days, then reclaimed, and files already past that window are cleared now to make space. (MY-47) Agent note: applied as the queue's file retention, which also governs worker scratch held for finished jobs.
+- Agent note: [settled shared checkpoints](files.md#resumable-jobs) have a separate 72-hour default grace from the terminal time (#894, #1314). Expiry still requires completed custody and delivery. The [purge runbook](operations.md#shared-checkpoint-purge) covers storage-local reclamation.
 
 <details><summary>Sources</summary>
 

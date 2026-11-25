@@ -53,10 +53,9 @@ production. See [adapters](https://github.com/1kuna/mycelium/blob/main/docs/adap
 [environments](https://github.com/1kuna/mycelium/blob/main/docs/environments.md) and
 [scheduling](https://github.com/1kuna/mycelium/blob/main/docs/scheduling.md).
 
-Extension registration freezes content; it is not an owner review. Native checks
-run automatically on first demand against the author's baseline, and a failed
-check holds that extension. The
-[execution gate audit](https://github.com/1kuna/mycelium/blob/main/docs/execution-gates.md) lists the protections.
+Extension registration freezes content. Native checks run against the author's
+baseline, and a failed check holds that extension. See the
+[extension qualification guide](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md#install-and-qualify).
 
 ### Disk needs
 

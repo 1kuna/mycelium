@@ -1,7 +1,8 @@
 # Mycelium v3
 
-- `docs/design-proposal.md` is the approved design and the only product spec;
-  `docs/DECISIONS.md` holds the maintainer's rulings.
+- `docs/design-proposal.md` is the approved design and the only product spec.
+  `docs/DECISIONS.md` holds the maintainer's rulings. Find current guides in
+  [the docs index](docs/START-HERE.md#where-to-go-next).
 - Keep every feature easy to use and testable on a laptop with no GPU.
 - One binary, one SQLite queue, plain-command workers. No peer network,
   leases, replicated registry, or restored v1 architecture. MY-40 records a

@@ -1453,7 +1453,15 @@ live policy; a different startup file is refused, so edit host policy with
 
 See [retention](retention.md#job-records) for expiry eligibility, custody, retained summaries and keyed replay.
 
-### Shared checkpoint purge
+Deleted SQLite pages are reused. Retention bounds full history by age, not total
+bytes: permanent key digests and unresolved custody still accumulate. To reclaim
+physical disk space, stop the queue through normal maintenance, take a verified
+local backup, and compact the stopped local database using SQLite `VACUUM`.
+Never open a NAS copy with SQLite or compact the running queue. Check free space
+first: compaction needs room for a second database. Preserve the verified backup
+until the compacted database passes `PRAGMA integrity_check` and reopens normally.
+
+## Shared checkpoint purge
 
 Schedule recurring storage-local reclamation of the children of
 `.myce-expired-checkpoints` under the shared checkpoint root. Workers place a
@@ -1469,14 +1477,6 @@ failure in the worker log or a growing `checkpoint_expiry.waiting` in the
 queue's storage status. During a mixed rollout, the updated queue gives expiry
 tasks only to workers that support the handoff. Until the queue updates, older
 queue and worker pairs can still perform direct mounted-share expiry.
-
-Deleted SQLite pages are reused. Retention bounds full history by age, not total
-bytes: permanent key digests and unresolved custody still accumulate. To reclaim
-physical disk space, stop the queue through normal maintenance, take a verified
-local backup, and compact the stopped local database using SQLite `VACUUM`.
-Never open a NAS copy with SQLite or compact the running queue. Check free space
-first: compaction needs room for a second database. Preserve the verified backup
-until the compacted database passes `PRAGMA integrity_check` and reopens normally.
 
 ## Queue backup, restore and relocation
 
