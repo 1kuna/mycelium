@@ -1423,6 +1423,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 					log.Printf("enrollment receipt unavailable; will retry")
 				}
 				w.compactNativeLaunch = reply.NativeLaunchProtocol == nativeLaunchProtocol
+				w.ramGateSampler.raise(reply.RAMGateSampleFloor)
 				w.fleet.noteReply(reply)
 				w.inspectNASPaths(reply.NASPathChecks, root.state.CheckpointRoot)
 				if reply.CheckpointExpiryProtocol == checkpointExpiryProtocol {

@@ -83,6 +83,9 @@ func (q *Queue) recordLaunchCapacityWait(j *Job, r Result) {
 		if prior := j.LaunchCapacityWait[key]; prior.Session == wait.Session && prior.Attempt == wait.Attempt {
 			return // A repeated result must not move the baseline to a newer reading.
 		}
+		if worker := q.s.Machines[j.Machine]; worker != nil && worker.Session == j.Session && wait.Admission != nil {
+			worker.ramGateFloor = max(worker.ramGateFloor, wait.Admission.RAMGateSampleID)
+		}
 		if !q.unreported[m.ID] {
 			wait.Evidence = q.launchCapacityEvidence(j, m)
 		}
@@ -228,13 +231,22 @@ func (q *Queue) queuedCapacityStatus(j *Job, scans ...*placementScan) (waiting, 
 // planner chooses lower tiers; same-tier work remains protected. Exact releases
 // and a changed capacity snapshot are still required by dispatch.
 func (q *Queue) launchCapacityProjection(j *Job, m *Machine) *Machine {
+	if short := q.workerRAMShortfall(j, m); short > 0 {
+		// The worker's gate refuses before any offer, so its shortfall stands
+		// in for the refusal detail an older worker would have returned.
+		copy := *m
+		copy.FreeHostMemoryGB = min(copy.FreeHostMemoryGB, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)-short)
+		return &copy
+	}
 	h, ok := j.LaunchCapacityWait[targetKey(m)]
 	if !ok || h.Evidence != q.launchCapacityEvidence(j, m) || h.Admission == nil {
 		return m
 	}
 	d := h.Admission
 	if d.Subcheck == memoryWaitReason && m.HostRAMGate != nil {
-		return m // A failed live check cannot make a victim reclaimable.
+		// The current gate supersedes the refusal's reading, whose room can
+		// include measured native startup loss. That loss never reclaims.
+		return m
 	}
 	if d.Unavailable || d.Available == nil || d.Required+d.HeldGB+d.KeepGB <= *d.Available {
 		return m

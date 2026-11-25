@@ -622,8 +622,8 @@ func (q *Queue) requeueMemoryPressure(j *Job) {
 }
 
 // HostRAMGate pairs the physical read with the worker's competing custody at
-// that read. The queue also retains its independent obligations, including
-// releases and assignments the worker has not seen yet.
+// that read. The queue adds its assignments that the gate's check-in did not
+// report, and keeps its independent ledger and exact-release checks.
 type HostRAMGate struct {
 	SampleID        int64   `json:"sample_id,omitempty"`
 	SampleStartedNS int64   `json:"sample_started_ns,omitempty"`
@@ -657,16 +657,54 @@ func (s HostRAMGate) physicalRoom(keep float64) float64 {
 	return s.RawGB - keep - s.PendingGB
 }
 
-func (q *Queue) workerRAMGate(j *Job, m *Machine) error {
+// workerRAMGateFor is the worker's latest gate for a pooled job, plus the
+// queue's assignments on that worker that the gate's check-in did not report.
+func (q *Queue) workerRAMGateFor(j *Job, m *Machine) (worker *Machine, gate HostRAMGate, known, ok bool) {
 	if !pooledMemory(j) {
+		return nil, gate, false, false
+	}
+	worker = q.s.Machines[m.ID]
+	if worker == nil || worker.HostRAMGate == nil || worker.Session != m.Session {
+		return nil, gate, false, false // Older workers remain subject to the ordinary queue ledger.
+	}
+	gate = *worker.HostRAMGate
+	for _, o := range q.hostObligations(hostID(worker)) {
+		r := o.Result
+		if o.Launch != nil || o.Engine != nil || o.Call != nil || o.Preparation || r.ID == j.ID ||
+			r.Machine != worker.ID || r.Session != worker.Session || worker.hostRAMGateSeen[attemptKey{r.ID, r.Attempt, r.Session}] {
+			continue
+		}
+		peer := q.s.Jobs[r.ID]
+		if peer == nil || peer.Attempt != r.Attempt || !batchReservesCapacity(peer) {
+			continue
+		}
+		// Nothing of an unreported attempt is resident in the gate's reading.
+		owner := allocationMachine(worker, peer.AllocatedDevices)
+		held, pending := pooledHostCharge(peer, owner, hostMemorySample{}, q.clock.Now(), hostNeed(owner, peer.Spec.Needs.MemoryGB, peer.Spec.Needs.HostMemoryGB))
+		gate.HeldGB, gate.PendingGB = gate.HeldGB+held, gate.PendingGB+pending
+	}
+	known = worker.HostMemoryMeasured && worker.HostMemoryError == "" && !gate.Unavailable
+	return worker, gate, known, true
+}
+
+// workerRAMShortfall is how far the gate is short of the job's full demand,
+// for release planning. The measured startup repeat is excluded: it delays a
+// re-offer but never stops other work.
+func (q *Queue) workerRAMShortfall(j *Job, m *Machine) float64 {
+	worker, gate, known, ok := q.workerRAMGateFor(j, m)
+	if !ok || !known {
+		return 0
+	}
+	pools := memoryPools(j)
+	return max(0, pools.RAM.TypicalGB+pools.KeepGB+gate.PendingGB-gate.available(worker, pools.KeepGB))
+}
+
+func (q *Queue) workerRAMGate(j *Job, m *Machine) error {
+	worker, gate, known, ok := q.workerRAMGateFor(j, m)
+	if !ok {
 		return nil
 	}
-	worker := q.s.Machines[m.ID]
-	if worker == nil || worker.HostRAMGate == nil || worker.Session != m.Session {
-		return nil // Older workers remain subject to the ordinary queue ledger.
-	}
-	gate, pools := worker.HostRAMGate, memoryPools(j)
-	known := worker.HostMemoryMeasured && worker.HostMemoryError == "" && !gate.Unavailable
+	pools := memoryPools(j)
 	if err := gate.check(worker, pools, known); err != nil {
 		return err
 	}

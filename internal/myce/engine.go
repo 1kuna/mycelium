@@ -1134,12 +1134,23 @@ func (s *ramGateSampler) begin(clock Clock) (int64, func()) {
 	}
 	s.mu.Lock()
 	// Order the physical probes themselves. A replacement process can adopt
-	// the same session, so IDs also follow the worker's clock across restarts.
+	// the same session: IDs follow its clock and the queue's floor (raise).
 	s.last++
 	if clock != nil {
 		s.last = max(s.last, clock.Now().UnixNano())
 	}
 	return s.last, s.mu.Unlock
+}
+
+// raise continues sample order above what the queue already holds. A
+// replacement whose clock reads earlier would otherwise issue lower IDs.
+func (s *ramGateSampler) raise(floor int64) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.last = max(s.last, floor)
+	s.mu.Unlock()
 }
 
 func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostLaunch) error {

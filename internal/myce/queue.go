@@ -1819,14 +1819,24 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			m.HostRAMGate = nil
 		}
 		m.hostRAMGateAt = memoryReceivedAt
+		if m.HostRAMGate != nil {
+			m.hostRAMGateSeen = make(map[attemptKey]bool, len(c.Attempts))
+			for _, a := range c.Attempts {
+				m.hostRAMGateSeen[attemptKey{a.ID, a.Attempt, a.Session}] = true
+			}
+		}
 		if old != nil && old.Session == m.Session {
+			m.ramGateFloor = old.ramGateFloor
 			stale := memoryReceivedAt.Before(old.hostRAMGateAt)
 			if m.HostRAMGate != nil && m.HostRAMGate.SampleID > 0 && old.HostRAMGate != nil && old.HostRAMGate.SampleID > 0 {
 				stale = m.HostRAMGate.SampleID <= old.HostRAMGate.SampleID
 			}
 			if stale {
-				m.HostRAMGate, m.hostRAMGateAt = old.HostRAMGate, old.hostRAMGateAt
+				m.HostRAMGate, m.hostRAMGateAt, m.hostRAMGateSeen = old.HostRAMGate, old.hostRAMGateAt, old.hostRAMGateSeen
 			}
+		}
+		if m.HostRAMGate != nil {
+			m.ramGateFloor = max(m.ramGateFloor, m.HostRAMGate.SampleID)
 		}
 		if old != nil && m.ModelConfigHash == "" && q.catalogStale(old) {
 			return errors.New("worker model config does not match queue")
@@ -2030,6 +2040,9 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			// AdmissionBlocked also holds existing supervisors' result replay.
 			// Recovery gates new offers/planning separately so saved results drain.
 			reply.AdmissionBlocked = availabilityBlocked(&m) || m.HostMemoryBudgetStatus() != "" || q.maintenanceBlocked(hostID(&m))
+			if stored := q.s.Machines[m.ID]; stored != nil && stored.Session == m.Session {
+				reply.RAMGateSampleFloor = stored.ramGateFloor
+			}
 			for _, p := range q.hostObligations(hostID(&m)) {
 				if p.Preparation && p.Result.Machine == m.ID && p.Result.Session == m.Session {
 					if r, ok := q.s.HostReleases[releaseKey(HostRelease{Job: p.Result.ID, Machine: m.ID, Session: m.Session})]; ok && !r.Until.IsZero() {
