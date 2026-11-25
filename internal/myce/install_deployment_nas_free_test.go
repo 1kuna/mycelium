@@ -6,6 +6,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"sync/atomic"
 	"testing"
 )
 
@@ -76,6 +78,75 @@ func TestInstalledWorkerNASFreePreflight(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestInstalledWorkerNASFreeSiblingModelRoot(t *testing.T) {
+	ctx := context.Background()
+	c, mountInventory := onboardingNAS(t, "linux")
+	share := c.NAS
+	c.NAS = filepath.Join(share, "selected")
+	c.Checkpoints = filepath.Join(c.NAS, "checkpoints")
+	c.ModelRoot = filepath.Join(share, "models")
+	c.EnvironmentRoot = filepath.Join(c.NAS, "environments")
+	c.RequireMountedNAS = true
+	mounted := true
+	inventory := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if !mounted {
+			return nil, nil
+		}
+		return mountInventory(ctx, name, args...)
+	}
+	var fallbackChecked atomic.Bool
+	diskProbe := workerDiskProbe
+	t.Cleanup(func() { workerDiskProbe = diskProbe })
+	workerDiskProbe = func(path string) (DiskReading, error) {
+		if path == share {
+			fallbackChecked.Store(true)
+		}
+		return diskProbe(path)
+	}
+	fs := &onboardingStorageFS{
+		lstat: os.Lstat,
+		mkdir: func(string, os.FileMode) error { return errors.New("unexpected directory creation") },
+		probe: func(string) error { return errors.New("unexpected write probe") },
+	}
+	mode := installStoragePreview | installStoragePreserveNAS
+	if warning, err := prepareInstallStorage(ctx, c, inventory, mode, fs); err != nil || warning != nil {
+		t.Fatalf("mounted sibling model root should pass: warning=%+v err=%v", warning, err)
+	}
+	mounted = false
+	if warning, err := prepareInstallStorage(ctx, c, inventory, mode, fs); err != nil || warning == nil || warning.Root != "nas" {
+		t.Errorf("saved selection should pass degraded preflight: warning=%+v err=%v", warning, err)
+	}
+	if fallbackChecked.Load() {
+		t.Error("preflight tried to classify the missing model root using the surviving parent")
+	}
+	if err := os.Mkdir(c.ModelRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	// The cold worker has the saved paths but no previous mount observation.
+	w := Worker{ServiceConfig: &c, ModelRoot: c.ModelRoot, MountRoots: func(ctx context.Context) ([]string, error) {
+		return workerMountedNASRoots(ctx, "linux", inventory)
+	}}
+	q, _, m := modelFixture(t)
+	catalog := q.models
+	catalog.Models = slices.Clone(catalog.Models)
+	catalog.Models[0].Path, catalog.Models[0].DirectNAS = "weights.gguf", true
+	if err := q.ConfigureModels(catalog); err != nil {
+		t.Fatal(err)
+	}
+	m.ModelConfigHash = modelConfigHash(q.models)
+	m.UnavailableRoots = w.sampleStorageRoots(ctx, c.Checkpoints)
+	check(t, q, m, nil)
+	call := addModelCall(t, q, "experiment")
+	expectWorkerStorageHold(t, q, call.ID, "model")
+
+	mounted = true
+	m.UnavailableRoots = w.sampleStorageRoots(ctx, c.Checkpoints)
+	if len(m.UnavailableRoots) != 0 {
+		t.Fatal("returning parent share did not restore the saved roots", m.UnavailableRoots)
 	}
 }
 

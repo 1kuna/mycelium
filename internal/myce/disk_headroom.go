@@ -162,6 +162,9 @@ func diskVolumeNeedWith(j *Job, v DiskVolume, work diskWork, machines ...*Machin
 	}
 	// Outputs are written inside the work dir, so scratch covers them.
 	output = addDiskBytes(max(output, work.scratch), spool)
+	// Keep existing disk admission on NAS-present workers. While NAS is
+	// unavailable, charge local_first checkpoint bytes to worker state.
+	localCheckpoint := j.Spec.localFirst() && len(machines) > 0 && machines[0] != nil && storageRootUnavailable(machines[0], "nas")
 	var need uint64
 	relevant := false
 	for _, root := range v.Roots {
@@ -169,7 +172,7 @@ func diskVolumeNeedWith(j *Job, v DiskVolume, work diskWork, machines ...*Machin
 		case "data":
 			relevant = true
 			need = addDiskBytes(need, addDiskBytes(input, output))
-			if j.Spec.localFirst() {
+			if localCheckpoint {
 				need = addDiskBytes(need, checkpointDiskBytes(j))
 			}
 			if j.Spec.ephemeral() {
@@ -202,7 +205,7 @@ func diskVolumeNeedWith(j *Job, v DiskVolume, work diskWork, machines ...*Machin
 				}
 			}
 		case "checkpoint":
-			if j.Spec.ephemeral() || j.Spec.localFirst() {
+			if j.Spec.ephemeral() || localCheckpoint {
 				continue
 			}
 			if needsCheckpoint(j) || j.ResumeFiles != nil {

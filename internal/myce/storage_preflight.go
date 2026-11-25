@@ -125,8 +125,8 @@ func preflightFleetStorageResult(ctx context.Context, c ServiceConfig, command f
 	return prepareInstallStorage(ctx, c, command, mode, fs)
 }
 
-// PreservesWorkerStorage covers a saved NAS selection whose dependent paths
-// the worker can fence from that selection alone, including at cold start.
+// PreservesWorkerStorage covers a saved NAS selection whose checkpoint and
+// environment paths the worker can fence from that selection at cold start.
 func (c ServiceConfig) PreservesWorkerStorage(previous ServiceConfig) bool {
 	return c.Role == "worker" && previous.Role == "worker" && previous.RequireMountedNAS &&
 		filepath.IsAbs(c.NAS) && filepath.Dir(c.NAS) != filepath.Clean(c.NAS) &&

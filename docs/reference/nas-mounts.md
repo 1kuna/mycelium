@@ -42,6 +42,9 @@ selection absent. Preflight checks the existing path metadata and defers NAS
 write probes, recording a `storage_warning`. A regular file or symlink at the
 saved mountpoint still fails preflight. When a worker is readmitted degraded,
 jobs of any tier can use it if their storage dependencies are available.
+A configured model source with unverified backing is reported unavailable
+while the worker's saved NAS is absent. A saved NAS selection can be a
+subdirectory of the share, with the model root elsewhere on that share.
 
 Workers reuse the host-hygiene mount probe for each configured checkpoint/NAS
 root. Checkpoint health reuses the existing admission access check: stat the

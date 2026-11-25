@@ -297,6 +297,18 @@ func validateOnboardingStorageFS(ctx context.Context, abort context.CancelCauseF
 		ctx := storageRootContext(ctx, []string{"nas", "checkpoint", "model", "environment"}[role])
 		base := mount
 		if role == 2 && !withinNAS(mount, path) && filepath.IsAbs(path) {
+			if missing {
+				// The selection can be a subdirectory of the absent share.
+				// Check the saved path's shape without inferring its backing.
+				info, err := onboardingFSOperation(ctx, abort, func() (os.FileInfo, error) { return fs.lstat(path) }, "ancestor-metadata")
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+					return storageRootRefusal(ctx, "ancestor-metadata", preflightError("model_root_not_local", "storage", "saved model root must be an accessible real directory"), err)
+				}
+				continue
+			}
 			// Model acquisition may use local disk; checkpoint/environment mount
 			// selection and health checks retain their existing contract.
 			local, err := validateLocalModelVolume(ctx, abort, path)

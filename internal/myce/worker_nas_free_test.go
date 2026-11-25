@@ -27,6 +27,7 @@ func TestWorkerNASFreePlacement(t *testing.T) {
 					if !mounted {
 						m.CheckpointUnavailable = true
 						m.UnavailableRoots = []UnavailableRoot{
+							{Root: "nas", Reason: "configured NAS mount missing"},
 							{Root: "checkpoint", Reason: "configured NAS mount missing"},
 							{Root: "job-files", Reason: "configured NAS mount missing"},
 						}
@@ -78,6 +79,44 @@ func expectWorkerStorageHold(t *testing.T, q *Queue, id, role string) {
 	}
 	if got.State != "queued" || got.Hold == nil || got.Hold.Kind != "storage_root" || !strings.Contains(got.Hold.Detail, role+" unavailable") {
 		t.Fatalf("expected %s storage hold, got state=%s hold=%+v", role, got.State, got.Hold)
+	}
+}
+
+func TestWorkerNASFreeLocalFirstDiskAdmission(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("nas_missing=%t", missing), func(t *testing.T) {
+			q, clock := fixture(t)
+			fakeCheckpointAvailability(t, q, true)
+			m := cpuMachine("worker", "worker", "cpu", 4, 16)
+			m.Capabilities = append(m.Capabilities, localFirstProtocol)
+			m = reportDisk(t, m, clock, "checkpoint", []string{"checkpoint"}, 100<<30, 50<<30)
+			checkpoint := m.DiskVolumes[0]
+			m = reportDisk(t, m, clock, "data", []string{"data"}, 100<<30, 1<<30)
+			if missing {
+				m.UnavailableRoots = []UnavailableRoot{{Root: "nas"}, {Root: "checkpoint"}}
+				m.CheckpointUnavailable = true
+			} else {
+				m.DiskVolumes = append(m.DiskVolumes, checkpoint)
+			}
+			check(t, q, m, nil)
+			s := cpuSpec(1, 1)
+			s.Resumable = true
+			s.Advanced = &Advanced{CheckpointPolicy: "local_first"}
+			s.Disk = &DiskNeeds{CheckpointBytes: 1 << 20}
+			queued := submit(t, q, s)
+			assigned := check(t, q, m, nil).Job
+			held, err := q.jobSnapshot(queued.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if missing {
+				if assigned != nil || held.Hold == nil || held.Hold.Kind != "disk_headroom" {
+					t.Fatalf("degraded worker should check local space: job=%v hold=%+v", assigned != nil, held.Hold)
+				}
+			} else if assigned == nil || assigned.ID != queued.ID {
+				t.Fatal("healthy worker lost existing local_first placement", held.Hold)
+			}
+		})
 	}
 }
 
