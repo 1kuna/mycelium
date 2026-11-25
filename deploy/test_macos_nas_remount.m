@@ -289,6 +289,17 @@ static void retriesUncertainTimeoutWithinBudget(void) {
     assert(runRemount() == EX_TEMPFAIL && mountCalls == 2);
 }
 
+static void retriesDisconnectClassesWithinBudget(void) {
+    const int disconnects[] = {ENETRESET, ECONNABORTED};
+    for (size_t i = 0; i < sizeof(disconnects) / sizeof(disconnects[0]); i++) {
+        mountStatus = disconnects[i];
+        assert(runRemount() == EX_TEMPFAIL);
+        assert(mountCalls == (int)i + 1);
+        assertNoHold();
+        now += 120;
+    }
+}
+
 static void holdsNonTransientResults(void) {
     const int nonTransient[] = {EAUTH, EIO};
     for (size_t i = 0; i < sizeof(nonTransient) / sizeof(nonTransient[0]); i++) {
@@ -448,6 +459,7 @@ int main(int argc, const char *argv[]) {
             {"directorySyncFailurePreventsAuthentication", directorySyncFailurePreventsAuthentication},
             {"retriesDisconnectsWithinBudget", retriesDisconnectsWithinBudget},
             {"retriesUncertainTimeoutWithinBudget", retriesUncertainTimeoutWithinBudget},
+            {"retriesDisconnectClassesWithinBudget", retriesDisconnectClassesWithinBudget},
             {"holdsNonTransientResults", holdsNonTransientResults},
             {"holdsUnsupportedAuthentication", holdsUnsupportedAuthentication},
             {"rejectsReplacedAttemptStateBeforeNetFS", rejectsReplacedAttemptStateBeforeNetFS},

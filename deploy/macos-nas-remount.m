@@ -182,10 +182,11 @@ static BOOL recordNetworkFailure(int directory, RetryState retry, int result) {
     return saved;
 }
 
-// NetFS returns a status without the SMB phase. A transport error is not a
-// rejected login: the saved credential is unchanged, so retrying cannot add a
-// failed-login count. Transport errors therefore retry automatically, bounded
-// by the per-window budget and backoff; rejected or unknown results hold.
+// NetFS returns a status without the SMB phase. With an unchanged, valid saved
+// credential a transport error is not a rejected login, so transport errors
+// retry automatically, bounded by the per-window budget and backoff. A lost
+// rejection reply can surface as a transport error, so the budget (not the
+// errno) bounds failed logins; rejected or unknown results hold.
 static BOOL networkError(int status) {
     switch (status) {
         case ENETDOWN:
@@ -194,6 +195,8 @@ static BOOL networkError(int status) {
         case EHOSTUNREACH:
         case ECONNREFUSED:
         case ENOTCONN:
+        case ENETRESET:
+        case ECONNABORTED:
         case EPIPE:
         case ETIMEDOUT:
             return YES;

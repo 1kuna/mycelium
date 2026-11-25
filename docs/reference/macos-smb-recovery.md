@@ -120,7 +120,8 @@ to `refused-mount`. Later ticks and checks return 79 even if an exact mount
 appears in the inventory. The helper leaves any mount it finds in place.
 
 After a transport failure (`ENETDOWN`, `ENETUNREACH`, `EHOSTDOWN`,
-`EHOSTUNREACH`, `ECONNREFUSED`, `ENOTCONN`, `EPIPE` or `ETIMEDOUT`), the
+`EHOSTUNREACH`, `ECONNREFUSED`, `ENOTCONN`, `ENETRESET`, `ECONNABORTED`,
+`EPIPE` or `ETIMEDOUT`), the
 helper clears `auth-hold`, returns 75 and retries on a later tick without
 operator action. It persists a budget of two failures per 15-minute window,
 with at least two minutes from the recorded failure to the next eligible
@@ -128,13 +129,25 @@ attempt. The window starts at the first recorded failure, so recovery after
 the network returns takes at most about 15 minutes, and the helper makes at
 most about eight attempts an hour while the network stays down.
 
-A transport failure is not a rejected login. The saved credential is
-unchanged, so a retry cannot add a failed-login count even when Apple's SMB
-client returns `ENOTCONN`, `EPIPE` or a timeout after session setup
-([session retry][apple-session], [mount code][apple-mount]). Account lockout
-comes from rejected credentials. Those results (`EAUTH`, unsupported
-authentication and any unknown status) keep `auth-hold` until an operator
-clears it. The budget also bounds load on the server during an outage.
+With a valid saved credential, a transport failure is not a rejected login.
+The errno alone cannot prove that, though. Apple's SMB client maps a received
+logon failure to `EAUTH`, but if the NAS rejects a stale credential and the
+reply is lost, the call can end in `ETIMEDOUT`, `ENOTCONN` or `EPIPE`, and an
+internal reconnect can end in a reachability code
+([session retry][apple-session], [mount code][apple-mount]). The retry budget,
+not the errno, bounds failed logins in that case: at most three NetFS calls in
+any rolling five minutes, and Apple can retry authentication inside one call.
+Before enabling the timer on a worker, verify the NAS account-lockout policy
+and the account's remaining headroom, and correlate the pilot's NetFS calls
+with the NAS's session-setup and failed-login counts. Results the client
+reports as rejected (`EAUTH`, unsupported authentication) and any unknown
+status keep `auth-hold` until an operator clears it. The budget also bounds
+load on the server during an outage.
+
+If the inventory read after NetFS fails, the helper cannot prove the mount and
+records `refused-mount`. Later ticks return 79 until an operator inspects the
+mount, even if the exact mount then appears. A backward wall-clock correction
+can lengthen the retry wait.
 
 [apple-session]: https://github.com/apple-oss-distributions/SMBClient/blob/99da2d9a4bbe17cde3cee382ad3edc16e25f5535/lib/smb/ctx.c#L3129-L3147
 [apple-mount]: https://github.com/apple-oss-distributions/SMBClient/blob/99da2d9a4bbe17cde3cee382ad3edc16e25f5535/lib/smb/ctx.c#L3326-L3340
