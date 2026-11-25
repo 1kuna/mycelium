@@ -486,13 +486,15 @@ func TestFleetInstallActiveApplyLockIsBenign(t *testing.T) {
 	}
 }
 
-func TestFleetInstallFileCacheCapacity(t *testing.T) {
+func TestFleetInstallPreservesWorkerSettings(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
 			f := newFleetInstallFixture(t, goos)
 			// Save through the installer's flag overlay, then reinstall with no
 			// override before the signed fleet update reads the configuration.
-			for _, args := range [][]string{{"--file-cache-bytes=34359738368"}, nil} {
+			for _, args := range [][]string{{
+				"--file-cache-bytes=34359738368", "--model-listen=:7332", "--model-advertise=http://worker.example:7332",
+			}, nil} {
 				c, err := ReadServiceConfig(f.c.Config)
 				if err != nil {
 					t.Fatal(err)
@@ -528,11 +530,20 @@ func TestFleetInstallFileCacheCapacity(t *testing.T) {
 			if err != nil || c.FileCacheBytes != 32<<30 {
 				t.Fatalf("fleet upgrade lost file cache capacity: %d, %v", c.FileCacheBytes, err)
 			}
+			if c.ModelListen != ":7332" || c.ModelAdvertise != "http://worker.example:7332" {
+				t.Fatal("fleet upgrade lost model proxy settings")
+			}
 			// launchd regenerates Args at startup; systemd retains the saved unit.
 			args := c.Args()
-			i := slices.Index(args, "--file-cache-bytes")
-			if i < 0 || args[i+1] != "34359738368" {
-				t.Fatal("fleet restart arguments lost file cache capacity")
+			for flag, want := range map[string]string{
+				"--file-cache-bytes": "34359738368",
+				"--model-listen":     c.ModelListen,
+				"--model-advertise":  c.ModelAdvertise,
+			} {
+				i := slices.Index(args, flag)
+				if i < 0 || args[i+1] != want {
+					t.Errorf("fleet restart arguments lost %s", flag)
+				}
 			}
 			unit, err := os.ReadFile(c.Service)
 			if err != nil || string(unit) != c.ServiceText() {

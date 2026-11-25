@@ -299,6 +299,9 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 	if e != nil {
 		return e
 	}
+	if warning := c.ModelProxyWarning(); warning != "" {
+		fmt.Println("Warning:", warning)
+	}
 	if err := myce.ResolveEnvironmentCacheSizing(&c, explicit["environment-cache-bytes"]); err != nil {
 		return err
 	}

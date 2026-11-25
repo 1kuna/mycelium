@@ -208,6 +208,16 @@ myce join --queue http://QUEUE_ADDRESS:7331 --name gpu-worker --gpu cuda \
   --model-listen WORKER_ADDRESS:7332 --model-advertise http://WORKER_ADDRESS:7332
 ```
 
+For an installed worker, set the same addresses on its saved configuration:
+
+```sh
+myce install worker --config WORKER_CONFIG \
+  --model-listen WORKER_ADDRESS:7332 --model-advertise http://WORKER_ADDRESS:7332
+```
+
+Add `--dry-run` to preview the command. Reinstalls and fleet upgrades preserve
+the addresses. Use a port distinct from the queue's port.
+
 The default proxy binds loopback on a random port for dev/local workers.
 The actual engine always binds loopback; only the token-protected worker proxy
 is LAN-visible. Model configuration hashes must match between queue and workers,

@@ -375,6 +375,20 @@ For an existing current installation, select its exact saved config:
 ./myce install queue --config QUEUE_CONFIG --dry-run
 ```
 
+For resident models on a worker on another host, the foreground and
+installed-worker forms both set the worker model proxy addresses:
+
+```sh
+myce join --queue QUEUE_URL --model-config MODEL_CATALOG \
+  --model-listen WORKER_ADDRESS:7332 --model-advertise http://WORKER_ADDRESS:7332
+myce install worker --config WORKER_CONFIG \
+  --model-listen WORKER_ADDRESS:7332 --model-advertise http://WORKER_ADDRESS:7332
+```
+
+Add `--dry-run` to the install command to preview the settings. Choose a worker
+address the queue can reach and a port distinct from the queue's port. Later
+reinstalls and fleet upgrades preserve these settings.
+
 Omitted flags preserve saved values, including false/zero/empty settings,
 queue/NAS addresses, GPU runtime environment, catalogs and secret
 references. Explicit flags overlay only their setting. Identity cannot be moved

@@ -141,6 +141,9 @@ func savedInstallFixture(t *testing.T, roles ...string) (myce.ServiceConfig, myc
 			switch name {
 			case "DiscoveryListen":
 				f.SetString("127.0.0.1:7443")
+			case "ModelListen", "ModelAdvertise":
+				// Leave these absent to exercise an older saved config.
+				continue
 			case "Slice":
 				f.SetString("mycetest0123456789abcdef0123456789abcdef.slice")
 			case "CPUQuota":
