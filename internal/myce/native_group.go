@@ -782,6 +782,11 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 		if m == g.members[0] {
 			l.NativeStartup = "first_member"
 		}
+		// This is evidence for an extra startup charge after a refusal.
+		// Never deduct it from the live demand or the competing ledger.
+		if peak := g.memory.peak(); peak != nil {
+			l.NativeResidentGB = peak.HostGB
+		}
 	}
 	main := m.Name == "main"
 	if main || g.worker.compactNativeLaunch {

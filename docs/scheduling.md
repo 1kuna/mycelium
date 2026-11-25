@@ -69,8 +69,8 @@ The queue checks its host ledger and the worker's physical reading with the
 worker's pending growth and allowance. The worker repeats the same comparison
 at launch with current inputs. Native helpers receive no credit against the full
 launch requirement. If room falls between the first native member and a later
-member's refusal, subsequent offers on that route budget for the measured
-startup loss in physical RAM as well. This measurement cannot authorize reclaim
+member's refusal, subsequent offers on that route budget for the portion of
+the loss supported by measured growth in the attempt's cgroup. This evidence cannot authorize reclaim
 or release. Fresh capacity and exact release still gate an offer.
 
 The host pressure forecast projects two horizons, through the next sample and

@@ -46,7 +46,7 @@ type attemptSupervisor struct {
 	admissionBlocked bool
 	// Confirmed local cleanup; independent of result delivery.
 	admissionReleased atomic.Bool
-	nativeStartupRAM  *HostRAMGate // Exact first member's full-demand reading, under admissionMu.
+	nativeStartupRAM  *nativeStartupMemory // Exact first member's reading, under admissionMu.
 	publication       *publicationProgress
 }
 
@@ -1366,6 +1366,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			rt.mu.Unlock()
 
 			// Refresh memory together after inventory, then age through the reads.
+			ramGateSampleID := rt.ramGateSampleID.Add(1)
 			rawAvailable := w.sampleHeartbeatMemory(ctx, &m, jobs, reports, actors)
 			if m.MemoryObservation != nil {
 				m.MemoryObservation.Quiescent = !recovering && !leaving && len(actors) == 0 && modelReportsQuiescent(modelReports) && environments.cores() == 0 && !hostPreparing(&m)
@@ -1377,7 +1378,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			rt.batchHostMemorySamples = w.hostMemorySamples
 			rt.publishHostLedgerLocked()
 			if ledger := rt.hostLedger.Load(); ledger != nil && m.HostMemoryError == "" && validMemoryValue(rawAvailable) {
-				m.HostRAMGate = &HostRAMGate{RawGB: rawAvailable, HeldGB: ledger.charge, PendingGB: ledger.pending}
+				m.HostRAMGate = &HostRAMGate{SampleID: ramGateSampleID, RawGB: rawAvailable, HeldGB: ledger.charge, PendingGB: ledger.pending}
 			}
 			rt.mu.Unlock()
 			probeClock := w.Clock

@@ -346,11 +346,12 @@ func TestLaunchCapacityUnifiedWorkerGateAndNativeStartup(t *testing.T) {
 	m.HostMemoryBudgetGB = 96
 	m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
 	const held, pending, keep = 60.0, 59.906, 4.0
+	var sampleID int64
 	report := func(raw float64) {
-		t.Helper()
+		sampleID++
 		m.HostAvailableMemoryGB = raw - keep
 		m.MemoryObservation = &HostMemoryObservation{TotalGB: 128, UsedGB: 128 - raw, ReserveGB: keep}
-		m.HostRAMGate = &HostRAMGate{RawGB: raw, HeldGB: held, PendingGB: pending}
+		m.HostRAMGate = &HostRAMGate{SampleID: sampleID, RawGB: raw, HeldGB: held, PendingGB: pending}
 	}
 	s := sharedSpec("experiment", 24)
 	s.Needs.HostMemoryGB = 12
@@ -378,14 +379,20 @@ func TestLaunchCapacityUnifiedWorkerGateAndNativeStartup(t *testing.T) {
 		batchSupervisors:     map[attemptKey]*attemptSupervisor{jobKey(*run): actor},
 		poolHostMemorySource: func(context.Context) (float64, error) { return raw, nil }}
 	rt.hostLedger.Store(&hostLedger{charge: held, pending: pending})
-	stage := HostLaunch{Machine: m.ID, Session: run.Session, Kind: "batch", Key: run.ID, Attempt: "1", NativeStartup: "first_member"}
+	rt.ramGateSampleID.Store(sampleID)
+	firstResident, laterResident := 0.0, 8.565
+	stage := HostLaunch{Machine: m.ID, Session: run.Session, Kind: "batch", Key: run.ID, Attempt: "1",
+		NativeStartup: "first_member", NativeResidentGB: &firstResident}
 	if err := rt.checkBatchLaunchMemory(t.Context(), stage); err != nil {
 		t.Fatal(err)
 	}
-	stage.NativeStartup, raw = "continuation", 93.435
+	// A heartbeat acquired before this refusal is sent only after release.
+	report(116)
+	delayed := m
+	stage.NativeStartup, stage.NativeResidentGB, raw = "continuation", &laterResident, 93.435
 	err := rt.checkBatchLaunchMemory(t.Context(), stage)
 	d := admissionDetail(err, *run)
-	if d == nil || d.Required != 36 || d.HeldGB != pending || d.KeepGB != keep || d.StartupGB < 8.56 || d.StartupGB > 8.57 {
+	if d == nil || d.Required != 36 || d.HeldGB != pending || d.KeepGB != keep || d.StartupGB < 8.56 || d.StartupGB > 8.57 || d.RAMGateSampleID <= delayed.HostRAMGate.SampleID {
 		t.Fatalf("full native check lost its startup comparison: %v, %+v", err, d)
 	}
 	r := capacityResult(run, true)
@@ -394,21 +401,24 @@ func TestLaunchCapacityUnifiedWorkerGateAndNativeStartup(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock.Advance(time.Second)
-	report(102)
-	if next := assignedJob(machineCheck(t, q, m)); next != nil {
-		t.Fatal("native teardown is still pending", next)
+	other := m
+	other.ID, other.HostID, other.Session = "other-worker", "other-host", "other-session"
+	other.HostRAMGate = &HostRAMGate{SampleID: 1, RawGB: 110}
+	if next := assignedJob(machineCheck(t, q, other)); next != nil {
+		t.Fatal("native teardown allowed an offer on another host", next.ID)
 	}
+	other.Leaving = true
+	machineCheck(t, q, other)
 	r.ReleaseOnly, r.ReleasePending = true, false
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
 	// A heartbeat already in flight at refusal cannot reopen the route even
 	// if its physical reading would now fit.
-	report(116)
-	late := Checkin{Machine: m, period: time.Second, AttemptProtocol: keyedAttemptProtocol}
-	if reply, err := q.processCheckinContext(t.Context(), late, 0, clock.Now().Add(-2*time.Second), nil); err != nil || assignedJob(reply) != nil {
-		t.Fatalf("delayed heartbeat returned an offer: %t, error: %v", assignedJob(reply) != nil, err)
+	if next := assignedJob(machineCheck(t, q, delayed)); next != nil {
+		t.Fatal("delayed heartbeat returned an offer", next.ID)
 	}
+	sampleID = d.RAMGateSampleID
 	for i := range 25 {
 		report(102 + float64(i%2)*0.1)
 		if next := assignedJob(machineCheck(t, q, m)); next != nil {
@@ -427,8 +437,9 @@ func TestLaunchCapacityNativeHelperNeverDiscountsFullDemand(t *testing.T) {
 		_, clock := fixture(t)
 		m := unifiedCUDAAdmissionMachine()
 		j := Job{ID: "job", Attempt: 1, Session: m.Session, Memory: &MemoryPools{RAM: memoryPoolEstimate{TypicalGB: 36, ChargeGB: 36}, KeepGB: 4}}
-		actor := &attemptSupervisor{job: j}
+		actor := &attemptSupervisor{job: j, nativeStartupRAM: &nativeStartupMemory{physicalRoomGB: 40, residentGB: 8}}
 		helper := 8.0
+		resident := helper
 		rt := &modelRuntime{machine: m.ID, memoryMachine: m, clock: clock,
 			batchSupervisors: map[attemptKey]*attemptSupervisor{jobKey(j): actor},
 			poolHostMemorySource: func(context.Context) (float64, error) {
@@ -439,10 +450,11 @@ func TestLaunchCapacityNativeHelperNeverDiscountsFullDemand(t *testing.T) {
 				}
 				return raw, nil
 			}}
-		launch := HostLaunch{Machine: m.ID, Session: m.Session, Kind: "batch", Key: j.ID, Attempt: "1", NativeStartup: "continuation"}
+		launch := HostLaunch{Machine: m.ID, Session: m.Session, Kind: "batch", Key: j.ID, Attempt: "1",
+			NativeStartup: "continuation", NativeResidentGB: &resident}
 		err := rt.checkBatchLaunchMemory(t.Context(), launch)
 		d := admissionDetail(err, j)
-		if d == nil || d.Required != 36 || !strings.Contains(err.Error(), "30.000 GiB net room") {
+		if d == nil || d.Required != 36 || d.StartupGB != 0 || !strings.Contains(err.Error(), "30.000 GiB net room") {
 			t.Fatalf("helper reacquire=%t changed the final full requirement: %v (%+v)", reacquire, err, d)
 		}
 	}

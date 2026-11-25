@@ -85,6 +85,9 @@
         "memory_room": {
           "$ref": "#/$defs/MemoryRoomDecision"
         },
+        "ram_gate_sample_id": {
+          "type": "integer"
+        },
         "required": {
           "type": "number"
         },
@@ -3248,6 +3251,9 @@
         },
         "machine": {
           "type": "string"
+        },
+        "native_resident_gb": {
+          "type": "number"
         },
         "native_startup": {
           "type": "string"

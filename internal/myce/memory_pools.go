@@ -646,13 +646,14 @@ func (q *Queue) requeueMemoryPressure(j *Job) {
 // that read. The queue also retains its independent obligations, including
 // releases and assignments the worker has not seen yet.
 type HostRAMGate struct {
+	SampleID  int64   `json:"sample_id,omitempty"`
 	RawGB     float64 `json:"raw_gb"`
 	HeldGB    float64 `json:"held_gb"`
 	PendingGB float64 `json:"pending_gb"`
 }
 
 func (s HostRAMGate) valid() bool {
-	return validMemoryValue(s.RawGB) && validMemoryValue(s.HeldGB) &&
+	return s.SampleID >= 0 && validMemoryValue(s.RawGB) && validMemoryValue(s.HeldGB) &&
 		validMemoryValue(s.PendingGB) && s.PendingGB <= s.HeldGB
 }
 
@@ -664,7 +665,11 @@ func (s HostRAMGate) available(m *Machine, keep float64) float64 {
 }
 
 func (s HostRAMGate) check(m *Machine, pools MemoryPools, known bool) error {
-	return checkMemoryPool(pools.RAM.TypicalGB, s.available(m, pools.KeepGB), pools.KeepGB, s.PendingGB, known)
+	err := checkMemoryPool(pools.RAM.TypicalGB, s.available(m, pools.KeepGB), pools.KeepGB, s.PendingGB, known)
+	if refusal, ok := err.(*admissionError); ok {
+		refusal.detail.RAMGateSampleID = s.SampleID
+	}
+	return err
 }
 
 func (s HostRAMGate) physicalRoom(keep float64) float64 {

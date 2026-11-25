@@ -196,7 +196,21 @@ func TestMemoryPoolReservedModelLoadDoesNotRestart(t *testing.T) {
 }
 
 func TestMemoryPoolPressureReleaseLearnsExactPeak(t *testing.T) {
-	q, _ := fixture(t)
+	for _, name := range []string{"copied generation", "missing final generation"} {
+		t.Run(name, func(t *testing.T) {
+			var generation *int64
+			if name == "copied generation" {
+				var copied int64 = 7
+				generation = &copied
+			}
+			assertPoolPressureReleaseLearnsExactPeak(t, generation)
+		})
+	}
+}
+
+func assertPoolPressureReleaseLearnsExactPeak(t *testing.T, generation *int64) {
+	t.Helper()
+	q, clock := fixture(t)
 	m := cpuMachine("pressure-learning", "pressure-learning", "cpu", 8, 96)
 	m.Devices = []MachineDevice{}
 	m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
@@ -219,6 +233,7 @@ func TestMemoryPoolPressureReleaseLearnsExactPeak(t *testing.T) {
 	// A completed stop report with unconfirmed cleanup still owns the attempt.
 	pending := result(run, false)
 	pending.Interrupted, pending.ReleasePending = true, true
+	pending.FinalCheckpointGeneration = generation
 	if err := q.Complete(pending); err != nil {
 		t.Fatal(err)
 	}
@@ -251,6 +266,18 @@ func TestMemoryPoolPressureReleaseLearnsExactPeak(t *testing.T) {
 	}
 	if got := q.memoryEvidence.estimate(key, 0, initialMemoryConfidence); got.ChargeGB < want {
 		t.Fatalf("exact pressure release lost the %.1f GiB measured floor: %+v", want, got)
+	}
+	// Restore the durable evidence, then exercise ordinary placement. A
+	// lower hint for the same exact program cannot erase the retained peak.
+	q = reopenQueue(t, q, clock)
+	requireState(t, q, j.ID, "queued")
+	if got := q.resolvePooledSize(&Job{Spec: cpuSpec(1, 8)}, &m).pools.RAM; got.ChargeGB != want {
+		t.Fatalf("next admission did not use the retained peak: %+v", got)
+	}
+	clock.Advance(time.Second)
+	next := assignedJob(machineCheck(t, q, m))
+	if next == nil || next.ID != j.ID || next.Attempt != 2 || next.Memory.RAM.ChargeGB < want {
+		t.Fatal("exact release did not permit a new admission with the retained floor", next)
 	}
 }
 

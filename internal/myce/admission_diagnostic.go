@@ -18,6 +18,7 @@ type AdmissionDetail struct {
 	KeepGB           float64                 `json:"keep_gb,omitempty"`
 	HeldGB           float64                 `json:"held_gb,omitempty"`
 	StartupGB        float64                 `json:"startup_gb,omitempty"`
+	RAMGateSampleID  int64                   `json:"ram_gate_sample_id,omitempty"`
 	EnvelopeSource   string                  `json:"envelope_source,omitempty"`
 	EnvelopeHostGB   float64                 `json:"envelope_host_gb"`
 	EnvelopeDeviceGB float64                 `json:"envelope_device_gb"`
@@ -107,6 +108,9 @@ func safeAdmissionDetail(d *AdmissionDetail) *AdmissionDetail {
 	}
 	if d.Subcheck != memoryWaitReason || !validMemoryValue(d.StartupGB) {
 		out.StartupGB = 0
+	}
+	if d.Subcheck != memoryWaitReason || d.RAMGateSampleID < 0 {
+		out.RAMGateSampleID = 0
 	}
 	out.MemoryRoom = safeMemoryRoom(d.MemoryRoom)
 	out.Contributors = nil

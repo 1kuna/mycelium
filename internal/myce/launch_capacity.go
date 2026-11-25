@@ -131,10 +131,12 @@ func (q *Queue) launchCapacityBlocked(j *Job, m *Machine) bool {
 	}
 	if worker := q.s.Machines[m.ID]; h.Admission != nil && h.Admission.Subcheck == memoryWaitReason &&
 		worker != nil && worker.HostRAMGate != nil && !h.ObservedAt.IsZero() && h.Session == m.Session {
-		// A delivery in flight when the refusal was accepted cannot validate
-		// a new offer. The next live gate, including an identical reading
-		// that genuinely recovered, has the same vote as ordinary admission.
-		return !worker.hostRAMGateAt.After(h.ObservedAt) || q.workerRAMGate(j, m) != nil
+		// Use the worker's probe order even when a delayed heartbeat first
+		// reaches the queue after the refusal. Legacy receipts use ingress.
+		if before, after := h.Admission.RAMGateSampleID, worker.HostRAMGate.SampleID; before > 0 && after > 0 {
+			return after <= before
+		}
+		return !worker.hostRAMGateAt.After(h.ObservedAt)
 	}
 	if h.Evidence == "" {
 		// Refused before the first post-restart report. Only a committed

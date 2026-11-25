@@ -1825,13 +1825,13 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		if m.HostRAMGate != nil && !m.HostRAMGate.valid() {
 			return errors.New("invalid worker RAM gate reading")
 		}
+		m.hostRAMGateAt = memoryReceivedAt
 		if old != nil && old.Session == m.Session {
-			m.hostRAMGateAt = memoryReceivedAt
-			if memoryReceivedAt.Before(old.hostRAMGateAt) {
+			stale := m.HostRAMGate != nil && old.HostRAMGate != nil && m.HostRAMGate.SampleID > 0 &&
+				m.HostRAMGate.SampleID <= old.HostRAMGate.SampleID
+			if stale || memoryReceivedAt.Before(old.hostRAMGateAt) {
 				m.HostRAMGate, m.hostRAMGateAt = old.HostRAMGate, old.hostRAMGateAt
 			}
-		} else {
-			m.hostRAMGateAt = memoryReceivedAt
 		}
 		if old != nil && m.ModelConfigHash == "" && q.catalogStale(old) {
 			return errors.New("worker model config does not match queue")
