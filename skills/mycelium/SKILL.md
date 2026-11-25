@@ -183,6 +183,9 @@ durability is required. Status comes from the running worker.
   continuing reclaim or offering the production job.
   A `memory_capacity` hold gives the estimate and the
   allowance of each eligible pool that is too small even when empty.
+  For unified CUDA RAM, `memory.ram.evidence.level: legacy` means the
+  queue is retaining an estimate from before complete CUDA attribution
+  was required. See [memory admission](https://github.com/1kuna/mycelium/blob/main/docs/reference/memory-mechanisms.md#pools-and-estimates).
   For `fan_out_dispatched`, inspect the piece's status for any remaining wait.
 - Fetch with `myce result JOB_ID --out DIR`. Fetch successful results before
   file expiry (72 hours by default). See [results](references/results.md) and

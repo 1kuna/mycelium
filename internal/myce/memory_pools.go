@@ -185,27 +185,45 @@ func (q *Queue) resolvePooledSize(j *Job, m *Machine) pooledCandidateSize {
 		evidence = &memoryEvidence{}
 	}
 	confidence := evidence.confidence()
-	pools := MemoryPools{RAM: evidence.estimate(key, hostHint, confidence), KeepGB: q.pooledKeep(m)}
-	if !n.cpuOnly() && pools.RAM.Alone {
-		// A cold accelerator job shares RAM. Missing device evidence can
-		// require a discrete card to itself, but never the entire host.
+	pools := MemoryPools{KeepGB: q.pooledKeep(m)}
+	if j.Spec.MemoryLimitGB != nil {
+		pools.LimitGB = *j.Spec.MemoryLimitGB
+	}
+	if key.unifiedCUDARAM() && j.HostMemoryOverrideGB == 0 {
+		canReduce := j.Spec.Resumable && jobClass(j.Spec) != "production" && q.priorityMatch(j.Spec).Tier != "production"
+		pools.RAM = evidence.unifiedCUDAEstimate(key, hostHint, confidence, q.poolAllowance(m), pools.LimitGB, canReduce)
+	} else {
+		pools.RAM = evidence.estimate(key, hostHint, confidence)
+	}
+	if !n.cpuOnly() && pools.RAM.Alone && (!key.unifiedCUDARAM() || pools.RAM.TypicalGB == 0) {
+		// Cold accelerator jobs can share RAM with a platform estimate.
+		// Keep exclusive RAM for known unified CUDA work without a repeat forecast.
 		if pools.RAM.TypicalGB == 0 {
 			cpu := memoryEvidenceKey{Platform: memoryPlatform(ExecutionTarget{OS: machineTarget(m).OS, Platform: "cpu"}, false), Pool: "ram"}
 			prior := evidence.first[key.platformKey()]
+			legacy := key.unifiedCUDARAM() && len(prior) > 0
+			if len(prior) == 0 && key.unifiedCUDARAM() {
+				prior = evidence.first[key.attributedRAM().platformKey()]
+			}
 			if len(prior) == 0 {
 				prior = evidence.first[cpu]
 			}
 			if len(prior) > 0 {
 				pools.RAM = memoryPoolEstimate{TypicalGB: memoryMedian(prior), ChargeGB: slices.Max(prior),
 					Evidence: memoryEstimateEvidence{Level: "platform", Runs: len(prior)}}
+				if legacy {
+					pools.RAM.Evidence = memoryEstimateEvidence{Level: "legacy"}
+				}
+				if key.unifiedCUDARAM() {
+					fitPoolCharge(&pools.RAM, q.poolAllowance(m), 0)
+				}
 			}
 		}
 		pools.RAM.Alone = false
 		pools.RAM.TypicalGB = max(pools.RAM.TypicalGB, minimumHostMemoryGB)
 		pools.RAM.ChargeGB = max(pools.RAM.ChargeGB, pools.RAM.TypicalGB)
 	}
-	if j.Spec.MemoryLimitGB != nil {
-		pools.LimitGB = *j.Spec.MemoryLimitGB
+	if pools.LimitGB > 0 {
 		pools.RAM.TypicalGB = min(pools.RAM.TypicalGB, pools.LimitGB)
 		pools.RAM.ChargeGB = min(pools.RAM.ChargeGB, pools.LimitGB)
 	}
@@ -214,15 +232,15 @@ func (q *Queue) resolvePooledSize(j *Job, m *Machine) pooledCandidateSize {
 		// Card sizing still uses its independent evidence on discrete hosts.
 		pools.LimitGB = gb
 		pools.RAM = memoryPoolEstimate{TypicalGB: gb, ChargeGB: gb}
-	} else {
-		fitPoolCharge(&pools.RAM, q.poolAllowance(m), evidence.exact[key].Lower)
+	} else if !key.unifiedCUDARAM() {
+		fitPoolCharge(&pools.RAM, q.poolAllowance(m), 2*evidence.exact[key].Lower)
 	}
 	size := pooledCandidateSize{pools: pools}
 	if !n.cpuOnly() && !m.UnifiedMemory {
 		key.Pool = "card"
 		count := max(1, len(m.groupMembers))
 		card := evidence.estimate(key, deviceHint/float64(count), confidence)
-		fitPoolCharge(&card, m.TotalMemoryGB/float64(count), evidence.exact[key].Lower)
+		fitPoolCharge(&card, m.TotalMemoryGB/float64(count), 2*evidence.exact[key].Lower)
 		size.card, size.cardGB, size.hasCard = card, card.ChargeGB*float64(count), true
 	}
 	return size
@@ -249,8 +267,8 @@ func (q *Queue) applyPooledSize(j *Job, m *Machine, size pooledCandidateSize) *J
 // A cautious estimate above the entire pool would strand work even after all
 // holders release. Use the typical estimate on that target, preserving the
 // retry floor from measured shortages and the ordinary live-room check.
-func fitPoolCharge(estimate *memoryPoolEstimate, allowance, lower float64) {
-	floor := max(estimate.TypicalGB, 2*lower)
+func fitPoolCharge(estimate *memoryPoolEstimate, allowance, minimumCharge float64) {
+	floor := max(estimate.TypicalGB, minimumCharge)
 	if allowance > 0 && estimate.ChargeGB > allowance && floor <= allowance {
 		estimate.ChargeGB = floor
 	}
@@ -523,9 +541,9 @@ func retainPoolPeaks(j *Job, host, device float64) {
 	j.Memory = &p
 }
 
-func (q *Queue) recordPoolEvidence(j *Job, r Result) {
+func (q *Queue) recordPoolEvidence(j *Job, r Result, oom bool) {
 	pressure := j.Reason == memoryPressureCause || r.ExecutionCause != nil && r.ExecutionCause.Class == memoryPressureCause
-	if q.memoryEvidence == nil || r.ReleaseOnly || r.MemoryPeak == nil || j.StartedAt == nil || !r.Success && !r.OutOfMemory && !pressure {
+	if q.memoryEvidence == nil || r.ReleaseOnly || r.MemoryPeak == nil || j.StartedAt == nil || !r.Success && !oom && !pressure {
 		return
 	}
 	m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
@@ -533,7 +551,7 @@ func (q *Queue) recordPoolEvidence(j *Job, r Result) {
 		return
 	}
 	key := pooledEvidenceKey(j, m)
-	limited := r.OutOfMemory || pressure || pooledSampleLimited(r.MemoryPeak)
+	limited := oom || pressure || pooledSampleLimited(r.MemoryPeak)
 	points := appendProjectedMemoryPeaks(nil, key, memoryEvidencePoint{At: q.clock.Now(), Limited: limited}, r.MemoryPeak)
 	if j.Memory != nil {
 		for _, point := range points {
@@ -547,6 +565,9 @@ func (q *Queue) recordPoolEvidence(j *Job, r Result) {
 	if len(points) == 0 {
 		return
 	}
+	if key.unifiedCUDARAM() && !limited && (r.MemoryPeak.constrained() || !completeCUDAPeak(r.MemoryPeak)) {
+		return
+	}
 	evidence := q.stagedMemoryEvidence()
 	for _, point := range points {
 		if pooledMemory(j) {
@@ -556,11 +577,14 @@ func (q *Queue) recordPoolEvidence(j *Job, r Result) {
 				estimate = *pools.Card
 			}
 			if point.Key.Pool == "ram" {
-				evidence.observeFeedback(estimate.ChargeGB, point.Peak, pressure || r.OutOfMemory, r.Success && !limited)
+				evidence.observeFeedback(estimate.ChargeGB, point.Peak, pressure || oom, r.Success && !limited)
 			}
-			if pressure && point.Peak <= estimate.ChargeGB {
+			if pressure && !oom && point.Peak <= estimate.ChargeGB {
 				continue // A bystander stop provides no new estimate.
 			}
+		}
+		if point.Key.unifiedCUDARAM() && !limited {
+			point.Key = point.Key.attributedRAM()
 		}
 		evidence.observe(point)
 	}

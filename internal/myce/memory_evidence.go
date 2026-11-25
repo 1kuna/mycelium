@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 )
@@ -21,14 +22,21 @@ func projectMemoryEvidence(points map[string]WorkObservation) []memoryEvidencePo
 			continue
 		}
 		limited := legacyWorkloadLimited(p.MemoryPeak)
+		if !limited && strings.HasSuffix(key.Platform, "/cuda/unified") {
+			continue // A legacy aggregate has no attempt-specific attribution.
+		}
 		if limited || !p.MemoryRecordedAt.IsZero() && !p.MemoryPeak.constrained() {
 			out = appendProjectedMemoryPeaks(out, key, memoryEvidencePoint{At: p.MemoryRecordedAt, Limited: limited}, p.MemoryPeak)
 		}
 	}
-	slices.SortFunc(out, func(a, b memoryEvidencePoint) int {
+	sortMemoryEvidencePoints(out)
+	return out
+}
+
+func sortMemoryEvidencePoints(points []memoryEvidencePoint) {
+	slices.SortFunc(points, func(a, b memoryEvidencePoint) int {
 		return cmp.Or(a.At.Compare(b.At), cmp.Compare(a.Key.Platform, b.Key.Platform), cmp.Compare(a.Key.Pool, b.Key.Pool), cmp.Compare(a.Key.Family, b.Key.Family), cmp.Compare(a.Key.Exact, b.Key.Exact), cmp.Compare(a.Peak, b.Peak))
 	})
-	return out
 }
 
 func legacyMemoryEvidenceKey(p WorkObservation) (memoryEvidenceKey, bool) {
@@ -92,6 +100,18 @@ func memoryValue(v *float64) float64 {
 		return 0
 	}
 	return *v
+}
+
+func completeCUDAPeak(peak *AttemptMemoryPeak) bool {
+	s := peak.DeviceSampling
+	// The sampler cannot receive more ticks than elapsed periods. Older
+	// workers failed to mark a missing per-process counter as incomplete.
+	// Requiring every elapsed tick to have yielded a usable reading excludes
+	// those gaps without trusting the old Complete flag on its own.
+	return s != nil && s.Complete && s.Samples >= 2 && validRate(s.ElapsedSeconds) &&
+		float64(s.Samples) == math.Floor(s.ElapsedSeconds/deviceMemorySamplePeriod.Seconds()) &&
+		peak.HostGB != nil && validMemoryValue(*peak.HostGB) && peak.DeviceGB != nil && validMemoryValue(*peak.DeviceGB) &&
+		peak.DeviceSource == "" && peak.DeviceUnavailable == ""
 }
 
 // Keep evidence outside queue_state's closed record namespace. The previous
@@ -169,7 +189,11 @@ func loadMemoryEvidence(db *sql.DB, s state) (*memoryEvidence, error) {
 		if err := evidence.readGPUSharing(db); err != nil {
 			return nil, err
 		}
-		return repairMemoryEvidence(db, evidence, s)
+		evidence, err = repairMemoryEvidence(db, evidence, s)
+		if err != nil {
+			return nil, err
+		}
+		return restoreAttributedCUDAMemory(db, evidence, s)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
@@ -193,7 +217,66 @@ func loadMemoryEvidence(db *sql.DB, s state) (*memoryEvidence, error) {
 		return nil, err
 	}
 	evidence.writes = nil
-	return evidence, nil
+	return restoreAttributedCUDAMemory(db, evidence, s)
+}
+
+// Rebuild qualified series before serving requests. Only the latest accepted
+// success can use the retained spec; older retries may have changed targets or
+// execution configuration. Replay in acceptance order so each calibration
+// sample uses only earlier peaks.
+func restoreAttributedCUDAMemory(db *sql.DB, e *memoryEvidence, s state) (*memoryEvidence, error) {
+	var projected bool
+	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM memory_evidence WHERE kind='projection' AND key='v4')`).Scan(&projected); err != nil || projected {
+		return e, err
+	}
+	var points []memoryEvidencePoint
+	for _, j := range s.Jobs {
+		if j.State != "succeeded" || j.Spec.Needs.cpuOnly() || len(j.MemoryAttempts) == 0 {
+			continue
+		}
+		for _, outcome := range j.AttemptHistory {
+			if outcome.State != "succeeded" || outcome.Attempt != j.Attempt || outcome.OutOfMemory || outcome.EndedAt.IsZero() ||
+				outcome.ExecutionCause != nil && outcome.ExecutionCause.Class == memoryPressureCause || outcome.Reason == memoryPressureCause {
+				continue
+			}
+			for _, facts := range j.MemoryAttempts {
+				p := facts.MemoryPeak
+				if facts.Attempt != outcome.Attempt || facts.Machine != outcome.Machine || facts.Session != outcome.Session ||
+					facts.LearningReason != "eligible" || p == nil || p.constrained() || pooledSampleLimited(p) || !completeCUDAPeak(p) {
+					continue
+				}
+				key, known := retainedMemoryEvidenceKey(j, s.Machines[facts.Machine], retainedMemoryAssignment(j, facts))
+				if known && key.unifiedCUDARAM() {
+					peaks := appendProjectedMemoryPeaks(nil, key, memoryEvidencePoint{At: outcome.EndedAt}, p)
+					for _, point := range peaks {
+						point.Key = point.Key.attributedRAM()
+						points = append(points, point)
+					}
+				}
+			}
+		}
+	}
+	sortMemoryEvidencePoints(points)
+	e = e.stage()
+	for _, point := range points {
+		e.observe(point)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if err := e.persist(tx); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`INSERT INTO memory_evidence(kind,key,data) VALUES ('projection','v4','true')`); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	e.writes = nil
+	return e, nil
 }
 
 func (e *memoryEvidence) readGPUSharing(db *sql.DB) error {

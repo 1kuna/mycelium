@@ -135,6 +135,79 @@ func (k memoryEvidenceKey) workKey() memoryEvidenceKey {
 	return k
 }
 
+func (k memoryEvidenceKey) unifiedCUDARAM() bool {
+	return k.Pool == "ram" && strings.HasSuffix(k.Platform, "/cuda/unified")
+}
+
+// Older rows do not distinguish CUDA counters from cgroup-only measurements.
+// Keep them for conservative fallback and adjacent-release rollback. The
+// attributed series use the same row format under a separate key.
+func (k memoryEvidenceKey) attributedRAM() memoryEvidenceKey {
+	k.Pool = attributedRAMPool
+	return k
+}
+
+const attributedRAMPool = "ram:attributed"
+
+func (e *memoryEvidence) unifiedCUDAEstimate(k memoryEvidenceKey, hint, confidence, allowance, limit float64, canReduce bool) memoryPoolEstimate {
+	lower := e.exact[k].Lower
+	attributed := k.attributedRAM()
+	verified := e.estimateWithFloor(attributed, hint, confidence, lower)
+	exact, family := e.exact[attributed].Peaks, e.family[attributed.familyKey()].Peaks
+	var observed float64
+	if len(exact) > 0 {
+		observed = slices.Max(exact)
+	}
+	if len(family) > 0 && (len(exact) < 2 || verified.Evidence.Level == "family") {
+		observed = max(observed, slices.Max(family))
+	}
+	fit := func(estimate memoryPoolEstimate) memoryPoolEstimate {
+		estimate.ChargeGB = max(estimate.ChargeGB, observed)
+		if limit > 0 {
+			estimate.TypicalGB = min(estimate.TypicalGB, limit)
+			estimate.ChargeGB = min(estimate.ChargeGB, limit)
+		}
+		fitPoolCharge(&estimate, allowance, max(observed, 2*lower))
+		return estimate
+	}
+
+	verified = fit(verified)
+	repeat := verified.Evidence.Level == "exact" || verified.Evidence.Level == "family"
+	if repeat && canReduce {
+		return verified
+	}
+	legacy := fit(e.estimate(k, hint, confidence))
+	if repeat {
+		typical := max(verified.TypicalGB, legacy.TypicalGB)
+		if verified.ChargeGB >= legacy.ChargeGB {
+			verified.TypicalGB = typical
+			return verified
+		}
+		legacy.TypicalGB = typical
+	}
+	if legacy.Evidence.Level == "unknown" && verified.Evidence.Level == "platform" && observed == 0 {
+		return verified
+	}
+	if !repeat && observed > 0 && legacy.Evidence.Level != "exact" && legacy.Evidence.Level != "family" {
+		// A first-run prior or a hint cannot size the uncertainty of a known
+		// repeat. Learn it without co-tenants until there is a repeat forecast.
+		legacy.TypicalGB = max(legacy.TypicalGB, observed)
+		if limit > 0 {
+			legacy.TypicalGB = min(legacy.TypicalGB, limit)
+		}
+		legacy.Alone = true
+	}
+	switch legacy.Evidence.Level {
+	case "exact", "family", "foreign", "platform":
+		legacy.Evidence = memoryEstimateEvidence{Level: "legacy"}
+	case "hint":
+		if legacy.Evidence.Runs > 0 {
+			legacy.Evidence = memoryEstimateEvidence{Level: "legacy"}
+		}
+	}
+	return legacy
+}
+
 func memoryRatioBucket(n int) int {
 	switch {
 	case n >= 20:
@@ -251,22 +324,7 @@ func (e *memoryEvidence) estimateWithFloor(k memoryEvidenceKey, hint, confidence
 		peak := slices.Max(candidate.peaks)
 		median := memoryMedian(candidate.peaks)
 		if factor, ok := memoryQuantile(e.ratios[memoryRatioKey{k.Platform, k.Pool, candidate.level, "", memoryRatioBucket(n)}], confidence); ok && validRate(factor*peak) {
-			predicted := factor * peak
-			if n == 1 && k.Pool == "ram" && strings.HasSuffix(k.Platform, "/cuda/unified") {
-				// A platform-wide growth ratio can extrapolate a single peak
-				// beyond the calibrated charge for an entirely new workload.
-				// Use that cold charge as a bound when it provides headroom
-				// above the observed peak. Never trim below a clean family peak.
-				// finish still applies measured limit floors.
-				if cold, ok := memoryQuantile(e.first[k.platformKey()], confidence); ok && cold > peak {
-					bound := cold
-					if len(family.Peaks) > 0 {
-						bound = max(bound, slices.Max(family.Peaks))
-					}
-					predicted = min(predicted, bound)
-				}
-			}
-			typical, charge = max(typical, median), max(charge, predicted)
+			typical, charge = max(typical, median), max(charge, factor*peak)
 			return finish(candidate.level, n, false)
 		}
 		typical, charge = max(typical, median), max(charge, peak)

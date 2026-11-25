@@ -6,6 +6,38 @@ import (
 	"time"
 )
 
+func TestMemoryPoolOOMDuringPressureStopRetainsFloor(t *testing.T) {
+	q, _ := fixture(t)
+	m := sharedUnifiedMachine()
+	m.HostMemoryBudgetGB = 96
+	machineCheck(t, q, m)
+	queued := submit(t, q, sharedSpec("experiment", 49))
+	run := assignedJob(machineCheck(t, q, m))
+	if run == nil || run.ID != queued.ID || run.Memory.RAM.ChargeGB != 50 {
+		t.Fatalf("fixture did not reserve 50 GiB: %+v", run)
+	}
+	if err := q.Started(result(run, true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.update(func() error {
+		q.stopForPoolPressure(q.s.Jobs[run.ID], "host/"+hostID(&m))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := result(run, false)
+	r.OutOfMemory = true
+	peak := 30.0
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	key := pooledEvidenceKey(run, allocationMachine(&m, run.AllocatedDevices))
+	if got := q.memoryEvidence.estimate(key, 50, initialMemoryConfidence); got.TypicalGB != 50 || got.ChargeGB != 60 {
+		t.Fatalf("OOM during pressure stop lost 30 GiB lower bound: %+v", got)
+	}
+}
+
 func TestMemoryPoolPressureRequiresSustainedDeclineWithHeadroom(t *testing.T) {
 	q, clock := fixture(t)
 	const total, keep, recovered = 31.206165313720703, 4.0, 23.25

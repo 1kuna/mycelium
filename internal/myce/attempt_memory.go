@@ -635,6 +635,7 @@ func (w Worker) observeDeviceMemoryWith(ctx context.Context, inventory func() (m
 				gb, _, err := w.attemptDeviceMemoryReading(ctx, ids, fs, host, known)
 				if errors.Is(err, errDeviceMemoryNotReported) {
 					unreported = true
+					sampling.incomplete = true
 					report(&AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNotReported})
 					continue
 				}

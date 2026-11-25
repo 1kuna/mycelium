@@ -42,10 +42,12 @@ outside-root residual accounting.
 A run is **clean** unless its memory was held back, in which case it is
 **limited** and its peak is only a lower bound. Limited means: stopped or
 killed for memory, an explicit limit was hit (`memory.events` `max` or `oom`,
-[cgroup v2][k-cg]), or its cgroup swapped out. Nothing else disqualifies a
-sample. PSI totals and `memory.peak` are recorded beside the peak for
-diagnosis and for the shadow comparison in section 4; they do not gate
-learning.
+[cgroup v2][k-cg]), or its cgroup swapped out. Clean unified CUDA RAM
+evidence also requires a valid cgroup footprint and complete direct
+per-process CUDA sampling. CUDA allocations can escape the cgroup. Keeping
+incomplete peaks as diagnostics costs calibration samples and prevents
+learning an undercount as a complete footprint. PSI totals and
+`memory.peak` are recorded beside the peak for diagnosis.
 
 ### 2.3 Estimating
 
@@ -91,11 +93,14 @@ between 2 and 3, calibrated the same way and skipped when it cannot be.
    own history of *next peak ÷ maximum of the previous `n`* at that level,
    bucketed by `n` as in the table above. `typical` is the median of those
    peaks.
-   For unified CUDA RAM with one exact or family observation, bound the
-   ratio prediction by the larger of the calibrated first-run platform
-   charge and the largest clean peak from the work family. Apply the bound
-   when the platform charge meets rule Q and provides headroom above the
-   observed peak. Any measured shortage floor still applies.
+   For unified CUDA RAM, calibrate repeat growth from completed runs with
+   complete CUDA attribution. The reserve is the observed maximum times
+   `max(0, f − 1)`. This guards against repeat growth at the cost of
+   reserving the measured upper tail of errors. Preserve larger known
+   peaks and shortage floors. A smaller forecast can replace the previous
+   estimate for resumable work outside production. Production and
+   non-resumable work retain the more conservative reservation and launch
+   check.
 3. If rule Q cannot be met for `f`, move up one level. Moving up never
    forgets: the more specific level's own maximum and median stay as floors.
 4. At the platform level, `charge` is the `c`-quantile of first-run peaks and
@@ -104,6 +109,13 @@ between 2 and 3, calibrated the same way and skipped when it cannot be.
    family), the estimate is **unknown** and the job runs alone on that pool.
    A new installation therefore runs its first nine distinct jobs per platform
    family one at a time per host, and shares from then on.
+
+Unified CUDA RAM retains its previous repeat forecast when there are too
+few attributed repeats for Rule Q. The old forecast measured repeat error
+using history that could include missing device counters. Keeping it can
+reserve excess RAM until more attributed runs finish. A known attributed
+workload without either repeat forecast runs alone to protect co-tenants
+from an uncalibrated repeat.
 
 **Floors and hints.**
 
@@ -234,7 +246,9 @@ production work, and only if resumable.
 resumable, requeue, no retry or loss charge, one cause (`memory_pressure`). An
 attempt that was over its charge is a limited run and gets the doubled floor.
 An attempt stopped within its charge was an innocent victim and keeps its
-estimate. A kernel kill inside the slice is classified the same way.
+estimate. A confirmed workload OOM still raises the floor when a pressure
+stop races it. A bystander kernel kill inside the slice follows the
+pressure-stop classification.
 
 ### 2.7 Growth
 
