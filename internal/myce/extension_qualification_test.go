@@ -1040,3 +1040,157 @@ func TestExtensionQualificationNoCapableHostFailsFast(t *testing.T) {
 		})
 	}
 }
+
+func TestConsumerQualificationRespectsStartupAndTargetFences(t *testing.T) {
+	q, w, e, demand, _, _ := qualificationFixture(t)
+	w.Machine.Capabilities = append(w.Machine.Capabilities, consumerCheckCapability)
+	if err := q.update(func() error {
+		q.cancelJob(q.s.Jobs[demand.ID])
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	policy := defaultPriorityPolicy()
+	policy.Tiers = append([]PriorityTier{{Name: "validation", Selectors: []string{"consumer/experiment"}}}, policy.Tiers...)
+	policy.Projects = map[string]ProjectPolicy{"excluded": {AllowedMachines: []string{"different-worker"}}}
+	if _, err := q.SetPriorityPolicy(0, policy); err != nil {
+		t.Fatal(err)
+	}
+
+	other := machine("different-worker", "fake")
+	check(t, q, other, nil)
+	s := spec("experiment")
+	s.AllowedMachines = []string{w.Machine.ID}
+	s.Needs.Platform = Platform{Required: []string{"fake"}}
+	victim := submit(t, q, s)
+	assigned := check(t, q, w.Machine, nil).Job
+	if assigned == nil || assigned.ID != victim.ID || assigned.StartedAt != nil {
+		t.Fatal("fixture did not retain a pre-main assignment", assigned)
+	}
+	if err := q.AuthorizeLaunch(HostLaunch{Machine: assigned.Machine, Session: assigned.Session, Kind: "batch", Key: assigned.ID, Attempt: "1"}); err != nil {
+		t.Fatal(err)
+	}
+	client := w.Client
+	ctx := t.Context()
+	request := ConsumerQualification{Project: "consumer", Extension: extensionKey(e), Digest: e.Digest, Worker: w.Machine.ID, Platform: "fake", Device: "0"}
+	bad := request
+	bad.Device = "unknown-device"
+	submissionError(t, client.Call(ctx, "POST", "/api/extension-checks", bad, nil), 404, "qualification_target_unknown")
+	bad = request
+	bad.Digest = strings.Repeat("0", 64)
+	submissionError(t, client.Call(ctx, "POST", "/api/extension-checks", bad, nil), 409, "qualification_digest_mismatch")
+	bad = request
+	bad.Project = "excluded"
+	submissionError(t, client.Call(ctx, "POST", "/api/extension-checks", bad, nil), 403, "qualification_target_denied")
+	unauthenticated := Client{URL: client.URL}
+	submissionError(t, unauthenticated.Call(ctx, "POST", "/api/extension-checks", request, nil), 401, "authentication_required")
+
+	var receipt QualificationVerdict
+	if err := client.Call(ctx, "POST", "/api/extension-checks", request, &receipt); err != nil || receipt.State != "queued" {
+		t.Fatal("consumer check not queued", receipt, err)
+	}
+	checkJob := job(t, q, receipt.JobID)
+	if q.comparePriority(checkJob.Spec, assigned.Spec) >= 0 || len(q.s.Reservations) != 0 {
+		t.Fatal("expected an ordinary higher-tier check without a validation reservation")
+	}
+	submissionError(t, client.Call(ctx, "POST", "/api/jobs", checkJob.Spec, nil), 400, "qualification_request_required")
+	if reply := check(t, q, w.Machine, assigned); reply.Stop || reply.Job != nil {
+		t.Fatal("qualification disrupted in-startup execution", reply)
+	}
+	if still := job(t, q, assigned.ID); still.State != "running" || still.StopAt != nil || still.StartedAt != nil {
+		t.Fatal("qualification revoked an in-startup attempt", still.State, still.Reason)
+	}
+	if err := q.Started(result(assigned, false)); err != nil {
+		t.Fatal(err)
+	}
+	q.clock.(*fakeClock).Advance(time.Second)
+	finish(t, q, assigned, true)
+	if next := check(t, q, other, nil); next.Job != nil {
+		t.Fatal("another worker could take the named check", next.Job.ID)
+	}
+	next := check(t, q, w.Machine, nil).Job
+	if next == nil || next.ID != receipt.JobID {
+		t.Fatal("check did not take the released card", next)
+	}
+	if err := q.Started(result(next, false)); err != nil {
+		t.Fatal(err)
+	}
+	var final QualificationVerdict
+	completed := result(next, true)
+	completed.ReleasePending = true
+	if err := q.Complete(completed); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Call(ctx, "GET", "/api/extension-checks/"+receipt.CheckID, nil, &final); err != nil || final.Verdict != "pending" {
+		t.Fatal("unreleased check published a verdict", final, err)
+	}
+	completed.ReleasePending, completed.ReleaseOnly = false, true
+	staleRelease := completed
+	staleRelease.Session = "stale-session"
+	if err := q.Complete(staleRelease); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Call(ctx, "GET", "/api/extension-checks/"+receipt.CheckID, nil, &final); err != nil || final.Verdict != "pending" {
+		t.Fatal("another session's release published a verdict", final, err)
+	}
+	if err := q.Complete(completed); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Call(ctx, "GET", "/api/extension-checks/"+receipt.CheckID, nil, &final); err != nil || final.Verdict != "passed" || final.JobID != next.ID {
+		t.Fatal("missing accepted verdict after exact release", final, err)
+	}
+	request.Recheck = true
+	if err := client.Call(ctx, "POST", "/api/extension-checks", request, &receipt); err != nil || receipt.JobID == next.ID {
+		t.Fatal("could not queue a distinct recheck", receipt, err)
+	}
+	w.Machine.ExtensionFingerprint = "replacement-fingerprint"
+	if reply := check(t, q, w.Machine, nil); reply.Job != nil {
+		t.Fatal("new fingerprint acquired the old invocation", reply.Job.ID)
+	}
+	if err := client.Call(ctx, "GET", "/api/jobs/"+receipt.JobID+"/extension-check", nil, &final); err != nil || final.Verdict != "no_verdict" || final.Attempt != 0 {
+		t.Fatal("identity change did not fence the pending check", final, err)
+	}
+}
+
+func TestConsumerQualificationReusesReleasedOwnerCheck(t *testing.T) {
+	q, w, e, demand, _, _ := qualificationFixture(t)
+	if err := q.Cancel(demand.ID); err != nil {
+		t.Fatal(err)
+	}
+	work := "extension:" + e.Name
+	manual := submit(t, q, Spec{Name: "extension-check", Project: "extension-check", SubmissionKey: "owner-check",
+		Extension: extensionKey(e), ExtensionDigest: e.Digest, AllowedMachines: []string{w.Machine.ID},
+		Needs:          ResourceNeeds{GPU: &GPUSelection{Devices: []string{"0"}}},
+		ExtensionCheck: &ExtensionCheckRequest{Work: work, Directory: t.TempDir()}})
+	assigned := check(t, q, w.Machine, nil).Job
+	if assigned == nil || assigned.ID != manual.ID {
+		t.Fatal("owner check was not assigned", assigned)
+	}
+	if err := q.Started(result(assigned, false)); err != nil {
+		t.Fatal(err)
+	}
+	finish(t, q, assigned, true)
+	// The local CLI seals and confirms release before publishing its report.
+	if _, err := q.CancelSubmission(manual.Spec.Project, manual.Spec.SubmissionKey); err != nil {
+		t.Fatal(err)
+	}
+	r := newExtensionReport(e, &w.Machine, work)
+	r.Setup, r.Qualified, r.CheckID, r.Reason = true, true, manual.Spec.SubmissionKey, ""
+	w.Machine.ExtensionReports = []ExtensionReport{r}
+	check(t, q, w.Machine, nil)
+
+	ctx := t.Context()
+	request := ConsumerQualification{Project: "consumer", Extension: extensionKey(e), Digest: e.Digest, Worker: w.Machine.ID, Platform: "fake", Device: "0"}
+	var v QualificationVerdict
+	if err := w.Client.Call(ctx, "POST", "/api/extension-checks", request, &v); err != nil || !v.Reused || v.Verdict != "passed" || v.JobID != manual.ID {
+		t.Fatal("existing qualified target did not reuse the released owner verdict", v, err)
+	}
+	var read QualificationVerdict
+	if err := w.Client.Call(ctx, "GET", "/api/extension-checks/"+v.CheckID, nil, &read); err != nil {
+		t.Fatal(err)
+	}
+	v.Reused = false
+	if v != read {
+		t.Fatal("readback differed from the reused verdict", v, read)
+	}
+}

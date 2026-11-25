@@ -200,7 +200,7 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool, 
 	if batch {
 	}
 	m = q.launchCapacityProjection(j, m)
-	p := &placementPlan{machine: m, preparations: true}
+	p := &placementPlan{machine: m, preparations: !consumerExtensionCheck(j.Spec)}
 	if len(yieldPlans) > 0 {
 		p.yields = yieldPlans[0]
 	}
@@ -230,7 +230,7 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool, 
 		}
 		p.preparationCores = 1
 		if l.PriorityStop == nil {
-			if l.Spec == nil || q.comparePriority(*l.Spec, j.Spec) <= 0 {
+			if !p.preparations || l.Spec == nil || q.comparePriority(*l.Spec, j.Spec) <= 0 {
 				return nil
 			}
 			if owner := q.s.Jobs[l.Demand]; owner != nil && q.preemptionProtected(owner.PreemptionCount, l.StartedAt) {

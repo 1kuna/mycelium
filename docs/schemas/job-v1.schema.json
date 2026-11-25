@@ -2424,6 +2424,9 @@
         "automatic": {
           "$ref": "#/$defs/ExtensionReport"
         },
+        "consumer": {
+          "type": "boolean"
+        },
         "directory": {
           "type": "string"
         },

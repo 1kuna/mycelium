@@ -260,6 +260,9 @@ func (j Job) publishesNASOutputs() bool {
 func (w Worker) publishExtensionFiles(j Job, attemptWork string) (err error) {
 	step := "output_check"
 	defer func() { err = finalizationErrorFor(step, "", err) }()
+	if consumerExtensionCheck(j.Spec) {
+		return w.validateExtensionCheckOutputAt(j, attemptWork, filepath.Join(".myce-check", "actual"))
+	}
 	if check := j.Spec.ExtensionCheck; check != nil && j.Spec.Run.Env["MYCE_CHECK_OUTPUT"] != "" {
 		// Only the worker publishes the bounded check result into the CLI's
 		// scratch folder. Payloads never receive write access to shared caches.
@@ -381,7 +384,8 @@ func validateExtensionJob(s Spec) error {
 		return err
 	}
 	if c := s.ExtensionCheck; c != nil {
-		if s.Extension == "" || s.ExtensionDigest == "" || len(s.AllowedMachines) != 1 || !filepath.IsAbs(c.Directory) || c.Work == "" || s.Kind != "" || s.Program != nil || len(s.Args)+len(s.Inputs)+len(s.Outputs)+len(s.Files) != 0 || s.Resumable {
+		scratch := filepath.IsAbs(c.Directory) || c.Consumer && c.Directory == consumerCheckWorkdir
+		if s.Extension == "" || s.ExtensionDigest == "" || len(s.AllowedMachines) != 1 || !scratch || c.Work == "" || s.Kind != "" || s.Program != nil || len(s.Args)+len(s.Inputs)+len(s.Outputs)+len(s.Files) != 0 || s.Resumable {
 			return errors.New("extension checks require an exact extension, one local worker, a check work type and an absolute scratch directory")
 		}
 	}
@@ -440,7 +444,18 @@ func validateExtensionJob(s Spec) error {
 // agree even when the command exits zero with incorrect output.
 func (w Worker) validateExtensionCheckOutput(j Job) error {
 	check := j.Spec.ExtensionCheck
-	if check == nil || j.Extension == nil {
+	if check == nil {
+		return nil
+	}
+	return w.validateExtensionCheckOutputAt(j, check.Directory, "actual")
+}
+
+func (w Worker) validateExtensionCheckOutputAt(j Job, directory, name string) error {
+	check := j.Spec.ExtensionCheck
+	if j.Extension == nil {
+		if consumerExtensionCheck(j.Spec) {
+			return errors.New("frozen check extension missing")
+		}
 		return nil
 	}
 	for _, e := range j.Extensions {
@@ -453,9 +468,12 @@ func (w Worker) validateExtensionCheckOutput(j Job) error {
 		}
 		b, ok := view.baseline(check.Work, w.Machine.GPU)
 		if !ok {
+			if consumerExtensionCheck(j.Spec) {
+				return errors.New("frozen native baseline missing")
+			}
 			return nil
 		}
-		actual, err := readExtensionCheckOutput(check.Directory)
+		actual, err := readExtensionCheckOutputAt(directory, name)
 		if err != nil {
 			return err
 		}

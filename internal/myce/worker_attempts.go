@@ -635,6 +635,15 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					continue
 				}
 				if resultAcknowledged {
+					if consumerExtensionCheck(s.state.Job.Spec) {
+						if e := w.recordConsumerQualification(ioCtx, *s.state.Job); e != nil {
+							s.fileError = "qualification report confirmation pending"
+							publicationPace.Observe(w.Clock.Now().Sub(publicationStarted), false)
+							publicationRetryAt = w.Clock.Now().Add(publicationPace.ServiceDelay(e, w.Client.Jitter))
+							wait()
+							continue
+						}
+					}
 					published, e := w.publishedAttemptFiles(ioCtx, s.state)
 					if e != nil {
 						s.fileError = "result confirmation pending; local files retained"
@@ -1321,7 +1330,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.ModelURL = rt.url
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
-			m.Capabilities = append(slices.Clone(w.Machine.Capabilities), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1", "nas_inspection_v1", scarceHostYieldCapability, localFirstProtocol)
+			m.Capabilities = append(slices.Clone(w.Machine.Capabilities), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1", "nas_inspection_v1", scarceHostYieldCapability, localFirstProtocol, consumerCheckCapability)
 			m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
 			if workerSyntheticMemoryHost || w.devEnvironmentSizing || w.Machine.GPU == "fake" && w.ServiceConfig == nil || runtime.GOOS == "darwin" && w.processMemory != nil && w.processMemory.OwnedFootprint != nil {
 				m.Capabilities = append(m.Capabilities, sampledMemoryCapability)

@@ -73,12 +73,18 @@ sizing. Use a pin only for a [hard requirement](references/submit.md#explicit-pl
   accelerator by default. For a compatible plain command, set
   `advanced: {allow_cpu_fallback: true}` only when CPU results are acceptable.
   For extension work, declare a CPU variant.
-- For an explicit exact-digest runtime check, run
-  `myce extension check --gpu PLATFORM --device DEVICE --digest SHA256 NAME@VERSION`
-  on the target worker as its installation owner. Omit `--device` for CPU.
-  From another host, submit the useful job with `extension: NAME@VERSION`,
-  `extension_digest: SHA256` and the required placement. The queue qualifies
-  the selected target before starting the job.
+- Before activating an extension release, ask the queue for an exact-digest
+  runtime check with
+  `myce extension qualify --project PROJECT --worker WORKER --gpu PLATFORM --device DEVICE --digest SHA256 NAME@VERSION`.
+  Use the worker and device IDs from queue inventory. Omit `--device` for CPU.
+  The receipt contains `check_id` and `job_id`. Wait with `myce wait JOB_ID`,
+  then read `myce extension qualification CHECK_ID` or
+  `myce extension qualification --job JOB_ID`. Require `verdict: passed`
+  before relying on the check. An identical request reuses its latest verdict.
+  Add `--recheck` for a fresh run. The request uses the project's experiment
+  tier mapping and ordinary admission. See
+  [consumer qualification](https://github.com/1kuna/mycelium/blob/main/docs/operations.md#request-an-extension-check-from-the-queue)
+  for work-type selection, verdicts and API routes.
 - [Inputs, checkpoints and pieces](references/submit.md#inputs-checkpoints-and-pieces)
   covers `--input DEST=PATH`, verified local staging of `shared_inputs`,
   runtime bindings, `pieces:` and extension fan-out. Submit known later

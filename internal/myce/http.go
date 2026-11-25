@@ -123,6 +123,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	a.registerFiles(mux)
 	a.registerFileRelease(mux)
 	a.registerAttemptFiles(mux)
+	a.registerConsumerQualifications(mux)
 	mux.HandleFunc("POST /api/extensions", func(w http.ResponseWriter, r *http.Request) {
 		var e Extension
 		if !decode(w, r, &e) {

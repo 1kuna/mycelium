@@ -62,9 +62,12 @@ func (q *Queue) extensionPreparationPlan(m *Machine) []EnvironmentRecipe {
 			if !slices.Contains(e.platforms(), m.GPU) || e.targetUnavailableReason(machineTarget(m)) != "" {
 				continue
 			}
+			if consumerExtensionCheck(j.Spec) && !consumerCheckTargetMatches(j, *e, m) {
+				continue
+			}
 			prepared := false
 			for _, r := range m.ExtensionReports {
-				if r.Digest == e.Digest && r.Setup && (len(e.Variants) == 0 && !strings.HasPrefix(r.CheckID, "auto-") || matchingExtensionReport(*e, m, r)) {
+				if r.Digest == e.Digest && r.Setup && (len(e.Variants) == 0 && !queueOwnedExtensionCheckID(r.CheckID) || matchingExtensionReport(*e, m, r)) {
 					prepared = true
 				}
 			}
@@ -377,7 +380,7 @@ func extensionQualificationReason(e Extension, r ExtensionReport, m *Machine) (r
 
 func uncachedExtensionQualificationReason(e Extension, r ExtensionReport, m *Machine) string {
 	view, ok := e.forMachine(m)
-	if strings.HasPrefix(r.CheckID, "auto-") && !matchingExtensionReport(e, m, r) {
+	if queueOwnedExtensionCheckID(r.CheckID) && !matchingExtensionReport(e, m, r) {
 		return "host, environment or check identity changed; check required"
 	}
 	if m.Devices != nil && (extensionReportDevice(r.Platform, r.Device) != extensionReportDevice(m.GPU, m.Device) || r.Fingerprint == "" || r.Fingerprint != m.ExtensionFingerprint) {

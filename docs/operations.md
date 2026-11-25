@@ -1315,6 +1315,43 @@ when that profile is already enabled. See
 [device maintenance, placement and drain semantics](reference/queue-maintenance.md#device-maintenance-placement-and-drain-semantics),
 including what `--wait` requires and how drains treat preparations.
 
+## Request an extension check from the queue
+
+A consumer can request a native check without access to the worker installation.
+Use the exact worker ID and, for an accelerator, the exact device ID from queue
+inventory. For CPU omit `--device`.
+
+```sh
+myce extension qualify --project example --worker worker-1 --gpu xpu --device 0 --digest SHA256 example@1
+myce wait JOB_ID
+myce extension qualification CHECK_ID
+myce extension qualification --job JOB_ID
+```
+
+The queue freezes a registered extension version, digest, work type and worker
+fingerprint before admission. The check runs as an experiment-class job under
+the project's ordinary policy and tier. It creates no maintenance reservation.
+The worker must advertise `consumer_native_check_v1`. For composed extensions
+the default work type is `extension:NAME`. A legacy extension with a single
+declared work type uses that type. Use `--work kind:NAME` or `--work program:NAME`
+to select another declared baseline. Each check has its own ten-minute
+execution budget starting at queue-recorded command start.
+
+The verdict is `pending` until the queue records terminal state and confirms
+any execution release. `passed` means the native comparison succeeded.
+`failed` carries a failed check result. `no_verdict` means the invocation
+was cancelled or ended without a check result. Use the job ID for diagnostics.
+The same project and target identity reuse the latest invocation or a newer
+verdict the worker has reported for that exact target and baseline. A first
+request can also reuse an existing verdict. Add `--recheck` to create a new
+invocation once the previous one is terminal and released.
+
+Use the normal authenticated API to `POST /api/extension-checks` with
+`project`, `extension`, `digest`, `worker` and `platform`. Supply `device`
+for accelerators. Optional fields are `work` and `recheck`. Read the receipt
+or verdict with `GET /api/extension-checks/{check_id}` or
+`GET /api/jobs/{job_id}/extension-check`.
+
 ## Check an installed worker's extension
 
 Run locally on the enrolled worker with its queue running:

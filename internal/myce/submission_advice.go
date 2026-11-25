@@ -11,7 +11,7 @@ import (
 // queue lock is taken after submitContext returns, including on key replay.
 func (q *Queue) submitWithDeadlineGuidance(ctx context.Context, s Spec) (*Job, error) {
 	var snapshot *submissionAdviceSnapshot
-	j, err := q.submitContext(ctx, s, func() { snapshot = q.captureSubmissionAdvice() })
+	j, err := q.submitContext(ctx, s, func() { snapshot = q.captureSubmissionAdvice() }, false)
 	if err != nil {
 		return j, err
 	}
