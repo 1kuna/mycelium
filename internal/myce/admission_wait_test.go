@@ -654,7 +654,7 @@ func TestAdmissionWaitPublicationFencesLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	closed := admissionWaitAPI(t, q, j.ID)
-	if err := q.commitAdmissionWait(capture, map[string]*AdmissionWaitEvidence{j.ID: stale}); err != nil {
+	if err := q.commitAdmissionWait(capture, map[string]admissionWaitUpdate{j.ID: {evidence: stale}}); err != nil {
 		t.Fatal(err)
 	}
 	got := admissionWaitAPI(t, q, j.ID)
@@ -734,7 +734,7 @@ func TestAdmissionWaitCaptureYieldsAndRetainedHistoryShrinks(t *testing.T) {
 	pinned := readGet(q.publishedReads.Load().root, key)
 	var stored queuePersistenceTiming
 	q.observePersistence = func(p queuePersistenceTiming) { stored = p }
-	if err := q.commitAdmissionWait(capture, map[string]*AdmissionWaitEvidence{j.ID: &next}); err != nil {
+	if err := q.commitAdmissionWait(capture, map[string]admissionWaitUpdate{j.ID: {deferredAt: next.DeferredAt}}); err != nil {
 		t.Fatal(err)
 	}
 	q.observePersistence = nil
@@ -789,6 +789,65 @@ func TestAdmissionWaitCaptureYieldsAndRetainedHistoryShrinks(t *testing.T) {
 	if len(shrunk.Transitions) != 0 || shrunk.HistoryBytes != 0 || shrunk.Dropped != closed.Dropped+1 || !reflect.DeepEqual(shrunk.First, closed.First) || !reflect.DeepEqual(shrunk.Latest, closed.Latest) {
 		t.Fatalf("pressure lost endpoints or failed to shed optional history: %+v", shrunk)
 	}
+}
+
+func TestAdmissionWaitGapCommitAfterReopenKeepsSharedSnapshot(t *testing.T) {
+	q, clock := fixture(t)
+	s := cpuSpec(1, 1)
+	s.Priority = "production"
+	j := submit(t, q, s)
+	snapshot := &AdmissionWaitSnapshot{At: clock.Now(), Predicate: "admission", Targets: []AdmissionWaitTarget{{DeviceFault: strings.Repeat("e", 2*q.persistencePageBytes)}}}
+	evidence := &AdmissionWaitEvidence{First: snapshot, Latest: snapshot}
+	if err := q.update(func() error { q.touchJob(j.ID).AdmissionWait = evidence; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	q = reopenVariants(t, q, clock)
+	q.mu.Lock()
+	capture := q.freezeAdmissionWait()
+	next := *q.s.Jobs[j.ID].AdmissionWait
+	q.mu.Unlock()
+	now := clock.Now()
+	next.CaptureGaps++
+	next.DeferredAt = &now
+	var stored queuePersistenceTiming
+	q.observePersistence = func(p queuePersistenceTiming) { stored = p }
+	err := q.commitAdmissionWait(capture, map[string]admissionWaitUpdate{j.ID: {deferredAt: next.DeferredAt}})
+	q.observePersistence = nil
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Bytes == 0 || stored.Bytes >= int64(q.persistencePageBytes) {
+		t.Fatalf("first gap-only commit after reopen wrote %d bytes for a %d-byte page", stored.Bytes, q.persistencePageBytes)
+	}
+	if got := admissionWaitAPI(t, q, j.ID); !reflect.DeepEqual(got, &next) {
+		t.Fatal("post-reopen gap write changed a snapshot or lost coverage")
+	}
+	t.Logf("first gap-only commit after reopen wrote %d bytes for a %d-byte page", stored.Bytes, q.persistencePageBytes)
+
+	q = reopenVariants(t, q, clock)
+	capture = q.freezeAdmissionWait()
+	value, err := readGet(capture.index.root, "jobs/"+j.ID).decode("jobs/" + j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A builder uses the immutable read generation. An identical recovery
+	// sample clears the gap without replacing the semantic endpoint.
+	read := value.(*Job).AdmissionWait
+	cleared := *read
+	cleared.DeferredAt = nil
+	q.observePersistence = func(p queuePersistenceTiming) { stored = p }
+	err = q.commitAdmissionWait(capture, map[string]admissionWaitUpdate{j.ID: {evidence: &cleared}})
+	q.observePersistence = nil
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Bytes == 0 || stored.Bytes >= int64(q.persistencePageBytes) {
+		t.Fatalf("clearing a gap after reopen wrote %d bytes for a %d-byte page", stored.Bytes, q.persistencePageBytes)
+	}
+	if got := admissionWaitAPI(t, q, j.ID); !reflect.DeepEqual(got, &cleared) {
+		t.Fatal("post-reopen gap clear changed a snapshot or lost coverage")
+	}
+	t.Logf("gap clear after reopen wrote %d bytes for a %d-byte page", stored.Bytes, q.persistencePageBytes)
 }
 
 // #884: a healthy pinned worker really considers a deadline job at attempt 0.

@@ -142,6 +142,10 @@ func queueHistoryBurst(t *testing.T, count int, seed string, clock *fakeClock, w
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { q.Close() })
+	// The test-only full-record audit scans retained history on every write.
+	// Measure the production writer so the ratios reflect its lock costs.
+	recordAuditExempt.Store(q, true)
+	defer recordAuditExempt.Delete(q)
 	fakeCheckpointAvailability(t, q, true)
 	q.fileRetention, q.logRetention = testFileRetention, testLogRetention
 	q.lossTimeouts = [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}

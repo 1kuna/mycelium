@@ -334,15 +334,18 @@ func collectWorkerExtensionReports(root string, now time.Time, retention time.Du
 			m.ExtensionFingerprint = d.ExtensionFingerprint
 		}
 	}
-	removeVanishedExtensionReports(root, m, extensions)
+	removeVanishedExtensionReports(root, m, extensions, os.Lstat)
 }
 
-func removeVanishedExtensionReports(root string, m *Machine, extensions []Extension) {
+func removeVanishedExtensionReports(root string, m *Machine, extensions []Extension, lstat func(string) (os.FileInfo, error)) {
 	// Qualification receipts can outlive a registration removed after the
 	// shared scan. Recheck each manifest once before advertising any target.
+	// An inconclusive stat keeps the scanned report. A removal after the stat
+	// can appear in this heartbeat; launch revalidates content and qualification.
 	var missing map[string]bool
 	for _, e := range extensions {
-		if info, err := os.Lstat(filepath.Join(extensionFolder(root, e), "extension.yaml")); err != nil || !info.Mode().IsRegular() {
+		info, err := lstat(filepath.Join(extensionFolder(root, e), "extension.yaml"))
+		if err == nil && !info.Mode().IsRegular() || errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
 			if missing == nil {
 				missing = map[string]bool{}
 			}

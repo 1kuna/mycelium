@@ -186,6 +186,7 @@ func TestStatusCompactRetainedEvidence(t *testing.T) {
 	}
 	q.statusCache.data = ""
 	if err := q.update(func() error {
+		q.touchMachine("ghost")
 		q.s.Machines["ghost"] = &Machine{ID: "ghost", Gone: true, Replacement: &MachineReplacement{Machine: "worker", Device: "0"}}
 		return nil
 	}); err != nil {

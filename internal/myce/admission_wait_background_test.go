@@ -1,7 +1,9 @@
 package myce
 
 import (
+	"context"
 	"fmt"
+	"reflect"
 	"slices"
 	"sync"
 	"syscall"
@@ -137,7 +139,7 @@ func TestAdmissionWaitBackgroundFencesResumeAndRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	drainAdmissionWait(t, q)
-	if err = q.commitAdmissionWait(capture, map[string]*AdmissionWaitEvidence{demand.ID: original}); err != nil {
+	if err = q.commitAdmissionWait(capture, map[string]admissionWaitUpdate{demand.ID: {evidence: original}}); err != nil {
 		t.Fatal(err)
 	}
 	after := admissionWaitAPI(t, q, demand.ID)
@@ -150,7 +152,7 @@ func TestAdmissionWaitBackgroundFencesResumeAndRetry(t *testing.T) {
 	if err = q.update(func() error { j := q.touchJob(demand.ID); j.Attempt++; return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if err = q.commitAdmissionWait(capture, map[string]*AdmissionWaitEvidence{demand.ID: original}); err != nil {
+	if err = q.commitAdmissionWait(capture, map[string]admissionWaitUpdate{demand.ID: {evidence: original}}); err != nil {
 		t.Fatal(err)
 	}
 	if got := admissionWaitAPI(t, q, demand.ID); got.CaptureGaps <= after.CaptureGaps {
@@ -196,6 +198,156 @@ func TestAdmissionWaitBackgroundRotatesUnchangedEvaluation(t *testing.T) {
 	if got := admissionWaitAPI(t, q, next); got.DeferredAt != nil || got.Latest.Predicate != "dependency" {
 		t.Fatal("unchanged oldest reason starved an updated wait reason")
 	}
+}
+
+func TestAdmissionWaitGapCommitKeepsPrunedHistory(t *testing.T) {
+	q, clock := fixture(t)
+	s := cpuSpec(1, 1)
+	s.Priority = "production"
+	j := submit(t, q, s)
+	first := admissionWaitAPI(t, q, j.ID).Latest
+	middle := &AdmissionWaitSnapshot{At: clock.Now().Add(time.Second), Predicate: "dependency"}
+	clock.Advance(2 * time.Second)
+	latest := &AdmissionWaitSnapshot{At: clock.Now(), Predicate: "admission"}
+	evidence := retainAdmissionWait(&AdmissionWaitEvidence{First: first, Latest: middle}, latest, 1<<20, false)
+	if len(evidence.Transitions) != 1 {
+		t.Fatal("fixture did not retain a transition")
+	}
+	if err := q.update(func() error { q.touchJob(j.ID).AdmissionWait = evidence; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	q.mu.Lock()
+	capture := q.freezeAdmissionWait()
+	q.mu.Unlock()
+	next := *evidence
+	now := clock.Now()
+	next.CaptureGaps++
+	next.DeferredAt = &now
+
+	q.evidenceMaintenance.capacity = func(context.Context) (RetentionCapacity, error) {
+		return RetentionCapacity{MemoryAvailableBytes: 1, DiskAvailableBytes: 1}, nil
+	}
+	drainEvidence(t, q)
+	pruned := admissionWaitAPI(t, q, j.ID)
+	if len(pruned.Transitions) != 0 || pruned.Dropped != evidence.Dropped+1 {
+		t.Fatal("retention did not prune the queued job's history")
+	}
+	if err := q.commitAdmissionWait(capture, map[string]admissionWaitUpdate{j.ID: {deferredAt: next.DeferredAt}}); err != nil {
+		t.Fatal(err)
+	}
+	pruned.CaptureGaps, pruned.DeferredAt = next.CaptureGaps, next.DeferredAt
+	if got := admissionWaitAPI(t, q, j.ID); !reflect.DeepEqual(got, pruned) {
+		t.Fatalf("gap commit replaced retained evidence: transitions=%d dropped=%d history=%d", len(got.Transitions), got.Dropped, got.HistoryBytes)
+	}
+	// An evaluated sample can carry the same stale transitions. Let a later
+	// build plan against the pruned history before publishing that sample.
+	evaluated := &AdmissionWaitSnapshot{At: now, Predicate: "dependency"}
+	fresh := retainAdmissionWait(evidence, evaluated, 1<<20, false)
+	if err := q.commitAdmissionWait(capture, map[string]admissionWaitUpdate{j.ID: {droppedBefore: evidence.Dropped, evidence: fresh}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := admissionWaitAPI(t, q, j.ID); !reflect.DeepEqual(got, pruned) {
+		t.Fatal("stale evaluated sample replaced retained evidence")
+	}
+}
+
+func TestAdmissionWaitClearingGapRefreshesTelemetry(t *testing.T) {
+	q, clock := fixture(t)
+	m := cpuMachine("worker", "host", "cpu", 1, 8)
+	check(t, q, m, nil)
+	s := cpuSpec(4, 1)
+	s.Priority = "production"
+	j := submit(t, q, s)
+	check(t, q, m, nil)
+	before := admissionWaitAPI(t, q, j.ID)
+	if len(before.Latest.Targets) != 1 || before.Latest.Targets[0].AvailableHostGB != 8 {
+		t.Fatalf("fixture did not record the original host memory: %+v", before.Latest)
+	}
+	deferCapture := func() {
+		t.Helper()
+		if err := q.update(func() error {
+			j := q.touchJob(j.ID)
+			j.AdmissionWait = deferAdmissionWait(j.AdmissionWait, clock.Now())
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deferCapture()
+	clock.Advance(time.Second)
+	m.HostAvailableMemoryGB = 4
+	check(t, q, m, nil)
+	after := admissionWaitAPI(t, q, j.ID)
+	if after.DeferredAt != nil || after.CaptureGaps != before.CaptureGaps+1 || !sameAdmissionWait(before.Latest, after.Latest) {
+		t.Fatalf("fixture did not clear the gap with an equivalent blocker: before=%+v after=%+v", before.Latest, after.Latest)
+	}
+	if got := after.Latest.Targets[0].AvailableHostGB; got != 4 || !after.Latest.At.Equal(clock.Now()) {
+		t.Fatalf("cleared gap kept stale telemetry: %g GiB at %v", got, after.Latest.At)
+	}
+	deferCapture()
+	clock.Advance(time.Second)
+	check(t, q, m, nil)
+	if got := admissionWaitAPI(t, q, j.ID); got.DeferredAt != nil || got.CaptureGaps != after.CaptureGaps+1 || !reflect.DeepEqual(got.Latest, after.Latest) {
+		t.Fatal("clearing a gap with identical readings rewrote the endpoint or lost coverage")
+	}
+}
+
+func TestAdmissionWaitWaveClosureKeepsExistingGap(t *testing.T) {
+	q, clock, _, s := fanOutFixture(t, 2)
+	s.Priority = "production"
+	j := submit(t, q, s)
+	if err := q.update(func() error {
+		j := q.touchJob(j.ID)
+		j.AdmissionWait = deferAdmissionWait(j.AdmissionWait, clock.Now())
+		j.FanOut.Next = len(j.Spec.FanOut.Pieces)
+		q.admissionWaitPending = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := admissionWaitAPI(t, q, j.ID)
+	if got.Latest.ClosedReason != "wave_admitted" || got.Latest.ClosedAt == nil || got.DeferredAt == nil || got.CaptureGaps != 1 {
+		t.Fatalf("wave closure should preserve its existing gap: closed=%q deferred=%v gaps=%d", got.Latest.ClosedReason, got.DeferredAt, got.CaptureGaps)
+	}
+}
+
+func TestAdmissionWaitBackgroundRotatesUnderSustainedArrivals(t *testing.T) {
+	q, clock := fixture(t)
+	s := cpuSpec(1, 1)
+	s.Priority = "production"
+	j := submit(t, q, s)
+	producer := submit(t, q, cpuSpec(1, 1))
+	if got := admissionWaitAPI(t, q, j.ID); got.Latest.Predicate != "no_qualified_target" {
+		t.Fatal("fixture did not evaluate the original blocker")
+	}
+	if err := q.update(func() error {
+		q.touchJob(j.ID).Spec.After = &PieceDependency{Job: producer.ID}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		if err := q.update(func() error {
+			newcomer := *q.s.Jobs[j.ID]
+			newcomer.ID = fmt.Sprintf("arrival-%d", i)
+			newcomer.AdmissionWait = nil
+			q.putJob(newcomer.ID, &newcomer)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		q.mu.Lock()
+		capture := q.freezeAdmissionWait()
+		q.mu.Unlock()
+		capture.clock = coldProbeAdvancingClock{&fakeClock{now: clock.Now()}}
+		capture.service = 2 * time.Nanosecond // One diagnostic evaluation fits.
+		q.enqueueAdmissionWait(capture)
+		got := admissionWaitAPI(t, q, j.ID)
+		if got.Latest.Predicate == "dependency" && got.DeferredAt == nil {
+			return
+		}
+	}
+	t.Fatal("a new arrival took every evaluation while the older blocker went stale")
 }
 
 // Same retained fixture as BenchmarkCheckinPersistence: five workers, 115 live

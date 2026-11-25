@@ -154,6 +154,9 @@ func decodeReadJob(data []byte) (*Job, error) {
 		LedgerEntries discardReadJSON `json:"ledger_entries"`
 	}{job: (*job)(out)}
 	err = json.Unmarshal(data, &wire)
+	if err == nil {
+		shareAdmissionWaitEndpoints(out)
+	}
 	return out, err
 }
 

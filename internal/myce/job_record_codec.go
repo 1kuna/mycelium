@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"slices"
 	"strconv"
 )
@@ -32,6 +33,19 @@ const (
 	minSharedJobValueBytes = 16
 	jobRecordRefBytes      = 12
 )
+
+// Job JSON owns separate copies of the endpoints even when both were encoded
+// as the same reference. Restore sharing after decoding so coverage-only
+// commits leave the persisted reference table intact.
+func shareAdmissionWaitEndpoints(j *Job) {
+	if j == nil || j.AdmissionWait == nil {
+		return
+	}
+	w := j.AdmissionWait
+	if w.First != nil && w.Latest != nil && w.First.At.Equal(w.Latest.At) && reflect.DeepEqual(w.First, w.Latest) {
+		w.Latest = w.First
+	}
+}
 
 // Keep the large admission snapshots in the existing $refs field so that
 // the SQLite field splitter can leave them untouched on gap-only writes.

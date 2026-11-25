@@ -54,7 +54,9 @@ func (q *Queue) readStartupState(marker []byte) error {
 			}
 			if err != nil {
 				result.err = fmt.Errorf("decode queue fragment jobs: %w", err)
+				continue
 			}
+			shareAdmissionWaitEndpoints(result.jobs[record.id])
 		}
 		done <- result
 	}()

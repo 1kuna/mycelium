@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -271,7 +272,7 @@ func (q *Queue) finishAdmissionWait(b *admissionWaitBuilder, c *admissionWaitCap
 	}
 	b.build++
 	b.lastEvaluated = source.buildAdmissionWaits(source.placementScan(), c.service, b.lastEvaluated, b.build)
-	changes := map[string]*AdmissionWaitEvidence{}
+	changes := map[string]admissionWaitUpdate{}
 	for id, j := range jobs {
 		if j.State != "queued" || j.AdmissionWait == nil {
 			continue
@@ -283,7 +284,16 @@ func (q *Queue) finishAdmissionWait(b *admissionWaitBuilder, c *admissionWaitCap
 		if old == nil || old.CaptureGaps != next.CaptureGaps ||
 			old.BudgetUnknown != next.BudgetUnknown || old.Dropped != next.Dropped ||
 			(old.DeferredAt == nil) != (next.DeferredAt == nil) || old.Latest != next.Latest {
-			changes[id] = next
+			// A wave closure can carry an existing gap and a new endpoint.
+			if next.DeferredAt != nil && (old == nil || old.Latest == next.Latest) {
+				changes[id] = admissionWaitUpdate{deferredAt: next.DeferredAt}
+				continue
+			}
+			change := admissionWaitUpdate{evidence: next}
+			if old != nil {
+				change.droppedBefore = old.Dropped
+			}
+			changes[id] = change
 		}
 	}
 	if len(changes) == 0 {
@@ -359,7 +369,13 @@ func sameAdmissionWaitEpisode(a, b *Job) bool {
 	return a.State == "queued" && b.State == "queued" && waitEpisode(a) == waitEpisode(b)
 }
 
-func (q *Queue) commitAdmissionWait(c *admissionWaitCapture, changes map[string]*AdmissionWaitEvidence) error {
+type admissionWaitUpdate struct {
+	evidence      *AdmissionWaitEvidence
+	droppedBefore uint64
+	deferredAt    *time.Time
+}
+
+func (q *Queue) commitAdmissionWait(c *admissionWaitCapture, changes map[string]admissionWaitUpdate) error {
 	// Decode immutable episode identities before taking the writer mutex.
 	originals := make(map[string]*Job, len(changes))
 	for id := range changes {
@@ -375,7 +391,7 @@ func (q *Queue) commitAdmissionWait(c *admissionWaitCapture, changes map[string]
 	exact := false
 	return q.updateTransactionMode(context.Background(), func() error {
 		exact = q.publishedReads.Load() == c.index
-		for id, next := range changes {
+		for id, change := range changes {
 			j := q.s.Jobs[id]
 			old := originals[id]
 			if j == nil || old == nil {
@@ -384,18 +400,24 @@ func (q *Queue) commitAdmissionWait(c *admissionWaitCapture, changes map[string]
 			}
 			if !sameAdmissionWaitEpisode(old, j) {
 				complete = false
-				evidence := AdmissionWaitEvidence{}
-				if j.AdmissionWait != nil {
-					evidence = *j.AdmissionWait
-				}
-				evidence.CaptureGaps++
-				now := q.clock.Now()
-				evidence.DeferredAt = &now
-				q.touchJob(id).AdmissionWait = &evidence
+				q.touchJob(id).AdmissionWait = deferAdmissionWait(j.AdmissionWait, q.clock.Now())
 				continue
 			}
-			q.touchJob(id).AdmissionWait = next
-			complete = complete && next.DeferredAt == nil
+			if change.deferredAt != nil {
+				// Deferral changes coverage only. Apply it to the writer's
+				// current evidence, including any concurrent retention trim.
+				complete = false
+				q.touchJob(id).AdmissionWait = deferAdmissionWait(j.AdmissionWait, *change.deferredAt)
+				continue
+			}
+			// A full sample includes retained history from the build's input.
+			// Retention may have pruned it since the builder took that input.
+			if j.AdmissionWait != nil && j.AdmissionWait.Dropped > change.droppedBefore {
+				complete = false
+				continue
+			}
+			q.touchJob(id).AdmissionWait = change.evidence
+			complete = complete && change.evidence.DeferredAt == nil
 		}
 		return nil
 	}, nil, false, func() {
@@ -423,6 +445,16 @@ type AdmissionWaitEvidence struct {
 	CaptureGaps        uint64                   `json:"capture_gaps,omitempty"`
 	DeferredAt         *time.Time               `json:"deferred_at,omitempty"`
 	BudgetUnknown      bool                     `json:"budget_unknown,omitempty"`
+}
+
+func deferAdmissionWait(old *AdmissionWaitEvidence, now time.Time) *AdmissionWaitEvidence {
+	evidence := AdmissionWaitEvidence{}
+	if old != nil {
+		evidence = *old
+	}
+	evidence.CaptureGaps++
+	evidence.DeferredAt = &now
+	return &evidence
 }
 
 type AdmissionWaitSnapshot struct {
@@ -694,9 +726,9 @@ func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration, 
 		}
 		waiting = append(waiting, j)
 		episode := waitEpisode(j)
-		evaluation := last[j.ID]
-		if evaluation.episode != episode {
-			evaluation = admissionWaitEvaluation{episode: episode}
+		evaluation, ok := last[j.ID]
+		if !ok || evaluation.episode != episode {
+			evaluation = admissionWaitEvaluation{episode: episode, build: build}
 		}
 		evaluations[j.ID] = evaluation
 		if j.AdmissionWait != nil {
@@ -704,7 +736,8 @@ func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration, 
 		}
 	}
 	// Oldest evaluation first, even when the previously evaluated job kept
-	// its existing snapshot. A build sequence breaks ties across clock ticks.
+	// its existing snapshot. New episodes enter at the current build so they
+	// cannot overtake jobs already waiting for their next evaluation.
 	slices.SortFunc(waiting, func(a, b *Job) int {
 		if c := cmp.Compare(evaluations[a.ID].build, evaluations[b.ID].build); c != 0 {
 			return c
@@ -726,13 +759,7 @@ func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration, 
 		// quantum. Never let optional capture monopolize a pressured control path.
 		// This can defer a snapshot, never scheduling or a cleanup acknowledgement.
 		if service > 0 && holdNow(q.holdClock).Sub(started) >= service {
-			evidence := AdmissionWaitEvidence{}
-			if j.AdmissionWait != nil {
-				evidence = *j.AdmissionWait
-			}
-			evidence.CaptureGaps++
-			evidence.DeferredAt = &now
-			q.touchJob(j.ID).AdmissionWait = &evidence
+			q.touchJob(j.ID).AdmissionWait = deferAdmissionWait(j.AdmissionWait, now)
 			continue
 		}
 		snapshot := &AdmissionWaitSnapshot{At: now, Attempt: j.Attempt, Predicate: "admission"}
@@ -860,10 +887,12 @@ func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration, 
 		evaluation := evaluations[j.ID]
 		evaluation.build = build
 		evaluations[j.ID] = evaluation
-		// Clearing a coverage gap leaves the semantic endpoint intact when
-		// the blockers are unchanged. Its time still belongs to its values.
+		// Equivalent blockers usually reuse their endpoint. A sample that
+		// clears a gap publishes any changed telemetry, with its own time.
 		if old := j.AdmissionWait; old != nil && old.Latest != nil && sameAdmissionWait(old.Latest, snapshot) {
-			snapshot = old.Latest
+			if old.DeferredAt == nil || sameAdmissionWaitReadings(old.Latest, snapshot) {
+				snapshot = old.Latest
+			}
 		}
 		q.touchJob(j.ID).AdmissionWait = retainAdmissionWait(j.AdmissionWait, snapshot, budget, unknown)
 	}
@@ -938,6 +967,42 @@ func sameAdmissionWait(a, b *AdmissionWaitSnapshot) bool {
 				return false
 			}
 			if h.Tier != nil && *h.Tier != *other.Tier {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// Called after the semantic comparison, which establishes matching target
+// and holder counts. Advancing receipt times and sample age alone leave the
+// original endpoint intact. Changed readings keep the new sample's provenance.
+func sameAdmissionWaitReadings(a, b *AdmissionWaitSnapshot) bool {
+	for i, x := range a.Targets {
+		y := b.Targets[i]
+		if x.AvailableCores != y.AvailableCores || x.AvailableHostGB != y.AvailableHostGB || x.HostMemoryKnown != y.HostMemoryKnown ||
+			x.HostDebtGB != y.HostDebtGB || x.AvailableDeviceGB != y.AvailableDeviceGB || x.DeviceMemoryKnown != y.DeviceMemoryKnown {
+			return false
+		}
+		if x.HostMemoryLedger != y.HostMemoryLedger {
+			if x.HostMemoryLedger == nil || y.HostMemoryLedger == nil {
+				return false
+			}
+			left, right := *x.HostMemoryLedger, *y.HostMemoryLedger
+			left.CapturedAt, right.CapturedAt = time.Time{}, time.Time{}
+			left.ObservedAt, right.ObservedAt = time.Time{}, time.Time{}
+			if !reflect.DeepEqual(left, right) {
+				return false
+			}
+		}
+		for k, holder := range x.Holders {
+			other := y.Holders[k]
+			if (holder.SampleAgeSeconds == nil) != (other.SampleAgeSeconds == nil) || !slices.Equal(holder.Devices, other.Devices) {
+				return false
+			}
+			holder.SampleAgeSeconds, other.SampleAgeSeconds = nil, nil
+			holder.Devices, other.Devices = nil, nil
+			if !reflect.DeepEqual(holder, other) {
 				return false
 			}
 		}
