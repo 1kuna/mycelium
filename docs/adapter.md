@@ -1256,8 +1256,8 @@ Ordinary submissions below leave host/device choice to Mycelium.
 On an installed worker, run locally with the worker enrolled and its queue
 running. Authority, host ID, extension root (`state_dir/extensions`) and runtime
 check environment cache default to its installed configuration. `--config FILE`
-selects a custom installation; explicit `--host`, `--root` and
-`--environment-cache` override these defaults. Keep tokens out of argv and job
+selects a custom installation. An explicit `--host` must match the installed
+worker. Explicit `--root` and `--environment-cache` override their defaults. Keep tokens out of argv and job
 environments. Select the qualification platform and device explicitly:
 
 ```sh
@@ -1268,10 +1268,9 @@ myce extension list --gpu xpu --device 0
 
 Runtime check performs preparation through the enrolled worker before execution.
 For CPU qualification use `--gpu cpu` without `--device`. Without installed
-configuration, supply `--host` and `--environment-cache` as well, or start
-`myce dev` for automatic local defaults. For a manual join, use the same extension
-root for CLI and `join --extension-root`; a runtime check with a different root
-from the installed worker warns that it does not qualify the live worker.
+configuration, start `myce dev` for automatic local defaults and omit
+`--host`. A runtime check with a different root from the installed worker
+warns that it does not qualify the live worker.
 
 Flags precede the folder or `name@version`. `add` registers the frozen small
 folder with the queue and installs it locally. On another hypha use `add` again

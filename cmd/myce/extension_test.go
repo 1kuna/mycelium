@@ -22,6 +22,22 @@ import (
 	"mycelium/internal/myce"
 )
 
+func TestExtensionCheckRefusesRemoteHost(t *testing.T) {
+	config := filepath.Join(t.TempDir(), "worker.json")
+	if err := os.WriteFile(config, []byte(`{"role":"worker","host_id":"local-worker"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// The CLI test guard panics if a real hardware probe runs.
+	for _, path := range []string{config, config + ".missing"} {
+		err := extensionCommand([]string{"check", "--config", path, "--host", "other-worker", "--gpu", "cuda", "--device", "0", "fixture@1"})
+		for _, want := range []string{`runtime checks execute on the target host "other-worker"`, "installation owner", "submit the useful job so the queue runs native qualification"} {
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("remote refusal missing %q: %v", want, err)
+			}
+		}
+	}
+}
+
 func TestExtensionCLIComposition(t *testing.T) {
 	folder, root := t.TempDir(), t.TempDir()
 	description := fmt.Sprintf(`name: fixture.stage
@@ -96,8 +112,8 @@ variants:
 	}
 	workerState := filepath.Join(home, "worker-state")
 	workerCache := filepath.Join(home, "environment-cache")
-	// Explicit flags below must override these deliberately unusable defaults.
-	saved, _ := json.Marshal(myce.ServiceConfig{Role: "worker", State: workerState, HostID: "wrong-host", EnvironmentCache: filepath.Join(home, "wrong-cache"), Queue: production.URL, EnvironmentFile: tokenFile})
+	// Explicit flags below must override the deliberately unusable cache default.
+	saved, _ := json.Marshal(myce.ServiceConfig{Role: "worker", State: workerState, HostID: "cli-host", EnvironmentCache: filepath.Join(home, "wrong-cache"), Queue: production.URL, EnvironmentFile: tokenFile})
 	if err := os.WriteFile(config, saved, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +329,7 @@ func TestExtensionCLIInstalledPinnedAuthority(t *testing.T) {
 	if requests != 3 {
 		t.Fatalf("registration requests: %d", requests)
 	}
-	err := extensionCommand([]string{"check", "--root", root, "--host", "fixture-host", "fixture@1"})
+	err := extensionCommand([]string{"check", "--root", root, "fixture@1"})
 	if err == nil || !strings.Contains(err.Error(), "runtime check requires") || requests != 4 {
 		t.Fatalf("check authority: %v, requests=%d", err, requests)
 	}

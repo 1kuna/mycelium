@@ -47,7 +47,8 @@ func main() {
 	// Version is a read-only probe, including for older fleet helpers that
 	// decode combined stdout/stderr as JSON.
 	versionProbe := len(os.Args) > 1 && (os.Args[1] == "version" || os.Args[1] == "--version" || os.Args[1] == "-v")
-	if len(os.Args) > 1 && !versionProbe && !strings.HasPrefix(os.Args[1], "_") && os.Args[1] != "skill" && os.Args[1] != "resident" {
+	// Release tooling may invoke an unreleased candidate during assembly.
+	if len(os.Args) > 1 && os.Args[1] != "release" && !versionProbe && !strings.HasPrefix(os.Args[1], "_") && os.Args[1] != "skill" && os.Args[1] != "resident" {
 		localSkillInstaller(os.Stderr).refresh(localSkillDirs())
 	}
 	if err := run(os.Args[1:]); err != nil {

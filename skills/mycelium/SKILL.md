@@ -68,6 +68,12 @@ sizing. Use a pin only for a [hard requirement](references/submit.md#explicit-pl
   accelerator by default. For a compatible plain command, set
   `advanced: {allow_cpu_fallback: true}` only when CPU results are acceptable.
   For extension work, declare a CPU variant.
+- For an explicit exact-digest runtime check, run
+  `myce extension check --gpu PLATFORM --device DEVICE --digest SHA256 NAME@VERSION`
+  on the target worker as its installation owner. Omit `--device` for CPU.
+  From another host, submit the useful job with `extension: NAME@VERSION`,
+  `extension_digest: SHA256` and the required placement. The queue qualifies
+  the selected target before starting the job.
 - [Inputs, checkpoints and pieces](references/submit.md#inputs-checkpoints-and-pieces)
   covers `--input DEST=PATH`, verified local staging of `shared_inputs`,
   runtime bindings, `pieces:` and extension fan-out. Submit known later
