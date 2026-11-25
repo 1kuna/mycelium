@@ -4,9 +4,12 @@
   `docs/DECISIONS.md` holds the maintainer's rulings. Find current guides in
   [the docs index](docs/START-HERE.md#where-to-go-next).
 - Keep every feature easy to use and testable on a laptop with no GPU.
-- One binary, one SQLite queue, plain-command workers. No peer network,
-  leases, replicated registry, or restored v1 architecture. MY-40 records a
-  maintainer-directed shared-queue design study; the approved design still binds.
+- One binary, plain-command workers, no restored v1 architecture. The queue
+  is one SQLite queue until the approved shared-queue design
+  (docs/design-queue-beyond-one-host.md, MY-40) reaches its stage 3 cutover:
+  one PostgreSQL authority on the NAS, a renewable coordinator turn with a
+  handover number, and a local SQLite copy beside each worker. Build only
+  that design's stages; no peer voting or replicated payload files.
 - Queue and scheduling decisions use an injected `Clock`. Never call
   `time.Now` or `time.Sleep` directly in queue or scheduling logic.
 - Fake-clock unit tests cover scheduling, leave, loss, and retry decisions.
