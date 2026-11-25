@@ -451,7 +451,7 @@ func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, prog
 				continue
 			}
 			reply.Attempts = append(reply.Attempts, AttemptDirective{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Stop: true, Kill: expired(j.StopAt, q.clock.Now()), GraceSeconds: max(0, j.StopAt.Sub(q.clock.Now()).Seconds()), PriorityStop: priorityStop(j), UserCancel: cancelled(j)})
-		} else if !recovering && j.State == "running" && !j.ReleaseConfirmed && !q.maintenanceBlocked(hostID(m)) && logPolicyFits(j.Spec.Logs, m) && sharedInputsFit(j.Spec, m) && q.checkpointReady(j, m) {
+		} else if !recovering && j.State == "running" && !j.ReleaseConfirmed && !q.maintenanceBlocked(hostID(m)) && logPolicyFits(j.Spec.Logs, m) && workerDataFits(j.Spec, m) && sharedInputsFit(j.Spec, m) && q.checkpointReady(j, m) {
 			out := cloneJob(j)
 			out.LedgerEntries = nil
 			reply.Attempts = append(reply.Attempts, attemptOffer(&out))

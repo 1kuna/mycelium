@@ -251,8 +251,10 @@ the same private work tree and one attempt-private stdout/stderr log. Prepared
 environment caches, extension source/assets and model caches stay read-only and
 are retained. Those are software, not a channel for customer inputs: do not put
 customer data in environment recipes, extension bundles or authored settings.
-Declared outputs return through the queue file
-store even when checkpoint storage uses a NAS.
+Declared outputs return through the queue file store even when checkpoint
+storage uses a NAS. Use the same `advanced: {worker_data: ephemeral}` setting
+on an extension job with its ordinary extension selector and declared inputs
+and outputs.
 
 Supply payload through declared managed files. Command text, authored settings,
 logical filenames, hashes and numeric/control evidence are retained metadata;
@@ -299,9 +301,10 @@ Submission checks frozen extension variants as well as the job. It refuses
 program jobs/usage files, extension-check publication, catalog model servers,
 resident model runtimes,
 custom workdirs (including extension-owned workdirs), resumability,
-diagnostics/`keep_on_failure`, alternate output delivery and fleets with no
-supporting worker, with `job_worker_data_unsupported`. The worker rechecks the
-lowered execution before staging customer inputs.
+diagnostics/`keep_on_failure` and alternate output delivery. Submission
+returns `job_worker_data_unsupported` for those cases or when no worker
+permitted by the job and project advertises the required capability. The
+worker rechecks the lowered execution before staging customer inputs.
 Execution requires `worker_data_ephemeral_v2`: Linux PID/mount namespaces and
 a readable file core route, or the qualified Mycelium core router, and an exec
 helper that passed a core-limit probe. Snapshot-backed jobs also require

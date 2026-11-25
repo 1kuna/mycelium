@@ -5,10 +5,12 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -267,7 +269,7 @@ while :; do sleep .01; done
 }
 
 func TestEphemeralExtensionFrozenScopeRefusals(t *testing.T) {
-	for _, field := range []string{"workdir", "network"} {
+	for _, field := range []string{"workdir", "network", "unqualified worker"} {
 		t.Run(field, func(t *testing.T) {
 			e := compositionExtension(t, false)
 			v := &e.Variants[0]
@@ -284,15 +286,213 @@ func TestEphemeralExtensionFrozenScopeRefusals(t *testing.T) {
 			}
 			w := prepareExtensionTestWorker(t, q, e)
 			check(t, q, w.Machine, nil)
-			_, err := w.Client.Submit(context.Background(), Spec{Name: "unsupported", Project: "test", Extension: extensionKey(e), WorkerData: "ephemeral", Outputs: map[string]string{"out": "results"}})
+			s := Spec{Name: "unsupported", Project: "test", Extension: extensionKey(e), WorkerData: "ephemeral", Outputs: map[string]string{"out": "results"}}
+			if field == "unqualified worker" {
+				check(t, q, ephemeralMachine(), nil)
+				s.AllowedMachines = []string{w.Machine.ID}
+			}
+			_, err := w.Client.Submit(context.Background(), s)
 			var refusal *HTTPError
 			if !errors.As(err, &refusal) || refusal.Code != "job_worker_data_unsupported" {
 				t.Fatal(err)
 			}
-			message := map[string]string{"workdir": "{work}", "network": "offline", "resident": "resident model runtimes", "legacy-resident": "resident model runtimes"}[field]
+			message := map[string]string{"workdir": "{work}", "network": "offline", "unqualified worker": ephemeralCapability}[field]
 			if !strings.Contains(err.Error(), message) {
 				t.Fatal("imprecise refusal", err)
 			}
 		})
+	}
+}
+
+func TestEphemeralExtensionTransferFence(t *testing.T) {
+	for _, superseded := range []bool{false, true} {
+		t.Run(map[bool]string{false: "resume", true: "superseded"}[superseded], func(t *testing.T) {
+			ctx := context.Background()
+			e := compositionExtension(t, false)
+			q, _ := fixture(t)
+			if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
+				t.Fatal(err)
+			}
+			w := prepareExtensionTestWorker(t, q, e)
+			m := w.Machine
+			m.Capabilities = append(m.Capabilities, ephemeralCapability, nativeCICapability, "native_isolation_namespace")
+			m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 32
+			report := newExtensionReport(e, &m, "extension:"+e.Name)
+			report.Setup, report.Qualified, report.CheckID = true, true, "fixture-check"
+			m.ExtensionReports = []ExtensionReport{report}
+			machineCheck(t, q, m)
+
+			const payload = "private stage data"
+			_, input := retentionUpload(t, w.Client, payload)
+			queued := submit(t, q, Spec{Name: "stage", Project: "test", Priority: "experiment", Extension: extensionKey(e),
+				Advanced: &Advanced{WorkerData: "ephemeral"}, Files: FileManifest{"in.txt": input},
+				Outputs: map[string]string{"a.txt": "results", "b.txt": "results"}})
+			j := assignedJob(machineCheck(t, q, m))
+			if j == nil || j.ID != queued.ID || j.Extension == nil {
+				t.Fatal("qualified extension was not assigned", j)
+			}
+			unqualified := m
+			unqualified.Capabilities = slices.DeleteFunc(slices.Clone(m.Capabilities), func(c string) bool { return c == ephemeralCapability })
+			if offered := assignedJob(machineCheck(t, q, unqualified)); offered != nil {
+				t.Fatal("unqualified worker received a replayed assignment", offered.ID)
+			}
+			if offered := assignedJob(machineCheck(t, q, m)); offered == nil || jobKey(*offered) != jobKey(*j) {
+				t.Fatal("qualified worker could not recover the exact offer", offered)
+			}
+
+			root := &workerStore{dir: w.StateDir, state: workerState{Session: m.Session}}
+			store, err := newAttemptStore(root, *j)
+			if err != nil {
+				t.Fatal(err)
+			}
+			staged := *j
+			if err := w.prepareExtensionFilesContext(ctx, &staged, store.dir); err != nil {
+				t.Fatal(err)
+			}
+			work := attemptStorageRoot(*j, store.dir)
+			// Simulate completed members so transfer failure and stale outcomes
+			// run on Linux guests without qualified kernel/core routing too.
+			local := map[string]string{"in.txt": payload, "a.txt": payload + " A", "b.txt": payload + " B", ".scratch/step": payload, ".myce-extension/generated": payload}
+			for name, data := range local {
+				if name == "in.txt" {
+					continue // Exercised through actual queue-backed input staging.
+				}
+				writeEphemeralFixtureFile(t, filepath.Join(work, name), data)
+			}
+			store.state.Log = ephemeralLogName(*j)
+			logPath := filepath.Join(store.dir, store.state.Log)
+			writeEphemeralFixtureFile(t, logPath, payload)
+			result := Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session, Success: true}
+			store.state.Result = &result
+
+			var firstUploaded, secondBlocked atomic.Bool
+			publisher := w
+			publisher.Client.HTTP = &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
+				if r.Method != http.MethodPost || r.URL.Path != "/api/files/uploads/" {
+					return http.DefaultTransport.RoundTrip(r)
+				}
+				if firstUploaded.Load() {
+					secondBlocked.Store(true)
+					return nil, errors.New("second output transfer interrupted")
+				}
+				response, err := http.DefaultTransport.RoundTrip(r)
+				if err == nil && response.StatusCode == http.StatusCreated && response.Header.Get("Upload-Offset") != "" {
+					firstUploaded.Store(true)
+				}
+				return response, err
+			})}
+			if done, err := publisher.finishEphemeralAttempt(ctx, store, true); err == nil || done || !secondBlocked.Load() {
+				t.Fatal("expected a failed transfer after one real upload", done, err)
+			}
+			assertPayloadPresent := func() {
+				t.Helper()
+				for name, want := range local {
+					got, err := os.ReadFile(filepath.Join(work, name))
+					if err != nil || string(got) != want {
+						t.Fatal("touched private data before acceptance", name, err)
+					}
+				}
+				if _, err := os.Stat(logPath); err != nil {
+					t.Fatal("touched the local log before acceptance", err)
+				}
+			}
+			assertUnreleased := func() {
+				t.Helper()
+				assertPayloadPresent()
+				got := job(t, q, j.ID)
+				if store.state.WorkerDataAccepted || got.ReleaseConfirmed || len(got.OutputRefs) != 0 || cleanupComplete(got.WorkerDataCleanup) {
+					t.Fatal("partial transfer accepted or released", got.State, got.OutputRefs, got.WorkerDataCleanup)
+				}
+			}
+			assertUnreleased()
+
+			var replacement *Job
+			var replacementPath string
+			if superseded {
+				if err := q.update(func() error {
+					q.requeue(q.s.Jobs[j.ID], "fixture lost the previous worker", true)
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+				next := m
+				next.ID, next.HostID, next.Session = "replacement", "replacement", ID()
+				nextReport := report
+				nextReport.Host = next.HostID
+				next.ExtensionReports = []ExtensionReport{nextReport}
+				replacement = assignedJob(machineCheck(t, q, next))
+				if replacement == nil || replacement.ID != j.ID || replacement.Attempt <= j.Attempt {
+					t.Fatal("replacement extension attempt was not assigned", replacement)
+				}
+				replacementPath = filepath.Join(attemptStorageRoot(*replacement, store.dir), "in.txt")
+				writeEphemeralFixtureFile(t, replacementPath, payload)
+
+				// A mismatched command result cannot authorize deletion even
+				// locally. Restore the real old result before reconciling it.
+				mismatched := result
+				mismatched.Attempt = replacement.Attempt
+				store.state.Result = &mismatched
+				if done, err := w.finishEphemeralAttempt(ctx, store, true); err == nil || done {
+					t.Fatal("mismatched result accepted", done, err)
+				}
+				assertUnreleased()
+				store.state.Result = &result
+			} else {
+				// A failed local acceptance write must not leave a volatile
+				// acknowledgement that a retry can use as authority to unlink.
+				stateName := store.stateName
+				store.stateName = filepath.Join("missing-state-directory", stateName)
+				done, err := w.finishEphemeralAttempt(ctx, store, true)
+				store.stateName = stateName
+				got := job(t, q, j.ID)
+				if err == nil || done || store.state.WorkerDataAccepted || got.State != "succeeded" || got.ReleaseConfirmed {
+					t.Fatal("local acceptance write failure did not retain custody", done, err, got.State)
+				}
+				assertPayloadPresent()
+			}
+
+			if done, err := w.finishEphemeralAttempt(ctx, store, true); err != nil || !done {
+				t.Fatal("could not reconcile exact attempt", done, err)
+			}
+			got := job(t, q, j.ID)
+			receipt := got.AttemptHistory[0].WorkerDataCleanup
+			if !cleanupComplete(receipt) || receipt.Execution != result.Execution || receipt.Machine != j.Machine || receipt.Session != j.Session {
+				t.Fatal("missing exact cleanup receipt", receipt)
+			}
+			for _, name := range []string{ephemeralRoot(store.dir, *j), logPath} {
+				if _, err := os.Lstat(name); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("old payload still present", name, err)
+				}
+			}
+			if superseded {
+				data, err := os.ReadFile(replacementPath)
+				if err != nil || string(data) != payload || got.Attempt != replacement.Attempt || got.ReleaseConfirmed || cleanupComplete(got.WorkerDataCleanup) || len(got.OutputRefs) != 0 {
+					t.Fatal("stale result affected the replacement", got.State, got.OutputRefs, got.WorkerDataCleanup, err)
+				}
+				return
+			}
+			if !got.ReleaseConfirmed || got.State != "succeeded" || len(got.OutputRefs) != 2 {
+				t.Fatal("result was not verified before release", got.State, got.OutputRefs, got.WorkerDataCleanup)
+			}
+			for name, ref := range got.OutputRefs {
+				dest := filepath.Join(t.TempDir(), name)
+				if err := w.Client.DownloadFile(ctx, ref, dest); err != nil {
+					t.Fatal(err)
+				}
+				if data, err := os.ReadFile(dest); err != nil || string(data) != local[name] {
+					t.Fatal("accepted output changed", name, err)
+				}
+			}
+		})
+	}
+}
+
+func writeEphemeralFixtureFile(t *testing.T, path, data string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
 	}
 }
