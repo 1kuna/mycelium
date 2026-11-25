@@ -663,6 +663,10 @@ func respond(w http.ResponseWriter, v any, err error) {
 	}
 	if err != nil {
 		status := http.StatusBadRequest
+		var writeFailure queueWriteError
+		if errors.As(err, &writeFailure) {
+			status = http.StatusServiceUnavailable
+		}
 		if errors.Is(err, ErrStale) {
 			status = http.StatusConflict
 		}
@@ -1033,7 +1037,8 @@ func workerProtocolEndpoint(path string) bool {
 func respondOperation(w http.ResponseWriter, v any, err error, code string) {
 	var rule *rejectionError
 	var api *HTTPError
-	if err != nil && !errors.Is(err, ErrStale) && !errors.As(err, &rule) && !errors.As(err, &api) {
+	var writeFailure queueWriteError
+	if err != nil && !errors.Is(err, ErrStale) && !errors.As(err, &rule) && !errors.As(err, &api) && !errors.As(err, &writeFailure) {
 		err = reject(code, err)
 	}
 	respond(w, v, err)

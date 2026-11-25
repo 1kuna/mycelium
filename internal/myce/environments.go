@@ -3,7 +3,6 @@ package myce
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -1762,46 +1761,23 @@ func (q *Queue) AppendEnvironmentLog(l EnvironmentLog, requestContexts ...contex
 	if len(l.Key) != 64 || l.Offset <= 0 || len(l.Text) > 16384 {
 		return errors.New("invalid environment log chunk")
 	}
-	tx, e := q.db.Begin()
-	if e != nil {
-		return e
-	}
-	defer tx.Rollback()
-	if _, e = tx.Exec("INSERT OR IGNORE INTO environment_build_logs(machine,session,key,offset,text) VALUES(?,?,?,?,?)", l.Machine, l.Session, l.Key, l.Offset, l.Text); e != nil {
-		return e
-	}
+	var batch queueWriteBatch
+	batch.add("INSERT OR IGNORE INTO environment_build_logs(machine,session,key,offset,text) VALUES(?,?,?,?,?)", l.Machine, l.Session, l.Key, l.Offset, l.Text)
 	for _, j := range q.liveJobs() {
-		if j.State == "queued" {
-			for _, target := range q.machineTargets(m) {
-				if environmentKey(j, target) == l.Key {
-					if e = insertEnvironmentJobLog(tx, j, l); e != nil {
-						return e
-					}
-					break
-				}
+		if j.State != "queued" || j.Spec.Logs == "none" {
+			continue
+		}
+		for _, target := range q.machineTargets(m) {
+			if environmentKey(j, target) == l.Key {
+				batch.add("INSERT OR IGNORE INTO environment_log_offsets(job,machine,session,key,offset) VALUES(?,?,?,?,?)", j.ID, l.Machine, l.Session, l.Key, l.Offset)
+				batch.add("INSERT INTO logs(job,attempt,text) SELECT ?,0,? WHERE changes()=1", j.ID, l.Text)
+				break
 			}
 		}
 	}
-	return tx.Commit()
+	return q.writeQueue(&batch, nil, nil, queueWriteLocked)
 }
-func insertEnvironmentJobLog(tx *sql.Tx, j *Job, l EnvironmentLog) error {
-	if j.Spec.Logs == "none" {
-		return nil
-	}
-	id := j.ID
-	res, e := tx.Exec("INSERT OR IGNORE INTO environment_log_offsets(job,machine,session,key,offset) VALUES(?,?,?,?,?)", id, l.Machine, l.Session, l.Key, l.Offset)
-	if e != nil {
-		return e
-	}
-	n, e := res.RowsAffected()
-	if e != nil {
-		return e
-	}
-	if n > 0 {
-		_, e = tx.Exec("INSERT INTO logs(job,attempt,text) VALUES(?,0,?)", id, l.Text)
-	}
-	return e
-}
+
 func syncEnvironmentFiles(root string) error {
 	dirs := []string{}
 	e := filepath.WalkDir(root, func(p string, d os.DirEntry, e error) error {

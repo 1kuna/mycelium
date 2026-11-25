@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"maps"
 	"reflect"
 	"time"
 )
@@ -8,15 +9,16 @@ import (
 // Retain efficiency readings until their own validity ends; a clean close
 // flushes the latest integral. Launch-drift histories no longer size first runs.
 type historySnapshot struct {
-	efficiency map[string]EfficiencyHost
+	efficiency        map[string]EfficiencyHost
+	contacts          map[string]contactEvidence
+	lastWorkerContact time.Time
 }
 
-func cloneHistories(efficiency map[string]EfficiencyHost) *historySnapshot {
-	h := &historySnapshot{}
-	if efficiency != nil {
-		h.efficiency = copyObservationValue(reflect.ValueOf(efficiency)).Interface().(map[string]EfficiencyHost)
+func cloneEfficiencyHistory(efficiency map[string]EfficiencyHost) map[string]EfficiencyHost {
+	if efficiency == nil {
+		return nil
 	}
-	return h
+	return copyObservationValue(reflect.ValueOf(efficiency)).Interface().(map[string]EfficiencyHost)
 }
 
 // persistentBase is the state root as SQLite should hold it. It also stages
@@ -25,17 +27,31 @@ func (q *Queue) persistentBase() state {
 	base := queueBase(q.s, false)
 	q.historiesPending = nil
 	if q.persisted == nil || q.histories == nil || q.flushHistoriesNow {
-		q.historiesPending = cloneHistories(q.s.EfficiencyHosts)
+		q.historiesPending = &historySnapshot{
+			efficiency: cloneEfficiencyHistory(q.s.EfficiencyHosts),
+			contacts:   maps.Clone(q.s.ContactEvidence), lastWorkerContact: q.s.LastWorkerContact,
+		}
 		return base
 	}
 	writeEfficiency := efficiencyNeedsWrite(q.histories.efficiency, q.s.EfficiencyHosts, q.clock.Now())
+	// Keep restart evidence without treating every accepted heartbeat as a
+	// durable change. One restart window bounds how far its contact checkpoint
+	// can lag. During recovery a saved report never substitutes for live contact.
+	writeContacts := q.s.LastWorkerContact.After(q.histories.lastWorkerContact) &&
+		q.s.LastWorkerContact.Sub(q.histories.lastWorkerContact) >= RestartGrace
 	stored := q.histories
-	if writeEfficiency {
+	if writeEfficiency || writeContacts {
 		next := *q.histories
-		next.efficiency = cloneHistories(q.s.EfficiencyHosts).efficiency
+		if writeEfficiency {
+			next.efficiency = cloneEfficiencyHistory(q.s.EfficiencyHosts)
+		}
+		if writeContacts {
+			next.contacts, next.lastWorkerContact = maps.Clone(q.s.ContactEvidence), q.s.LastWorkerContact
+		}
 		q.historiesPending, stored = &next, &next
 	}
 	base.EfficiencyHosts = stored.efficiency
+	base.ContactEvidence, base.LastWorkerContact = stored.contacts, stored.lastWorkerContact
 	return base
 }
 
@@ -53,21 +69,18 @@ func (q *Queue) flushHistories() error {
 	if q.db == nil || q.simulation || q.persisted == nil || q.histories == nil || q.records == nil {
 		return nil
 	}
-	if !efficiencyNeedsWrite(q.histories.efficiency, q.s.EfficiencyHosts, time.Time{}) {
+	if !efficiencyNeedsWrite(q.histories.efficiency, q.s.EfficiencyHosts, time.Time{}) &&
+		q.histories.lastWorkerContact.Equal(q.s.LastWorkerContact) && maps.Equal(q.histories.contacts, q.s.ContactEvidence) {
 		return nil
 	}
 	q.flushHistoriesNow = true
 	defer func() { q.flushHistoriesNow, q.historiesPending = false, nil }()
-	tx, err := q.db.Begin()
+	var batch queueWriteBatch
+	next, err := q.prepareStateWrite(&batch, &queuePersistenceTiming{}, false)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
-	next, err := q.persistState(tx, &queuePersistenceTiming{})
-	if err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
+	if err := q.writeQueue(&batch, nil, nil, queueWriteLocked); err != nil {
 		return err
 	}
 	q.commitPersistenceRoot(next)

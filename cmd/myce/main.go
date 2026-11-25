@@ -294,6 +294,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	debugListen := f.String("debug-listen", "", "optional loopback-only queue profiling address (disabled by default)")
 	address := f.String("listen", "127.0.0.1:7331", "queue listen address")
 	db := f.String("db", "myce-state/myce.db", "SQLite database file")
+	queueCommitUnderLock := f.Bool("queue-commit-under-lock", false, "temporarily commit queue changes under the queue lock")
 	uploadSpoolDir := f.String("upload-spool-dir", "", "queue model-upload directory (default private directory beside DB)")
 	logRetention := f.Duration("log-retention", myce.DefaultLogRetention, "retention of completed batch and inactive model-server logs")
 	uploadSpoolBytes := f.Int64("upload-spool-bytes", myce.DefaultUploadSpoolBytes, "total model-upload bytes (-1: measured free disk capacity)")
@@ -604,7 +605,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if *checkpointExpiryGrace <= 0 {
 			return errors.New("checkpoint-expiry-grace must be positive")
 		}
-		q, err := myce.Open(*db, *checkpoint, myce.RealClock{}, myce.WithStartupTrace(queueStartupTrace(myce.RealClock{}, log.Printf)), myce.WithCheckpointShards(), myce.WithFileStoreProductionReserve(*fileStoreProductionReserve), myce.WithFileStore(*fileStore, *fileStoreLimit, !nasConfigured), myce.WithOutputDeliveryRoot(*outputDeliveryRoot), myce.WithHealthStorageDelay(*healthStorageDelay), myce.WithCheckpointExpiryGrace(*checkpointExpiryGrace))
+		q, err := myce.Open(*db, *checkpoint, myce.RealClock{}, myce.WithStartupTrace(queueStartupTrace(myce.RealClock{}, log.Printf)), myce.WithQueueCommitUnderLock(*queueCommitUnderLock), myce.WithCheckpointShards(), myce.WithFileStoreProductionReserve(*fileStoreProductionReserve), myce.WithFileStore(*fileStore, *fileStoreLimit, !nasConfigured), myce.WithOutputDeliveryRoot(*outputDeliveryRoot), myce.WithHealthStorageDelay(*healthStorageDelay), myce.WithCheckpointExpiryGrace(*checkpointExpiryGrace))
 		if err != nil {
 			return err
 		}

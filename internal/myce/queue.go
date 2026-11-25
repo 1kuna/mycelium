@@ -289,6 +289,8 @@ type Queue struct {
 	persistedStateSize      int                        // Logical JSON size for evidence accounting; q.mu.
 	flushHistoriesNow       bool
 	observePersistence      func(queuePersistenceTiming)
+	observeQueueRow         func(string, []any)
+	inLockCommit            bool // One-release fallback, set at Open.
 	observePersistenceHold  func(queueHoldPhases)
 	maintenance             *queueMaintenance
 	observeBodyPhase        func(string, time.Duration) // Optional diagnostic observer; never changes decisions.
@@ -319,6 +321,12 @@ type QueueOption func(*Queue)
 // The observer runs before serving requests, outside queue transactions.
 func WithStartupTrace(trace func(string)) QueueOption {
 	return func(q *Queue) { q.startupTrace = trace }
+}
+
+// WithQueueCommitUnderLock selects the one-release SQLite rollback path.
+// Both paths write the same rows and can open the same database.
+func WithQueueCommitUnderLock(enabled bool) QueueOption {
+	return func(q *Queue) { q.inLockCommit = enabled }
 }
 
 func (q *Queue) traceStartup(phase string) {
@@ -2978,30 +2986,16 @@ func (q *Queue) appendLogs(chunks []LogChunk, requestCtx context.Context) error 
 	if j.Spec.Logs == "none" {
 		return nil
 	}
-	tx, err := q.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
+	var batch queueWriteBatch
 	for _, l := range chunks {
 		if l.Offset > 0 {
-			res, err := tx.Exec("INSERT OR IGNORE INTO log_offsets(job,attempt,offset) VALUES(?,?,?)", l.ID, l.Attempt, l.Offset)
-			if err != nil {
-				return err
-			}
-			n, err := res.RowsAffected()
-			if err != nil {
-				return err
-			}
-			if n == 0 {
-				continue
-			}
-		}
-		if _, err = tx.Exec("INSERT INTO logs(job,attempt,text) VALUES(?,?,?)", l.ID, l.Attempt, l.Text); err != nil {
-			return err
+			batch.add("INSERT OR IGNORE INTO log_offsets(job,attempt,offset) VALUES(?,?,?)", l.ID, l.Attempt, l.Offset)
+			batch.add("INSERT INTO logs(job,attempt,text) SELECT ?,?,? WHERE changes()=1", l.ID, l.Attempt, l.Text)
+		} else {
+			batch.add("INSERT INTO logs(job,attempt,text) VALUES(?,?,?)", l.ID, l.Attempt, l.Text)
 		}
 	}
-	if err = tx.Commit(); err != nil {
+	if err := q.writeQueue(&batch, nil, nil, queueWriteLocked); err != nil {
 		return err
 	}
 	if m := q.s.Machines[l.Machine]; m != nil && m.Session == l.Session {

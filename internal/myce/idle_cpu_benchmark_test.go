@@ -4,6 +4,8 @@ package myce
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime/pprof"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -134,10 +137,46 @@ func BenchmarkQueueIdleTraffic(b *testing.B) {
 		b.Fatal(err)
 	}
 	var persistence queuePersistenceTiming
+	var commits, checkinHolds []time.Duration
+	pending, classes := map[string]int{}, map[string]*idleWriteRate{}
+	q.observeQueueRow = func(query string, args []any) {
+		if !strings.HasPrefix(query, "INSERT") {
+			return
+		}
+		class := idleWriteClass(query, args)
+		for _, arg := range args {
+			switch v := arg.(type) {
+			case string:
+				pending[class] += len(v)
+			case []byte:
+				pending[class] += len(v)
+			case json.RawMessage:
+				pending[class] += len(v)
+			case int, int64, float64:
+				pending[class] += 8
+			}
+		}
+	}
 	q.observePersistence = func(p queuePersistenceTiming) {
 		persistence.Bytes += p.Bytes
 		persistence.Records += p.Records
 		persistence.Commit += p.Commit
+		if p.Commit > 0 {
+			commits = append(commits, p.Commit)
+			for class, size := range pending {
+				if classes[class] == nil {
+					classes[class] = &idleWriteRate{}
+				}
+				classes[class].bytes += size
+				classes[class].commits++
+			}
+		}
+		clear(pending)
+	}
+	q.observePersistenceHold = func(p queueHoldPhases) {
+		if p.checkinBody {
+			checkinHolds = append(checkinHolds, p.duration())
+		}
 	}
 	stopProfile := idleCPUProfile(b)
 	defer stopProfile()
@@ -167,6 +206,13 @@ func BenchmarkQueueIdleTraffic(b *testing.B) {
 	b.ReportMetric(float64(persistence.Bytes)/elapsed.Seconds(), "payload-B/s")
 	b.ReportMetric(float64(persistence.Records)/elapsed.Seconds(), "records/s")
 	b.ReportMetric(float64(persistence.Commit)/float64(time.Millisecond)/elapsed.Seconds(), "commit-ms/s")
+	b.ReportMetric(float64(len(commits))/elapsed.Seconds(), "commits/s")
+	for class, rate := range classes {
+		b.ReportMetric(float64(rate.bytes)/elapsed.Seconds(), class+"-B/s")
+		b.ReportMetric(float64(rate.commits)/elapsed.Seconds(), class+"-commits/s")
+	}
+	samples["checkin-mutex"] = checkinHolds
+	samples["sqlite-commit"] = commits
 	for name, durations := range samples {
 		if len(durations) == 0 {
 			b.Errorf("no completed %s requests", name)
@@ -178,6 +224,35 @@ func BenchmarkQueueIdleTraffic(b *testing.B) {
 			index := (len(durations)*pct+99)/100 - 1
 			b.ReportMetric(float64(durations[index])/float64(time.Millisecond), fmt.Sprintf("%s-p%d-ms", name, pct))
 		}
+	}
+}
+
+type idleWriteRate struct{ bytes, commits int }
+
+func idleWriteClass(query string, args []any) string {
+	if strings.HasPrefix(query, "INSERT INTO usage_samples") {
+		return "usage"
+	}
+	if !strings.HasPrefix(query, "INSERT INTO queue_state") {
+		return "other"
+	}
+	key := args[0].(string)
+	if parts := strings.SplitN(key, "/", 3); len(parts) == 3 && parts[0] == "fields" {
+		logical, _ := base64.RawURLEncoding.DecodeString(parts[1])
+		field, _ := base64.RawURLEncoding.DecodeString(parts[2])
+		if string(field) == "admission_wait" {
+			return "wait"
+		}
+		key = string(logical)
+	}
+	group, _, _ := strings.Cut(key, "/")
+	switch group {
+	case "jobs", "submissions", "machines", "state", "health_events":
+		return group
+	case "work_observations", "storage_observations", "external_memory":
+		return "learned"
+	default:
+		return "other"
 	}
 }
 

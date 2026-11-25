@@ -85,6 +85,7 @@ type queueUpdateTiming struct {
 	// Instruction polls opt in to distinguish pool acquisition from work.
 	measureWriter bool
 	writerWait    time.Duration
+	offLock       time.Duration
 	persistence   queuePersistenceTiming
 }
 
@@ -163,7 +164,7 @@ func (t *queueUpdateTiming) logLaunch(ok bool) {
 // Optional internal observer used by the queue-history burst regression.
 func (t *queueUpdateTiming) observe(fn func(time.Duration, time.Duration)) {
 	if fn != nil {
-		fn(t.mutexWait, time.Since(t.lockedAt))
+		fn(t.mutexWait, time.Since(t.lockedAt)-t.offLock)
 	}
 }
 
@@ -173,6 +174,7 @@ type queueHoldPhases struct {
 	persistence   queuePersistenceTiming
 	clock         Clock
 	started, last time.Time
+	offLock       time.Duration
 	active        int
 	phases        [5]time.Duration
 	checkinBody   bool
@@ -264,8 +266,20 @@ func (p *queueHoldPhases) finish() time.Duration {
 		return 0
 	}
 	p.next(p.active)
-	return p.last.Sub(p.started)
+	return p.duration()
 }
+
+func (p *queueHoldPhases) pause() { p.next(p.active) }
+
+func (p *queueHoldPhases) resume() {
+	if !p.started.IsZero() {
+		now := holdNow(p.clock)
+		p.offLock += now.Sub(p.last)
+		p.last = now
+	}
+}
+
+func (p *queueHoldPhases) duration() time.Duration { return p.last.Sub(p.started) - p.offLock }
 
 // Body timers run inside a transaction or an explicitly observed diagnostic
 // fixture. Only the existing slow-hold logger emits them, after unlocking.
