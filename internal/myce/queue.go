@@ -3054,6 +3054,7 @@ func cloneJob(j *Job) Job {
 		out.Spec.Files = maps.Clone(j.Spec.Files)
 	}
 	out.LedgerEntries = j.LedgerEntries
+	out.gpuSharingRun = j.gpuSharingRun // Immutable and replaced on every change.
 	return out
 }
 func cloneMachine(m *Machine) Machine {
@@ -3379,7 +3380,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j.LaunchTimings = nil
 	j.InputsStagedAt = nil
 	j.Timing = nil
-	j.GPUSharingRun = nil
+	j.gpuSharingRun = nil
 	j.ApplicationProgress = nil
 	j.Liveness = nil
 	now := q.clock.Now()

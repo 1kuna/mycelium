@@ -105,7 +105,7 @@ type gpuSharingRun struct {
 }
 
 func currentSharingRun(j *Job) *gpuSharingRun {
-	r := j.GPUSharingRun
+	r := j.gpuSharingRun
 	if r != nil && r.Execution == (Execution{ID: j.ID, Attempt: j.Attempt}) && r.Session == j.Session {
 		return r
 	}
@@ -113,7 +113,7 @@ func currentSharingRun(j *Job) *gpuSharingRun {
 }
 
 func (q *Queue) beginGPUSharingRun(j *Job) {
-	j.GPUSharingRun = nil
+	j.gpuSharingRun = nil
 	if j.Spec.Needs.cpuOnly() || q.memoryEvidence == nil {
 		return
 	}
@@ -136,24 +136,24 @@ func (q *Queue) beginGPUSharingRun(j *Job) {
 		comparable = false
 		if other != nil {
 			q.touchJob(holder.ID)
-			holder.GPUSharingRun = nil
+			holder.gpuSharingRun = nil
 		}
 	}
 	if !comparable || q.gpuSharingCompetingCustody(m) {
 		if peer != nil {
 			q.touchJob(peer.ID)
-			peer.GPUSharingRun = nil
+			peer.gpuSharingRun = nil
 		}
 		return
 	}
 	run := &gpuSharingRun{Key: key, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session}
 	if peer != nil {
 		q.touchJob(peer.ID)
-		other := *peer.GPUSharingRun
+		other := *peer.gpuSharingRun
 		run.Peer, other.Peer = other.Execution, run.Execution
-		peer.GPUSharingRun = &other
+		peer.gpuSharingRun = &other
 	}
-	j.GPUSharingRun = run
+	j.gpuSharingRun = run
 }
 
 func (q *Queue) gpuSharingCompetingCustody(m *Machine) bool {
@@ -180,7 +180,7 @@ func (q *Queue) gpuSharingCompetingCustody(m *Machine) bool {
 // or unmeasured member cannot teach a shared throughput result.
 func (q *Queue) recordGPUSharingRun(j *Job, result Result) {
 	run := currentSharingRun(j)
-	j.GPUSharingRun = nil
+	j.gpuSharingRun = nil
 	if run == nil || q.memoryEvidence == nil || j.StartedAt == nil || j.State != "running" ||
 		!result.Success || result.ReleasePending || result.Interrupted || result.Forced || result.OutOfMemory ||
 		result.MemoryPeak == nil || result.MemoryPeak.constrained() || pooledSampleLimited(result.MemoryPeak) {
@@ -219,7 +219,7 @@ func (q *Queue) recordGPUSharingRun(j *Job, result Result) {
 	if peer.StartedAt.Before(next.PairStart) {
 		next.PairStart = *peer.StartedAt
 	}
-	peer.GPUSharingRun = &next
+	peer.gpuSharingRun = &next
 }
 
 func (q *Queue) observeGPUSharing(key gpuSharingKey, seconds float64, paired bool) {

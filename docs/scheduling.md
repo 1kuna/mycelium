@@ -447,7 +447,8 @@ On a unified-memory GPU, a work family runs one batch attempt at a time on a
 device once measured sharing lowers its throughput. Mycelium compares the
 latest clean two-run overlap (time from first start to last finish) with twice
 the median of up to 20 recent solo durations. Each run needs an accepted
-completion and a clean measured memory peak. The comparison stays with the
+completion and a clean measured memory peak. Queue restarts preserve completed
+measurements. The comparison stays with the
 physical device and its reported hardware and software identity, and updates
 with new observations. Plain commands group by project and name. Extensions
 group by project, extension digest and work type. A declared workload also

@@ -166,6 +166,5 @@ type attemptKey struct {
 func (k attemptKey) matches(e Execution) bool { return k.job == e.ID && k.attempt == e.Attempt }
 
 func attemptOffer(j *Job) AttemptDirective {
-	j.GPUSharingRun = nil // Queue-owned learning evidence.
 	return AttemptDirective{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Job: j}
 }
