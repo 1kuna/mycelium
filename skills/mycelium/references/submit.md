@@ -272,7 +272,9 @@ restore. Each save writes a temporary file in `$MYCE_CHECKPOINT_DIR`, fsyncs and
 renames it, carrying a rising `myce_checkpoint.generation`; Python's
 `Checkpoint` does this, and `StopSignal` sets a flag on SIGTERM so you save
 between work units. Checkpoints are not results and not an input cache: a
-checkpoint is kept 72 hours after the job ends. A disposable non-resumable
+checkpoint is kept 72 hours after the job ends. Expiry removes the checkpoint
+from its readable path. Declare retained outputs for anything you need longer.
+A disposable non-resumable
 experiment may declare `preemptible: true` so it can leave a scarce host by
 restarting from scratch (MY-26); class alone never implies it. See
 [checkpoints](https://github.com/1kuna/mycelium/blob/main/docs/files.md#resumable-jobs).

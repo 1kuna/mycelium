@@ -72,6 +72,9 @@ func TestCheckpointExpiryUsesSettledRecordsAndClaims(t *testing.T) {
 	if v := check(t, q, one, nil); len(v.CheckpointExpiries) != 0 {
 		t.Fatal("expiry sent to a worker that did not advertise the protocol")
 	}
+	if v, err := q.Checkin(Checkin{Machine: one, period: time.Second, CheckpointExpiryProtocol: "checkpoint-expiry-v1"}); err != nil || len(v.CheckpointExpiries) != 0 {
+		t.Fatalf("legacy worker got mounted-share delete tasks: %v, %v", v.CheckpointExpiries, err)
+	}
 	tasks := expiryCheckin(t, q, one)
 	want := []string{jobs["legacy"].ID, jobs["succeeded"].ID}
 	slices.Sort(want)
@@ -127,7 +130,7 @@ func TestCheckpointExpiryUsesSettledRecordsAndClaims(t *testing.T) {
 	}
 }
 
-func TestWorkerCheckpointExpiryRemovesOnlyVerifiedJobFolders(t *testing.T) {
+func TestWorkerCheckpointExpiryMovesOnlyVerifiedJobFolders(t *testing.T) {
 	root := t.TempDir()
 	id, flat := "ab0123456789abcdef0123456789abcd", "cd0123456789abcdef0123456789abcd"
 	sharded := filepath.Join(root, "ab", id)
@@ -182,20 +185,52 @@ func TestWorkerCheckpointExpiryRemovesOnlyVerifiedJobFolders(t *testing.T) {
 			t.Fatalf("%s not removed", gone)
 		}
 	}
+	for id, attempt := range map[string]string{id: "attempt-1", flat: "attempt-2"} {
+		if _, err := os.Stat(filepath.Join(root, checkpointPurgeDirectory, id, attempt)); err != nil {
+			t.Fatalf("checkpoint contents not preserved for storage-local purge: %v", err)
+		}
+	}
+	if r := run(CheckpointExpiry{ID: id, Path: "ab/" + id}); !r[0].Removed {
+		t.Fatalf("successful handoff was not replayable: %+v", r)
+	}
 	if _, err := os.Stat(outside); err != nil {
 		t.Fatal("symlinked shard target removed")
 	}
 
-	w.checkpointExpiry.remove = func(string) error { return errors.New("busy") }
 	writeSave(t, sharded, "1")
-	if r := run(CheckpointExpiry{ID: id, Path: "ab/" + id}); r[0].Removed || r[0].Error != "remove_failed" {
-		t.Fatalf("failed removal reported as %+v", r)
+	if r := run(CheckpointExpiry{ID: id, Path: "ab/" + id}); r[0].Removed || r[0].Error != "purge_destination_unavailable" {
+		t.Fatalf("existing purge destination reported as %+v", r)
+	}
+	other := "abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	otherPath := filepath.Join(root, "ab", other)
+	writeSave(t, otherPath, "3")
+	w.checkpointExpiry.rename = func(string, string) error { return errors.New("busy") }
+	if r := run(CheckpointExpiry{ID: other, Path: "ab/" + other}); r[0].Removed || r[0].Error != "handoff_failed" {
+		t.Fatalf("failed handoff reported as %+v", r)
+	}
+	if _, err := os.Stat(otherPath); err != nil {
+		t.Fatalf("failed rename changed the source: %v", err)
+	}
+	purge := filepath.Join(root, checkpointPurgeDirectory)
+	if err := os.Rename(purge, purge+".saved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), purge); err != nil {
+		t.Fatal(err)
+	}
+	w.checkpointExpiry.rename = os.Rename
+	if r := run(CheckpointExpiry{ID: other, Path: "ab/" + other}); r[0].Removed || r[0].Error != "purge_directory_unavailable" {
+		t.Fatalf("symlinked purge directory reported as %+v", r)
 	}
 
 	// Reports wait for the queue's advertisement and leave only once acknowledged.
 	w.checkpointExpiry.supported = false
 	if c, sent := w.checkpointExpiryCheckin(Checkin{}); sent != 0 || c.CheckpointExpiryProtocol != "" {
 		t.Fatal("reports sent before the queue advertised the protocol")
+	}
+	w.acceptCheckpointExpiryReply(0, Reply{CheckpointExpiryProtocol: "checkpoint-expiry-v1"})
+	if c, sent := w.checkpointExpiryCheckin(Checkin{}); sent != 0 || c.CheckpointExpiryProtocol != "" {
+		t.Fatal("worker opted into expiry on a legacy queue")
 	}
 	w.acceptCheckpointExpiryReply(0, Reply{CheckpointExpiryProtocol: checkpointExpiryProtocol})
 	c, sent := w.checkpointExpiryCheckin(Checkin{})
@@ -307,7 +342,7 @@ func TestCheckpointExpiryDatesLegacyRecords(t *testing.T) {
 }
 
 // Refused attempts may have left completed copies or unpublished .tmp copies
-// before #1607. Expiry removes the entire settled job root, independent of an
+// before #1607. Expiry moves the entire settled job root, independent of an
 // attempt having a save, a history entry, or a successful Started hand-off.
 func TestCheckpointExpiryReclaimsOrphanedAttemptCopies(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)}
@@ -343,19 +378,17 @@ func TestCheckpointExpiryReclaimsOrphanedAttemptCopies(t *testing.T) {
 	if len(tasks) != 1 || tasks[0].ID != j.ID {
 		t.Fatal("orphan copies omitted from retention", tasks)
 	}
-	removed := 0
-	report := expireCheckpoint(root, tasks[0], func(path string) error {
-		removed++
-		if path != j.Checkpoint {
-			t.Fatal("not the whole owned job root", path)
-		}
-		return os.RemoveAll(path)
-	})
-	if !report.Removed || removed != 1 {
-		t.Fatal("orphan copies not reclaimed", report)
+	report := expireCheckpoint(root, tasks[0], os.Rename)
+	if !report.Removed {
+		t.Fatal("orphan copies not handed off", report)
 	}
 	if _, err := os.Stat(j.Checkpoint); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("orphan copy survived retention", err)
+		t.Fatal("original job folder survived expiry", err)
+	}
+	for _, name := range []string{"attempt-1", "attempt-2", "attempt-99", ".myce-prepare-orphan.tmp"} {
+		if _, err := os.Stat(filepath.Join(root, checkpointPurgeDirectory, j.ID, name, "pool.bin")); err != nil {
+			t.Fatalf("whole directory not preserved for storage-local purge: %v", err)
+		}
 	}
 	expiryCheckin(t, q, worker, report)
 	if job(t, q, j.ID).CheckpointExpired == nil {

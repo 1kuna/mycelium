@@ -1267,20 +1267,18 @@ attempt ends, stops and releases, cancellation and ledger events, then starts,
 assignment, waiting and submission. That never places the end before any recorded
 activity. A record with no timestamp at all is kept, and `myce status`
 counts it under `checkpoint_expiry.undated` in the storage section, beside
-`waiting` (settled folders waiting for their grace period or a worker). The queue picks
-due jobs from its in-memory records, never from directory scans, and gives a worker that advertises
-`checkpoint-expiry-v1` up to 8 job folders at a time. The worker removes them in
-the background, off the queue lock, and reports each removal. The queue records
-`checkpoint_expired` on the job, which survives restart. A worker removes nothing
-unless the root contains the queue's marker, so an empty local mountpoint never
-counts as the share. It refuses any path other than the job's own flat or
-sharded folder and never follows a symlinked shard. A failed or unfinished
-removal is reissued after 30 minutes, or sooner if that worker restarts or
-leaves. Jobs never assigned an attempt, and file-store checkpoints, which file retention
-already governs, are not touched. The whole settled job folder is removed,
-including orphaned `attempt-N` copies and unpublished preparation `.tmp` folders;
-their own timestamps, generations and presence in attempt history do not extend
-the 72-hour window.
+`waiting` (settled folders waiting for their grace period or a worker). The queue
+picks due jobs from its in-memory records and gives a worker that advertises
+`checkpoint-expiry-v2` up to eight job folders at a time. The worker atomically
+renames each complete folder into the checkpoint root's purge directory so
+expiry creates no recycle-bin entries on mounted shares. The durable job field
+`checkpoint_expired` confirms the original path is gone. For reclamation and
+rollout, see [checkpoint purge](operations.md#shared-checkpoint-purge).
+The worker requires the queue's root marker and the job's own flat or sharded
+path. Failed or unfinished handoffs are retried after 30 minutes, or sooner if
+that worker restarts or leaves. Jobs never assigned an attempt and file-store
+checkpoints use their existing lifecycle. Orphaned `attempt-N` copies and
+unpublished preparation `.tmp` folders move with the whole settled job folder.
 
 **Every save must be atomic:** write to a temporary file in the same directory,
 flush and fsync it, rename it into place, then fsync the directory (except the

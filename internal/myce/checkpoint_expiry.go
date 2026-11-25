@@ -16,10 +16,13 @@ import (
 // delivery and release records which NAS checkpoint folders nothing can resume
 // or still write; age alone never qualifies a folder. Consumers may still read
 // a finished job's checkpoint for a while, so a settled folder also waits out
-// the grace period after the job's recorded terminal time. Workers do the deletion
-// off the queue lock and report each removal, which the queue records durably
-// on the job. The queue performs no directory scan or NAS I/O for this.
-const checkpointExpiryProtocol = "checkpoint-expiry-v1"
+// the grace period after the job's recorded terminal time. Workers move expired
+// folders into the storage operator's purge directory and report each removal
+// from the readable namespace. The queue does no directory scan or NAS I/O.
+const (
+	checkpointExpiryProtocol = "checkpoint-expiry-v2"
+	checkpointPurgeDirectory = ".myce-expired-checkpoints"
+)
 
 // DefaultCheckpointExpiryGrace keeps a settled job's checkpoint readable after
 // it ends (maintainer-directed, #894). `myce queue --checkpoint-expiry-grace`.
@@ -258,11 +261,11 @@ type workerCheckpointExpiry struct {
 	supported bool
 	running   bool
 	reports   []CheckpointExpiryReport // Finished, not yet acknowledged by a reply.
-	remove    func(string) error
+	rename    func(string, string) error
 }
 
 func newWorkerCheckpointExpiry() *workerCheckpointExpiry {
-	return &workerCheckpointExpiry{remove: os.RemoveAll}
+	return &workerCheckpointExpiry{rename: os.Rename}
 }
 
 // checkpointExpiryCheckin returns the check-in and how many reports it carries.
@@ -314,14 +317,14 @@ func (w Worker) expireCheckpoints(tasks []CheckpointExpiry, root string) <-chan 
 		return nil
 	}
 	e.running = true
-	remove := e.remove
+	rename := e.rename
 	e.mu.Unlock()
 	tasks = slices.Clone(tasks)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for _, t := range tasks {
-			r := expireCheckpoint(root, t, remove)
+			r := expireCheckpoint(root, t, rename)
 			e.mu.Lock()
 			e.reports = append(e.reports, r)
 			e.mu.Unlock()
@@ -333,7 +336,7 @@ func (w Worker) expireCheckpoints(tasks []CheckpointExpiry, root string) <-chan 
 	return done
 }
 
-func expireCheckpoint(root string, t CheckpointExpiry, remove func(string) error) CheckpointExpiryReport {
+func expireCheckpoint(root string, t CheckpointExpiry, rename func(string, string) error) CheckpointExpiryReport {
 	r := CheckpointExpiryReport{ID: t.ID}
 	if !validCheckpointExpiryPath(t.ID, t.Path) {
 		r.Error = "invalid_path"
@@ -353,15 +356,37 @@ func expireCheckpoint(root string, t CheckpointExpiry, remove func(string) error
 			return r
 		}
 	}
-	if info, err := os.Lstat(path); err == nil && !info.IsDir() {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		// A replay after a successful move or storage-local reclamation.
+		r.Removed = true
+		return r
+	}
+	if err != nil || !info.IsDir() {
 		r.Error = "unexpected_entry"
 		return r
 	}
-	if err := remove(path); err != nil {
-		log.Printf("checkpoint expiry job=%s removal failed; the queue retries after its claim lapses", t.ID)
-		r.Error = "remove_failed"
+	purge := filepath.Join(root, checkpointPurgeDirectory)
+	if err := os.Mkdir(purge, 0755); err != nil && !errors.Is(err, os.ErrExist) {
+		r.Error = "purge_directory_unavailable"
 		return r
 	}
+	if info, err := os.Lstat(purge); err != nil || !info.IsDir() {
+		r.Error = "purge_directory_unavailable"
+		return r
+	}
+	destination := filepath.Join(purge, t.ID)
+	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+		r.Error = "purge_destination_unavailable"
+		return r
+	}
+	if err := rename(path, destination); err != nil {
+		_, errno := storageProbeFailureDetails("rename", err)
+		log.Printf("checkpoint expiry job=%s handoff failed errno=%d; the queue retries after its claim lapses", t.ID, errno)
+		r.Error = "handoff_failed"
+		return r
+	}
+	log.Printf("checkpoint expiry job=%s handed off for storage-local purge", t.ID)
 	r.Removed = true
 	return r
 }
