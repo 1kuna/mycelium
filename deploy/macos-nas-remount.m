@@ -13,6 +13,10 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifndef NETFS_MOUNT_PARENT
+#define NETFS_MOUNT_PARENT @"/Volumes"
+#endif
+
 enum {
     exitRefusedMount = 79,
     exitStateMismatch = 80,
@@ -100,6 +104,27 @@ static BOOL emptyDirectory(DIR *dir) {
         }
     }
     return errno == 0;
+}
+
+static BOOL missingDefaultTarget(NSString *point) {
+    NSString *parent = NETFS_MOUNT_PARENT;
+    if (![[point stringByDeletingLastPathComponent] isEqualToString:parent]) {
+        return NO;
+    }
+
+    // The system owns /Volumes. Only allow an absent leaf under the real,
+    // local directory. In particular, a dangling symlink is an occupied leaf.
+    int fd = open(parent.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC);
+    if (fd < 0) {
+        return NO;
+    }
+    struct statfs filesystem;
+    struct stat entry;
+    BOOL missing = fstatfs(fd, &filesystem) == 0 && (filesystem.f_flags & MNT_LOCAL) &&
+                   fstatat(fd, point.lastPathComponent.fileSystemRepresentation, &entry, AT_SYMLINK_NOFOLLOW) != 0 &&
+                   errno == ENOENT;
+    close(fd);
+    return missing;
 }
 
 static BOOL holdAtPath(int directory, int hold) {
@@ -207,12 +232,17 @@ static BOOL networkError(int status) {
 
 static int mountShare(NSURL *url, NSString *point, const char *source, DIR *target, int *netfsStatus) {
     const char *path = point.fileSystemRepresentation;
-    NSURL *mountURL = [NSURL fileURLWithPath:point isDirectory:YES];
     // NetAuth can reuse the saved login in this GUI session. Supply no password
     // and request no authentication UI.
     NSMutableDictionary *session = [@{(__bridge NSString *)kNAUIOptionKey:
                                        (__bridge NSString *)kNAUIOptionNoUI} mutableCopy];
-    NSMutableDictionary *options = [@{(__bridge NSString *)kNetFSMountAtMountDirKey: @YES} mutableCopy];
+    // A NULL mountpath asks NetFS to select and create its default mountpoint.
+    NSURL *mountURL = nil;
+    NSMutableDictionary *options = [NSMutableDictionary dictionary];
+    if (target != NULL) {
+        mountURL = [NSURL fileURLWithPath:point isDirectory:YES];
+        options[(__bridge NSString *)kNetFSMountAtMountDirKey] = @YES;
+    }
     CFArrayRef mounted = NULL;
 
     int result = NetFSMountURLSync((__bridge CFURLRef)url,
@@ -220,27 +250,31 @@ static int mountShare(NSURL *url, NSString *point, const char *source, DIR *targ
                                   NULL, NULL, (__bridge CFMutableDictionaryRef)session,
                                   (__bridge CFMutableDictionaryRef)options, &mounted);
     *netfsStatus = result;
+    CFIndex count = mounted == NULL ? 0 : CFArrayGetCount(mounted);
+    BOOL exactPath = count == 1 && CFEqual(CFArrayGetValueAtIndex(mounted, 0), (__bridge CFStringRef)point);
     if (mounted != NULL) {
         CFRelease(mounted);
     }
 
-    // The descriptor still refers to the underlying local directory. Avoid
-    // following the pathname into a fresh SMB mount to check for local changes.
-    int targetFD = dirfd(target);
-    char underlyingPath[PATH_MAX];
-    struct stat underlying;
-    if (fcntl(targetFD, F_GETPATH, underlyingPath) != 0 || strcmp(underlyingPath, path) != 0 ||
-        fstat(targetFD, &underlying) != 0 || underlying.st_uid != geteuid() || !emptyDirectory(target)) {
-        os_log_error(OS_LOG_DEFAULT, "Mycelium NAS remount target changed during NetFS");
-        return EX_CONFIG;
+    if (target != NULL) {
+        // The descriptor still refers to the underlying local directory. Avoid
+        // following the pathname into a fresh SMB mount to check for changes.
+        int targetFD = dirfd(target);
+        char underlyingPath[PATH_MAX];
+        struct stat underlying;
+        if (fcntl(targetFD, F_GETPATH, underlyingPath) != 0 || strcmp(underlyingPath, path) != 0 ||
+            fstat(targetFD, &underlying) != 0 || underlying.st_uid != geteuid() || !emptyDirectory(target)) {
+            os_log_error(OS_LOG_DEFAULT, "Mycelium NAS remount target changed during NetFS");
+            return exitRefusedMount;
+        }
     }
     int state = checkMount(path, source);
-    if (result == 0 && state == EX_OK) {
+    if (result == 0 && exactPath && state == EX_OK) {
         return EX_OK;
     }
-    if (result == 0 || state != EX_UNAVAILABLE) {
+    if (result == 0 || count != 0 || state != EX_UNAVAILABLE) {
         os_log_error(OS_LOG_DEFAULT, "Mycelium NAS remount returned unexpected mount inventory, NetFS status %{public}d", result);
-        return EX_CONFIG;
+        return exitRefusedMount;
     }
     os_log_error(OS_LOG_DEFAULT, "Mycelium NAS remount failed, NetFS status %{public}d", result);
     return EX_NOPERM;
@@ -268,7 +302,9 @@ static int mountWithHold(NSURL *url, NSString *point, const char *source, DIR *t
         const char *path = point.fileSystemRepresentation;
         status = checkMount(path, source);
         if (status == EX_UNAVAILABLE) {
-            if (!emptyDirectory(target) || !directoryAtPath(dirfd(target), path)) {
+            BOOL validTarget = target == NULL ? missingDefaultTarget(point) :
+                               emptyDirectory(target) && directoryAtPath(dirfd(target), path);
+            if (!validTarget) {
                 status = EX_CONFIG;
             } else if (!holdAtPath(directory, hold)) {
                 status = EX_CANTCREAT;
@@ -283,7 +319,7 @@ static int mountWithHold(NSURL *url, NSString *point, const char *source, DIR *t
 
     if (!called) {
         os_log(OS_LOG_DEFAULT, "Mycelium NAS remount skipped NetFS before call, helper status %{public}d", status);
-    } else if (status == EX_CONFIG) {
+    } else if (status == exitRefusedMount) {
         // A rename keeps either the durable attempt hold or the refusal
         // visible. A later exact mount cannot clear either record.
         if (!holdAtPath(directory, hold) || renameat(directory, authHold, directory, refusedMount) != 0 ||
@@ -355,7 +391,7 @@ static int checkOrMount(NSURL *url, NSString *point, const char *source, const c
         close(fd);
     }
     status = EX_CONFIG;
-    if (target != NULL && emptyDirectory(target)) {
+    if (target == NULL ? missingDefaultTarget(point) : emptyDirectory(target)) {
         status = checkOnly ? EX_UNAVAILABLE : mountWithHold(url, point, source, target, directory, directoryPath);
     } else {
         os_log_error(OS_LOG_DEFAULT, "Mycelium NAS remount refused the target directory");
