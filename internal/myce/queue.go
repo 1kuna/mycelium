@@ -1296,13 +1296,12 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 		// The existing exact release path calls retry again after confirmation.
 		return
 	}
-	// With no local publication, an interrupted NAS writer may have saved
-	// unreported bytes. Preserve its target until resume inspects those bytes;
-	// absence of a live progress report is not proof of an empty checkpoint.
+	// An interrupted NAS writer with unknown progress may have saved unreported
+	// bytes. Keep its target as a hint while there is no accepted generation.
 	if j.Spec.Resumable && !j.FileTransport && j.Progress < 0 && j.StartedAt != nil {
 		if m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices); m != nil {
 			target := jobTargetOn(j, m)
-			if j.CheckpointTarget == nil || j.CheckpointTarget.Target != target {
+			if j.CheckpointTarget == nil || (j.CheckpointTarget.Generation == 0 && j.CheckpointTarget.Target != target) {
 				j.CheckpointTarget = &CheckpointOrigin{Target: target, Attempt: j.Attempt}
 			}
 		}

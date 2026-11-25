@@ -921,6 +921,14 @@ func prepareCheckpoint(j Job) (string, error) {
 func prepareCheckpointCopy(j Job, copyFile func(io.Writer, io.Reader) (int64, error)) (string, error) {
 	return prepareCheckpointCopySync(j, copyFile, syncWorkerDir)
 }
+
+func requireCheckpointFloor(j Job, generation int64) error {
+	if origin := j.CheckpointTarget; origin != nil && origin.Generation > 0 && generation < origin.Generation {
+		return fmt.Errorf("checkpoint generation %d is below accepted generation %d", generation, origin.Generation)
+	}
+	return nil
+}
+
 func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64, error), syncDir func(string) error) (string, error) {
 	// A relative path would resolve against the process working directory.
 	if !filepath.IsAbs(j.Checkpoint) {
@@ -935,8 +943,12 @@ func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64
 	dest := attemptCheckpoint(j)
 	if _, err := os.Stat(dest); err == nil {
 		progress, err := checkpointProgress(dest)
-		if err != nil || progress >= 0 {
-			return dest, err // A prepared retry must not overwrite its own durable saves.
+		if err != nil {
+			return dest, err
+		}
+		if progress >= 0 {
+			// A prepared retry must not overwrite its own durable saves.
+			return dest, requireCheckpointFloor(j, progress)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
@@ -969,6 +981,9 @@ func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64
 			newestAttempt = n
 			source = dir
 		}
+	}
+	if err := requireCheckpointFloor(j, newest); err != nil {
+		return "", err
 	}
 	// Publish the whole copy together: a manifest must not outrank missing payloads.
 	staging, err := os.MkdirTemp(j.Checkpoint, ".myce-prepare-*.tmp")

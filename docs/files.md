@@ -1227,6 +1227,8 @@ mounted NAS before starting the queue. Dev creates a local root.
 The stable job folder holds `attempt-1`, `attempt-2`, etc.; the environment points
 to the current attempt's folder. Before starting, the worker copies checkpoints
 from the attempt with the highest durable checkpoint generation.
+Preparation requires at least the last positive generation accepted by the
+queue. That floor survives an interruption with no progress report.
 The worker checks exact-attempt launch authorization before materializing that
 copy. If preparation outlives an observation budget, the same attempt waits for
 its existing writer before repeating admission or device probes; it does not
