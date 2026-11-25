@@ -47,6 +47,29 @@ class RelatedTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
+    def test_nested_module_selects_its_own_tests(self):
+        # scripts/queue-qualify has its own go.mod; gate.sh runs the selected
+        # tests inside it, and its dependencies never force a full gate.
+        previous = os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            os.chdir(directory)
+            try:
+                def git(*args):
+                    subprocess.run(['git', *args], check=True, capture_output=True)
+                pathlib.Path('go.mod').write_text('module root\n')
+                git('init', '-q')
+                git('add', '.')
+                git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'base')
+                tool = pathlib.Path('scripts/tool')
+                tool.mkdir(parents=True)
+                (tool / 'go.mod').write_text('module root/scripts/tool\nrequire example.com/driver v1.0.0\n')
+                (tool / 'go.sum').write_text('example.com/driver v1.0.0 h1:x\n')
+                (tool / 'probe.go').write_text('package main\nfunc probe() {}\n')
+                (tool / 'probe_test.go').write_text('package main\nfunc TestProbe(t *testing.T) { probe() }\n')
+                self.assertEqual(related.select('HEAD'), [('scripts/tool', '^(TestProbe)$')])
+            finally:
+                os.chdir(previous)
+
     def test_private_interface_methods_match_the_receiver(self):
         previous = os.getcwd()
         with tempfile.TemporaryDirectory() as directory:
