@@ -262,6 +262,23 @@ the cursor, as stage 2 does. It decodes the same JSON shape and upserts keyed
 rows. It approximates the real table set, so the stage 2 laptop numbers remain
 the reference for apply cost. The LAN measurement is what this step adds.
 
+## Laptop sample
+
+This run, from 2026-11-25, shows the shape of the reports. It says nothing
+about the NAS. It used a disposable PostgreSQL 17.10 cluster on an Apple silicon
+laptop's internal SSD, over loopback, with its own data directory and port.
+Commit runs measured for 2 minutes after a 15 s warm-up, with the default
+profile at 11.6/s.
+
+| Run | Result |
+| --- | --- |
+| `commit`, idle | Pass. Append service p50/p95/p99/max 0.81 / 4.97 / 23.86 / 89.48 ms; renewal p99 23.57 ms; 11.49 appends/s; WAL 156 kB/s |
+| `commit` during `load` on the same disk | Pass. Append service 1.03 / 8.06 / 27.20 / 49.11 ms; renewal p99 3.57 ms. Load wrote and read about 24 GiB each at about 1.2 GiB/s and stopped at its byte cap after 20 s. Its directory was removed. |
+| `durability-write` across `pg_ctl restart -m immediate` | Pass. 1,076 acknowledged, 1 failed before commit, 0.5 s outage, 1 restart seen, same identifier |
+| `durability-verify` | Pass. 0 of 1,076 missing, 0 corrupt |
+| `catchup` | Pass. 6,960 changes (78 MB) replayed in 5.1 s, 117× the live rate. The 1 GiB snapshot copy ran from a warm local cache, so it is no network measure. |
+| `commit --watch` with no fault | Incomplete, as designed: no unresponsive window, so the isolation check is `not-exercised` |
+
 ## Rollback and cleanup
 
 Any step can stop at once. Ctrl-C stops the harness, and the load generator
