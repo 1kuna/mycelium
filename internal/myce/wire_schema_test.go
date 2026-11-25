@@ -71,7 +71,7 @@ func generatedJobSchema(t *testing.T) []byte {
 		for _, property := range properties {
 			property.(map[string]any)["x-contract"] = "diagnostic"
 		}
-		stable := []string{"id", "spec", "spec_projection", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "pause", "pause_revision", "control", "cancelled_at", "infrastructure_retries", "dependency", "cancellation", "cancellation_scope", "command_started", "ledger", "delivery", "recovered_results"}
+		stable := []string{"id", "spec", "spec_projection", "state", "attempt", "machine", "session", "release_confirmed", "execution_release", "finished_at", "queued", "pause", "pause_revision", "control", "cancelled_at", "infrastructure_retries", "dependency", "cancellation", "cancellation_scope", "command_started", "ledger", "delivery", "recovered_results"}
 		if definition == "Spec" {
 			stable = []string{"project", "submission_key", "after", "output_delivery"}
 		}
@@ -84,6 +84,9 @@ func generatedJobSchema(t *testing.T) []byte {
 	binding["execution"].(map[string]any)["description"] = "Immutable producing child job ID and accepted attempt for a selected-piece edge; zero value for a whole-parent edge."
 	binding["executions"].(map[string]any)["description"] = "Whole-parent edge: accepted producing executions keyed by mapped producer piece. Immutable across retry and restart."
 	job := defs["Job"].(map[string]any)["properties"].(map[string]any)
+	release := job["execution_release"].(map[string]any)
+	release["enum"] = []string{"pending", "confirmed", "not_applicable"}
+	release["description"] = "Single-job read of aggregate execution and stage custody. Pending means custody remains, confirmed means an attempted scope has cleared, and not_applicable means there is no pending custody or recorded attempt."
 	job["control"].(map[string]any)["description"] = "Last committed fenced operation. Compare its revision with the current pause_revision to reconcile a retry. Omitted before the first fenced operation."
 	control := defs["JobControl"].(map[string]any)["properties"].(map[string]any)
 	control["action"].(map[string]any)["enum"] = []string{"pause", "resume"}

@@ -833,6 +833,7 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	if err == nil {
 		q.publishWaitStates(oldCalls)
 		q.invalidateCallSnapshots(oldCalls)
+		q.invalidateReleaseSnapshots(old.base.HostReleases)
 		q.invalidateTerminalStatus()
 		// Freeze contact while the transaction's active-job index is still
 		// selected. After commitRecords ends the journal, liveJobs includes

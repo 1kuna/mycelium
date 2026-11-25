@@ -121,6 +121,11 @@ same request body across retries. A predecessor returns a route error.
 - `POST /api/jobs/JOB/control/pause` takes `project`, `reason`, `if_attempt`
   and `control_generation`. The current attempt must match. A new generation
   can hold queued work or replace a direct hold and always advances the revision.
+  Supply the optional `if_revision` from the same read as `if_attempt` to
+  require that the hold revision still matches. Use zero when `pause_revision`
+  is absent. Require `fenced_job_control_if_revision` in `queue_capabilities`
+  before relying on this comparison. Omitting `if_revision` preserves the
+  generation-and-attempt contract.
 - `POST /api/jobs/JOB/control/resume` takes `control_generation` and
   `if_revision`. Use the current `pause_revision`, treating omission as zero.
   A matching or newer generation can release a direct hold. On a queued job it
@@ -142,6 +147,14 @@ After a lost reply, read `GET /api/jobs/JOB` for `control.generation`,
 `control.action`, `control.revision`, current `pause_revision`, and job state.
 These fields persist with the job across queue restarts. A legacy or parent-owned
 transition can advance `pause_revision` beyond the stored control receipt.
+
+The same job GET returns `execution_release` for retained jobs. It covers the
+job's execution copies and host-held stage obligations. For fan-out parents
+it also covers their materialized cancellation scope. `pending` means custody
+remains. `confirmed` means custody cleared after an attempt. `not_applicable`
+means there is no pending custody or recorded attempt. A caller can use the
+latter two values to check for release without cancelling. Treat a missing field
+as unknown. An expired job still returns HTTP 410 `job_expired`.
 
 ## Batch YAML
 
