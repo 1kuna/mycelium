@@ -1302,13 +1302,12 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 		// The existing exact release path calls retry again after confirmation.
 		return
 	}
-	// With no local publication, an interrupted NAS writer may have saved
-	// unreported bytes. Preserve its target until resume inspects those bytes;
-	// absence of a live progress report is not proof of an empty checkpoint.
+	// An interrupted NAS writer with unknown progress may have saved unreported
+	// bytes. Keep its target as a hint while there is no accepted generation.
 	if j.Spec.Resumable && !j.FileTransport && j.Progress < 0 && j.StartedAt != nil {
 		if m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices); m != nil {
 			target := jobTargetOn(j, m)
-			if j.CheckpointTarget == nil || j.CheckpointTarget.Target != target {
+			if j.CheckpointTarget == nil || (j.CheckpointTarget.Generation == 0 && j.CheckpointTarget.Target != target) {
 				j.CheckpointTarget = &CheckpointOrigin{Target: target, Attempt: j.Attempt}
 			}
 		}
@@ -1729,7 +1728,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			if save, ok := j.FileCheckpoints[j.Attempt]; ok {
 				progress.durable = save.Generation
 			}
-		} else if j != nil && (j.State == "queued" || j.State == "running" || j.State == "stopping") && j.Spec.Resumable && j.Attempt != report.Attempt {
+		} else if j != nil && (j.State == "queued" || j.State == "running" || j.State == "stopping") && j.Spec.Resumable && j.Attempt != report.Attempt && !knownBelowCheckpointFloor(j, report.Progress) {
 			// Only a known recoverable execution can open a resume decision.
 			// Ordinary or already rejected stale heartbeats do no share I/O.
 			for _, copy := range j.Copies {
@@ -2207,7 +2206,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 		yieldPath = attemptCheckpoint(*j)
 	}
 	var finalPath string
-	if err == nil && j != nil && (j.State == "running" || j.State == "stopping") && j.Spec.Resumable && !j.FileTransport && !r.ReleasePending {
+	if err == nil && j != nil && (j.State == "running" || j.State == "stopping") && j.Spec.Resumable && !j.FileTransport && !r.ReleasePending && missingCheckpointFloor(j, r) == nil {
 		finalPath = attemptCheckpoint(*j)
 	}
 	var outputs map[string]string
@@ -2514,7 +2513,17 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 			}
 		}
 	}
-	if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure && !diskFailure && !wallFailure && !wallTimeStopped(j) && !launchCapacityRefusal(r) && !poolPressure {
+	if floor := missingCheckpointFloor(j, r); floor != nil && !cancelled(j) && !oomFailure && !diskFailure && !wallFailure && !wallTimeStopped(j) && j.YieldPause == nil {
+		q.requeue(j, floor.Error(), false)
+		if j.State == "queued" {
+			if j.Starts > 0 {
+				j.Starts--
+				j.AdmissionRequeues++
+			}
+			q.pauseJob(j, JobPause{Reason: floor.Error(), CheckpointFloor: floor})
+			admissionRequeueOutcome(&outcome)
+		}
+	} else if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure && !diskFailure && !wallFailure && !wallTimeStopped(j) && !launchCapacityRefusal(r) && !poolPressure {
 		if cancelled(j) {
 			q.finishCancellation(j)
 		} else {
@@ -3226,7 +3235,8 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 	if j != nil && j.Spec.localFirst() && j.Attempt == report.Attempt && j.Machine == m.ID && j.Session == report.Session && report.Session == m.Session {
 		j.LocalCheckpointGeneration = max(j.LocalCheckpointGeneration, report.LocalCheckpointGeneration)
 	}
-	if j != nil && (j.State == "queued" || j.State == "running" || j.State == "stopping") && !cancelled(j) && (j.State == "queued" || j.Attempt != report.Attempt || j.Machine != m.ID || j.Session != m.Session) {
+	if j != nil && (j.State == "queued" || j.State == "running" || j.State == "stopping") && !cancelled(j) &&
+		!knownBelowCheckpointFloor(j, report.Progress) && (j.State == "queued" || j.Attempt != report.Attempt || j.Machine != m.ID || j.Session != m.Session) {
 		for _, copy := range j.Copies {
 			canRecover := q.machineRecoveryFits(m, j, copy)
 			if canRecover && q.placementPolicyAllowed(j, allocationMachine(m, copy.AllocatedDevices), false) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && ((!j.Spec.localFirst() && (m.CheckpointUnavailable || !q.checkpointsAvailable())) || progress.err != nil || (progress.path != "" && progress.path != attemptCheckpoint(*j))) {

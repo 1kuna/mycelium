@@ -18,7 +18,56 @@ type CheckpointOrigin struct {
 	Attempt    int             `json:"attempt"`
 }
 
-const checkpointTargetHold = "checkpoint_target"
+const (
+	checkpointTargetHold       = "checkpoint_target"
+	checkpointFloorMissingHold = "checkpoint_floor_missing"
+)
+
+// CheckpointFloorMissing is evidence of a completed NAS scan below the
+// accepted generation. Observed is -1 when the scan found no saves.
+type CheckpointFloorMissing struct {
+	Required int64 `json:"required"`
+	Observed int64 `json:"observed"`
+}
+
+func (e *CheckpointFloorMissing) Error() string {
+	if e.Observed == -1 {
+		return fmt.Sprintf("no checkpoint save found; accepted generation %d or newer is required", e.Required)
+	}
+	return fmt.Sprintf("checkpoint generation %d is below accepted generation %d", e.Observed, e.Required)
+}
+
+func checkpointResumeFloor(j *Job) int64 {
+	if !j.FileTransport && j.CheckpointTarget != nil {
+		return j.CheckpointTarget.Generation
+	}
+	return 0
+}
+
+func belowCheckpointFloor(j *Job, generation int64) bool {
+	floor := checkpointResumeFloor(j)
+	return floor > 0 && generation < floor
+}
+
+// A report of -1 means the attempt has not published a generation yet; its
+// durable save may still be at or above the floor. Only a confirmed lower
+// generation may skip recovery comparison.
+func knownBelowCheckpointFloor(j *Job, generation int64) bool {
+	return generation >= 0 && belowCheckpointFloor(j, generation)
+}
+
+// The caller checks exact attempt ownership. A scan result can hold only an
+// unstarted NAS resume with confirmed release and the same accepted floor.
+func missingCheckpointFloor(j *Job, r Result) *CheckpointFloorMissing {
+	e := r.CheckpointFloorMissing
+	if e == nil || e.Required <= 0 || e.Observed < -1 || e.Observed >= e.Required ||
+		!j.Spec.Resumable || !needsCheckpoint(j) || e.Required != checkpointResumeFloor(j) ||
+		j.StartedAt != nil || r.ExecutionCause == nil || r.ExecutionCause.Predicate != checkpointFloorMissingHold ||
+		!provenPrelaunchRefusal(j, r) {
+		return nil
+	}
+	return e
+}
 
 // The exact os/arch/platform a job runs as on m; CPU work ignores accelerators.
 func jobTargetOn(j *Job, m *Machine) ExecutionTarget {

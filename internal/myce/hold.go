@@ -86,6 +86,7 @@ var holdKinds = map[string]holdKind{
 	"memory_capacity":             {ownerConsumer, "estimated memory exceeds eligible pool capacity", "an eligible pool can fit the job's estimate", "check the job's memory estimate and allowed machines"},
 	"checkpoint_root":             {ownerStorage, "saved progress storage is unavailable", "the queue's checkpoint root is reachable again", "restore the queue's checkpoint storage mount"},
 	checkpointTargetHold:          {ownerQueue, "resuming on the target that wrote its checkpoint", "a host of that target can take it, or none remains in the fleet", "wait; if its checkpoints resume correctly on other targets, declare resume_compatibility for them"},
+	checkpointFloorMissingHold:    {ownerStorage, "the accepted NAS checkpoint is missing", "a checkpoint at or above the required generation is restored and the job is resumed", "restore a complete checkpoint at or above the required generation, then run myce resume JOB_ID; to start from scratch, submit with a new submission key"},
 	"scarce_host_yield":           {ownerQueue, "waiting for portable work to yield a scarce host", "the yielding attempt saves its checkpoint and releases the host", "wait; nothing to do"},
 	"shared_host_backoff":         {ownerQueue, "backing off a shared host whose owner needed it", "the host's owner pressure stays quiet for the measured recovery span", "wait; another eligible host can still take it"},
 	stagingHostRetryHold:          {ownerQueue, "retrying on another eligible host after input staging failed here", "another eligible host takes it, or no untried eligible host remains", "wait; nothing to do"},
@@ -183,7 +184,7 @@ var holdDiagnosticCodes = map[string]string{
 // listed are capacity waits.
 var holdEfficiencyCategories = map[string]string{
 	"paused": "holds", "production_admission": "holds", hostMaintenanceJobHold: "holds",
-	"pinned_model": "holds", checkpointTargetHold: "holds", "reservation": "holds", "unified_cuda_headroom": "holds",
+	"pinned_model": "holds", checkpointTargetHold: "holds", checkpointFloorMissingHold: "holds", "reservation": "holds", "unified_cuda_headroom": "holds",
 	"waiting_for_builder": "preparation", "building": "preparation", "unprepared": "preparation",
 	"shared_input": "preparation", "shared_input_unreported": "preparation", stagingStorageHold: "preparation",
 	"no_buildable_worker": "environment", "deterministically_failed": "environment", "extension": "environment",
@@ -273,7 +274,10 @@ func pauseHold(j *Job) *Hold {
 		return nil
 	}
 	h := newHold("paused", j.Pause.Reason)
-	if j.Pause.Reason != "" {
+	if floor := j.Pause.CheckpointFloor; floor != nil {
+		h = newHold(checkpointFloorMissingHold, j.Pause.Reason)
+		h.Reason = floor.Error()
+	} else if j.Pause.Reason != "" {
 		h.Reason = "paused: " + j.Pause.Reason
 	}
 	h.Next = strings.ReplaceAll(h.Next, "JOB_ID", j.ID)

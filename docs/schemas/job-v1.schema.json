@@ -1382,6 +1382,21 @@
       ],
       "type": "object"
     },
+    "CheckpointFloorMissing": {
+      "properties": {
+        "observed": {
+          "type": "integer"
+        },
+        "required": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "required",
+        "observed"
+      ],
+      "type": "object"
+    },
     "CheckpointInputExpiry": {
       "properties": {
         "deadline": {
@@ -4429,6 +4444,9 @@
     },
     "JobPause": {
       "properties": {
+        "checkpoint_floor_missing": {
+          "$ref": "#/$defs/CheckpointFloorMissing"
+        },
         "parent": {
           "type": "string"
         },

@@ -88,6 +88,11 @@ func (w Worker) cleanupRefusedCheckpoint(ctx context.Context, s *workerStore) er
 	if j == nil || j.Spec.ephemeral() || r == nil || r.ReleasePending || r.ID != j.ID || r.Attempt != j.Attempt || r.Session != j.Session {
 		return nil
 	}
+	if r.CheckpointFloorMissing != nil {
+		// A stale prepared copy can be the only remaining save. Keep it
+		// under normal job retention when the required generation is missing.
+		return nil
+	}
 	e := safeExecutionEvidence(r.ExecutionEvidence, j.Attempt)
 	if e == nil || e.Main != executionNotStarted || e.Sidecars != executionNotStarted {
 		return nil

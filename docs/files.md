@@ -1227,13 +1227,26 @@ mounted NAS before starting the queue. Dev creates a local root.
 The stable job folder holds `attempt-1`, `attempt-2`, etc.; the environment points
 to the current attempt's folder. Before starting, the worker copies checkpoints
 from the attempt with the highest durable checkpoint generation.
+Preparation requires at least the last positive generation accepted by the
+queue. That floor survives an interruption with no progress report and also
+applies when a disconnected attempt returns. If a prepared copy is below
+the floor, the worker checks earlier attempts for a usable generation.
+If a scan finds no usable generation, Mycelium releases the assignment and
+pauses the job. `myce status JOB_ID` reports `checkpoint_floor_missing` in
+JSON, along with the required generation, the best save found and the next
+step. Restore a complete checkpoint at or above the required generation in
+the job's checkpoint directory, then run `myce resume JOB_ID`. If recovery
+is impossible and the owner chooses to start from scratch, submit with a
+new submission key.
 The worker checks exact-attempt launch authorization before materializing that
 copy. If preparation outlives an observation budget, the same attempt waits for
 its existing writer before repeating admission or device probes; it does not
 start another copy. A refused attempt's copy is removed after exact release is
 acknowledged and positive execution evidence proves neither main nor sidecars
-ran. Pending writers retain release custody until they finish. Unknown or
-possibly executed attempts keep their checkpoints under settled expiry below.
+ran. A missing-generation hold keeps a stale prepared copy, which could be
+the only save left. Pending writers retain release custody until they finish.
+Unknown or possibly executed attempts keep their checkpoints under settled
+expiry below.
 
 Temporary files and directories ending in `.tmp` never count as complete and are never copied.
 Workers stage a complete attempt copy in an ignored temporary directory, then

@@ -1,7 +1,10 @@
 package myce
 
 import (
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 // #1437: a planned stop of checkpointed multi-target work resumes on the target
@@ -122,6 +125,92 @@ func TestPlannedStopResumesOnCheckpointTarget(t *testing.T) {
 				t.Fatal("did not resume on the checkpoint's target", got)
 			}
 		})
+	}
+}
+
+func TestInterruptedPortableResumePreservesCheckpointFloor(t *testing.T) {
+	q, clock, a, b, first := yieldFixture(t, false)
+	// The second worker uses a different, explicitly compatible target.
+	b.CapabilityProfile.Arch = "arm64"
+	if err := q.update(func() error {
+		j := q.touchJob(first.ID)
+		j.Spec.ResumeCompatibility.Targets = append(j.Spec.ResumeCompatibility.Targets, ResumeTarget{
+			Target: ExecutionTarget{OS: "linux", Arch: "arm64", Platform: "cpu"}, Environment: "none", ResultCheck: "counter-resume-test",
+		})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	saveYieldGeneration(t, job(t, q, first.ID), 7)
+	first.Progress = 7
+	machineCheck(t, q, a, first)
+	origin := job(t, q, first.ID).CheckpointTarget
+	if origin == nil || origin.Generation != 7 {
+		t.Fatal("first generation not accepted", origin)
+	}
+	if _, err := q.ChangeHostMaintenance(a.HostID, HostMaintenanceRequest{Action: "disable", Stop: true}); err != nil {
+		t.Fatal(err)
+	}
+	finishInterrupted(t, q, first)
+	release := result(first, false)
+	release.ReleaseOnly = true
+	if err := q.Complete(release); err != nil {
+		t.Fatal(err)
+	}
+	second := assignedJob(machineCheck(t, q, b))
+	if second == nil || second.ID != first.ID || second.Attempt != first.Attempt+1 {
+		t.Fatal("compatible worker did not resume", second)
+	}
+	if err := q.Started(result(second, false)); err != nil {
+		t.Fatal(err)
+	}
+	second.Progress = -1
+	machineCheck(t, q, b, second)
+	clock.Advance(time.Second)
+	if _, err := q.ChangeHostMaintenance(b.HostID, HostMaintenanceRequest{Action: "disable", Stop: true}); err != nil {
+		t.Fatal(err)
+	}
+	// No second-attempt save is visible to the queue during finalization.
+	finishInterrupted(t, q, second)
+	release = result(second, false)
+	release.ReleaseOnly = true
+	if err := q.Complete(release); err != nil {
+		t.Fatal(err)
+	}
+	current := job(t, q, first.ID)
+	if current.State != "queued" {
+		t.Fatal("interrupted attempt was not requeued", current.State, current.Attempt, current.Reason)
+	}
+	if got := current.CheckpointTarget; got == nil || *got != *origin {
+		t.Fatalf("unreported attempt erased accepted checkpoint: got %+v, want %+v", got, origin)
+	}
+	if _, err := q.ChangeHostMaintenance(a.HostID, HostMaintenanceRequest{Action: "resume"}); err != nil {
+		t.Fatal(err)
+	}
+	third := assignedJob(machineCheck(t, q, a))
+	if third == nil || third.ID != first.ID || third.Attempt != second.Attempt+1 {
+		t.Fatal("next worker did not receive the interrupted job", third)
+	}
+	third.Checkpoint = filepath.Join(t.TempDir(), "job")
+	writeSave(t, filepath.Join(third.Checkpoint, "attempt-1"), "6")
+	if _, err := prepareCheckpoint(*third); err == nil || !strings.Contains(err.Error(), "below accepted generation 7") {
+		t.Fatal("worker prepared resume below the accepted floor", err)
+	}
+	writeSave(t, filepath.Join(third.Checkpoint, "attempt-1"), "7")
+	dest, err := prepareCheckpoint(*third)
+	if err != nil {
+		t.Fatal("worker refused to resume the accepted generation", err)
+	}
+	if got, err := checkpointProgress(dest); err != nil || got != 7 {
+		t.Fatalf("prepared checkpoint generation = %d, want 7 (error: %v)", got, err)
+	}
+
+	// A previous worker can leave an already prepared copy below the floor,
+	// and the source that met the floor can disappear before a later retry.
+	writeSave(t, filepath.Join(third.Checkpoint, "attempt-1"), "6")
+	writeSave(t, dest, "6")
+	if _, err := prepareCheckpoint(*third); err == nil || !strings.Contains(err.Error(), "below accepted generation 7") {
+		t.Fatal("worker reused a prepared checkpoint below the accepted floor", err)
 	}
 }
 

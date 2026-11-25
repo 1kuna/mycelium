@@ -678,6 +678,11 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		if err == nil {
 			err = ctx.Err()
 		}
+		var floor *CheckpointFloorMissing
+		if errors.As(err, &floor) {
+			s.checkpointUnavailable = false
+			return nil, s.startFailureAt(j, launchRefused, err, w.Clock.Now())
+		}
 		// A still-running copy is preparation, not evidence of a failed NAS.
 		// The independent root probe fences actual storage stalls.
 		s.checkpointUnavailable = err != nil && !errors.Is(err, errCheckpointIOPending) && !errors.Is(err, context.Canceled)

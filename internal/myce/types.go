@@ -907,6 +907,8 @@ type AttemptDirective struct {
 	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
 }
 type Result struct {
+	CheckpointFloorMissing *CheckpointFloorMissing `json:"checkpoint_floor_missing,omitempty"`
+
 	WorkerDataCleanup         *WorkerDataCleanup  `json:"worker_data_cleanup,omitempty"`
 	ExecutionEvidence         *ExecutionEvidence  `json:"execution_evidence,omitempty"`
 	Resources                 *AttemptResources   `json:"resources,omitempty"`

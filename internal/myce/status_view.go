@@ -226,7 +226,7 @@ func jobReason(j *Job, detail bool) string {
 // its pause. Nil when nothing holds it.
 func JobHold(j *Job) *Hold {
 	if j.State == "paused" && j.Pause != nil {
-		if j.Hold != nil && j.Hold.Kind == "paused" {
+		if j.Hold != nil && (j.Hold.Kind == "paused" || j.Hold.Kind == checkpointFloorMissingHold) {
 			return j.Hold
 		}
 		return pauseHold(j)

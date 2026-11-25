@@ -9,9 +9,10 @@ import (
 // Pause is queue ownership, never execution or cleanup custody. Revision also
 // survives resume so a delayed request cannot release a later pause.
 type JobPause struct {
-	Reason string     `json:"reason"`
-	Until  *time.Time `json:"until,omitempty"`
-	Parent string     `json:"parent,omitempty"`
+	CheckpointFloor *CheckpointFloorMissing `json:"checkpoint_floor_missing,omitempty"`
+	Reason          string                  `json:"reason"`
+	Until           *time.Time              `json:"until,omitempty"`
+	Parent          string                  `json:"parent,omitempty"`
 }
 type PauseJobRequest struct {
 	Reason         string     `json:"reason"`
@@ -104,6 +105,10 @@ func (q *Queue) pauseJob(j *Job, pause JobPause) {
 	if pause.Until != nil {
 		until := *pause.Until
 		pause.Until = &until
+	}
+	if pause.CheckpointFloor != nil {
+		floor := *pause.CheckpointFloor
+		pause.CheckpointFloor = &floor
 	}
 	q.closeAdmissionWait(j, "paused")
 	j.State, j.Pause, j.Reason = "paused", &pause, pause.Reason

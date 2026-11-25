@@ -171,6 +171,9 @@ uses the declared NAS source even when an ordinary shared-input cache holds a co
   capacity versus coverage, memory, storage and device evidence. Route owner
   actions with the job ID, attempt and typed reason. Keep full history reads
   out of loops.
+  For `checkpoint_floor_missing`, restore a complete NAS checkpoint at or
+  above the generation in the hold and run `myce resume JOB_ID`. To start
+  from scratch, submit with a new submission key.
   For `staging_storage_full`, ask the worker owner to restore staging space.
   For staging operation `model_snapshot` with capacity `disk_free_floor`,
   `required_bytes` is the write size, `available_bytes` is measured free disk
