@@ -83,11 +83,21 @@ const (
 	installStorageWrite installStorageMode = iota
 	installStorageProbe
 	installStoragePreview
+	installStoragePreserveNAS installStorageMode = 4
 )
 
 func prepareInstallNASMode(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error), mode installStorageMode) (result error) {
-	if c.RequireMountedNAS || c.Role == "worker" && c.Detection.Platform != "fake" {
-		_, err := prepareOnboardingStorageFS(ctx, c, false, command, onboardingStorageFS{lstat: os.Lstat, mkdir: os.Mkdir, probeContext: probeNASDirectoryContext, removeCreated: mode == installStorageProbe, readOnly: mode == installStoragePreview})
+	fs := onboardingStorageFS{lstat: os.Lstat, mkdir: os.Mkdir, probeContext: probeNASDirectoryContext}
+	return prepareInstallNASFS(ctx, c, command, mode, fs, false)
+}
+
+func prepareInstallNASFS(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error), mode installStorageMode, fs onboardingStorageFS, useMountedStorage bool) error {
+	fs.allowMissingNAS = mode&installStoragePreserveNAS != 0
+	mode &^= installStoragePreserveNAS
+	fs.removeCreated = mode == installStorageProbe
+	fs.readOnly = mode == installStoragePreview
+	if useMountedStorage || c.RequireMountedNAS || c.Role == "worker" && c.Detection.Platform != "fake" {
+		_, err := prepareOnboardingStorageFS(ctx, c, false, command, fs)
 		return err
 	}
 	started := time.Now()

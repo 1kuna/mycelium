@@ -141,6 +141,19 @@ func diskVolumeNeed(j *Job, v DiskVolume, machines ...*Machine) (uint64, bool) {
 func (q *Queue) diskVolumeNeed(j *Job, v DiskVolume, m *Machine) (uint64, bool) {
 	return diskVolumeNeedWith(j, v, q.diskWork(j, m), m)
 }
+
+func checkpointDiskBytes(j *Job) uint64 {
+	if j.ResumeFiles != nil {
+		if bytes := manifestDiskBytes(j.ResumeFiles.Files); bytes > 0 {
+			return bytes
+		}
+	}
+	if j.Spec.Disk != nil {
+		return j.Spec.Disk.CheckpointBytes
+	}
+	return 0
+}
+
 func diskVolumeNeedWith(j *Job, v DiskVolume, work diskWork, machines ...*Machine) (uint64, bool) {
 	input, output := diskInputOutput(j)
 	spool := uint64(0)
@@ -149,6 +162,9 @@ func diskVolumeNeedWith(j *Job, v DiskVolume, work diskWork, machines ...*Machin
 	}
 	// Outputs are written inside the work dir, so scratch covers them.
 	output = addDiskBytes(max(output, work.scratch), spool)
+	// Keep existing disk admission on NAS-present workers. While NAS is
+	// unavailable, charge local_first checkpoint bytes to worker state.
+	localCheckpoint := j.Spec.localFirst() && len(machines) > 0 && machines[0] != nil && storageRootUnavailable(machines[0], "nas")
 	var need uint64
 	relevant := false
 	for _, root := range v.Roots {
@@ -156,6 +172,9 @@ func diskVolumeNeedWith(j *Job, v DiskVolume, work diskWork, machines ...*Machin
 		case "data":
 			relevant = true
 			need = addDiskBytes(need, addDiskBytes(input, output))
+			if localCheckpoint {
+				need = addDiskBytes(need, checkpointDiskBytes(j))
+			}
 			if j.Spec.ephemeral() {
 				for _, private := range j.Spec.SharedInputs {
 					need = addDiskBytes(need, uint64(private.bytes()))
@@ -186,19 +205,12 @@ func diskVolumeNeedWith(j *Job, v DiskVolume, work diskWork, machines ...*Machin
 				}
 			}
 		case "checkpoint":
-			if j.Spec.ephemeral() {
+			if j.Spec.ephemeral() || localCheckpoint {
 				continue
 			}
-			if j.Spec.Resumable || j.ResumeFiles != nil || j.Spec.Disk != nil && j.Spec.Disk.CheckpointBytes > 0 {
+			if needsCheckpoint(j) || j.ResumeFiles != nil {
 				relevant = true
-				checkpoint := uint64(0)
-				if j.ResumeFiles != nil {
-					checkpoint = manifestDiskBytes(j.ResumeFiles.Files)
-				}
-				if checkpoint == 0 && j.Spec.Disk != nil {
-					checkpoint = j.Spec.Disk.CheckpointBytes
-				}
-				need = addDiskBytes(need, checkpoint)
+				need = addDiskBytes(need, checkpointDiskBytes(j))
 			}
 		case "environment":
 			relevant = relevant || j.Spec.Environment.Key() != "" || j.Spec.extensionJob() || work.environment > 0

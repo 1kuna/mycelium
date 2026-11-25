@@ -15,20 +15,25 @@ import (
 // MountedNASRoots retains only mount paths, never source addresses/options
 // (which can contain credentials). Mounting belongs to the operator or OS.
 func MountedNASRoots(ctx context.Context, osname string, command func(context.Context, string, ...string) ([]byte, error)) ([]string, error) {
+	mounts, err := boundedNASInventory(ctx, osname, command)
+	return nasInventoryRoots(mounts), err
+}
+
+func boundedNASInventory(ctx context.Context, osname string, command func(context.Context, string, ...string) ([]byte, error)) ([]nasMount, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	started := time.Now()
 	bounded, cancel := context.WithTimeout(ctx, onboardingMountInventoryBudget)
 	defer cancel()
-	roots, err := mountedNASRoots(bounded, osname, command)
+	mounts, err := mountedNASInventory(bounded, osname, command)
 	if errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled) {
 		return nil, context.Canceled
 	}
 	if bounded.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
 		return nil, storageRefusal(preflightError("nas_unresponsive", "storage", fmt.Sprintf("NAS mount inventory exceeded the %s budget; restore the mount and retry", onboardingMountInventoryBudget)), storageCheckError("nas", "inventory", time.Since(started), context.DeadlineExceeded))
 	}
-	return roots, err
+	return mounts, err
 }
 
 // cachedMountInventoryCommand is an in-process probe, never an external program.
@@ -37,14 +42,13 @@ const cachedMountInventoryCommand = "myce:mounts-nowait"
 
 type nasMount struct{ root, fingerprint, kind string }
 
-func mountedNASRoots(ctx context.Context, osname string, command func(context.Context, string, ...string) ([]byte, error)) ([]string, error) {
-	mounts, err := mountedNASInventory(ctx, osname, command)
+func nasInventoryRoots(mounts []nasMount) []string {
 	roots := make([]string, 0, len(mounts))
 	for _, mount := range mounts {
 		roots = append(roots, mount.root)
 	}
 	slices.Sort(roots)
-	return slices.Compact(roots), err
+	return slices.Compact(roots)
 }
 
 func mountedNASInventory(ctx context.Context, osname string, command func(context.Context, string, ...string) ([]byte, error)) ([]nasMount, error) {
@@ -143,12 +147,13 @@ func ResolveOnboardingStorage(ctx context.Context, c ServiceConfig, discover boo
 }
 
 type onboardingStorageFS struct {
-	removeCreated bool // Preflight removes only directories it created, inside the owned I/O sequence.
-	readOnly      bool // Preview checks existing metadata without creating or probing files.
-	lstat         func(string) (os.FileInfo, error)
-	mkdir         func(string, os.FileMode) error
-	probe         func(string) error
-	probeContext  func(context.Context, context.CancelCauseFunc, string) error
+	removeCreated   bool // Preflight removes only directories it created, inside the owned I/O sequence.
+	readOnly        bool // Preview checks existing metadata without creating or probing files.
+	allowMissingNAS bool // Only an unchanged worker installation can run degraded.
+	lstat           func(string) (os.FileInfo, error)
+	mkdir           func(string, os.FileMode) error
+	probe           func(string) error
+	probeContext    func(context.Context, context.CancelCauseFunc, string) error
 }
 
 // A contended delete completed in 14.90s (#289); round the observed tail to
@@ -165,6 +170,7 @@ const onboardingFilesystemStallBudget = 2 * 15 * time.Second
 const onboardingFilesystemSlowThreshold = 10 * time.Second
 
 var onboardingNASIO = checkpointIO[bool]{timeout: -1} // Each operation cancels the sequence on stall; no aggregate cap.
+var errInstalledNASAbsent = errors.New("saved worker NAS is not mounted")
 
 // PrepareOnboardingStorage validates an already resolved selection. One checkpointIO
 // guards the complete filesystem sequence, including cleanup. A blocked syscall
@@ -182,12 +188,19 @@ func prepareOnboardingStorageFS(ctx context.Context, c ServiceConfig, discover b
 		return c, err
 	}
 	started := time.Now()
-	roots, err := MountedNASRoots(ctx, c.Detection.OS, command)
+	mounts, err := boundedNASInventory(ctx, c.Detection.OS, command)
 	if err != nil {
 		return c, storageCheckError("nas", "inventory", time.Since(started), err)
 	}
+	roots := nasInventoryRoots(mounts)
 	mount := onboardingMount(c, roots)
-	if mount == "" {
+	missing := fs.allowMissingNAS && !slices.ContainsFunc(mounts, func(m nasMount) bool {
+		return m.kind != "autofs" && withinNAS(m.root, c.NAS)
+	})
+	if missing {
+		mount = c.NAS
+		fs.readOnly = true
+	} else if mount == "" {
 		if discover || c.NAS == "" {
 			return c, storageCheckError("nas", "inventory", time.Since(started), nasNotConfigured(roots))
 		}
@@ -195,8 +208,14 @@ func prepareOnboardingStorageFS(ctx context.Context, c ServiceConfig, discover b
 	}
 	ioCtx, abort := context.WithCancelCause(ctx)
 	defer abort(nil)
-	_, err = onboardingNASIO.runContext(ioCtx, c.NAS+"\x00"+c.Checkpoints+"\x00"+c.ModelRoot+"\x00"+c.EnvironmentRoot, func() (bool, error) {
-		return false, validateOnboardingStorageFS(ioCtx, abort, c, mount, fs)
+	_, err = onboardingNASIO.runContext(ioCtx, fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%t", c.NAS, c.Checkpoints, c.ModelRoot, c.EnvironmentRoot, missing), func() (bool, error) {
+		if err := validateOnboardingStorageFS(ioCtx, abort, c, mount, fs, missing); err != nil {
+			return false, err
+		}
+		if missing {
+			return false, storageCheckError("nas", "inventory", time.Since(started), errInstalledNASAbsent)
+		}
+		return false, nil
 	})
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return c, context.Canceled
@@ -251,7 +270,7 @@ func onboardingFSError(ctx context.Context, abort context.CancelCauseFunc, fn fu
 	_, err := onboardingFSOperation(ctx, abort, func() (bool, error) { return false, fn() }, operation...)
 	return err
 }
-func validateOnboardingStorageFS(ctx context.Context, abort context.CancelCauseFunc, c ServiceConfig, mount string, fs onboardingStorageFS) (result error) {
+func validateOnboardingStorageFS(ctx context.Context, abort context.CancelCauseFunc, c ServiceConfig, mount string, fs onboardingStorageFS, missing bool) (result error) {
 	var created []string
 	defer func() {
 		for i := len(created) - 1; i >= 0; i-- {
@@ -267,13 +286,29 @@ func validateOnboardingStorageFS(ctx context.Context, abort context.CancelCauseF
 	ctx = storageRootContext(ctx, "nas")
 	// Check the mount and every ancestor before mkdir. In particular, a missing
 	// mountpoint is never created on the local disk.
-	if st, e := onboardingFSOperation(ctx, abort, func() (os.FileInfo, error) { return fs.lstat(mount) }, "mount-metadata"); e != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+	st, e := onboardingFSOperation(ctx, abort, func() (os.FileInfo, error) { return fs.lstat(mount) }, "mount-metadata")
+	if !(missing && errors.Is(e, os.ErrNotExist)) && (e != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0) {
+		if missing && e == nil {
+			return storageRootRefusal(ctx, "mount-metadata", preflightError("nas_root_invalid", "storage", "saved NAS mountpoint must be a real directory"), nil)
+		}
 		return storageRootRefusal(ctx, "mount-metadata", preflightError("nas_unreachable", "storage", "mounted NAS is unavailable; restore the OS mount"), e)
 	}
 	for role, path := range []string{c.NAS, c.Checkpoints, c.ModelRoot, c.EnvironmentRoot} {
 		ctx := storageRootContext(ctx, []string{"nas", "checkpoint", "model", "environment"}[role])
 		base := mount
 		if role == 2 && !withinNAS(mount, path) && filepath.IsAbs(path) {
+			if missing {
+				// The selection can be a subdirectory of the absent share.
+				// Check the saved path's shape without inferring its backing.
+				info, err := onboardingFSOperation(ctx, abort, func() (os.FileInfo, error) { return fs.lstat(path) }, "ancestor-metadata")
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+					return storageRootRefusal(ctx, "ancestor-metadata", preflightError("model_root_not_local", "storage", "saved model root must be an accessible real directory"), err)
+				}
+				continue
+			}
 			// Model acquisition may use local disk; checkpoint/environment mount
 			// selection and health checks retain their existing contract.
 			local, err := validateLocalModelVolume(ctx, abort, path)

@@ -193,6 +193,67 @@ func TestResolveNASWorkerChecksAreConfinedAndCached(t *testing.T) {
 	}
 }
 
+func TestResolveNASUsesCheckpointRootSignal(t *testing.T) {
+	q, clock := fixture(t)
+	m := cacheCapacityMachine("worker", 1<<20)
+	m.GPU = "cpu"
+	m.Capabilities = append(m.Capabilities, "nas_inspection_v1")
+	// A local-first restore failure may set the aggregate checkpoint flag.
+	m.CheckpointUnavailable = true
+	check(t, q, m, nil)
+	req := ResolveRequest{Spec: cpuResolveSpec(), InspectNAS: true}
+	req.Spec.SharedInputs = map[string]SharedInput{"data": {NAS: "input", SHA256: strings.Repeat("a", 64), SizeBytes: 1}}
+	cache := newResolveNASCache(clock)
+	resolve := func(want string) {
+		t.Helper()
+		report, err := q.Resolve(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cache.resolve(req, &report)
+		if got := report.Targets[0].NASInputs[0].State; got != want {
+			t.Fatalf("NAS inspection state = %s, want %s", got, want)
+		}
+	}
+	resolve("pending")
+	checks := cache.checkin(Checkin{Machine: m})
+	if len(checks) != 1 {
+		t.Fatalf("healthy checkpoint root did not receive inspection: %v", checks)
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "input"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	w := Worker{Machine: m, Clock: clock}
+	w.inspectNASPaths(checks, root)
+	reports := w.nasPathReports()
+	if len(reports) != 1 || reports[0].State != "present" {
+		t.Fatalf("local checkpoint error hid healthy NAS input: %v", reports)
+	}
+	cache.checkin(Checkin{Machine: m, NASPathReports: reports})
+	resolve("present")
+
+	m.UnavailableRoots = []UnavailableRoot{{Root: "checkpoint", Reason: "configured NAS mount missing"}}
+	w.Machine = m
+	w.inspectNASPaths(checks, root)
+	if reports := w.nasPathReports(); len(reports) != 0 {
+		t.Fatalf("worker inspected a file on the fallback filesystem: %v", reports)
+	}
+	check(t, q, m, nil)
+	resolve("unverified") // Includes the window before cache invalidation.
+	if pending := cache.checkin(Checkin{Machine: m, NASPathReports: reports}); len(pending) != 0 {
+		t.Fatalf("queue sent new inspection to unavailable root: %v", pending)
+	}
+
+	m.UnavailableRoots = nil
+	check(t, q, m, nil)
+	resolve("pending")
+	next := cache.checkin(Checkin{Machine: m, NASPathReports: reports})
+	if len(next) != 1 || next[0].ID == checks[0].ID {
+		t.Fatalf("mount recovery reused evidence from before the outage: %v", next)
+	}
+}
+
 func TestResolveNASInspectionSharedAcrossListeners(t *testing.T) {
 	q, clock := fixture(t)
 	m := cacheCapacityMachine("worker", 16<<30)

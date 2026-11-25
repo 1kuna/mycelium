@@ -19,6 +19,10 @@ type UnavailableRoot struct {
 	Reason string `json:"reason"`
 }
 
+func storageRootUnavailable(m *Machine, role string) bool {
+	return slices.ContainsFunc(m.UnavailableRoots, func(root UnavailableRoot) bool { return root.Root == role })
+}
+
 type workerRootMonitor struct {
 	mu        sync.Mutex
 	paths     map[string]string
@@ -113,6 +117,9 @@ func (w *Worker) sampleStorageRoots(ctx context.Context, checkpoint string) []Un
 		probe = workerMountRoots
 	}
 	mounts, err := probe(ctx)
+	nasMounted := nas != "" && err == nil && slices.ContainsFunc(mounts, func(mount string) bool {
+		return withinNAS(filepath.Clean(mount), nas)
+	})
 	missing := []UnavailableRoot{}
 	for role, path := range w.rootMonitor.paths {
 		expected := w.rootMonitor.expected[role]
@@ -125,6 +132,11 @@ func (w *Worker) sampleStorageRoots(ctx context.Context, checkpoint string) []Un
 			}
 		}
 		if expected == "" && (nas == "" || !withinNAS(nas, path)) {
+			// A model root outside the saved selection can still belong to
+			// the same share. A cold worker has no history to tell them apart.
+			if role == "model" && nas != "" && !nasMounted {
+				missing = append(missing, UnavailableRoot{Root: role, Reason: "model backing unverified while configured NAS mount is unavailable"})
+			}
 			continue
 		}
 		if expected != "" {
@@ -157,9 +169,9 @@ func storageRootReason(j *Job, m *Machine) string {
 		case "extension":
 			needs = j.Spec.extensionJob() || len(j.Extensions) > 0
 		case "checkpoint":
-			needs = needsCheckpoint(j) && !j.Spec.localFirst()
+			needs = needsNASCheckpoint(j)
 			for _, input := range j.Spec.SharedInputs {
-				needs = needs || input.NAS != "" && !slices.Contains(m.CachedSharedInputs, input.key())
+				needs = needs || input.NAS != "" && (j.Spec.ephemeral() || !slices.Contains(m.CachedSharedInputs, input.key()))
 			}
 		case "job-files":
 			needs = len(jobInputPaths(j)) > 0 || j.publishesNASOutputs()

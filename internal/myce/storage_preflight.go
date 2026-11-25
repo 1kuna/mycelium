@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"path/filepath"
 	"syscall"
 	"time"
 )
@@ -117,7 +118,22 @@ func preflightFleetStorageResult(ctx context.Context, c ServiceConfig, command f
 			return nil, storageCheckError(name, "format", time.Since(started), err)
 		}
 	}
-	return prepareInstallStorage(ctx, c, command, installStorageProbe, fs)
+	mode := installStorageProbe
+	if c.PreservesWorkerStorage(c) {
+		mode |= installStoragePreserveNAS
+	}
+	return prepareInstallStorage(ctx, c, command, mode, fs)
+}
+
+// PreservesWorkerStorage covers a saved NAS selection whose checkpoint and
+// environment paths the worker can fence from that selection at cold start.
+func (c ServiceConfig) PreservesWorkerStorage(previous ServiceConfig) bool {
+	return c.Role == "worker" && previous.Role == "worker" && previous.RequireMountedNAS &&
+		filepath.IsAbs(c.NAS) && filepath.Dir(c.NAS) != filepath.Clean(c.NAS) &&
+		c.NAS == previous.NAS && c.Checkpoints == previous.Checkpoints &&
+		c.ModelRoot == previous.ModelRoot && c.EnvironmentRoot == previous.EnvironmentRoot &&
+		withinNAS(c.NAS, c.Checkpoints) && withinNAS(c.NAS, c.EnvironmentRoot) &&
+		filepath.IsAbs(c.ModelRoot)
 }
 
 func fleetStorageFailure(code string, detail *StoragePreflightFailure) *StoragePreflightFailure {
@@ -154,7 +170,7 @@ func installStorageOutcome(ctx context.Context, err error) (*StoragePreflightFai
 	if detail == nil {
 		return nil, err
 	}
-	transient := detail.TimedOut || detail.Operation == "pending"
+	transient := detail.TimedOut || detail.Operation == "pending" || errors.Is(err, errInstalledNASAbsent)
 	switch syscall.Errno(detail.Errno) {
 	case syscall.EIO, syscall.ETIMEDOUT, syscall.ENETUNREACH, syscall.EHOSTUNREACH, syscall.ENOTCONN, syscall.ECONNRESET, syscall.ESTALE:
 		transient = true
@@ -175,10 +191,7 @@ type installStorageReceipt struct {
 func prepareInstallStorage(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error), mode installStorageMode, fs *onboardingStorageFS) (*StoragePreflightFailure, error) {
 	var err error
 	if fs != nil {
-		copy := *fs
-		copy.removeCreated = mode == installStorageProbe
-		copy.readOnly = mode == installStoragePreview
-		_, err = prepareOnboardingStorageFS(ctx, c, false, command, copy)
+		err = prepareInstallNASFS(ctx, c, command, mode, *fs, true)
 	} else {
 		err = prepareInstallNASMode(ctx, c, command, mode)
 	}

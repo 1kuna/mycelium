@@ -333,7 +333,7 @@ func (q *Queue) resolveTargets(j *Job) []ResolveTarget {
 		} else {
 			row.Reason = targetFitReason(fit.first, candidate, m)
 		}
-		row.nasInspection = slices.Contains(m.Capabilities, "nas_inspection_v1")
+		row.nasInspection = slices.Contains(m.Capabilities, "nas_inspection_v1") && !storageRootUnavailable(m, "checkpoint")
 		row.cachedInputs = map[string]bool{}
 		for _, key := range m.CachedSharedInputs {
 			row.cachedInputs[key] = true

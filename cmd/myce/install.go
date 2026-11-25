@@ -359,7 +359,9 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 	}
 	d := c.Detection
 	c.InstalledReleaseManifest = installedReleaseManifest
-	if role == "worker" {
+	// Preserved installations validate storage in the install preflight, which
+	// handles an absent saved NAS without inferring local model backing.
+	if role == "worker" && (installed == nil || !c.PreservesWorkerStorage(*installed)) {
 		if err := myce.ValidateOnboardingModelSelection(ctx, c, probe.Command); err != nil {
 			return err
 		}
@@ -435,7 +437,8 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 			return e
 		}
 	}
-	if role == "worker" && c.Detection.Platform != "fake" && !c.Enrollment {
+	if role == "worker" && c.Detection.Platform != "fake" && !c.Enrollment &&
+		(installed == nil || !c.PreservesWorkerStorage(*installed)) {
 		c, e = myce.PrepareOnboardingStorage(ctx, c, installed == nil && !explicit["nas"], probe.Command)
 		if e != nil {
 			return e

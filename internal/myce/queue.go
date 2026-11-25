@@ -2874,13 +2874,18 @@ func (q *Queue) callView(c *ModelCall) *Job {
 }
 
 // callWait is the scheduler's wait for a model call, in the call's precedence:
-// log policy, host RAM, production/disk fences, project cap, model
+// log policy, storage roots, host RAM, production/disk fences, project cap, model
 // placement, engine recovery, then an ordinary wait for a worker.
 func (q *Queue) callWait(c *ModelCall) *Hold {
 	call := q.callView(c)
 	model, _ := q.model(c.Model)
 	if reason := q.logsWaitingReason(call); reason != "" {
 		return newHold("log_policy", reason)
+	}
+	if c.Machine == "" {
+		if hold := q.hostRetryStorageWait(call); hold != nil {
+			return hold
+		}
 	}
 	if c.Machine == "" && model.HostMemoryGB > 0 {
 		eligible, room := false, false

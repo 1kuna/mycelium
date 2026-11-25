@@ -51,7 +51,7 @@ func mountHumanReason(osname string) mountRecoveryError {
 // Access is the supported, unprivileged automount trigger on both systems. We
 // never invoke mount, sudo, Finder, AppleScript, or a credential helper. A failed
 // trigger is retried by the same single-outstanding probe lane.
-func probeRecoveryMount(path, required, osname string, probe func(string) error, inventory func() ([]nasMount, error)) error {
+func probeRecoveryMount(path, required, osname string, probe, trigger func(string) error, inventory func() ([]nasMount, error)) error {
 	mounts, err := inventory()
 	if err != nil {
 		return mountRecoveryError("mount_inventory_unavailable")
@@ -61,7 +61,16 @@ func probeRecoveryMount(path, required, osname string, probe func(string) error,
 			required = m.root
 		}
 	}
-	err = probe(path)
+	// Trigger automount with metadata only while the known share is absent.
+	// A subsequent sample proves checkpoint writes on the recovered mount.
+	triggerOnly := trigger != nil && required != "" && !slices.ContainsFunc(mounts, func(m nasMount) bool {
+		return m.kind != "autofs" && withinNAS(m.root, required)
+	})
+	if triggerOnly {
+		err = trigger(path)
+	} else {
+		err = probe(path)
+	}
 	if required == "" {
 		return err
 	} // Explicit local checkpoint roots stay local.
@@ -83,7 +92,7 @@ func probeRecoveryMount(path, required, osname string, probe func(string) error,
 	if !mounted && !automount || errors.Is(err, os.ErrPermission) {
 		return mountHumanReason(osname)
 	}
-	if !mounted && err == nil {
+	if (!mounted || triggerOnly) && err == nil {
 		return mountRecoveryError("mount_automount_pending")
 	}
 	return err
@@ -117,7 +126,11 @@ func recoveryMountProbe(w Worker, role, path string) func(string, func()) error 
 			}
 			w.rootMonitor.mu.Unlock()
 		}
-		return probeRecoveryMount(path, required, runtime.GOOS, func(path string) error { return probe(path, progress) }, func() ([]nasMount, error) {
+		var trigger func(string) error
+		if role == "checkpoint" {
+			trigger = func(path string) error { return workerHealthMountProbe(path, progress) }
+		}
+		return probeRecoveryMount(path, required, runtime.GOOS, func(path string) error { return probe(path, progress) }, trigger, func() ([]nasMount, error) {
 			probeguard.Check()
 			defer progress()
 			return mountedNASInventory(context.Background(), runtime.GOOS, func(ctx context.Context, _ string, _ ...string) ([]byte, error) {

@@ -453,16 +453,17 @@ The measured 30-second no-progress bound (twice the recorded 14.90-second
 contention tail, #289) limits waiting for one probe operation, not installation
 eligibility. Completed operations renew the observation window. A syscall may
 outlive the warning; the process retains single-sequence ownership until it
-returns; no second sequence starts in that process while it is pending. Missing selected mounts,
-invalid directories/symlinks, wrong filesystems and completed permission errors
-still fail with typed errors. An unavailable mount cannot be distinguished from
-a wrong selection when absent from OS mount inventory, so that refusal stays.
-Local state/cache format errors remain fatal.
+returns; no second sequence starts in that process while it is pending.
+An in-place worker update can retain its saved NAS selection when the
+checkpoint and environment paths are within that selection and the mount is
+absent. It records a warning and defers NAS write probes. Fresh or changed NAS
+selections still require the mounted share. Invalid directories or symlinks,
+completed permission errors and local state/cache format errors remain fatal.
 
-An installed service can be healthy while storage is unavailable. Current
-runtime mount health, `unavailable_roots` and checkpoint admission continue to
-withhold work requiring those roots until recovery; an install receipt is a
-historical observation, never proof that NAS-dependent work can start.
+An installed worker can be readmitted degraded while its storage is
+unavailable. Runtime mount health and `unavailable_roots` withhold work
+requiring those roots until recovery. Use that live evidence to judge
+admission. The install receipt records the preflight observation.
 
 Drain/disable admission before installing an upgrade. Matching queue and workers
 must use the current protocol. The installer updates only the selected service,

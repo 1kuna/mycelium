@@ -148,6 +148,13 @@ the `checkpoint: local_first` opt-in. A queue-accepted generation is portable
 to a compatible worker. Check verified NAS mirror state separately when NAS
 durability is required. Status comes from the running worker.
 
+During a worker NAS outage, compatible production, deadline, experiment and
+test jobs can still run. Queue-backed inputs and explicit `local_first`
+checkpoints can use the queue file store. A `storage_root` hold names the
+unavailable role. During the outage, work that needs an unverified model
+source also waits with `storage_root` for the model role. Ephemeral staging
+uses the declared NAS source even when an ordinary shared-input cache holds a copy.
+
 ## Wait, inspect and recover
 
 - Use foreground wait for immediate work. One `myce wait JOB_A JOB_B` observes

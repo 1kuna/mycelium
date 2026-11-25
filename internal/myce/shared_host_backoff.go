@@ -95,11 +95,21 @@ func (q *Queue) hostRetryStorageWait(j *Job) *Hold {
 		if m.Gone || !q.jobAllowsMachine(j, m.ID) {
 			continue
 		}
+		if call := q.calls[j.ID]; call != nil {
+			model, _ := q.model(call.Model)
+			if len(m.group) != 0 || m.ModelURL == "" || !q.modelFitsMachine(model, m) || q.callExcludes(call, m.ID, targetDevice(m)) {
+				continue
+			}
+		}
 		// Ignore temporary root failures when deciding whether this is otherwise a
 		// compatible target. No filesystem work occurs in this queue-side check.
 		candidate := *m
 		candidate.UnavailableRoots = nil
 		candidate.CheckpointUnavailable = false
+		rootReason := q.storageRootReason(j, m)
+		if rootReason != "" {
+			candidate.DiskVolumes = diskCapacityVolumes(m.DiskVolumes)
+		}
 		if !fits(j, &candidate, max(m.TotalMemoryGB, m.FreeMemoryGB)) {
 			continue
 		}
@@ -107,7 +117,7 @@ func (q *Queue) hostRetryStorageWait(j *Job) *Hold {
 		if reason != "" {
 			kind = "shared_host_backoff"
 		} else {
-			reason = q.storageRootReason(j, m)
+			reason = rootReason
 		}
 		if reason == "" {
 			return nil

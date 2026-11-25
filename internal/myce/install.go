@@ -383,7 +383,11 @@ func PreflightInstall(ctx context.Context, c ServiceConfig, executable, token st
 	if err != nil || c.SaveSettingsOnly {
 		return err
 	}
-	_, err = prepareInstallStorage(ctx, plan.config, command, installStoragePreview, nil)
+	mode := installStoragePreview
+	if plan.existing && plan.config.PreservesWorkerStorage(plan.slotConfig) {
+		mode |= installStoragePreserveNAS
+	}
+	_, err = prepareInstallStorage(ctx, plan.config, command, mode, nil)
 	return err
 }
 
@@ -598,7 +602,11 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 			}
 		}
 	}()
-	warning, err := prepareInstallStorage(ctx, c, command, installStorageWrite, files.storageFS)
+	mode := installStorageWrite
+	if existing && c.PreservesWorkerStorage(plan.slotConfig) {
+		mode |= installStoragePreserveNAS
+	}
+	warning, err := prepareInstallStorage(ctx, c, command, mode, files.storageFS)
 	if err != nil {
 		return err
 	}

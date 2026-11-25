@@ -157,6 +157,10 @@ func needsCheckpoint(j *Job) bool {
 	return !j.Spec.ephemeral() && (j.Spec.Resumable || j.Spec.Disk != nil && j.Spec.Disk.CheckpointBytes > 0)
 }
 
+func needsNASCheckpoint(j *Job) bool {
+	return needsCheckpoint(j) && !j.Spec.localFirst()
+}
+
 // Background availability uses the installer's measured per-operation stall
 // backstop: successful CIFS create/unlink calls took 17.73s/23.22s (#234).
 // Completed operations renew liveness; a progressing sequence has no total cap.

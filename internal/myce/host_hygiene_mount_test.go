@@ -188,19 +188,28 @@ func TestHostHygieneMountRecoveryReadBackoffAndHumanAlert(t *testing.T) {
 			var failure error
 			var fakeMu sync.Mutex
 			mounted := true
+			var fallbackWrites atomic.Int32
 			setFailure := func(err error, present bool) { fakeMu.Lock(); failure, mounted = err, present; fakeMu.Unlock() }
 			p := &hostMountProbe{root: "checkpoint", path: "root"}
 			p.measure = func(string, func()) hostMountResult {
 				fakeMu.Lock()
 				defer fakeMu.Unlock()
-				err := probeRecoveryMount("/storage/checkpoints", "/storage", osname, func(string) error {
+				trigger := func(string) error {
 					return statHealthMount("root", func(path string) (os.FileInfo, error) {
 						if failure != nil {
 							return nil, failure
 						}
 						return fs.Stat(files, path)
 					}, func() {})
-				}, func() ([]nasMount, error) {
+				}
+				writeProbe := func(string) error {
+					if !mounted {
+						fallbackWrites.Add(1)
+						return errors.New("checkpoint write probe reached fallback")
+					}
+					return failure
+				}
+				err := probeRecoveryMount("/storage/checkpoints", "/storage", osname, writeProbe, trigger, func() ([]nasMount, error) {
 					if mounted {
 						return []nasMount{{root: "/storage", kind: "smbfs"}}, nil
 					}
@@ -250,6 +259,9 @@ func TestHostHygieneMountRecoveryReadBackoffAndHumanAlert(t *testing.T) {
 			human := complete()
 			if human.Reason != string(mountHumanReason(osname)) {
 				t.Fatal(human)
+			}
+			if fallbackWrites.Load() != 0 {
+				t.Fatal("checkpoint write probe ran while the share was absent")
 			}
 			m := cpuMachine("worker", "host", "cpu", 2, 8)
 			publish := func(mount HostMountHealth) {
