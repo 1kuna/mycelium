@@ -122,6 +122,13 @@ func nativeSpec(t *testing.T) Spec {
 }
 func nativeStart(t *testing.T, spec Spec, platform string, catalogs ...EnvironmentCatalog) *nativeTestRun {
 	t.Helper()
+	// Synthetic lifecycle tests own their helper. The listener check uses the
+	// host's real socket table in TestNativeGroupForeignReadinessListener.
+	return nativeStartWithListener(t, spec, platform, func(string, int) error { return nil }, catalogs...)
+}
+
+func nativeStartWithListener(t *testing.T, spec Spec, platform string, probe func(string, int) error, catalogs ...EnvironmentCatalog) *nativeTestRun {
+	t.Helper()
 	q, _ := fixture(t)
 	for _, catalog := range catalogs {
 		if err := q.ConfigureEnvironments(catalog); err != nil {
@@ -153,9 +160,7 @@ func nativeStart(t *testing.T, spec Spec, platform string, catalogs ...Environme
 	}))
 	w := Worker{environmentCache: &EnvironmentCache{Root: t.TempDir(), Limit: 512 << 20, Clock: RealClock{}}, Clock: RealClock{}, StateDir: t.TempDir(), Machine: m, Client: Client{URL: server.URL, Token: "fleet-private-test-token"}, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
 	w.MemorySource = func(context.Context) (float64, error) { return m.FreeMemoryGB, nil }
-	// Synthetic lifecycle tests own their helper. Host listener discovery is
-	// exercised directly by TestNativeGroupForeignReadinessListener.
-	w.nativeListenerProbe = func(string, int) error { return nil }
+	w.nativeListenerProbe = probe
 	if platform == "cuda" || platform == "xpu" {
 		w.nativeGPUDeviceProbe = syntheticNativeGPUDeviceProbe(MachineDevice{ID: "1", Platform: platform, Selector: "1"})
 	}
@@ -459,12 +464,12 @@ func TestNativeGroupNamedEnvironment(t *testing.T) {
 }
 func TestNativeGroupForeignReadinessListener(t *testing.T) {
 	s := nativeSpec(t)
-	r := nativeStart(t, s, "fake")
+	// Use host loopback so the readiness gate and the foreign-listener check
+	// inspect the same socket table. Main starts only after real verification.
+	s.Isolation = "unsandboxed"
+	s.Reason = "exercise host loopback listener ownership"
+	r := nativeStartWithListener(t, s, "fake", nil)
 	nativeFile(t, r.dir, "main-ready")
-	env := nativeEnv(t, r.dir, "main")
-	if err := verifyNativeListener(env["MYCE_SIDECAR_HELPER_PORT"], r.p.cmd.Process.Pid); err != nil {
-		t.Fatal("refused owned HTTP listener", err)
-	}
 	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }))
 	defer foreign.Close()
 	_, port, _ := net.SplitHostPort(strings.TrimPrefix(foreign.URL, "http://"))
