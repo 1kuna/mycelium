@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"mycelium/internal/myce"
 )
 
 func TestCommandUsageDoesNotExposeSecrets(t *testing.T) {
@@ -35,6 +37,18 @@ func TestCommandUsageDoesNotExposeSecrets(t *testing.T) {
 			t.Run(command+"/"+option, func(t *testing.T) {
 				args := append(strings.Fields(command), option)
 				stdout, stderr, err := captureUsageOutput(t, args)
+				for _, output := range []string{stdout, stderr} {
+					if strings.Contains(output, token) || strings.Contains(output, invitationToken) {
+						t.Fatal("credential exposed in command output")
+					}
+				}
+				if strings.HasPrefix(command, "model ") {
+					var retired *myce.HTTPError
+					if !errors.As(err, &retired) || !strings.HasSuffix(retired.Code, "_retired") {
+						t.Fatalf("expected model retirement diagnostic, got %T", err)
+					}
+					return
+				}
 				waitHelp := command == "wait" && option != "--unknown-flag"
 				retired := command == "disable" || command == "enable"
 				if err == nil && !waitHelp {
@@ -42,11 +56,6 @@ func TestCommandUsageDoesNotExposeSecrets(t *testing.T) {
 				}
 				if option != "--unknown-flag" && !waitHelp && !retired && !errors.Is(err, flag.ErrHelp) {
 					t.Fatalf("expected ErrHelp, got %T", err)
-				}
-				for _, output := range []string{stdout, stderr} {
-					if strings.Contains(output, token) || strings.Contains(output, invitationToken) {
-						t.Fatal("credential exposed in command output")
-					}
 				}
 				if retired {
 					if !strings.Contains(stdout+stderr, "retired host control; use myce host drain|disable|resume HOST") {

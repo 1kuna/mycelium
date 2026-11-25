@@ -71,11 +71,8 @@ func TestOwnerWritesInstalledPinnedAuthority(t *testing.T) {
 		if strings.Contains(out.String(), token) {
 			t.Fatal("credential in output")
 		}
-		if err := modelCommand(append([]string{"sync", "example", "--to", "all"}, flags...)); err != nil {
-			t.Fatal(err)
-		}
 	}
-	if writes != 6 {
+	if writes != 3 {
 		t.Fatalf("writes = %d", writes)
 	}
 	// A real server with a different certificate receives no owner request.
