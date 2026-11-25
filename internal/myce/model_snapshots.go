@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"net"
 	"os"
 	"path"
@@ -424,13 +425,25 @@ func (w Worker) acquireResolvedSnapshot(ctx context.Context, j Job, input Shared
 	}
 	// Zero uses the cache's volume-derived disk floor during admission,
 	// after inactive entries have had a chance to be evicted.
-	if _, err := os.Stat(filepath.Join(w.modelSnapshots.cache.Root, input.key())); err != nil && j.ModelLimits.FreeFloorBytes > 0 && w.modelSnapshots.budget == nil {
+	floor := uint64(max(0, j.ModelLimits.FreeFloorBytes))
+	if _, err := os.Stat(filepath.Join(w.modelSnapshots.cache.Root, input.key())); err != nil && floor > 0 && w.modelSnapshots.budget == nil {
 		disk, e := workerDiskProbe(w.modelSnapshots.cache.Root)
-		if e != nil || disk.FreeBytes < uint64(need) || disk.FreeBytes-uint64(need) < uint64(j.ModelLimits.FreeFloorBytes) {
+		if e != nil {
 			return "", nil, modelSnapshotDiskFault(e)
 		}
+		available := disk.FreeBytes - min(disk.FreeBytes, floor)
+		if disk.FreeBytes < floor || uint64(need) > available {
+			fault := modelSnapshotDiskFault(&stagingCapacityError{
+				required: need, available: int64(min(disk.FreeBytes, math.MaxInt64)),
+				limit: int64(floor), capacity: "disk_free_floor",
+			})
+			// Distinguish the raw free bytes and reserved floor from the
+			// shared admission check's post-reservation headroom and ceiling.
+			fault.diagnostic.Staging.Operation = "model_snapshot"
+			return "", nil, fault
+		}
 	}
-	path, done, err := w.modelSnapshots.Acquire(context.WithValue(ctx, diskBudgetFloorKey{}, uint64(max(0, j.ModelLimits.FreeFloorBytes))), input, root)
+	path, done, err := w.modelSnapshots.Acquire(context.WithValue(ctx, diskBudgetFloorKey{}, floor), input, root)
 	if err != nil {
 		var typed *runtimeError
 		if errors.Is(err, errCheckpointIOPending) || errors.Is(err, errModelIndexStale) || ctx.Err() != nil || errors.As(err, &typed) {
@@ -448,7 +461,7 @@ func (w Worker) acquireResolvedSnapshot(ctx context.Context, j Job, input Shared
 	return path, done, nil
 }
 
-func modelSnapshotDiskFault(cause error) error {
+func modelSnapshotDiskFault(cause error) *runtimeError {
 	if cause == nil {
 		cause = errors.New("model snapshot cache lacks room above the free-space floor")
 	}

@@ -184,23 +184,51 @@ func TestModelHubRejectsPreviouslyExpandedSelection(t *testing.T) {
 	cache := t.TempDir()
 	w := hubWorker(t, cache, hub.URL)
 	full := snapshotJob("org/tiny")
-	if _, err := acquireOnce(t, w, full); err != nil {
+	fullDir, err := acquireOnce(t, w, full)
+	if err != nil {
 		t.Fatal(err)
 	}
 	model := full.Spec.ModelSnapshots["base"]
-	input, ok := w.modelIndex.lookup(snapshotIdentity(model))
+	wholeID := snapshotIdentity(model)
+	input, ok := w.modelIndex.lookup(wholeID)
 	if !ok {
 		t.Fatal("missing whole-snapshot cache record")
 	}
 	model.Files = []string{"model.safetensors"}
-	full.Spec.ModelSnapshots["base"] = model
-	// Emulate an older worker that recorded the extra file under a selection.
-	w.modelIndex.record(w.modelSnapshots.cache.Root, model, input)
-	restarted := hubWorker(t, cache, hub.URL)
-	if held, sizes := restarted.modelIndex.report(restarted.modelSnapshots.readyKeys()); len(held) != 0 || len(sizes) != 0 {
-		t.Fatalf("advertised a legacy entry that violated its selection: held=%v sizes=%v", held, sizes)
+	filtered := snapshotJob("org/tiny")
+	filtered.Spec.ModelSnapshots["base"] = model
+	// Emulate the old single-record format where a legacy selection
+	// overwrote the whole snapshot's record for the same cache key.
+	keyDir := filepath.Dir(fullDir)
+	records, err := filepath.Glob(filepath.Join(keyDir, "snapshot*.json"))
+	if err != nil || len(records) != 1 {
+		t.Fatalf("expected one whole-snapshot record: %v %v", records, err)
 	}
-	dir, err := acquireOnce(t, w, full)
+	if err := os.Remove(records[0]); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := json.Marshal(modelSnapshotRecord{Snapshot: model, Input: input})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileAtomic(filepath.Join(keyDir, "snapshot.json"), legacy); err != nil {
+		t.Fatal(err)
+	}
+	restarted := hubWorker(t, cache, hub.URL)
+	if held, sizes := restarted.modelIndex.report(restarted.modelSnapshots.readyKeys()); !slices.Equal(held, []string{wholeID}) || len(sizes) != 1 || sizes[wholeID] != snapshotBytes(input) {
+		t.Fatalf("expected only the whole snapshot after restart: held=%v sizes=%v", held, sizes)
+	}
+	before := hub.total()
+	hub.mu.Lock()
+	hub.status = http.StatusServiceUnavailable
+	hub.mu.Unlock()
+	if dir, err := acquireOnce(t, restarted, full); err != nil || dir != fullDir || hub.total() != before {
+		t.Fatalf("whole snapshot was not reused offline: %q %v", dir, err)
+	}
+	hub.mu.Lock()
+	hub.status = 0
+	hub.mu.Unlock()
+	dir, err := acquireOnce(t, restarted, filtered)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,6 +301,31 @@ func TestModelHubFetchesUncachedSnapshotOnce(t *testing.T) {
 	}
 	if hub.total() != before {
 		t.Fatalf("held snapshot contacted the hub: %d requests", hub.total()-before)
+	}
+
+	// An explicit list of every file shares the cache key with the whole
+	// snapshot. Both declarations must survive a restart.
+	selected := snapshotJob("org/tiny")
+	m := selected.Spec.ModelSnapshots["base"]
+	m.Files = []string{"model.safetensors", "config.json"}
+	selected.Spec.ModelSnapshots["base"] = m
+	if path, err := acquireOnce(t, restarted, selected); err != nil || path != paths[0] {
+		t.Fatalf("exact selection did not share the cache entry: %q %v", path, err)
+	}
+	before = hub.total()
+	restarted = hubWorker(t, cache, hub.URL)
+	want := []string{id, snapshotIdentity(m)}
+	slices.Sort(want)
+	if held, _ := restarted.modelIndex.report(restarted.modelSnapshots.readyKeys()); !slices.Equal(held, want) {
+		t.Fatalf("restarted worker forgot a declaration: %v", held)
+	}
+	for _, job := range []Job{snapshotJob("org/tiny"), selected} {
+		if path, err := acquireOnce(t, restarted, job); err != nil || path != paths[0] {
+			t.Fatalf("held declaration did not reuse verified bytes: %q %v", path, err)
+		}
+	}
+	if hub.total() != before {
+		t.Fatalf("held declarations contacted the hub: %d requests", hub.total()-before)
 	}
 }
 

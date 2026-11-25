@@ -1062,6 +1062,10 @@ disk headroom rule. This leaves room for filesystem metadata, control logs and
 other writers without imposing one deployment's disk size on smaller systems.
 A positive value requests an explicit reserve for that model copy's admission;
 it does not raise the floor for unrelated staging or background collection.
+If the worker's explicit floor check refuses a copy, status reports staging
+operation `model_snapshot` and capacity `disk_free_floor`. Its `required_bytes`
+is the copy size, `available_bytes` is the measured free space, and
+`limit_bytes` is the configured reserve.
 The ordinary measured cache disk floor still applies. Cache capacity, verified identities and read-only staging remain
 required.
 
