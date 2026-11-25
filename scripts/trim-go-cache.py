@@ -19,7 +19,9 @@ def main() -> int:
     root = sys.argv[1]
     cap = int(float(os.environ.get("GATE_GOCACHE_CAP_GB", "15")) * (1 << 30))
     grace = float(os.environ.get("GATE_GOCACHE_GRACE_SECONDS", "600"))
-    if not os.path.isfile(os.path.join(root, "README")):
+    # Go creates the 256 two-hex shard directories 00..ff. Only those shards are
+    # trimmed; other directories under GOCACHE (tool state) are left alone.
+    if not all(os.path.isdir(os.path.join(root, s)) for s in ("00", "7f", "ff")):
         return 0  # Not a Go build cache; touch nothing.
     entries, total = [], 0
     for name in os.listdir(root):
