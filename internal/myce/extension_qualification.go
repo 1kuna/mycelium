@@ -33,6 +33,10 @@ func matchingExtensionReport(e Extension, m *Machine, r ExtensionReport) bool {
 	return m.ExtensionFingerprint != "" && extensionReportIdentity(r) == extensionReportIdentity(newExtensionReport(e, m, r.Work))
 }
 
+func queueOwnedExtensionCheckID(id string) bool {
+	return strings.HasPrefix(id, "auto-") || strings.HasPrefix(id, consumerCheckPrefix)
+}
+
 func automaticExtensionCheckID(machine string, r ExtensionReport) string {
 	return "auto-" + identityHash([2]string{machine, extensionReportIdentity(r)})
 }
@@ -374,25 +378,27 @@ func (q *Queue) acceptExtensionQualifications(owner *Machine) {
 	for _, m := range q.machineTargets(owner) {
 		for i := range m.ExtensionReports {
 			r := &m.ExtensionReports[i]
-			if !r.Qualified || !strings.HasPrefix(r.CheckID, "auto-") || r.Platform != m.GPU || extensionReportDevice(r.Platform, r.Device) != extensionReportDevice(m.GPU, m.Device) {
+			consumerFailure := strings.HasPrefix(r.CheckID, consumerCheckPrefix) && !r.Qualified && r.CheckState == "failed"
+			if (!r.Qualified && !consumerFailure) || !queueOwnedExtensionCheckID(r.CheckID) || r.Platform != m.GPU || extensionReportDevice(r.Platform, r.Device) != extensionReportDevice(m.GPU, m.Device) {
 				continue
 			}
 			accepted := false
-			record := q.s.Submissions[submissionDigest("extension-check", r.CheckID)]
-			if record != nil {
-				j := q.s.Jobs[record.JobID]
-				if j != nil && j.State == "succeeded" && !cancelled(j) && j.ReleaseConfirmed && j.Machine == m.ID {
-					check := automaticExtensionCheck(j)
-					for _, e := range j.Extensions {
-						if check != nil && extensionReportIdentity(*check) == extensionReportIdentity(*r) && matchingExtensionReport(e, m, *r) {
-							accepted = true
-						}
+			j := q.checkJobByID(r.CheckID)
+			if j != nil && j.ReleaseConfirmed && j.Machine == m.ID &&
+				(j.State == "succeeded" && !consumerFailure && !cancelled(j) || consumerFailure && j.State == "failed" && !automaticCheckNoVerdict(j)) {
+				check := automaticExtensionCheck(j)
+				for _, e := range j.Extensions {
+					if check != nil && extensionReportIdentity(*check) == extensionReportIdentity(*r) && matchingExtensionReport(e, m, *r) {
+						accepted = true
 					}
 				}
 			}
 			if !accepted {
 				r.Qualified = false
 				r.Reason = "accepted native check required"
+				if consumerFailure {
+					r.CheckID, r.CheckState = "", ""
+				}
 			}
 		}
 	}
@@ -405,6 +411,19 @@ func (q *Queue) maintainExtensionQualifications() {
 	for _, j := range q.liveJobs() {
 		r := automaticExtensionCheck(j)
 		if r == nil || terminal(j.State) || cancelled(j) {
+			continue
+		}
+		if consumerExtensionCheck(j.Spec) {
+			owner := q.s.Machines[j.Spec.AllowedMachines[0]]
+			if owner != nil && !q.automaticCheckIdentityUnknown(owner, *r) {
+				m := q.qualificationTarget(owner.ID, r.Platform, r.Device)
+				if m == nil || !matchingExtensionReport(j.Extensions[0], m, *r) {
+					q.cancelJob(j)
+					if j.Attempt == 0 {
+						j.Reason = "native qualification target identity changed"
+					}
+				}
+			}
 			continue
 		}
 		wanted, identityValid, identityUnknown := false, false, true

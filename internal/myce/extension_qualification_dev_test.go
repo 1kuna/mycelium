@@ -140,3 +140,108 @@ func extensionFrozenRecoveryDev(t *testing.T, legacy bool) {
 		t.Fatal("cold native setup was not prepared", err)
 	}
 }
+
+func TestConsumerQualificationDev(t *testing.T) {
+	root := newTestStateRoot(t)
+	c := DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"),
+		FileStore: filepath.Join(root, "files"), ExtensionRoot: filepath.Join(root, "extensions"), Token: "consumer-qualification-fixture",
+		Workers: 1, Devices: 2, HostID: "test-worker", MemoryGB: 8, Interval: 10 * time.Millisecond}
+	t.Setenv("MYCE_TOKEN", c.Token)
+	e := compositionExtension(t, false)
+	e.Files["check.sh"] = append([]byte("test ! -f \"$MYCE_EXTENSION_CACHE/fail\" || { printf '[99]' > \"$MYCE_CHECK_OUTPUT\"; exit 0; }\n"), e.Files["check.sh"]...)
+	e = freezeComposition(t, e)
+	d, err := startTestDev(t, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := d.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	awaitTestDevDeviceFingerprints(t, d)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	client := d.Client()
+	if err := client.Call(ctx, "POST", "/api/extensions", e, nil); err != nil {
+		t.Fatal(err)
+	}
+	request := ConsumerQualification{Project: "consumer", Extension: extensionKey(e), Digest: e.Digest, Worker: c.HostID, Platform: "fake", Device: "1"}
+	submitCheck := func() QualificationVerdict {
+		t.Helper()
+		var v QualificationVerdict
+		if err := client.Call(ctx, "POST", "/api/extension-checks", request, &v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	read := func(path string) QualificationVerdict {
+		t.Helper()
+		var v QualificationVerdict
+		if err := client.Call(ctx, "GET", path, nil, &v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	first := submitCheck()
+	if first.State != "queued" || first.Verdict != "pending" || first.Reused || first.JobID == "" || first.CheckID == "" {
+		t.Fatal("missing queued receipt", first)
+	}
+	j, err := client.Wait(ctx, first.JobID)
+	if err != nil || j.State != "succeeded" || !j.ReleaseConfirmed || j.Machine != request.Worker || len(j.AllocatedDevices) != 1 || j.AllocatedDevices[0] != request.Device {
+		t.Fatalf("check did not succeed on the exact worker device: %+v (%v)", j, err)
+	}
+	byCheck := read("/api/extension-checks/" + first.CheckID)
+	byJob := read("/api/jobs/" + first.JobID + "/extension-check")
+	if byCheck != byJob || byJob.Verdict != "passed" || byJob.Digest != request.Digest || byJob.Worker != request.Worker || byJob.Device != request.Device || byJob.Attempt != 1 {
+		t.Fatal("incorrect or inconsistent verdict readback", byCheck, byJob)
+	}
+	if v := submitCheck(); !v.Reused || v.CheckID != first.CheckID || v.Verdict != "passed" {
+		t.Fatal("repeat did not reuse released evidence", v)
+	}
+	awaitReport := func(checkID string, qualified bool) {
+		t.Helper()
+		await(t, func() bool {
+			d.Queue.mu.RLock()
+			defer d.Queue.mu.RUnlock()
+			m := d.Queue.qualificationTarget(request.Worker, request.Platform, request.Device)
+			for _, r := range m.ExtensionReports {
+				if r.CheckID == checkID && r.Qualified == qualified {
+					return true
+				}
+			}
+			return false
+		})
+	}
+	awaitReport(first.CheckID, true)
+	request.Project = "other-consumer"
+	if v := submitCheck(); !v.Reused || v.CheckID != first.CheckID {
+		t.Fatal("project could not reuse existing native evidence", v)
+	}
+	request.Project = "consumer"
+	request.Recheck = true
+	if err := os.WriteFile(filepath.Join(extensionCache(c.ExtensionRoot, e, "fake"), "fail"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	second := submitCheck()
+	if second.CheckID == first.CheckID || second.Verdict != "pending" || second.Reused {
+		t.Fatal("recheck did not enqueue a fresh invocation", second)
+	}
+	j, err = client.Wait(ctx, second.JobID)
+	if j == nil || j.State != "failed" || !j.ReleaseConfirmed {
+		t.Fatalf("incorrect baseline did not fail the job: %+v (%v)", j, err)
+	}
+	request.Recheck = false
+	if v := submitCheck(); !v.Reused || v.CheckID != second.CheckID || v.Verdict != "failed" {
+		t.Fatal("repeat did not retain the latest failed verdict", v)
+	}
+	awaitReport(second.CheckID, false)
+	request.Project = "other-consumer"
+	if v := submitCheck(); !v.Reused || v.CheckID != second.CheckID || v.Verdict != "failed" {
+		t.Fatal("a failed recheck left the older pass available to another project", v)
+	}
+	if v := read("/api/extension-checks/" + first.CheckID); v.Verdict != "passed" {
+		t.Fatal("recheck mutated the earlier verdict", v)
+	}
+}

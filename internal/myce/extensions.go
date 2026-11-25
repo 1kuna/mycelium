@@ -511,6 +511,9 @@ func extensionCandidates(j *Job, m *Machine, qualified, piece bool) ([]*Job, str
 		if !e.matchesTarget(m) || !slices.Contains(e.platforms(), m.GPU) {
 			continue
 		}
+		if consumerExtensionCheck(j.Spec) && !consumerCheckTargetMatches(j, e, m) {
+			continue
+		}
 		if len(j.Spec.SharedInputs) > 0 {
 			candidate := j.Spec
 			if piece {

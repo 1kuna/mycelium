@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/signal"
 	"os/user"
@@ -20,10 +21,13 @@ import (
 
 func extensionCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: myce extension init|add|list|setup|check [flags] [folder|name@version]")
+		return errors.New("usage: myce extension init|add|list|setup|check|qualify|qualification [flags]")
 	}
 	if args[0] == "init" {
 		return extensionInit(args[1:])
+	}
+	if args[0] == "qualify" || args[0] == "qualification" {
+		return consumerQualificationCommand(args[0], args[1:])
 	}
 	f := flag.NewFlagSet("extension "+args[0], flag.ContinueOnError)
 	root := f.String("root", myce.DefaultExtensionRoot(), "local extension library and download cache (default: installed worker root, then user cache)")
@@ -54,7 +58,7 @@ func extensionCommand(args []string) error {
 	if args[0] == "check" && !*static {
 		worker, installedWorker = installedExtensionWorker(*config)
 		if *host != "" && (!installedWorker || *host != worker.HostID) {
-			return fmt.Errorf("runtime checks execute on the target host %q: run myce extension check there as the installation owner, or submit the useful job so the queue runs native qualification", *host)
+			return fmt.Errorf("runtime checks execute on the target host %q: use myce extension qualify for an explicit queue request, run myce extension check there as the installation owner, or submit the useful job so the queue runs native qualification", *host)
 		}
 	}
 	if *reserve && (args[0] != "check" || *static || *reserveLifetime <= 0 || *reserveLifetime > myce.MaxReservationLifetime) {
@@ -231,6 +235,55 @@ func extensionCommand(args []string) error {
 	default:
 		return errors.New("unknown extension command")
 	}
+}
+
+func consumerQualificationCommand(command string, args []string) error {
+	f := flag.NewFlagSet("extension "+command, flag.ContinueOnError)
+	queue := f.String("queue", env("MYCE_QUEUE", ""), "queue address")
+	config := f.String("config", "", "installed config")
+	joining := f.String("joining-file", env("MYCE_JOINING_FILE", ""), "privately supplied invitation")
+	var request myce.ConsumerQualification
+	var job string
+	if command == "qualify" {
+		f.StringVar(&request.Project, "project", "", "project used for ordinary admission and priority")
+		f.StringVar(&request.Digest, "digest", "", "exact registered SHA-256")
+		f.StringVar(&request.Worker, "worker", "", "exact queue worker ID")
+		f.StringVar(&request.Platform, "gpu", "", "native platform: cpu, cuda, xpu, metal or fake")
+		f.StringVar(&request.Device, "device", "", "exact device ID from queue inventory (omit for CPU)")
+		f.StringVar(&request.Work, "work", "", "declared work type (defaults to extension:NAME or the sole legacy work type)")
+		f.BoolVar(&request.Recheck, "recheck", false, "run a new check after the previous check has released")
+	} else {
+		f.StringVar(&job, "job", "", "read the verdict by exact job ID")
+	}
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if command == "qualify" && (f.NArg() != 1 || request.Project == "" || request.Digest == "" || request.Worker == "" || request.Platform == "") {
+		return errors.New("usage: myce extension qualify --project PROJECT --digest SHA256 --worker WORKER --gpu PLATFORM [--device DEVICE] NAME@VERSION")
+	}
+	if command == "qualification" && (job == "" && f.NArg() != 1 || job != "" && f.NArg() != 0) {
+		return errors.New("usage: myce extension qualification CHECK_ID or myce extension qualification --job JOB_ID")
+	}
+	client, err := runClient(*config, *joining, *queue, env("MYCE_TOKEN", ""))
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	var verdict myce.QualificationVerdict
+	switch {
+	case command == "qualify":
+		request.Extension = f.Arg(0)
+		err = client.Call(ctx, "POST", "/api/extension-checks", request, &verdict)
+	case job != "":
+		err = client.Call(ctx, "GET", "/api/jobs/"+url.PathEscape(job)+"/extension-check", nil, &verdict)
+	default:
+		err = client.Call(ctx, "GET", "/api/extension-checks/"+url.PathEscape(f.Arg(0)), nil, &verdict)
+	}
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(verdict)
 }
 
 // Qualification reports belong to the root checked; they are not transferred

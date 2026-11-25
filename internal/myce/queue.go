@@ -868,11 +868,11 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 // SubmitContext snapshots input custody before bulk verification. Key replay,
 // cancellation and job creation still serialize in the final update transaction.
 func (q *Queue) SubmitContext(ctx context.Context, s Spec) (*Job, error) {
-	return q.submitContext(ctx, s, nil)
+	return q.submitContext(ctx, s, nil, false)
 }
 
 // committed pins immutable advice inputs before releasing the commit lock.
-func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ *Job, err error) {
+func (q *Queue) submitContext(ctx context.Context, s Spec, committed func(), consumerCheck bool) (_ *Job, err error) {
 	ctx = context.WithValue(ctx, submissionTurnKey{}, true)
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
@@ -910,6 +910,9 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 	// Direct API callers may send the MY-54 authoring form; store it flat.
 	if _, err := s.FoldAdvanced(); err != nil {
 		return nil, err
+	}
+	if consumerExtensionCheck(s) && !consumerCheck {
+		return nil, qualificationRequestError(400, "qualification_request_required", "use the extension-check request endpoint")
 	}
 	if s.SubmissionKey != "" {
 		if err := validateSubmissionKey(s.SubmissionKey); err != nil {
@@ -1046,8 +1049,14 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		if e != nil {
 			return rejectFieldRule("job_program_invalid", e)
 		}
-		if err := q.validateAutomaticExtensionCheck(s, extensions); err != nil {
-			return err
+		if consumerExtensionCheck(s) {
+			if err := q.validateConsumerCheck(&s, extensions); err != nil {
+				return err
+			}
+		} else {
+			if err := q.validateAutomaticExtensionCheck(s, extensions); err != nil {
+				return err
+			}
 		}
 		// Validate the original execution/needs, with the resolved class default.
 		// Resolution must not hide forbidden overrides or bypass deadline rules.

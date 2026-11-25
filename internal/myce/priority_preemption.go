@@ -163,6 +163,9 @@ func (q *Queue) batchPreemptible(j *Job, demand Spec) bool {
 	if !batchReservesCapacity(j) || q.comparePriority(j.Spec, demand) <= 0 {
 		return false
 	}
+	if consumerExtensionCheck(demand) && j.StartedAt == nil {
+		return false // Qualification cannot withdraw another job's startup.
+	}
 	// Deadline retains its cooperative-only legacy interruption contract.
 	if demand.Priority == "deadline" && !j.Spec.Resumable {
 		return false

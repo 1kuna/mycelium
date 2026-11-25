@@ -90,7 +90,7 @@ func TestExtensionAgentDevEndToEnd(t *testing.T) {
 		t.Fatal("dev startup", ctx.Err())
 	}
 	t.Setenv("MYCE_QUEUE", queue)
-	run := func(args ...string) {
+	run := func(args ...string) []byte {
 		t.Helper()
 		c := exec.CommandContext(ctx, binary, args...)
 		c.Env = os.Environ()
@@ -99,6 +99,7 @@ func TestExtensionAgentDevEndToEnd(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		return out
 	}
 	// Scripted fresh-agent flow: inspect the existing app and copy it unchanged,
 	// create the skeleton, then author the complete target from the guide example.
@@ -173,6 +174,33 @@ func TestExtensionAgentDevEndToEnd(t *testing.T) {
 		if r.State != "released" || r.Owner != "dev-agent" || r.Reason != "runtime qualification" || r.CleanupPending {
 			t.Fatal("--reserve did not release after check cleanup", r)
 		}
+	}
+	e, err := myce.ReadExtension(folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := []string{"extension", "qualify", "--project", "demo", "--worker", "fake-1", "--gpu", "fake", "--device", "0", "--digest", e.Digest}
+	decodeVerdict := func(out []byte) myce.QualificationVerdict {
+		t.Helper()
+		var verdict myce.QualificationVerdict
+		if err := json.Unmarshal(out, &verdict); err != nil {
+			t.Fatal(err)
+		}
+		return verdict
+	}
+	recheck := decodeVerdict(run(append(request, "--recheck", "http-stage@1")...))
+	if recheck.Reused || recheck.CheckID == "" || recheck.Verdict != "pending" {
+		t.Fatal("consumer CLI recheck did not enqueue a new check", recheck)
+	}
+	run("wait", recheck.JobID)
+	byCheck := decodeVerdict(run("extension", "qualification", recheck.CheckID))
+	byJob := decodeVerdict(run("extension", "qualification", "--job", recheck.JobID))
+	if byCheck != byJob || byCheck.Verdict != "passed" || byCheck.Digest != e.Digest || byCheck.Device != "0" {
+		t.Fatal("consumer readback did not confirm the requested native check", byCheck, byJob)
+	}
+	warm := decodeVerdict(run(append(request, "http-stage@1")...))
+	if !warm.Reused || warm.CheckID != recheck.CheckID || warm.Verdict != "passed" {
+		t.Fatal("consumer CLI did not reuse the accepted native check", warm)
 	}
 	python, err := exec.LookPath("python3.11")
 	if err != nil {

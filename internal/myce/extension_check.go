@@ -23,6 +23,8 @@ type ExtensionCheckRequest struct {
 	// Automatic binds a worker-requested check to its prepared native identity.
 	// Manual checks keep their existing request and report contract.
 	Automatic *ExtensionReport `json:"automatic,omitempty" yaml:"automatic,omitempty"`
+	// Consumer checks use the same identity fence with attempt-owned storage.
+	Consumer bool `json:"consumer,omitempty" yaml:"consumer,omitempty"`
 }
 
 // CheckExtension checks a frozen local variant on this host. Host is the local

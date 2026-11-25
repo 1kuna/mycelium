@@ -709,6 +709,9 @@ func (q *Queue) slotReclaimableFor(s *ModelSlot, demand Spec) bool {
 	if s.State == "unload_failed" || s.State == "failed" {
 		return false
 	}
+	if consumerExtensionCheck(demand) && s.State == "loading" {
+		return false
+	}
 	n := q.comparePriority(q.slotSpec(s), demand)
 	if n > 0 && s.PriorityStop == nil && q.preemptionProtected(s.PreemptionCount, s.RunSince) {
 		return false
