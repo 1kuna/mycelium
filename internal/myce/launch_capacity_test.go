@@ -419,6 +419,13 @@ func TestLaunchCapacityUnifiedWorkerGateAndNativeStartup(t *testing.T) {
 		t.Fatal("delayed heartbeat returned an offer", next.ID)
 	}
 	sampleID = d.RAMGateSampleID
+	report(102)
+	machineCheck(t, q, m)
+	clock.Advance(time.Second)
+	machineCheck(t, q, delayed)
+	if seen := q.poolAvailability[m.ID]; seen.free != 102 || !seen.at.Before(clock.Now()) {
+		t.Fatalf("delayed heartbeat also changed the pressure sample: %.3f GiB at %v", seen.free, seen.at)
+	}
 	for i := range 25 {
 		report(102 + float64(i%2)*0.1)
 		if next := assignedJob(machineCheck(t, q, m)); next != nil {

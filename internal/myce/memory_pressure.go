@@ -32,7 +32,8 @@ type poolPressureSample struct {
 
 func (q *Queue) observePoolAvailability(m *Machine, period time.Duration, receivedAt time.Time, reports []AttemptReport) {
 	previous := q.poolAvailability[m.ID]
-	if previous.session == m.Session && receivedAt.Before(previous.at) {
+	if previous.session == m.Session && receivedAt.Before(previous.at) ||
+		m.HostRAMGate != nil && !m.hostRAMGateAt.Equal(receivedAt) {
 		return
 	}
 	if !workerUsesMemoryPools(m) || !m.HostMemoryMeasured || m.HostMemoryError != "" {
@@ -40,7 +41,7 @@ func (q *Queue) observePoolAvailability(m *Machine, period time.Duration, receiv
 		return
 	}
 	reading := poolAvailability{session: m.Session, at: receivedAt, free: m.HostAvailableMemoryGB, period: period}
-	if m.HostRAMGate != nil && m.hostRAMGateAt.Equal(receivedAt) {
+	if m.HostRAMGate != nil {
 		reading.free, reading.raw = m.HostRAMGate.RawGB, true
 	} else if o := m.MemoryObservation; validHostMemoryObservation(o) {
 		reading.free, reading.raw = o.TotalGB-o.UsedGB, true
