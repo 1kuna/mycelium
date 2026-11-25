@@ -16,9 +16,11 @@ locally; subsequent saves do not enumerate the checkpoint directory.
 Custom writers can publish the same notification after their atomic JSON save
 or manifest is durable. Names are plain `.json` filenames and generations are
 positive int64s. Use a single writer and atomic local replacement. The worker
-stats only this local file, reads a changed marker once, and sends its generation
-to the queue. Several saves before observation may coalesce to the latest.
-Neither worker nor queue opens a NAS marker or directory to produce status.
+reads a changed marker once and verifies the named JSON save's generation
+metadata within its first 1 MiB through the prepared attempt directory. An
+absent save or a replaced backing leaves progress unknown. Several saves before
+observation may coalesce to the latest. Status queries and repeated check-ins
+do not trigger verification.
 An explicitly different Python checkpoint directory does not signal the attempt.
 
 Arbitrary writers without notifications report progress **unknown** (`-1`)
@@ -41,9 +43,10 @@ live checkpoint scans. Arbitrary writers without publication evidence cannot
 be selected for portable scarce-host yield until a positive generation is
 known; the helper supplies that evidence. Yield still requires a newer verified
 final save after stop, plus exact process release. Finalization/release discovers
-unreported saves and records the resume target before retry. If a writer is lost
-while progress is unknown, its last executing target is retained conservatively;
-absence of status evidence never proves that its checkpoint folder is empty.
+unreported saves on the verified queue backing and records the resume target
+before retry. If a writer is lost while progress is unknown, the queue preserves
+the last accepted generation and its target. Without an accepted generation, it
+retains the last executing target as a hint.
 
 `local_first` is unchanged: local `generation.json`, cooperative acknowledgement,
 queue-portable generations and asynchronous NAS mirrors keep their protocol.
@@ -62,7 +65,7 @@ Neither status consumer opens that tree:
 
 | Consumer | Code and regression evidence |
 | --- | --- |
-| Running worker | `worker_attempts.go` calls `checkpointReport`; its NAS live branch in `checkpoint_progress.go` reads only the local notification and returns unknown without one. `TestCheckpointProgressEventDriven` asserts zero NAS reads through a simulated minute and one local marker read. |
+| Running worker | `worker_attempts.go` calls `checkpointReport`; its NAS live branch in `checkpoint_progress.go` verifies the one named save on a new local notification and returns unknown without one. `TestCheckpointProgressEventDriven` asserts zero NAS directory reads through a simulated minute and one local marker read. |
 | Queue check-in (`queue.go`) | `processCheckinContext` leaves the NAS path empty for same-attempt reports. Only an exact known recoverable copy can request a resume comparison. `TestQueueCheckpointProgressFromWorker` fails on any NAS status scan. |
 | Resume and stop/release/finalization, worker and queue | Both use `checkpointProgress` / `scanCheckpointProgressWalk` in `worker_recovery.go`. The scanner prunes the top-level output directory before metadata inspection or enumeration. `TestCheckpointProgressNeverEnumeratesOutput` rejects either operation and verifies output JSON cannot become checkpoint progress, with the production walker too. |
 
@@ -79,8 +82,8 @@ not claim that every NAS access is a checkpoint lifecycle operation.
 The #1671 fixture used three directories, a 100 ms actor and five-second reports:
 **36 → 0 NAS directory reads per running attempt per minute** (12 → 0 walks).
 The older r6.19 baseline was 1,800 reads/minute in that fixture. The isolated
-published save causes exactly **one local marker read**, zero NAS reads. These
-are local counting-filesystem results to be qualified, not live CIFS counts.
+published save causes **one local marker read** and verification of its named
+save. The directory-read counts come from a local counting-filesystem fixture.
 
 Idle root probes use five minutes: ten times the existing 30-second operation
 stall allowance, based on observed successful 17.73s/23.22s NAS operations (#234).
@@ -94,7 +97,7 @@ minutes. These admission/host-health checks never inspect job progress.
 
 | Path / consumer | #1671 | This change / remaining rate |
 | --- | --- | --- |
-| Worker NAS attempt progress | `60D/N` directory reads/minute | **0 periodic NAS accesses**, no checkpoint-root stat; local notification only |
+| Worker NAS attempt progress | `60D/N` directory reads/minute | **0 periodic NAS accesses**; verifies one named save per observed notification |
 | Queue same-attempt progress / portable yield status | One verification walk per sender interval | **0 NAS accesses for status**; worker report only |
 | Resume/recovery, stop, release, finalization | Fresh lifecycle reads | Event-only; one owned observation per event, no timed refresh |
 | Restore/source discovery and staging errors before launch | Retry each report interval | Failed NAS preparation retries at most once/5 min; pending copies joined promptly |

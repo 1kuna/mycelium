@@ -3,7 +3,9 @@ package myce
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,6 +58,10 @@ func readCheckpointJSON(path string, value any) error {
 		return err
 	}
 	defer f.Close()
+	return decodeCheckpointJSON(f, value)
+}
+
+func decodeCheckpointJSON(f *os.File, value any) error {
 	info, err := f.Stat()
 	if err != nil {
 		return err
@@ -71,6 +77,45 @@ func readCheckpointJSON(path string, value any) error {
 		return errors.New("checkpoint marker too large")
 	}
 	return json.Unmarshal(data, value)
+}
+
+func verifyCheckpointSignal(root *os.Root, save checkpointSave) (int64, error) {
+	f, err := root.OpenFile(save.Name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return -1, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return -1, err
+	}
+	if !info.Mode().IsRegular() {
+		return -1, nil
+	}
+	// Verify only the generation metadata. The writer has already attested
+	// to an atomic save, which can contain a much larger application value.
+	decoder := json.NewDecoder(io.LimitReader(f, 1<<20))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return -1, nil
+	}
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			break
+		}
+		if key == "myce_checkpoint" {
+			var metadata struct{ Generation int64 }
+			if decoder.Decode(&metadata) == nil && metadata.Generation == save.Generation {
+				return save.Generation, nil
+			}
+			break
+		}
+		var skip json.RawMessage
+		if decoder.Decode(&skip) != nil {
+			break
+		}
+	}
+	return -1, nil
 }
 
 // Cache by event identity, not elapsed time. Unchanged heartbeats never start
@@ -152,22 +197,48 @@ func (s *workerStore) checkpointReport(w Worker, j Job, recovery, final bool) (i
 	if j.FileTransport { // Local disk; retain existing portable capture behavior.
 		return s.nasProgress.read(w.Clock, w.Interval, path)
 	}
-	if !recovery && !final {
-		if save := s.nasProgress.localSignal(checkpointSignalFile(s.dir, j)); save != nil {
-			return save.Generation, nil
-		}
-		return -1, nil // Arbitrary writes: unknown until an event.
+	if s.state.CheckpointBacking == nil {
+		return -1, nil // Older launches have no proof of the prepared backing.
 	}
+	backing := s.state.CheckpointBacking.Attempt
 	event := "recovery"
+	var save *checkpointSave
 	if final {
 		event = "final"
+	} else if !recovery {
+		save = s.nasProgress.localSignal(checkpointSignalFile(s.dir, j))
+		if save == nil {
+			return -1, nil // Arbitrary writes: unknown until a lifecycle event.
+		}
+		event = fmt.Sprintf("save:%s:%d", save.Name, save.Generation)
 	}
-	return s.nasProgress.event(w.Clock, event, path, func() (int64, error) {
+	generation, err := s.nasProgress.event(w.Clock, event, path, func() (int64, error) {
+		root, err := openBoundCheckpoint(path, backing)
+		if err != nil {
+			return -1, err
+		}
+		defer root.Close()
+		if save != nil {
+			return verifyCheckpointSignal(root, *save)
+		}
 		if s.nasProgress.scan != nil {
 			return s.nasProgress.scan(path)
 		}
-		return checkpointProgress(path)
+		return scanCheckpointProgressFS(root.FS(), ".", false)
 	})
+	if err != nil {
+		if errors.Is(err, errCheckpointBacking) {
+			return -1, nil // Fence only this attempt. The host may have remounted.
+		}
+		return -1, checkpointPathError(path, err)
+	}
+	return generation, nil
+}
+
+func scanCheckpointProgressFS(files fs.FS, dir string, jobRoot bool) (int64, error) {
+	return scanCheckpointProgressFiles(dir, jobRoot, func(name string, visit fs.WalkDirFunc) error {
+		return fs.WalkDir(files, name, visit)
+	}, func(name string) ([]byte, error) { return fs.ReadFile(files, name) })
 }
 
 func (n *checkpointProgressReader) read(clock Clock, period time.Duration, path string) (int64, error) {

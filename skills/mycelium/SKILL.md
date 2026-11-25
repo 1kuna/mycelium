@@ -147,6 +147,9 @@ for storage holds, target compatibility, NAS save notification, retention and
 the `checkpoint: local_first` opt-in. A queue-accepted generation is portable
 to a compatible worker. Check verified NAS mirror state separately when NAS
 durability is required. Status comes from the running worker.
+NAS progress is reported after the worker verifies the notified generation on
+the attempt's prepared storage. The last accepted generation remains the resume
+floor if the mount drops or a retry has not published progress yet.
 
 ## Wait, inspect and recover
 

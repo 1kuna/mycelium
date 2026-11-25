@@ -58,6 +58,8 @@ type workerState struct {
 	// Written with cleared custody only after the queue confirms terminal,
 	// released publication. Survives a restart before scratch retention runs.
 	PublishedAttempt *Execution `json:"published_attempt,omitempty"`
+	// Only the exact attempt prepared on this backing can publish progress.
+	CheckpointBacking *checkpointBacking `json:"checkpoint_backing,omitempty"`
 
 	LaunchOutcome   string                 `json:"launch_outcome,omitempty"`
 	Attempts        []string               `json:"attempts,omitempty"`
@@ -111,7 +113,7 @@ type workerStore struct {
 	checkpointUnavailable bool
 	nasProbe              checkpointAvailability
 	nasProgress           checkpointProgressReader
-	nasPrepare            checkpointIO[string]
+	nasPrepare            checkpointIO[preparedCheckpoint]
 	nasCleanup            checkpointIO[bool]
 	dir                   string
 	lock                  *os.File
@@ -865,6 +867,10 @@ func scanCheckpointProgress(dir string, jobRoot bool) (int64, error) {
 }
 
 func scanCheckpointProgressWalk(dir string, jobRoot bool, walk func(string, fs.WalkDirFunc) error) (int64, error) {
+	return scanCheckpointProgressFiles(dir, jobRoot, walk, os.ReadFile)
+}
+
+func scanCheckpointProgressFiles(dir string, jobRoot bool, walk func(string, fs.WalkDirFunc) error, read func(string) ([]byte, error)) (int64, error) {
 	latest := int64(-1)
 	err := walk(dir, func(path string, e os.DirEntry, err error) error {
 		if err != nil {
@@ -894,7 +900,7 @@ func scanCheckpointProgressWalk(dir string, jobRoot bool, walk func(string, fs.W
 		if info.Mode().IsRegular() {
 			latest = max(latest, 0) // Unsequenced legacy saves rank below every generation.
 			if strings.HasSuffix(e.Name(), ".json") {
-				data, err := os.ReadFile(path)
+				data, err := read(path)
 				if err != nil {
 					return err
 				}
@@ -919,9 +925,10 @@ func prepareCheckpoint(j Job) (string, error) {
 	return prepareCheckpointCopy(j, io.Copy)
 }
 func prepareCheckpointCopy(j Job, copyFile func(io.Writer, io.Reader) (int64, error)) (string, error) {
-	return prepareCheckpointCopySync(j, copyFile, syncWorkerDir)
+	return prepareCheckpointCopySync(j, copyFile, nil)
 }
-func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64, error), syncDir func(string) error) (string, error) {
+func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64, error), syncDir func(string) error) (_ string, copyErr error) {
+	defer func() { copyErr = checkpointPathError(j.Checkpoint, copyErr) }()
 	// A relative path would resolve against the process working directory.
 	if !filepath.IsAbs(j.Checkpoint) {
 		return "", fmt.Errorf("checkpoint path %q is not absolute", j.Checkpoint)
@@ -932,21 +939,53 @@ func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64
 	if err := os.MkdirAll(j.Checkpoint, 0700); err != nil {
 		return "", err
 	}
-	dest := attemptCheckpoint(j)
-	if _, err := os.Stat(dest); err == nil {
-		progress, err := checkpointProgress(dest)
-		if err != nil || progress >= 0 {
-			return dest, err // A prepared retry must not overwrite its own durable saves.
+	root, err := os.OpenRoot(j.Checkpoint)
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	current, err := root.Stat(".")
+	if err != nil {
+		return "", err
+	}
+	checkBacking := func() error {
+		info, err := os.Stat(j.Checkpoint)
+		if err != nil || !os.SameFile(current, info) {
+			return errors.Join(errCheckpointBacking, err)
+		}
+		return nil
+	}
+	sync := func(dir string) error {
+		if syncDir != nil {
+			return syncDir(filepath.Join(j.Checkpoint, dir))
+		}
+		f, err := root.Open(dir)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		return syncCheckpointDirFile(f, checkpointCIFS, (*os.File).Sync)
+	}
+	files := root.FS()
+	dest := filepath.Base(attemptCheckpoint(j))
+	if _, err := root.Stat(dest); err == nil {
+		progress, err := scanCheckpointProgressFS(files, dest, false)
+		if err != nil {
+			return "", err
+		}
+		if progress >= 0 {
+			// A prepared retry must not overwrite its own durable saves.
+			return attemptCheckpoint(j), errors.Join(requireCheckpointFloor(j, progress), checkBacking())
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
-	entries, err := os.ReadDir(j.Checkpoint)
+	entries, err := fs.ReadDir(files, ".")
 	if err != nil {
 		return "", err
 	}
-	source := j.Checkpoint
-	newest, err := scanCheckpointProgress(j.Checkpoint, true)
+	source := "."
+	newest, err := scanCheckpointProgressFS(files, source, true)
 	if err != nil {
 		return "", err
 	}
@@ -959,8 +998,8 @@ func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64
 		if err != nil || n >= j.Attempt {
 			continue
 		}
-		dir := filepath.Join(j.Checkpoint, e.Name())
-		progress, err := checkpointProgress(dir)
+		dir := e.Name()
+		progress, err := scanCheckpointProgressFS(files, dir, false)
 		if err != nil {
 			return "", err
 		}
@@ -970,81 +1009,82 @@ func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64
 			source = dir
 		}
 	}
+	if err := requireCheckpointFloor(j, newest); err != nil {
+		return "", err
+	}
 	// Publish the whole copy together: a manifest must not outrank missing payloads.
-	staging, err := os.MkdirTemp(j.Checkpoint, ".myce-prepare-*.tmp")
-	if err != nil {
+	staging := ".myce-prepare-" + ID() + ".tmp"
+	if err := root.Mkdir(staging, 0700); err != nil {
 		return "", err
 	}
 	directories := []string{}
-	if source != "" {
-		err = filepath.WalkDir(source, func(path string, e os.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if strings.HasSuffix(e.Name(), ".tmp") {
-				if e.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if source == j.Checkpoint && e.IsDir() && path != source && strings.HasPrefix(e.Name(), "attempt-") {
+	err = fs.WalkDir(files, source, func(path string, e os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			if e.IsDir() {
 				return filepath.SkipDir
 			}
-			rel, err := filepath.Rel(source, path)
-			if err != nil {
-				return err
-			}
-			target := filepath.Join(staging, rel)
-			if e.IsDir() {
-				directories = append(directories, target)
-				return os.MkdirAll(target, 0700)
-			}
-			if e.Type()&os.ModeSymlink != 0 {
-				return fmt.Errorf("checkpoint symlink is unsupported: %s", path)
-			}
-			info, err := e.Info()
-			if err != nil {
-				return err
-			}
-			if !info.Mode().IsRegular() {
-				return fmt.Errorf("checkpoint is not a regular file: %s", path)
-			}
-			in, err := os.Open(path)
-			if err != nil {
-				return err
-			}
-			defer in.Close()
-			out, err := os.OpenFile(target+".tmp", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
-			if err != nil {
-				return err
-			}
-			// File-to-file io.Copy can use copy_file_range on Linux, whose
-			// source faults can be returned as destination "write" errors.
-			// Stream through Reader/Writer only so errno and custody retain
-			// the actual failing read or write syscall and source path.
-			copied, copyErr := copyFile(struct{ io.Writer }{out}, struct{ io.Reader }{in})
-			err = copyErr
-			if err == nil && copied < info.Size() {
-				err = &os.PathError{Op: "read", Path: path, Err: io.ErrUnexpectedEOF}
-			}
-			if err == nil {
-				err = out.Sync()
-			}
-			ce := out.Close()
-			if err == nil {
-				err = ce
-			}
-			if err != nil {
-				return err
-			}
-			if err = os.Rename(target+".tmp", target); err != nil {
-				return err
-			}
-			return nil // Staging is unpublished; sync each directory once below.
-		})
-	}
+			return nil
+		}
+		if source == "." && e.IsDir() && path != source && strings.HasPrefix(e.Name(), "attempt-") {
+			return filepath.SkipDir
+		}
+		rel, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(staging, rel)
+		if e.IsDir() {
+			directories = append(directories, target)
+			return root.MkdirAll(target, 0700)
+		}
+		if e.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("checkpoint symlink is unsupported: %s", path)
+		}
+		info, err := e.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("checkpoint is not a regular file: %s", path)
+		}
+		in, err := root.Open(path)
+		if err != nil {
+			return err
+		}
+		defer in.Close()
+		out, err := root.OpenFile(target+".tmp", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+		if err != nil {
+			return err
+		}
+		// File-to-file io.Copy can use copy_file_range on Linux, whose
+		// source faults can be returned as destination "write" errors.
+		// Stream through Reader/Writer only so errno and custody retain
+		// the actual failing read or write syscall and source path.
+		copied, copyErr := copyFile(struct{ io.Writer }{out}, struct{ io.Reader }{in})
+		err = copyErr
+		if err == nil && copied < info.Size() {
+			err = &os.PathError{Op: "read", Path: filepath.Join(j.Checkpoint, path), Err: io.ErrUnexpectedEOF}
+		}
+		if err == nil {
+			err = out.Sync()
+		}
+		ce := out.Close()
+		if err == nil {
+			err = ce
+		}
+		if err != nil {
+			return err
+		}
+		if err = root.Rename(target+".tmp", target); err != nil {
+			return err
+		}
+		return nil // Staging is unpublished; sync each directory once below.
+	})
 	if err == nil {
-		progress, readErr := scanCheckpointProgress(source, source == j.Checkpoint)
+		progress, readErr := scanCheckpointProgressFS(files, source, source == ".")
 		if readErr != nil {
 			err = readErr
 		} else if progress != newest {
@@ -1055,21 +1095,29 @@ func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64
 		// Children before parents; every directory entry is durable before publication.
 		sort.Slice(directories, func(i, k int) bool { return len(directories[i]) > len(directories[k]) })
 		for _, dir := range directories {
-			if err = syncDir(dir); err != nil {
+			if err = sync(dir); err != nil {
 				break
 			}
 		}
 		if len(directories) == 0 {
-			err = syncDir(staging)
+			err = sync(staging)
 		}
 	}
 	if err == nil {
-		err = renameStoragePath(context.Background(), staging, dest)
+		err = checkBacking()
 	}
 	if err == nil {
-		err = syncDir(j.Checkpoint)
+		err = renameStorageDirectory(context.Background(), filepath.Join(j.Checkpoint, staging), func() error {
+			return root.Rename(staging, dest)
+		})
 	}
-	return dest, err
+	if err == nil {
+		err = sync(".")
+	}
+	if err == nil {
+		err = checkBacking()
+	}
+	return attemptCheckpoint(j), err
 }
 
 func workerCheckpointAvailable(root string, progress func()) error {
@@ -1099,6 +1147,10 @@ func syncCheckpointDirectory(dir string, filesystem func(*os.File) (bool, error)
 		return err
 	}
 	defer f.Close()
+	return syncCheckpointDirFile(f, filesystem, syncFile)
+}
+
+func syncCheckpointDirFile(f *os.File, filesystem func(*os.File) (bool, error), syncFile func(*os.File) error) error {
 	// Linux CIFS directory fsync is a dummy operation; file flushes remain required.
 	if cifs, err := filesystem(f); err == nil && cifs {
 		return nil

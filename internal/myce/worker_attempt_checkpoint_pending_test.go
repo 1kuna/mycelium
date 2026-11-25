@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -28,10 +29,16 @@ func TestAttemptPendingCheckpointScanDoesNotFenceHost(t *testing.T) {
 		}
 		// Finalization is an event; its completed-error diagnostic stays cached
 		// without periodic attempts to reread the unsupported symlink.
-		if err := os.MkdirAll(j.Checkpoint, 0700); err != nil {
+		path := attemptCheckpoint(j)
+		if err := os.MkdirAll(path, 0700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink(t.TempDir(), attemptCheckpoint(j)); err != nil {
+		backing, err := checkpointDirectoryIdentity(os.Stat(path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.state.CheckpointBacking = &checkpointBacking{Attempt: backing}
+		if err := os.Symlink(t.TempDir(), filepath.Join(path, "unsupported")); err != nil {
 			t.Fatal(err)
 		}
 		release := make(chan error, 1)

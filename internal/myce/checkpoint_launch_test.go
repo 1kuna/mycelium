@@ -191,11 +191,11 @@ func TestRefusedCheckpointCopyCleanupCustody(t *testing.T) {
 	store.state.Result = &Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, ExecutionEvidence: unstartedExecution(j.Attempt)}
 	copied, release := make(chan struct{}), make(chan struct{})
 	store.nasPrepare.timeout = time.Millisecond
-	_, err = store.nasPrepare.run("copy", func() (string, error) {
+	_, err = store.nasPrepare.run("copy", func() (preparedCheckpoint, error) {
 		path, e := prepareCheckpoint(j)
 		close(copied)
 		<-release
-		return path, e
+		return preparedCheckpoint{path: path}, e
 	})
 	<-copied
 	if !errors.Is(err, errCheckpointIOPending) {

@@ -1227,6 +1227,8 @@ mounted NAS before starting the queue. Dev creates a local root.
 The stable job folder holds `attempt-1`, `attempt-2`, etc.; the environment points
 to the current attempt's folder. Before starting, the worker copies checkpoints
 from the attempt with the highest durable checkpoint generation.
+Preparation refuses a copy below the queue's last accepted positive generation,
+even if the last writer was interrupted before reporting progress.
 The worker checks exact-attempt launch authorization before materializing that
 copy. If preparation outlives an observation budget, the same attempt waits for
 its existing writer before repeating admission or device probes; it does not
@@ -1297,14 +1299,19 @@ atomic JSON save, never by file times or wall clocks:
 {"myce_checkpoint": {"generation": 9}, "value": {"step": 42}}
 ```
 
-Job status and progress come only from the executing worker; the NAS is never
-read for status (#1670). The updated Python helper publishes its generation to
+Job status and progress come from the executing worker. Status requests never
+read the NAS (#1670). The Python helper publishes its generation to
 `MYCE_CHECKPOINT_NOTIFY`, a worker-provided file in the attempt's private local
 work directory, after the save is durable. A custom writer can atomically
 publish `{"name":"checkpoint.json","generation":9}` there after syncing its
 JSON save or commit manifest. Use a plain `.json` filename and a positive int64
-generation; replace the local notification atomically. The worker reads the
-local marker once and reports it in its check-in, with no NAS status read.
+generation; replace the local notification atomically. For a changed marker the
+worker checks the named save on the attempt's prepared backing. Put the
+generation metadata within the first 1 MiB of the save so live verification
+can find it without reading a large payload. Lifecycle discovery still reads
+saves with metadata elsewhere. The worker reuses the observation between
+check-ins. If a mount drops or changes, a save on the fallback filesystem
+cannot advance accepted progress.
 Checkpoint discovery excludes the top-level output directory, including nested
 output JSON; keep checkpoint saves and manifests outside that directory.
 Without notifications, live checkpoint progress is unknown (`-1`); Mycelium

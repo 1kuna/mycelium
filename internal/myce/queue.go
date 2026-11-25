@@ -212,6 +212,7 @@ type Queue struct {
 	nasProbe                   checkpointAvailability
 	nasRecent                  recentAvailability
 	nasProbeIO                 func(root string, progress func()) bool // Test seam; checkpointAvailable by default.
+	nasBacking                 atomic.Pointer[queueCheckpointBacking]
 	nasProgress                checkpointProgressReader
 	shards                     checkpointShards
 	checkpointClaims           map[string]checkpointExpiryClaim // Under q.mu; in memory, reissued after restart.
@@ -1296,13 +1297,13 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 		// The existing exact release path calls retry again after confirmation.
 		return
 	}
-	// With no local publication, an interrupted NAS writer may have saved
-	// unreported bytes. Preserve its target until resume inspects those bytes;
-	// absence of a live progress report is not proof of an empty checkpoint.
+	// Until there is an accepted generation, keep the interrupted writer's
+	// target as a placement hint. Unknown progress cannot replace a proven
+	// origin or lower the floor used by resume preparation.
 	if j.Spec.Resumable && !j.FileTransport && j.Progress < 0 && j.StartedAt != nil {
 		if m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices); m != nil {
 			target := jobTargetOn(j, m)
-			if j.CheckpointTarget == nil || j.CheckpointTarget.Target != target {
+			if j.CheckpointTarget == nil || j.CheckpointTarget.Generation == 0 && j.CheckpointTarget.Target != target {
 				j.CheckpointTarget = &CheckpointOrigin{Target: target, Attempt: j.Attempt}
 			}
 		}
@@ -1737,10 +1738,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		unlockRequest()
 		if progress.path != "" {
 			progress.durable, progress.err = q.nasProgress.event(q.clock, event, progress.path, func() (int64, error) {
-				if q.nasProgress.scan != nil {
-					return q.nasProgress.scan(progress.path)
-				}
-				return checkpointProgress(progress.path)
+				return q.scanBoundCheckpoint(progress.path, q.nasProgress.scan)
 			})
 			if errors.Is(progress.err, os.ErrNotExist) {
 				progress.durable, progress.err = 0, nil
@@ -2240,7 +2238,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 		}
 		key := fmt.Sprintf("%s:%d:%s", event, r.Attempt, r.Session)
 		var e error
-		finalGeneration, e = q.nasProgress.event(q.clock, key, finalPath, func() (int64, error) { return checkpointProgress(finalPath) })
+		finalGeneration, e = q.nasProgress.event(q.clock, key, finalPath, func() (int64, error) { return q.scanBoundCheckpoint(finalPath, nil) })
 		if errors.Is(e, errCheckpointIOPending) || errors.Is(e, errCheckpointIOTimeout) {
 			return e
 		}
@@ -3212,17 +3210,21 @@ type attemptProgress struct {
 func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progress attemptProgress) AttemptDirective {
 	reply := AttemptDirective{Execution: Execution{ID: report.ID, Attempt: report.Attempt}, Session: report.Session}
 	j := q.touchJob(report.ID)
+	reportedProgress := report.Progress
+	if j != nil && j.nasCheckpoint() && checkpointRootUnavailable(m) {
+		reportedProgress = -1
+	}
 	if j != nil && j.Spec.localFirst() && j.Attempt == report.Attempt && j.Machine == m.ID && j.Session == report.Session && report.Session == m.Session {
 		j.LocalCheckpointGeneration = max(j.LocalCheckpointGeneration, report.LocalCheckpointGeneration)
 	}
 	if j != nil && (j.State == "queued" || j.State == "running" || j.State == "stopping") && !cancelled(j) && (j.State == "queued" || j.Attempt != report.Attempt || j.Machine != m.ID || j.Session != m.Session) {
 		for _, copy := range j.Copies {
 			canRecover := q.machineRecoveryFits(m, j, copy)
-			if canRecover && q.placementPolicyAllowed(j, allocationMachine(m, copy.AllocatedDevices), false) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && ((!j.Spec.localFirst() && (m.CheckpointUnavailable || !q.checkpointsAvailable())) || progress.err != nil || (progress.path != "" && progress.path != attemptCheckpoint(*j))) {
+			if canRecover && q.placementPolicyAllowed(j, allocationMachine(m, copy.AllocatedDevices), false) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && ((!j.Spec.localFirst() && (checkpointRootUnavailable(m) || !q.checkpointsAvailable())) || progress.err != nil || (progress.path != "" && progress.path != attemptCheckpoint(*j))) {
 				reply.Hold = true
 				return reply
 			}
-			if canRecover && q.placementPolicyAllowed(j, allocationMachine(m, copy.AllocatedDevices), false) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && (j.State == "queued" || (j.Spec.Resumable && report.Progress > max(0, progress.durable))) {
+			if canRecover && q.placementPolicyAllowed(j, allocationMachine(m, copy.AllocatedDevices), false) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && (j.State == "queued" || (j.Spec.Resumable && reportedProgress > max(0, progress.durable))) {
 				for i := range j.Copies {
 					j.Copies[i].Recoverable = false
 				}
@@ -3238,7 +3240,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 				j.ReleaseConfirmed = false
 				j.StopAt = nil
 				j.Reason = ""
-				j.Progress = report.Progress
+				j.Progress = reportedProgress
 				break
 			}
 		}
@@ -3258,10 +3260,10 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 		reply.Kill = true
 		return reply
 	}
-	if !j.FileTransport && j.Spec.ResumeCompatibility != nil && report.Progress > 0 {
+	if !j.FileTransport && j.Spec.ResumeCompatibility != nil && reportedProgress > 0 {
 		// Worker-local publication evidence; final yield still verifies the
 		// durable save at the stop/finalization event, never on status.
-		j.YieldGeneration = max(j.YieldGeneration, report.Progress)
+		j.YieldGeneration = max(j.YieldGeneration, reportedProgress)
 	}
 	q.retainAttemptResources(j, report.Resources)
 	retainInputsStagedAt(j, report.InputsStagedAt)
@@ -3273,8 +3275,8 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 	if report.Started && j.Spec.StartBy == nil && j.StartedAt == nil && j.State == "running" && q.startPlacementPolicyAllowed(j) {
 		q.markStarted(j)
 	}
-	j.Progress = report.Progress
-	noteCheckpointTarget(j, allocationMachine(m, j.AllocatedDevices), j.Attempt, report.Progress)
+	j.Progress = reportedProgress
+	noteCheckpointTarget(j, allocationMachine(m, j.AllocatedDevices), j.Attempt, reportedProgress)
 	q.retainApplicationProgress(j, report, m)
 	q.retainLiveness(j, report)
 	if j.State == "stopping" {

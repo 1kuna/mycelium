@@ -670,11 +670,13 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 			return nil, err
 		}
 	} else if needsCheckpoint(&j) {
-		checkpoint, err = s.nasPrepare.runBounded(ctx, attemptCheckpoint(j), func() (string, error) {
-			path, err := prepare(j)
+		root, prior := s.state.CheckpointRoot, s.state.CheckpointBacking
+		prepared, prepareErr := s.nasPrepare.runBounded(ctx, attemptCheckpoint(j), func() (preparedCheckpoint, error) {
+			prepared, err := w.prepareBoundCheckpoint(ctx, j, root, prior, prepare)
 			w.observeStorageError(err)
-			return path, err
+			return prepared, err
 		}, false)
+		err = prepareErr
 		if err == nil {
 			err = ctx.Err()
 		}
@@ -684,6 +686,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", errWorkerCheckpoint, err)
 		}
+		checkpoint, s.state.CheckpointBacking = prepared.path, prepared.backing
 	} else {
 		s.checkpointUnavailable = false
 		checkpoint = filepath.Join(s.dir, "checkpoints", j.ID, fmt.Sprintf("attempt-%d", j.Attempt))

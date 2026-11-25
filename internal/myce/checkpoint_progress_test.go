@@ -123,6 +123,14 @@ func TestCheckpointProgressEventDriven(t *testing.T) {
 			}
 		}
 		write("1")
+		// The marker names a top-level save. Keep nested saves for the
+		// enumeration measurement and finalization check below.
+		writeSave(t, path, "1")
+		backing, err := checkpointDirectoryIdentity(os.Stat(path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.state.CheckpointBacking = &checkpointBacking{Attempt: backing}
 		beforeFS, beforeScan := checkpointCountingScan(path)
 		for tick := 0; tick < 12; tick++ {
 			if _, err := beforeScan(path); err != nil {
@@ -164,7 +172,8 @@ func TestCheckpointProgressEventDriven(t *testing.T) {
 					t.Fatal(err)
 				}
 				write("2")
-				if err := os.WriteFile(signal, []byte(`{"name":"save.json","generation":2}`), 0600); err != nil {
+				writeSave(t, path, "2")
+				if err := os.WriteFile(signal, []byte(`{"name":"state.json","generation":2}`), 0600); err != nil {
 					t.Fatal(err)
 				}
 				updated, err := os.Stat(path)
@@ -306,6 +315,33 @@ func TestQueueCheckpointProgressFromWorker(t *testing.T) {
 	got := job(t, q, j.ID)
 	if got.Progress != 2 || got.YieldGeneration != 2 || got.CheckpointTarget == nil || got.CheckpointTarget.Generation != 2 {
 		t.Fatal("worker progress not retained", got)
+	}
+}
+
+func TestQueueRejectsCheckpointProgressFromUnavailableRoot(t *testing.T) {
+	q, _, m, _, j := yieldFixture(t, false)
+	report := AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt, Progress: 7}, Session: j.Session, Started: true}
+	saveYieldGeneration(t, job(t, q, j.ID), 7)
+	if _, err := q.Checkin(Checkin{Machine: m, Attempts: []AttemptReport{report}}); err != nil {
+		t.Fatal(err)
+	}
+	m.UnavailableRoots = []UnavailableRoot{{Root: "checkpoint", Reason: "configured NAS mount missing"}}
+	report.Progress = 8
+	if _, err := q.Checkin(Checkin{Machine: m, Attempts: []AttemptReport{report}}); err != nil {
+		t.Fatal(err)
+	}
+	got := job(t, q, j.ID)
+	if got.CheckpointTarget == nil || got.CheckpointTarget.Generation != 7 || got.YieldGeneration != 7 || got.Progress == 8 {
+		t.Fatalf("unavailable backing advanced checkpoint: origin=%+v yield=%d progress=%d", got.CheckpointTarget, got.YieldGeneration, got.Progress)
+	}
+	// A healthy report still has to name the live attempt.
+	m.UnavailableRoots = nil
+	report.Attempt++
+	if _, err := q.Checkin(Checkin{Machine: m, Attempts: []AttemptReport{report}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := job(t, q, j.ID).CheckpointTarget; got == nil || got.Generation != 7 {
+		t.Fatal("non-current attempt advanced the checkpoint", got)
 	}
 }
 

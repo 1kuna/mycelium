@@ -245,7 +245,7 @@ func (q *Queue) recentCheckpointAvailability() bool {
 	q.nasRecent.mu.Unlock()
 	probe := q.nasProbeIO
 	if probe == nil {
-		probe = func(root string, progress func()) bool { return checkpointAvailable(root, "queue", progress) }
+		probe = q.probeCheckpointBacking
 	}
 	available, err := q.nasProbe.runProgress(q.root, func(progress func()) (bool, error) {
 		return probe(q.root, progress), nil

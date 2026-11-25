@@ -405,6 +405,7 @@ func (g *attemptCustodian) updateStore(s *workerStore) {
 	v := g.snapshot().State
 	// The parent exclusively owns upload offsets and publication custody.
 	s.state.Job, s.state.Identity, s.state.Log = v.Job, v.Identity, v.Log
+	s.state.CheckpointBacking = v.CheckpointBacking
 	s.state.PID, s.state.Birth, s.state.Cgroup, s.state.Groups = v.PID, v.Birth, v.Cgroup, v.Groups
 	s.state.LaunchPending, s.state.InputWriterPending = v.LaunchPending, v.InputWriterPending
 	// A failed preparation can retain a builder without any payload PID. Carry
