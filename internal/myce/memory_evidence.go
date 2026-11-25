@@ -99,6 +99,11 @@ func memoryValue(v *float64) float64 {
 const memoryEvidenceSchema = `CREATE TABLE IF NOT EXISTS memory_evidence (
 	kind TEXT NOT NULL, key TEXT NOT NULL, data BLOB NOT NULL, PRIMARY KEY(kind,key))`
 
+// The predecessor rejects unknown memory_evidence kinds. Keep throughput rows
+// in their own table so that version can still open and update this queue.
+const gpuSharingSchema = `CREATE TABLE IF NOT EXISTS gpu_sharing_evidence (
+	key TEXT PRIMARY KEY, data BLOB NOT NULL)`
+
 type memoryEvidenceRowKey struct {
 	kind  string
 	key   memoryEvidenceKey
@@ -133,6 +138,20 @@ func (e *memoryEvidence) persist(tx *sql.Tx) error {
 			return err
 		}
 	}
+	for key, history := range e.gpuSharingWrites {
+		encodedKey, err := json.Marshal(key)
+		if err != nil {
+			return err
+		}
+		data, err := json.Marshal(history)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO gpu_sharing_evidence(key,data) VALUES(?,?)
+			ON CONFLICT(key) DO UPDATE SET data=excluded.data`, string(encodedKey), data); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -142,8 +161,14 @@ func loadMemoryEvidence(db *sql.DB, s state) (*memoryEvidence, error) {
 	if _, err := db.Exec(memoryEvidenceSchema); err != nil {
 		return nil, err
 	}
+	if _, err := db.Exec(gpuSharingSchema); err != nil {
+		return nil, err
+	}
 	evidence, err := readMemoryEvidence(db)
 	if err == nil {
+		if err := evidence.readGPUSharing(db); err != nil {
+			return nil, err
+		}
 		return repairMemoryEvidence(db, evidence, s)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -169,6 +194,28 @@ func loadMemoryEvidence(db *sql.DB, s state) (*memoryEvidence, error) {
 	}
 	evidence.writes = nil
 	return evidence, nil
+}
+
+func (e *memoryEvidence) readGPUSharing(db *sql.DB) error {
+	rows, err := db.Query(`SELECT key,data FROM gpu_sharing_evidence`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key, data []byte
+		if err := rows.Scan(&key, &data); err != nil {
+			return err
+		}
+		var id gpuSharingKey
+		if err := json.Unmarshal(key, &id); err != nil {
+			return err
+		}
+		if err := decodeQueueRecord(e.gpuSharing, id, data); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 func readMemoryEvidence(db *sql.DB) (*memoryEvidence, error) {

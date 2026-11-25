@@ -3087,6 +3087,7 @@ func (q *Queue) markStarted(j *Job) {
 		q.checkLedgerNativeCoverage(j)
 		q.appendJobLedger(j, ledgerAttempt(j, "started", "start_authorized"))
 		q.beginWorkTiming(j)
+		q.beginGPUSharingRun(j)
 		if j.Spec.StartBy != nil && j.StartWindow == 0 {
 			j.StartWindow = j.Spec.StartBy.Sub(j.Queued)
 		}
@@ -3378,6 +3379,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j.LaunchTimings = nil
 	j.InputsStagedAt = nil
 	j.Timing = nil
+	j.GPUSharingRun = nil
 	j.ApplicationProgress = nil
 	j.Liveness = nil
 	now := q.clock.Now()

@@ -548,6 +548,7 @@ type Job struct {
 	FanOut           *FanOutProgress `json:"fan_out,omitempty"`
 	Batch            *BatchWork      `json:"batch,omitempty"`
 	Timing           *WorkTiming     `json:"timing,omitempty"`
+	GPUSharingRun    *gpuSharingRun  `json:"gpu_sharing_run,omitempty"`
 	DiagnosticCode   string          `json:"diagnostic_code,omitempty"`
 	AllocatedDevices []string        `json:"allocated_devices,omitempty"`
 	PreemptionCount  int             `json:"preemption_count,omitempty"`

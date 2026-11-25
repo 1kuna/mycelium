@@ -64,6 +64,7 @@ func (q *Queue) storageLearningSample(j *Job, r Result) (*eligibleStorageSample,
 
 func (q *Queue) recordAttemptLearning(j *Job, r Result) {
 	q.recordWorkObservation(j, r)
+	q.recordGPUSharingRun(j, r)
 	if sample, _ := q.storageLearningSample(j, r); sample != nil {
 		q.recordStorageNeeds(*sample)
 	}

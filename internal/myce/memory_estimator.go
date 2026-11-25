@@ -57,20 +57,23 @@ type memoryRatioKey struct {
 }
 
 type memoryEvidence struct {
-	exact    map[memoryEvidenceKey]memoryEvidenceSeries
-	family   map[memoryEvidenceKey]memoryEvidenceSeries
-	first    map[memoryEvidenceKey][]float64
-	ratios   map[memoryRatioKey][]float64
-	foreign  map[memoryEvidenceKey]map[string]bool
-	writes   map[memoryEvidenceRowKey]any
-	feedback []float64
+	exact            map[memoryEvidenceKey]memoryEvidenceSeries
+	family           map[memoryEvidenceKey]memoryEvidenceSeries
+	first            map[memoryEvidenceKey][]float64
+	ratios           map[memoryRatioKey][]float64
+	foreign          map[memoryEvidenceKey]map[string]bool
+	writes           map[memoryEvidenceRowKey]any
+	feedback         []float64
+	gpuSharing       map[gpuSharingKey]gpuSharingHistory
+	gpuSharingWrites map[gpuSharingKey]gpuSharingHistory
 }
 
 func (e *memoryEvidence) stage() *memoryEvidence {
 	return &memoryEvidence{
 		exact: maps.Clone(e.exact), family: maps.Clone(e.family), first: maps.Clone(e.first),
 		ratios: maps.Clone(e.ratios), foreign: maps.Clone(e.foreign), writes: map[memoryEvidenceRowKey]any{},
-		feedback: e.feedback,
+		feedback:   e.feedback,
+		gpuSharing: e.gpuSharing,
 	}
 }
 
@@ -108,11 +111,12 @@ func (e *memoryEvidence) observeFeedback(charge, peak float64, pressure, clean b
 
 func newMemoryEvidence() *memoryEvidence {
 	return &memoryEvidence{
-		exact:   map[memoryEvidenceKey]memoryEvidenceSeries{},
-		family:  map[memoryEvidenceKey]memoryEvidenceSeries{},
-		first:   map[memoryEvidenceKey][]float64{},
-		ratios:  map[memoryRatioKey][]float64{},
-		foreign: map[memoryEvidenceKey]map[string]bool{},
+		exact:      map[memoryEvidenceKey]memoryEvidenceSeries{},
+		family:     map[memoryEvidenceKey]memoryEvidenceSeries{},
+		first:      map[memoryEvidenceKey][]float64{},
+		ratios:     map[memoryRatioKey][]float64{},
+		foreign:    map[memoryEvidenceKey]map[string]bool{},
+		gpuSharing: map[gpuSharingKey]gpuSharingHistory{},
 	}
 }
 

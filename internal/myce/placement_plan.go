@@ -381,6 +381,10 @@ func (q *Queue) cardRoom(j *Job, m *Machine, need float64, batch, releaseBatch, 
 	}
 	// Co-tenants already hold their charge in room. Only exclusive work needs
 	// every holder released; sharing stops the fewest that free enough.
+	var sharingRestriction gpuSharingKey
+	if batch {
+		sharingRestriction = q.gpuSharingRestriction(j, m)
+	}
 	var victims []*Job
 	for _, r := range q.liveJobs() {
 		if !batchOnTarget(r, m) || !batchReservesCapacity(r) {
@@ -391,15 +395,16 @@ func (q *Queue) cardRoom(j *Job, m *Machine, need float64, batch, releaseBatch, 
 			continue
 		}
 		isolateTier := isolatesDeviceTiers(m) && !j.Spec.Needs.cpuOnly() && !r.Spec.Needs.cpuOnly() && q.comparePriority(r.Spec, j.Spec) != 0
+		mustRelease := isolateTier || sharingRestriction.conflicts(r, m)
 		if !q.batchPreemptible(r, j.Spec) && p.yields[r.ID] == nil {
-			if batch && !shared || isolateTier {
+			if batch && !shared || mustRelease {
 				return false
 			}
 			continue
 		}
-		if shared && !isolateTier {
+		if shared && !mustRelease {
 			victims = append(victims, r)
-		} else if releaseBatch || isolateTier {
+		} else if releaseBatch || mustRelease {
 			p.addJob(r)
 			room += deviceShareGB(r)
 		}

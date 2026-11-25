@@ -37,6 +37,8 @@ go test -race -count=1 ./internal/myce -run '^TestName$'
 ```
 
 Quick and targeted tests run without a GPU, fleet credentials or a Linux VM.
+Use `myce dev --workers 1 --fake-unified-memory` to exercise unified GPU
+placement with ordinary shell commands and a fake accelerator.
 Go may fetch missing module dependencies. Python client checks also require
 Python 3.11 (on PATH or already installed through uv).
 

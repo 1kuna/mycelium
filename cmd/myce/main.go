@@ -370,6 +370,10 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	maxJobs := f.Int("max-jobs", 0, "optional maximum simultaneous jobs/calls per physical host (0 means unlimited)")
 	workers := f.Int("workers", 2, "fake workers in dev mode")
 	fakeGPUs := f.Int("fake-gpus", 1, "GPU components per fake machine in dev mode (use --workers 1)")
+	fakeUnifiedMemory := new(bool)
+	if args[0] == "dev" {
+		f.BoolVar(fakeUnifiedMemory, "fake-unified-memory", false, "simulate unified GPU memory with one fake worker")
+	}
 	now := f.Bool("now", false, "stop every job on leave")
 	full := f.Bool("full", false, "show full job IDs in status")
 	statusJSON := f.Bool("json", false, "show status as JSON")
@@ -553,7 +557,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if e != nil {
 			return e
 		}
-		d, err := myce.StartDev(myce.DevConfig{EnvironmentCacheLimit: *environmentLimit, OutputDeliveryRoot: *outputDeliveryRoot, Devices: *fakeGPUs, ProductionInfrastructureRetries: productionRetries, FileStore: *fileStore, FileStoreLimit: *fileStoreLimit, FileStoreProductionReserve: *fileStoreProductionReserve, FileRetention: *fileRetention, NASCheckpoints: nasConfigured, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MemoryGB: *memory, Interval: *heartbeat})
+		d, err := myce.StartDev(myce.DevConfig{EnvironmentCacheLimit: *environmentLimit, OutputDeliveryRoot: *outputDeliveryRoot, Devices: *fakeGPUs, FakeUnifiedMemory: *fakeUnifiedMemory, ProductionInfrastructureRetries: productionRetries, FileStore: *fileStore, FileStoreLimit: *fileStoreLimit, FileStoreProductionReserve: *fileStoreProductionReserve, FileRetention: *fileRetention, NASCheckpoints: nasConfigured, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MemoryGB: *memory, Interval: *heartbeat})
 		if err != nil {
 			return err
 		}

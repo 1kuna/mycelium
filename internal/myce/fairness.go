@@ -332,6 +332,7 @@ type batchResourceKey struct {
 	cores                    int
 	shares                   bool
 	ramAlone                 bool
+	sharingRestriction       gpuSharingKey
 }
 type batchResourceRoom struct {
 	machine  Machine
@@ -346,7 +347,7 @@ func resourceKey(j *Job) batchResourceKey {
 	if len(j.LaunchCapacityWait) > 0 || len(j.Spec.RequirementReasons) > 0 || len(j.Extensions) > 0 {
 		id = j.ID
 	}
-	return batchResourceKey{j.Spec.Project, j.Spec.Class, j.Spec.Priority, id, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Needs.cores(), sharesDevice(j), pooledMemory(j) && memoryPools(j).RAM.Alone}
+	return batchResourceKey{j.Spec.Project, j.Spec.Class, j.Spec.Priority, id, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Needs.cores(), sharesDevice(j), pooledMemory(j) && memoryPools(j).RAM.Alone, gpuSharingKey{}}
 }
 
 func (q *Queue) batchResourcesFitWithScan(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) bool {
@@ -354,6 +355,7 @@ func (q *Queue) batchResourcesFitWithScan(j *Job, m *Machine, resources map[batc
 		return false
 	}
 	key := resourceKey(j)
+	key.sharingRestriction = q.gpuSharingRestriction(j, m)
 	room, found := resources[key]
 	if !found {
 		// #740 made every annotated/extension job miss the whole resource
@@ -550,7 +552,7 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string, map[string
 		batchSlotAllocated := busy
 		sharedWith := 0
 		if busy {
-			if n, ok := q.deviceCoTenants(live, best, true); ok && q.cardSettled(live) {
+			if n, ok := q.deviceCoTenants(live, best, true); ok && q.cardSettled(live) && !q.gpuSharingBlocked(best, live) {
 				sharedWith, busy = n, false
 			}
 		}

@@ -10,15 +10,16 @@ import (
 // which work may win, never which projects compete for fair share. Discard the
 // set after applying a placement or otherwise changing queue state.
 type candidateSet struct {
-	q         *Queue
-	m         *Machine
-	jobs      []*Job
-	stages    []*Job
-	scores    map[string]float64
-	actives   map[string]float64
-	resources map[batchResourceKey]batchResourceRoom
-	ordered   map[string][]*Job
-	projects  []string
+	q               *Queue
+	m               *Machine
+	jobs            []*Job
+	stages          []*Job
+	scores          map[string]float64
+	actives         map[string]float64
+	resources       map[batchResourceKey]batchResourceRoom
+	ordered         map[string][]*Job
+	projects        []string
+	sharingBlockers map[gpuSharingKey]bool
 }
 
 func (q *Queue) candidates(m *Machine, scans ...*placementScan) *candidateSet {
@@ -46,6 +47,14 @@ func (q *Queue) buildCandidates(m *Machine, scans ...*placementScan) *candidateS
 	s.resources = map[batchResourceKey]batchResourceRoom{}
 	fence := q.groupDemandFence(m)
 	for _, j := range q.liveJobs() {
+		if m.UnifiedMemory && batchReservesCapacity(j) && batchOnTarget(j, m) {
+			if restriction := q.gpuSharingRestriction(j, m); restriction.Device != "" {
+				if s.sharingBlockers == nil {
+					s.sharingBlockers = make(map[gpuSharingKey]bool)
+				}
+				s.sharingBlockers[restriction] = true
+			}
+		}
 		previousDecision, previousJob := q.beginAdmissionCandidate(j, m)
 		if fence != nil && j.ID != fence.ID && q.comparePriority(j.Spec, fence.Spec) >= 0 {
 			q.admissionPass(j, m, false, predicateGroupDemand)
@@ -172,12 +181,23 @@ func (s *candidateSet) before(a, b *Job) bool {
 
 // Within-project order is immutable during a read-only pass. Sort it once
 // instead of comparing every remaining job again for each exclusion.
-func (s *candidateSet) pick(excluded map[string]bool) *Job {
+func (s *candidateSet) pick(excluded map[string]bool, immediate ...bool) *Job {
+	skipSharing := len(immediate) != 0 && immediate[0] && len(s.sharingBlockers) != 0
+	eligible := func(j *Job) bool {
+		if excluded[j.ID] {
+			return false
+		}
+		if skipSharing {
+			key, ok := sharingKey(j, s.m)
+			return s.q.admissionGate(j, s.m, !ok || !s.sharingBlockers[key], predicateBatchSlot)
+		}
+		return true
+	}
 	// Most passes only need the head. Do not sort the backlog to find it.
 	if len(excluded) == 0 && s.ordered == nil {
 		var best *Job
 		for _, j := range s.jobs {
-			if best == nil || s.before(j, best) {
+			if eligible(j) && (best == nil || s.before(j, best)) {
 				best = j
 			}
 		}
@@ -205,7 +225,7 @@ func (s *candidateSet) pick(excluded map[string]bool) *Job {
 	var best *Job
 	for _, project := range s.projects {
 		for _, j := range s.ordered[project] {
-			if excluded[j.ID] {
+			if !eligible(j) {
 				continue
 			}
 			if best == nil || s.before(j, best) {
@@ -222,6 +242,7 @@ func (s *candidateSet) batchPlan(j *Job) *placementPlan {
 		return s.q.fleetStartPlan(j, s.q.roomPlan(j, s.m, true))
 	}
 	key := resourceKey(j)
+	key.sharingRestriction = s.q.gpuSharingRestriction(j, s.m)
 	if room, ok := s.resources[key]; ok {
 		return s.q.fleetStartPlan(j, room.plan)
 	}

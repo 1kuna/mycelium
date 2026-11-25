@@ -416,7 +416,7 @@ RAM/CPU deficit, including work on another card. The ordinary physical-memory
 and exact-release gates still apply; compatible other hosts remain eligible.
 
 Equal-tier projects share available targets. One machine worker may run CPU
-attempts and one batch attempt per GPU concurrently within the shared ledger. Same-tier work is not stopped
+attempts and compatible batch attempts per GPU concurrently within the shared ledger. Same-tier work is not stopped
 to rebalance usage: a single indefinite allocation can occupy a scarce device
 indefinitely. Strict higher tiers can starve lower ones.
 
@@ -442,6 +442,23 @@ their resume promotion does not consume an accelerator's accumulating RAM/cores.
 Projects in the same owner-configured tier share available GPU time, including
 projects with different job classes. Higher tiers still win. A project running
 alone can use the entire compatible pool.
+
+On a unified-memory GPU, a work family runs one batch attempt at a time on a
+device once measured sharing lowers its throughput. Mycelium compares the
+latest clean two-run overlap (time from first start to last finish) with twice
+the median of up to 20 recent solo durations. Each run needs an accepted
+completion and a clean measured memory peak. The comparison stays with the
+physical device and its reported hardware and software identity, and updates
+with new observations. Plain commands group by project and name. Extensions
+group by project, extension digest and work type. A declared workload also
+matches input shape and units.
+
+Until both measurements exist, jobs share according to the usual memory,
+device custody and tier rules. Other work families can still use room on the
+same device under those rules. Queued peers can report lower measured
+throughput in their occupied-card hold. The rule uses existing priority and
+release checks and lets already admitted jobs finish. Jobs on discrete cards
+keep their ordinary device admission rules.
 
 For each worker, the scheduler considers only jobs that fit and pass their caps.
 It totals those projects' recent usage, computes each project's weighted share,

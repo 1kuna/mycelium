@@ -167,6 +167,11 @@ durability is required. Status comes from the running worker.
 - CPU work blocked by live RAM can report `memory_wait` with the current
   room and the attempts that hold RAM. A `memory_wait` or occupied-card
   `capacity` hold clears as room or custody becomes available.
+  A unified-memory GPU can run one attempt per work family when measured
+  overlap lowers that family's throughput. Other families can use remaining
+  room under the ordinary memory and tier rules. Keep queued peers on their
+  existing job IDs. They can start when the device releases or another
+  compatible device is available.
   On supporting unified-memory workers, ready production can reclaim
   lower-tier attempts when the pool allowance can hold the production charge.
   The queue checks for released attempts and fresh RAM headroom before

@@ -411,6 +411,7 @@ func projectReleasedJobReason(j *Job) {
 }
 
 func (q *Queue) projectStatusLifecycle(j *Job) {
+	j.GPUSharingRun = nil
 	j.Spec.Class = jobClass(j.Spec)
 	j.PriorityPolicy = q.priorityMatch(j.Spec)
 	q.projectRuntime(j)
