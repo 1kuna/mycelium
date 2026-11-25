@@ -73,14 +73,14 @@ func (q *Queue) writeDetachedQueue(ctx context.Context, batch *queueWriteBatch) 
 }
 
 func (q *Queue) applyQueueWrite(ctx context.Context, batch *queueWriteBatch, timing *queueUpdateTiming, measured *queuePersistenceTiming, mode queueWriteMode) error {
-	if len(batch.rows) == 0 {
+	if len(batch.rows) == 0 && q.sharedWriter == nil {
 		return nil
 	}
 	write := func() error {
-		writer := queueSQLiteWriter{db: q.db, clock: q.clock, holdClock: q.holdClock, observe: q.observeQueueRow}
+		writer := queueSQLiteWriter{db: q.db, clock: q.clock, holdClock: q.holdClock, observe: q.observeQueueRow, shared: q.sharedWriter}
 		return writer.apply(ctx, batch, timing, measured)
 	}
-	if mode != queueWriteDetached && q.inLockCommit {
+	if mode != queueWriteDetached && q.inLockCommit && q.sharedWriter == nil {
 		return write()
 	}
 	if q.activeHold != nil {
@@ -96,9 +96,16 @@ type queueSQLiteWriter struct {
 	clock     Clock
 	holdClock Clock
 	observe   func(string, []any)
+	shared    *sharedQueueWriter
 }
 
 func (w queueSQLiteWriter) apply(ctx context.Context, batch *queueWriteBatch, timing *queueUpdateTiming, measured *queuePersistenceTiming) error {
+	if w.shared != nil {
+		if err := w.shared.apply(ctx, w.db, batch, w.observe); err != nil {
+			return queueWriteError{err}
+		}
+		return nil
+	}
 	started := holdNow(w.holdClock)
 	var conn *sql.Conn
 	var err error

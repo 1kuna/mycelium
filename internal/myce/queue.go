@@ -132,8 +132,9 @@ type state struct {
 	Front        int64                   `json:"front"`
 }
 type Queue struct {
-	diskHost                string       // Physical hostname for co-located disk relief.
-	startupTrace            func(string) // Startup only; controlled phase names, no state values.
+	sharedWriter            *sharedQueueWriter // Set only for an active shared-queue proof turn.
+	diskHost                string             // Physical hostname for co-located disk relief.
+	startupTrace            func(string)       // Startup only; controlled phase names, no state values.
 	startupReadWorkers      int
 	readInvalidations       map[string]bool // q.mu; applied atomically with capture publication.
 	readDependenciesInvalid bool
@@ -351,6 +352,35 @@ func WithCheckpointAvailability(probe func() bool) QueueOption {
 }
 
 func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error) {
+	return openQueue(path, root, clock, nil, nil, options...)
+}
+
+func lockQueueDatabase(path string) (*os.File, error) {
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		lock.Close()
+		return nil, fmt.Errorf("queue database already in use: %w", err)
+	}
+	return lock, nil
+}
+
+func openQueueSQLite(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS enrollment_tickets (digest TEXT PRIMARY KEY, pin TEXT NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS queue_state (key TEXT PRIMARY KEY, data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY CHECK(id=1), data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, attempt INTEGER NOT NULL, text TEXT NOT NULL); CREATE TABLE IF NOT EXISTS log_offsets (job TEXT, attempt INTEGER, offset INTEGER, PRIMARY KEY(job,attempt,offset)); CREATE TABLE IF NOT EXISTS environment_log_offsets (job TEXT, machine TEXT, session TEXT, key TEXT, offset INTEGER, PRIMARY KEY(job,machine,session,key,offset)); CREATE TABLE IF NOT EXISTS environment_build_logs (machine TEXT, session TEXT, key TEXT, offset INTEGER, text TEXT, PRIMARY KEY(machine,session,key,offset)); CREATE INDEX IF NOT EXISTS logs_job ON logs(job,seq); CREATE TABLE IF NOT EXISTS job_summaries (id TEXT PRIMARY KEY, finished INTEGER NOT NULL, summary BLOB NOT NULL, learned BLOB); CREATE TABLE IF NOT EXISTS usage_samples (at INTEGER NOT NULL, span INTEGER NOT NULL, machine TEXT NOT NULL, device TEXT NOT NULL, project TEXT NOT NULL, job TEXT NOT NULL, model TEXT NOT NULL, busy REAL NOT NULL, idle REAL NOT NULL, pinned REAL NOT NULL, memory_seconds REAL NOT NULL, observed REAL NOT NULL, PRIMARY KEY(at,span,machine,device,project,job,model));`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+func openQueue(path, root string, clock Clock, shared *sharedQueueWriter, lock *os.File, options ...QueueOption) (*Queue, error) {
 	if clock == nil {
 		return nil, errors.New("clock is required")
 	}
@@ -361,27 +391,34 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 	if err != nil {
 		return nil, err
 	}
-	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		return nil, err
-	}
-	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		lock.Close()
-		return nil, fmt.Errorf("queue database already in use: %w", err)
+	if shared == nil {
+		lock, err = lockQueueDatabase(path)
+		if err != nil {
+			return nil, err
+		}
 	}
 	success := false
 	defer func() {
-		if !success {
-			_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+		if !success && shared == nil && lock != nil {
 			_ = lock.Close()
 		}
 	}()
-	db, err := sql.Open("sqlite", path)
+	db, err := openQueueSQLite(path)
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
-	q := &Queue{startupReadWorkers: startupQueueReadWorkers, slimJobRecords: slimJobRecordsDefault, fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lock: lock, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, FairUsageVersion: 1, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
+	if shared == nil {
+		var replica bool
+		err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='myce_shared_cursor')").Scan(&replica)
+		if err != nil || replica {
+			db.Close()
+			if err != nil {
+				return nil, err
+			}
+			return nil, errors.New("a shared queue copy requires shared queue proof mode")
+		}
+	}
+	q := &Queue{sharedWriter: shared, startupReadWorkers: startupQueueReadWorkers, slimJobRecords: slimJobRecordsDefault, fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lock: lock, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, FairUsageVersion: 1, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
 	q.diskHost, _ = os.Hostname()
 	q.mu.control = &controlClock{clock: func() time.Time { return q.clock.Now() }, at: clock.Now()}
 	q.admissionWaitBuild.synchronous = synchronousAdmissionWaitDefault
@@ -397,10 +434,6 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 			db.Close()
 			return nil, err
 		}
-	}
-	if _, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS enrollment_tickets (digest TEXT PRIMARY KEY, pin TEXT NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS queue_state (key TEXT PRIMARY KEY, data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY CHECK(id=1), data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, attempt INTEGER NOT NULL, text TEXT NOT NULL); CREATE TABLE IF NOT EXISTS log_offsets (job TEXT, attempt INTEGER, offset INTEGER, PRIMARY KEY(job,attempt,offset)); CREATE TABLE IF NOT EXISTS environment_log_offsets (job TEXT, machine TEXT, session TEXT, key TEXT, offset INTEGER, PRIMARY KEY(job,machine,session,key,offset)); CREATE TABLE IF NOT EXISTS environment_build_logs (machine TEXT, session TEXT, key TEXT, offset INTEGER, text TEXT, PRIMARY KEY(machine,session,key,offset)); CREATE INDEX IF NOT EXISTS logs_job ON logs(job,seq); CREATE TABLE IF NOT EXISTS job_summaries (id TEXT PRIMARY KEY, finished INTEGER NOT NULL, summary BLOB NOT NULL, learned BLOB); CREATE TABLE IF NOT EXISTS usage_samples (at INTEGER NOT NULL, span INTEGER NOT NULL, machine TEXT NOT NULL, device TEXT NOT NULL, project TEXT NOT NULL, job TEXT NOT NULL, model TEXT NOT NULL, busy REAL NOT NULL, idle REAL NOT NULL, pinned REAL NOT NULL, memory_seconds REAL NOT NULL, observed REAL NOT NULL, PRIMARY KEY(at,span,machine,device,project,job,model));`); err != nil {
-		db.Close()
-		return nil, err
 	}
 	if err = db.QueryRow("PRAGMA page_size").Scan(&q.persistencePageBytes); err != nil {
 		db.Close()
@@ -434,7 +467,11 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		log.Print("ignoring saved model pins, pre-copy requests and demand history (docs/services.md)")
 		q.s.Pins, q.s.SyncRequests, q.s.ModelUses = nil, nil, nil
 	}
-	q.memoryEvidence, err = loadMemoryEvidence(db, q.s)
+	if shared == nil {
+		q.memoryEvidence, err = loadMemoryEvidence(db, q.s)
+	} else {
+		q.memoryEvidence, err = (queueSQLiteWriter{db: db, shared: shared}).loadMemoryEvidence(q.s)
+	}
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("load memory evidence: %w", err)
@@ -628,8 +665,10 @@ func (q *Queue) Close() error {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if flushErr := q.flushHistories(); flushErr != nil {
-		err = errors.Join(err, fmt.Errorf("write measurement histories at close: %w", flushErr))
+	if q.sharedWriter == nil || !q.sharedWriter.disabled.Load() {
+		if flushErr := q.flushHistories(); flushErr != nil {
+			err = errors.Join(err, fmt.Errorf("write measurement histories at close: %w", flushErr))
+		}
 	}
 	if q.usageReader != nil {
 		err = errors.Join(err, q.usageReader.Close())
@@ -639,10 +678,10 @@ func (q *Queue) Close() error {
 		err = errors.Join(err, q.uploadSpool.lock.Close())
 		q.uploadSpool.lock = nil
 	}
-	if q.lock != nil {
+	if q.lock != nil && q.sharedWriter == nil {
 		err = errors.Join(err, syscall.Flock(int(q.lock.Fd()), syscall.LOCK_UN), q.lock.Close())
-		q.lock = nil
 	}
+	q.lock = nil
 	if q.stopping.Load() {
 		log.Printf("event=queue_shutdown phase=storage_closed clean=%t", err == nil)
 	}

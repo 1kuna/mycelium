@@ -208,6 +208,11 @@ func retainedMemoryEvidenceKey(j *Job, m *Machine, assignment Copy) (memoryEvide
 }
 
 func repairMemoryEvidence(db *sql.DB, e *memoryEvidence, s state) (*memoryEvidence, error) {
+	return (queueSQLiteWriter{db: db}).repairMemoryEvidence(e, s)
+}
+
+func (w queueSQLiteWriter) repairMemoryEvidence(e *memoryEvidence, s state) (*memoryEvidence, error) {
+	db := w.db
 	var repairedV2, repairedV3 bool
 	err := db.QueryRow(`SELECT
 		EXISTS(SELECT 1 FROM memory_evidence WHERE kind='projection' AND key='v2'),
@@ -259,7 +264,7 @@ func repairMemoryEvidence(db *sql.DB, e *memoryEvidence, s state) (*memoryEviden
 		return nil, err
 	}
 	batch.add(`INSERT OR IGNORE INTO memory_evidence(kind,key,data) VALUES ('projection','v2','true'), ('projection','v3','true')`)
-	if err := (queueSQLiteWriter{db: db}).apply(context.Background(), &batch, nil, nil); err != nil {
+	if err := w.apply(context.Background(), &batch, nil, nil); err != nil {
 		return nil, err
 	}
 	e.writes = nil

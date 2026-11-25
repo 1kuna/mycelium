@@ -757,6 +757,9 @@ func (q *Queue) Run(ctx context.Context) error {
 var clientTransport = &http.Transport{Proxy: http.ProxyFromEnvironment}
 
 type Client struct {
+	// SharedQueueProof verifies a worker control reply through its local
+	// member before handing it to launch or stop code.
+	SharedQueueProof bool
 	publication      *publicationProgress
 	publicationWire  *atomic.Bool
 	inventoryWire    *atomic.Bool
@@ -898,6 +901,10 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	if workerProtocolEndpoint(path) {
 		req.Header.Set("X-Myce-Start-Gate", startGateProtocol)
 	}
+	verifyTurn := c.SharedQueueProof && sharedWorkerControl(path)
+	if verifyTurn {
+		req.Header.Set(sharedVerifyHeader, "1")
+	}
 	hc := c.HTTP
 	if hc == nil {
 		hc = &http.Client{Transport: clientTransport}
@@ -943,6 +950,9 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 		}
 		return e
 	}
+	if verifyTurn && res.Header.Get(sharedTurnHeader) == "" {
+		return queueStopping()
+	}
 	if out != nil {
 		if stream, ok := out.(io.Writer); ok {
 			return copyJSONDocument(stream, res.Body)
@@ -955,10 +965,23 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 			if err := json.NewDecoder(res.Body).Decode(next.Interface()); err != nil {
 				return err
 			}
+			if verifyTurn {
+				if err := c.verifySharedTurn(ctx, res); err != nil {
+					return err
+				}
+			}
 			dest.Elem().Set(next.Elem())
 			return nil
 		}
-		return json.NewDecoder(res.Body).Decode(out)
+		if !verifyTurn {
+			return json.NewDecoder(res.Body).Decode(out)
+		}
+		if err := json.NewDecoder(res.Body).Decode(out); err != nil {
+			return err
+		}
+	}
+	if verifyTurn {
+		return c.verifySharedTurn(ctx, res)
 	}
 	_, err = io.Copy(io.Discard, res.Body)
 	return err
