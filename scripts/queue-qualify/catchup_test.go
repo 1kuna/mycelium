@@ -20,7 +20,7 @@ func TestSnapshotIsWriteOnlyAndCopyHashesAndProjects(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := filepath.Join(made.path, snapshotFile)
-	if filepath.Dir(made.path) != share || made.BytesWritten != 8<<20 || made.FilesComplete != 1 {
+	if filepath.Dir(made.path) != filepath.Clean(share) || made.BytesWritten != 8<<20 || made.FilesComplete != 1 {
 		t.Fatalf("%+v", made)
 	}
 	if b, _ := os.ReadFile(filepath.Join(share, "snapshot.bin")); string(b) != "someone else's" {
