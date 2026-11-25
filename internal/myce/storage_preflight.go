@@ -129,7 +129,7 @@ func (c ServiceConfig) WithInstalledStorage(previous ServiceConfig) ServiceConfi
 	if c.Role != "worker" || !previous.RequireMountedNAS || !c.RequireMountedNAS ||
 		ValidateInstallIdentity(previous, c) != nil || !filepath.IsAbs(c.NAS) ||
 		filepath.Dir(c.NAS) == filepath.Clean(c.NAS) || c.NAS != previous.NAS || c.Checkpoints != previous.Checkpoints ||
-		c.ModelRoot != previous.ModelRoot || c.EnvironmentRoot != previous.EnvironmentRoot {
+		c.CheckpointMount != previous.CheckpointMount || c.ModelRoot != previous.ModelRoot || c.EnvironmentRoot != previous.EnvironmentRoot {
 		return c
 	}
 	for _, path := range []string{c.Checkpoints, c.EnvironmentRoot} {
@@ -191,6 +191,10 @@ func installStorageOutcome(ctx context.Context, c ServiceConfig, err error) (*St
 	var refusal *PreflightError
 	if c.allowMissingInstalledNAS && detail.Root == "nas" && detail.Operation == "inventory" &&
 		errors.As(err, &refusal) && refusal.Code == "nas_not_mounted" {
+		transient = true
+	}
+	if c.allowMissingInstalledNAS && detail.Root == "checkpoint" && detail.Operation == "inventory" &&
+		errors.As(err, &refusal) && refusal.Code == "checkpoint_mount_unverified" {
 		transient = true
 	}
 	switch syscall.Errno(detail.Errno) {

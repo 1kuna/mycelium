@@ -1182,7 +1182,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			m.UnavailableRoots = w.sampleStorageRoots(ctx, root.state.CheckpointRoot)
 			w.Machine.UnavailableRoots = slices.Clone(m.UnavailableRoots)
 			checkpointRoot := root.state.CheckpointRoot
-			mountMissing := slices.ContainsFunc(m.UnavailableRoots, func(r UnavailableRoot) bool { return r.Root == "checkpoint" })
+			mountMissing := checkpointRootUnavailable(&m)
 			if mountMissing {
 				// Avoid reporting the unmounted directory's local volume as NAS
 				// capacity, or writing the periodic sentinel into that directory.
@@ -1292,6 +1292,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 					probeWorker.observeStorageError(err)
 					return err == nil, err
 				})
+				if !available {
+					m.UnavailableRoots = append(m.UnavailableRoots, UnavailableRoot{Root: "checkpoint", Reason: "checkpoint root probe unavailable"})
+				}
 			}
 			m.CheckpointUnavailable = !available || diagnostics.CheckpointUnavailable
 			if m.CapabilityProfile != nil {

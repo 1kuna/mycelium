@@ -50,6 +50,7 @@ func TestInstallAndUninstallTempOnly(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	c.CheckpointMount = c.NAS
 	executable := filepath.Join(home, "test-executable")
 	if err := os.Mkdir(c.NAS, 0700); err != nil {
 		t.Fatal(err)
@@ -286,6 +287,9 @@ func TestInstallDeploymentNASAndUpgrade(t *testing.T) {
 			c, _ := PlanInstall(role, home, "", nas, "http://queue:7331", "test", Detection{OS: "linux", Arch: "amd64", Platform: "fake", MemoryMode: "fixed", MemoryGB: 2})
 			c.AllowDeviceless = true
 			c.RequireMountedNAS = true
+			if role == "worker" {
+				c.CheckpointMount = nas
+			}
 			c.EnvironmentFile = filepath.Join(home, "fleet.env")
 			os.WriteFile(c.EnvironmentFile, []byte("MYCE_TOKEN='private-test-secret'\nMYCE_QUEUE=http://queue:7331\n"), 0600)
 			executable := filepath.Join(home, "binary")

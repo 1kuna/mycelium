@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"syscall"
 	"testing"
 	"testing/synctest"
@@ -73,6 +74,14 @@ func TestInstallStorageClassifiesMisconfigurationAndReachability(t *testing.T) {
 
 func TestFleetInstallStorageWarningReceiptAndStatus(t *testing.T) {
 	f := newFleetInstallFixture(t, "linux")
+	f.c.CheckpointMount = f.c.NAS
+	config, err := json.Marshal(f.c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.c.Config, config, 0600); err != nil {
+		t.Fatal(err)
+	}
 	f.i.StorageWarnings = true
 	if err := f.launch(); err != nil {
 		t.Fatal(err)
@@ -227,6 +236,55 @@ func TestPreservedWorkerInstallMissingNAS(t *testing.T) {
 				}
 				if err != nil || warning == nil || warning.Root != "nas" || warning.Operation != "inventory" {
 					t.Fatalf("mode %d: missing NAS was not advisory: %+v, %v", mode, warning, err)
+				}
+			}
+		})
+	}
+}
+
+func TestPreservedWorkerInstallUnverifiedCheckpointSkipsWrites(t *testing.T) {
+	for _, tc := range []struct {
+		name, shadowKind string
+		declared         bool
+		wantProbe        bool
+	}{
+		{name: "visible_ancestor_only"},
+		{name: "verified_parent", declared: true, wantProbe: true},
+		{name: "shadowed_by_autofs", declared: true, shadowKind: "autofs"},
+		{name: "shadowed_by_local_mount", declared: true, shadowKind: "ext4"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := onboardingNAS(t, "linux")
+			c.CheckpointMount = ""
+			if tc.declared {
+				c.CheckpointMount = c.NAS
+			}
+			c.RequireMountedNAS = true
+			shadow := filepath.Join(c.NAS, "nested")
+			c.Checkpoints = filepath.Join(shadow, "checkpoints")
+			command := func(context.Context, string, ...string) ([]byte, error) {
+				mounts := "source " + strings.ReplaceAll(c.NAS, " ", `\040`) + " nfs4 rw 0 0\n"
+				if tc.shadowKind != "" {
+					mounts += "source " + strings.ReplaceAll(shadow, " ", `\040`) + " " + tc.shadowKind + " rw 0 0\n"
+				}
+				return []byte(mounts), nil
+			}
+			for _, mode := range []installStorageMode{installStoragePreview, installStorageProbe, installStorageWrite} {
+				checkpointProbe, checkpointDir := false, false
+				fs := onboardingStorageFS{lstat: os.Lstat, mkdir: func(path string, mode os.FileMode) error {
+					checkpointDir = checkpointDir || path == shadow || path == c.Checkpoints
+					return os.Mkdir(path, mode)
+				}, probeContext: func(ctx context.Context, _ context.CancelCauseFunc, _ string) error {
+					checkpointProbe = checkpointProbe || storageContextRoot(ctx) == "checkpoint"
+					return nil
+				}}
+				warning, err := prepareInstallStorage(context.Background(), c.WithInstalledStorage(c), command, mode, &fs)
+				if err != nil || (warning == nil) != tc.wantProbe || warning != nil && (warning.Root != "checkpoint" || warning.Operation != "inventory") {
+					t.Fatalf("mode %d: unexpected preflight result: %+v %v", mode, warning, err)
+				}
+				wantWrite := tc.wantProbe && mode != installStoragePreview
+				if checkpointProbe != wantWrite || checkpointDir != wantWrite {
+					t.Fatalf("mode %d: checkpoint mkdir=%t probe=%t", mode, checkpointDir, checkpointProbe)
 				}
 			}
 		})

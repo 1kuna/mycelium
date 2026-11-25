@@ -19,6 +19,7 @@ func onboardingNAS(t *testing.T, osname string) (ServiceConfig, func(context.Con
 		t.Fatal(err)
 	}
 	c, _ := PlanInstall("worker", home, "", nas, "http://queue.invalid", "hypha", Detection{OS: osname, Arch: "arm64", Platform: "cpu", MemoryMode: "fixed"})
+	c.CheckpointMount = nas
 	command := func(_ context.Context, n string, args ...string) ([]byte, error) {
 		if osname == "linux" && n == "cat" && len(args) == 1 && args[0] == "/proc/mounts" {
 			return []byte("credentials-must-not-print " + strings.ReplaceAll(nas, " ", `\040`) + " nfs4 rw,password=private-value 0 0\n"), nil

@@ -52,13 +52,14 @@ func TestRedeemedInvitationCarriesShareIdentityWithoutLocalPaths(t *testing.T) {
 	got, err := ResolveOnboardingStorage(context.Background(), c, true, func(context.Context, string, ...string) ([]byte, error) {
 		return []byte("//user@storage.invalid/share on " + localMount + " (smbfs, nodev)\n"), nil
 	}, saved.NASIdentity)
-	if err != nil || got.NAS != localMount || got.Checkpoints != filepath.Join(localMount, filepath.Base(q.root)) {
+	if err != nil || got.NAS != localMount || got.CheckpointMount != localMount || got.Checkpoints != filepath.Join(localMount, filepath.Base(q.root)) {
 		t.Fatal("queue-relative checkpoint path not adopted", err)
 	}
 }
 
 func TestNASIdentityKeepsExplicitRootsAndRejectsUnsafeRelativePath(t *testing.T) {
 	c, command := onboardingNAS(t, "darwin")
+	c.CheckpointMount = ""
 	c.Checkpoints = filepath.Join(c.NAS, "custom-checkpoints")
 	c.ModelRoot = filepath.Join(c.NAS, "custom-models")
 	identity := NASIdentity{nasSourceFingerprint("//storage.invalid/share", "smbfs"), "custom/queue-checkpoints"}
@@ -66,7 +67,7 @@ func TestNASIdentityKeepsExplicitRootsAndRejectsUnsafeRelativePath(t *testing.T)
 		return []byte("//storage.invalid/share on " + c.NAS + " (smbfs, nodev)"), nil
 	}
 	got, err := ResolveOnboardingStorage(context.Background(), c, true, inventory, identity)
-	if err != nil || got.Checkpoints != c.Checkpoints || got.ModelRoot != c.ModelRoot {
+	if err != nil || got.Checkpoints != c.Checkpoints || got.CheckpointMount != "" || got.ModelRoot != c.ModelRoot {
 		t.Fatal("custom paths changed", err)
 	}
 	identity.CheckpointPath = "../../escape"

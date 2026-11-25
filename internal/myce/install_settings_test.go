@@ -364,11 +364,16 @@ func TestInstallSettingsAliasesAndRelativePaths(t *testing.T) {
 			if err := f.Parse([]string{fmt.Sprintf("--%s=relative", s.Flag)}); err != nil {
 				t.Fatal(err)
 			}
-			got, err := OverlayInstallFlags(f, c, values)
+			want, _ := filepath.Abs("relative")
+			base := c
+			if s.Flag == "checkpoint-mount" {
+				base, _ = PlanInstall("worker", "/fixture/home", "", "/fixture/nas", "http://queue.invalid", "fixture", Detection{OS: "linux", Arch: "arm64", Platform: "fake"})
+				base.Checkpoints = filepath.Join(want, "checkpoints")
+			}
+			got, err := OverlayInstallFlags(f, base, values)
 			if err != nil {
 				t.Fatal(err)
 			}
-			want, _ := filepath.Abs("relative")
 			if installTestField(&got, s.Field).String() != want {
 				t.Fatal("relative flag path not normalized")
 			}

@@ -99,7 +99,10 @@ helpers report only the failure code; absent details cannot identify the cause.
 
 A helper that supports NAS-optional updates records `storage_warning` with
 `root: nas` and `operation: inventory` if the unchanged, previously selected
-worker NAS is absent from mount inventory. The checkpoint and environment
+worker NAS is absent from mount inventory. When only checkpoint backing is
+unverified, the warning names `root: checkpoint` and preflight skips checkpoint
+writes. See [checkpoint mount verification](nas-mounts.md#worker-mount-recovery-linux-and-macos).
+The checkpoint and environment
 source roots must be inside that NAS. The model root may also use a verified
 local volume. Worker state and caches must be outside the NAS. Preflight
 refuses invalid mountpoint paths and still checks local state, signatures and

@@ -56,7 +56,7 @@ func SetWorkerProbeDefaults(p WorkerProbeDefaults) {
 		workerSignalEvidence = p.SignalEvidence
 	}
 	if p.MountRoots != nil {
-		workerMountRoots = p.MountRoots
+		workerMountInventory = func(ctx context.Context) ([]nasMount, error) { return mountInventoryFromPaths(p.MountRoots(ctx)) }
 	}
 	if p.Disk != nil {
 		workerDiskProbe = p.Disk

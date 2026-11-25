@@ -17,6 +17,7 @@ func TestStoragePreflightRemovesOnlyItsNewDirectories(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			c.CheckpointMount = mount
 			// Existing directories and their contents belong to the user.
 			keep := filepath.Join(mount, "keep")
 			if err := os.WriteFile(keep, []byte("preserve"), 0600); err != nil {

@@ -1227,9 +1227,7 @@ The stable job folder holds `attempt-1`, `attempt-2`, etc.; the environment poin
 to the current attempt's folder. Before starting, the worker copies checkpoints
 from the attempt with the highest durable checkpoint generation.
 If the queue has recorded a positive generation, the worker requires that
-generation or a newer one before starting a NAS resume. A previously observed
-nested checkpoint mount stays required across worker restarts, even when its
-parent NAS is reachable.
+generation or a newer one before starting a NAS resume.
 The worker checks exact-attempt launch authorization before materializing that
 copy. If preparation outlives an observation budget, the same attempt waits for
 its existing writer before repeating admission or device probes; it does not
@@ -1378,8 +1376,10 @@ Test stop/save/restart on a later attempt and verify complete output.
 Jobs in every class can start on a worker with a missing NAS mount when their
 declared dependencies can be satisfied locally or through the queue file store.
 This includes release and test jobs. Jobs that need a worker NAS root wait with
-`hold.kind: storage_root` and the affected root role in `hold.detail`. Jobs
-that need the queue's unreachable NAS checkpoint root report `checkpoint_root`.
+`hold.kind: storage_root` and the affected root role in `hold.detail`. At cold
+start this holds NAS-checkpoint work until the worker confirms the backing in
+its current session. Jobs that need the queue's unreachable NAS checkpoint root
+report `checkpoint_root`.
 Explicit [local-first checkpoints](#local-first-checkpoints-1600) use the worker
 state volume and the queue file store. They can resume on another compatible
 worker while either worker lacks the NAS mount.

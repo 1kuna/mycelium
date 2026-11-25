@@ -188,6 +188,7 @@ type ServiceConfig struct {
 	DiscoveryListen        string    `json:"discovery_listen,omitempty"`
 	NAS                    string    `json:"nas"`
 	Checkpoints            string    `json:"checkpoint_root"`
+	CheckpointMount        string    `json:"checkpoint_mount,omitempty"`
 	ModelRoot              string    `json:"model_root"`
 	SecretRoot             string    `json:"secret_root,omitempty"`
 	ModelCatalog           string    `json:"model_catalog"`

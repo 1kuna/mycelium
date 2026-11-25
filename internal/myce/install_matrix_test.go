@@ -194,6 +194,7 @@ func newInstallMatrixFixture(t *testing.T, platform, role string, prior int) ins
 	c.HostID = "fixture-host"
 	c.RequireMountedNAS = platform == "linux"
 	if role == "worker" {
+		c.CheckpointMount = c.NAS
 		if err := PrepareStateRoots(c.State); err != nil {
 			t.Fatal(err)
 		}

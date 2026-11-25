@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -176,6 +177,30 @@ func TestHostHygieneMountSingleOutstandingAndScopedRecovery(t *testing.T) {
 			return false
 		}
 	})
+}
+
+func TestHostHygieneCheckpointProbeRequiresExpectedMount(t *testing.T) {
+	nas := t.TempDir()
+	root := filepath.Join(nas, "checkpoints")
+	mounts := []string{nas}
+	w := Worker{ServiceConfig: &ServiceConfig{NAS: nas}, MountRoots: func(context.Context) ([]string, error) { return mounts, nil }}
+	checkpointProbe := workerHealthCheckpointProbe
+	t.Cleanup(func() { workerHealthCheckpointProbe = checkpointProbe })
+	writes := 0
+	workerHealthCheckpointProbe = func(string, func()) error { writes++; return nil }
+	probe := recoveryMountProbe(w, "checkpoint", root)
+	if err := probe(root, func() {}); err == nil || writes != 0 {
+		t.Fatalf("unverified parent reached the recovery write probe: writes=%d err=%v", writes, err)
+	}
+	mounts = append(mounts, root)
+	if err := probe(root, func() {}); err != nil || writes != 1 {
+		t.Fatalf("exact mount did not qualify for recovery: writes=%d err=%v", writes, err)
+	}
+	mounts = []string{nas}
+	w.ServiceConfig.CheckpointMount = nas
+	if err := probe(root, func() {}); err != nil || writes != 2 {
+		t.Fatalf("declared parent did not qualify for recovery: writes=%d err=%v", writes, err)
+	}
 }
 
 // Replay a working mount, dropped connection, permission-required remount and

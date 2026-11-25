@@ -101,6 +101,10 @@ func TestResolveNASCacheFreshnessAndSession(t *testing.T) {
 		cache.resolve(req, &r)
 		return r
 	}
+	// A local-first restore failure sets the aggregate flag while the NAS
+	// root remains available for inspection on the same worker session.
+	m.CheckpointUnavailable = true
+	check(t, q, m, nil)
 	before := string(wireJSON(t, q.s))
 	r := resolve()
 	if r.Targets[0].NASInputs[0].State != "pending" {
@@ -203,6 +207,12 @@ func TestResolveNASWorkerChecksAreConfinedAndCached(t *testing.T) {
 	clock.Advance(10 * time.Second)
 	if reports = w.nasPathReports(&w.Machine); reports[0].AgeSeconds != 10 {
 		t.Fatal("old sample was renewed", reports)
+	}
+	// The attempt-wide flag can come from a local-first file restore.
+	w.Machine.CheckpointUnavailable = true
+	w.inspectNASPaths(checks, root)
+	if reports = w.nasPathReports(&w.Machine); len(reports) != 1 || reports[0].State != "present" {
+		t.Fatal("local-first restore error hid a healthy NAS input", reports)
 	}
 	w.Machine.UnavailableRoots = []UnavailableRoot{{Root: "checkpoint", Reason: "configured NAS mount missing"}}
 	w.inspectNASPaths(checks, root)

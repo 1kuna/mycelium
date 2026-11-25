@@ -59,11 +59,15 @@ OS; no separate repair daemon or privileged command is installed. Cached mount
 inventory is checked again after access, so an empty local mountpoint cannot
 pretend to be a recovered NAS. Independent local checkpoint roots remain local.
 
-The worker saves the observed network mountpoint for its checkpoint root in
-private local state before admitting work that depends on it. Across worker
-restarts, a surviving parent share cannot stand in for a previously observed
-nested checkpoint mount. A metadata read can trigger an automount. The write
-probe waits for mount inventory to confirm the expected backing.
+For a checkpoint root inside a mounted share, enrollment can match the queue's
+share identity and exact relative checkpoint path. For manual configuration,
+the storage owner sets `myce install worker --checkpoint-mount PATH` to the
+verified mountpoint of that share. Without a declared backing the worker
+expects a network mount at the checkpoint root itself. A nested mount or
+automount can shadow the declared backing. A metadata read can trigger an
+automount, and checkpoint write probes
+require current mount inventory to confirm the expected backing. The old
+mountpoint receipt is ignored because it could record a fallback share.
 
 A learned whole-sequence latency outlier is advisory while filesystem
 operations still progress. The existing hygiene band and confirmation count

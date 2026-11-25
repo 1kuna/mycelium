@@ -24,6 +24,7 @@ func TestInstallWorkerRuntimeAndServiceDetection(t *testing.T) {
 				t.Fatal(err)
 			}
 			c, _ := PlanInstall("worker", home, "", home, "http://queue:7331", "worker", Detection{OS: "linux", Arch: "amd64", Platform: "xpu", MemoryMode: "fixed", MemoryGB: 16})
+			c.CheckpointMount = c.NAS
 			if instance != "" {
 				// A machine worker can offer only card 1 without a split unit.
 				c.Device = "1"

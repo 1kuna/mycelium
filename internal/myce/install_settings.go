@@ -226,6 +226,12 @@ func InstallSettings() []InstallSetting {
 		installSetting("reserve-host-memory-gb", "ReserveHostMemoryGB", "host RAM reserve", func(c *ServiceConfig) *float64 { return &c.ReserveHostMemoryGB }, installNonnegative),
 		installStateSetting(),
 		installPath("checkpoint-root", "Checkpoints", "worker checkpoint root", func(c *ServiceConfig) *string { return &c.Checkpoints }, false),
+		installContext(installPath("checkpoint-mount", "CheckpointMount", "verified OS mount backing for worker checkpoints (empty requires an exact root mount)", func(c *ServiceConfig) *string { return &c.CheckpointMount }, false), func(c ServiceConfig) error {
+			if c.CheckpointMount != "" && (c.Role != "worker" || !withinNAS(c.CheckpointMount, c.Checkpoints)) {
+				return errors.New("must be a worker mountpoint containing the checkpoint root")
+			}
+			return nil
+		}),
 		installPath("checkpoints", "Checkpoints", "queue checkpoint root (alias of checkpoint-root)", func(c *ServiceConfig) *string { return &c.Checkpoints }, false),
 		installPath("model-root", "ModelRoot", "model source/acquisition root (mounted NAS or verified local disk)", func(c *ServiceConfig) *string { return &c.ModelRoot }, false),
 		installSetting("secret-root", "SecretRoot", "worker-local named secrets directory (absolute; empty clears)", func(c *ServiceConfig) *string { return &c.SecretRoot }, func(p string) error {

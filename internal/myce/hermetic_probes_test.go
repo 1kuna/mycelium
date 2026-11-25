@@ -23,7 +23,7 @@ func syntheticProfileProbe() ProfileProbe {
 }
 
 func installSyntheticWorkerHost() {
-	workerMountRoots = func(context.Context) ([]string, error) { return []string{"/"}, nil }
+	workerMountInventory = func(context.Context) ([]nasMount, error) { return mountInventoryFromPaths([]string{"/"}, nil) }
 	workerCheckpointPrepare = func(j Job) (string, error) {
 		dir := attemptCheckpoint(j)
 		if !filepath.IsAbs(dir) {

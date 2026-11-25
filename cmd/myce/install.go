@@ -343,8 +343,14 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 		}
 		beforeStorage := c
 		c, e = myce.ResolveOnboardingStorage(ctx, c, installed == nil && !explicit["nas"], probe.Command, identity)
-		if explicit["checkpoint-root"] {
+		if explicit["checkpoint-root"] || explicit["checkpoints"] {
+			if c.Checkpoints != beforeStorage.Checkpoints {
+				c.CheckpointMount = beforeStorage.CheckpointMount
+			}
 			c.Checkpoints = beforeStorage.Checkpoints
+		}
+		if explicit["checkpoint-mount"] {
+			c.CheckpointMount = beforeStorage.CheckpointMount
 		}
 		if explicit["model-root"] {
 			c.ModelRoot = beforeStorage.ModelRoot

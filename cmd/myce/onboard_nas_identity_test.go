@@ -73,7 +73,7 @@ func TestOnboardingSelectsOnlyClusterNAS(t *testing.T) {
 			}}
 			args := []string{"install", "worker", "--gpu", "cpu", "--joining-file", path, "--queue", address, "--dry-run", "--environment-cache-bytes", "1048576"}
 			if mode == "override" {
-				args = append(args, "--nas", second)
+				args = append(args, "--nas", second, "--checkpoint-mount", second)
 			}
 			var result error
 			output := captureJoiningOutput(t, func() error { result = setupCommandWithProbe(args, p, home); return nil })

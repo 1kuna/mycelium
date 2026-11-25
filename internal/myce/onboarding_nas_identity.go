@@ -117,8 +117,12 @@ func resolveClusterNAS(ctx context.Context, c ServiceConfig, command func(contex
 			*path = filepath.Join(root, rel)
 		}
 	}
+	checkpointPath := filepath.Join(root, filepath.FromSlash(identity.CheckpointPath))
 	if c.Checkpoints == filepath.Join(root, "mycelium", "checkpoints") {
-		c.Checkpoints = filepath.Join(root, filepath.FromSlash(identity.CheckpointPath))
+		c.Checkpoints = checkpointPath
+	}
+	if c.Role == "worker" && c.CheckpointMount == "" && c.Checkpoints == checkpointPath {
+		c.CheckpointMount = root // The queue identity names this share and exact relative path.
 	}
 	c.NAS = root
 	return c, nil

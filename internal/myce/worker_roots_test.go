@@ -28,7 +28,7 @@ func TestWorkerRootsMissingMountAndRecovery(t *testing.T) {
 	nas := t.TempDir() // The mountpoint survives, so existence/statfs is not proof.
 	mounted := false
 	inventoryError := false
-	w := Worker{ServiceConfig: &ServiceConfig{NAS: nas}, JobFileRoot: nas, ModelRoot: filepath.Join(nas, "models"), EnvironmentSourceRoot: filepath.Join(nas, "env"), EnvironmentRoot: t.TempDir(), MountRoots: func(context.Context) ([]string, error) {
+	w := Worker{ServiceConfig: &ServiceConfig{NAS: nas, CheckpointMount: nas}, JobFileRoot: nas, ModelRoot: filepath.Join(nas, "models"), EnvironmentSourceRoot: filepath.Join(nas, "env"), EnvironmentRoot: t.TempDir(), MountRoots: func(context.Context) ([]string, error) {
 		if inventoryError {
 			return nil, errors.New("inventory failed")
 		}
@@ -73,7 +73,7 @@ func TestWorkerRootsNestedCheckpointMountSurvivesRestart(t *testing.T) {
 	}
 	mounts := []string{nas, nested}
 	newWorker := func() Worker {
-		return Worker{StateDir: state, CheckpointRoot: root, ServiceConfig: &ServiceConfig{NAS: nas}, MountRoots: func(context.Context) ([]string, error) { return mounts, nil }}
+		return Worker{StateDir: state, CheckpointRoot: root, ServiceConfig: &ServiceConfig{NAS: nas, CheckpointMount: nested}, MountRoots: func(context.Context) ([]string, error) { return mounts, nil }}
 	}
 	w := newWorker()
 	if missing := w.sampleStorageRoots(ctx, root); len(missing) != 0 {
@@ -126,6 +126,70 @@ func TestWorkerRootsNestedCheckpointMountSurvivesRestart(t *testing.T) {
 	}
 	if progress, err := checkpointProgress(dest); err != nil || progress != 7 {
 		t.Fatalf("recovered attempt lost the durable generation: %d, %v", progress, err)
+	}
+}
+
+func TestWorkerRootsColdStartDoesNotAcceptFallbackCheckpoint(t *testing.T) {
+	for _, legacyReceipt := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy_receipt=%t", legacyReceipt), func(t *testing.T) {
+			q, _ := fixture(t)
+			fakeCheckpointAvailability(t, q, true)
+			nas, state, offline := t.TempDir(), t.TempDir(), t.TempDir()
+			root := filepath.Join(nas, "nested", "checkpoints")
+			if err := os.MkdirAll(root, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if legacyReceipt {
+				receipt := map[string]string{"path": root, "mount": nas}
+				if err := saveWorkerJSON(state, "checkpoint-mount.json", receipt); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s := cpuSpec(1, 1)
+			s.Class, s.Priority, s.Resumable = "experiment", "", true
+			m := cpuMachine("worker", "worker", "cpu", 4, 16)
+			check(t, q, m, nil)
+			j := submit(t, q, s)
+			prior := check(t, q, m, nil).Job
+			if prior == nil || prior.ID != j.ID || prior.Attempt != 1 {
+				t.Fatal("missing first attempt", prior)
+			}
+			// The queue has no positive generation evidence. Generation 7 is
+			// on the nested share, which is offline when this worker starts.
+			first := filepath.Join(offline, j.ID, "attempt-1")
+			if err := os.MkdirAll(first, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(first, "checkpoint.json"), []byte(`{"myce_checkpoint":{"generation":7}}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			interrupted := result(prior, false)
+			interrupted.Interrupted = true
+			if err := q.Complete(interrupted); err != nil {
+				t.Fatal(err)
+			}
+			w := Worker{StateDir: state, CheckpointRoot: root, ServiceConfig: &ServiceConfig{NAS: nas}, MountRoots: func(context.Context) ([]string, error) { return []string{nas}, nil }}
+			m.UnavailableRoots = w.sampleStorageRoots(context.Background(), root)
+			if assigned := check(t, q, m, nil).Job; assigned != nil {
+				assigned.Checkpoint = filepath.Join(root, j.ID)
+				dest, err := prepareCheckpoint(*assigned)
+				if err != nil {
+					t.Fatal("fallback preparation failed", err)
+				}
+				generation, err := checkpointProgress(dest)
+				t.Fatalf("prepared fallback attempt %d at generation %d while generation 7 was offline: %v", assigned.Attempt, generation, err)
+			}
+			got, err := q.jobSnapshot(j.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Hold == nil || got.Hold.Kind != "storage_root" || !strings.Contains(got.Hold.Detail, "checkpoint unavailable") {
+				t.Fatalf("missing typed checkpoint hold: %+v", got.Hold)
+			}
+			if _, err := os.Lstat(filepath.Join(root, j.ID)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("held checkpoint materialized in the fallback", err)
+			}
+		})
 	}
 }
 
@@ -210,15 +274,24 @@ func TestWorkerRootsReadmissionAndCheckpointPlacement(t *testing.T) {
 			name := fmt.Sprintf("%s/mounted=%t", class, mounted)
 			t.Run(name, func(t *testing.T) {
 				q, clock := fixture(t)
+				nas := t.TempDir()
+				root := filepath.Join(nas, "checkpoints")
+				w := Worker{ServiceConfig: &ServiceConfig{NAS: nas}, MountRoots: func(context.Context) ([]string, error) { return []string{nas}, nil }}
+				if mounted {
+					w.ServiceConfig.CheckpointMount = nas
+				}
 				m := cpuMachine("worker", "worker", "cpu", 4, 16)
+				m.UnavailableRoots = w.sampleStorageRoots(context.Background(), root)
+				m.CheckpointUnavailable = checkpointRootUnavailable(&m)
+				if m.CheckpointUnavailable == mounted {
+					t.Fatal("unexpected checkpoint root status", m.UnavailableRoots)
+				}
 				m.Capabilities = append(m.Capabilities, localFirstProtocol)
 				m = reportDisk(t, m, clock, "data", []string{"data", "file-cache"}, 100<<30, 50<<30)
 				if mounted {
 					nas := reportDisk(t, m, clock, "checkpoint", []string{"checkpoint"}, 100<<30, 50<<30)
 					m.DiskVolumes = append(m.DiskVolumes, nas.DiskVolumes...)
 				} else {
-					m.UnavailableRoots = []UnavailableRoot{{Root: "checkpoint", Reason: "configured NAS mount missing"}}
-					m.CheckpointUnavailable = true
 					m.DiskVolumes = append(m.DiskVolumes, DiskVolume{Roots: []string{"checkpoint"}, Error: "disk reading unavailable"})
 				}
 				check(t, q, m, nil)
@@ -415,14 +488,14 @@ func TestWorkerRootsMissingExtensionAllowsPlainCommand(t *testing.T) {
 func TestWorkerRootsAutofsIsNotMountedNAS(t *testing.T) {
 	for _, osname := range []string{"darwin", "linux"} {
 		t.Run(osname, func(t *testing.T) {
-			roots, err := workerMountedNASRoots(context.Background(), osname, func(context.Context, string, ...string) ([]byte, error) {
+			mounts, err := mountedNASInventory(context.Background(), osname, func(context.Context, string, ...string) ([]byte, error) {
 				if osname == "linux" {
 					return []byte("map /nas autofs rw 0 0\nfixture /nas/online nfs rw 0 0\n"), nil
 				}
 				return []byte("map on /nas (autofs)\nfixture on /nas/online (smbfs)\n"), nil
 			})
-			if err != nil || len(roots) != 1 || roots[0] != "/nas/online" {
-				t.Fatal("automount placeholder counted as NAS", roots, err)
+			if err != nil || checkpointMountConfirmed(mounts, "/nas/checkpoints", "/nas") || !checkpointMountConfirmed(mounts, "/nas/online/checkpoints", "/nas/online") {
+				t.Fatal("automount placeholder counted as NAS or an active nested mount was missed", err)
 			}
 		})
 	}

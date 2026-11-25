@@ -113,7 +113,7 @@ func TestInstallCLIDryRunFakeDetection(t *testing.T) {
 				p.OS = "darwin"
 				p.Arch = "arm64"
 			}
-			if e := setupCommandWithProbe([]string{"install", "worker", "--nas", home, "--dry-run", "--environment-cache-bytes", "1048576", "--secret-root", filepath.Join(home, "named secrets")}, dryInstallProbe(t, home, p), home); e != nil {
+			if e := setupCommandWithProbe([]string{"install", "worker", "--nas", home, "--checkpoint-mount", home, "--dry-run", "--environment-cache-bytes", "1048576", "--secret-root", filepath.Join(home, "named secrets")}, dryInstallProbe(t, home, p), home); e != nil {
 				t.Fatal(e)
 			}
 			entries, _ := os.ReadDir(home)
@@ -230,7 +230,7 @@ func TestInstallCLICPUWithoutGPU(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
 			probe := myce.MachineProbe{OS: "linux", Arch: "amd64", Glob: func(string) ([]string, error) { return nil, nil }, Command: func(context.Context, string, ...string) ([]byte, error) { return nil, exec.ErrNotFound }}
-			args := append([]string{"install", "worker", "--nas", home, "--dry-run", "--environment-cache-bytes", "1048576"}, tc.args...)
+			args := append([]string{"install", "worker", "--nas", home, "--checkpoint-mount", home, "--dry-run", "--environment-cache-bytes", "1048576"}, tc.args...)
 			err := setupCommandWithProbe(args, dryInstallProbe(t, home, probe), home)
 			if (err == nil) != tc.ok {
 				t.Fatal(err)
@@ -284,7 +284,7 @@ func TestInstallWorkerDeploymentFlags(t *testing.T) {
 	os.Stdout = out
 	defer func() { os.Stdout = saved; out.Close() }()
 	args := []string{"install", "worker", "--nas", home, "--dry-run", "--name", "b70-gpu1", "--host-id", "b70", "--device", "1", "--gpu", "xpu", "--memory-mode", "fixed", "--memory-gb", "16", "--reserve-memory-gb", "2", "--reserve-host-memory-gb", "4", "--host-memory-budget-gb", "5", "--memory-ceiling-slack-gb", "0", "--memory-swap-max-bytes", "0", "--state-dir", home + "/spool", "--checkpoint-root", home + "/cp", "--model-root", home + "/models", "--environment-root", home + "/envs", "--model-cache", home + "/mc", "--model-cache-bytes", "1111", "--environment-cache", home + "/ec", "--environment-cache-bytes", "2222", "--heartbeat", "2s", "--log-retention", "24h", "--require-memory-ceilings", "--require-mounted-nas=false"}
-	args = append(args, "--queue", "http://queue.example:7331", "--model-listen", ":7332", "--model-advertise", "http://localhost:7332")
+	args = append(args, "--checkpoint-mount", home, "--queue", "http://queue.example:7331", "--model-listen", ":7332", "--model-advertise", "http://localhost:7332")
 	probe := integratedPCIFixture(myce.MachineProbe{OS: "linux", Arch: "amd64",
 		CommandEnv: func(_ context.Context, _ map[string]string, name string, _ ...string) ([]byte, error) {
 			if name == "python3" {
@@ -533,7 +533,7 @@ func TestInstallWorkerOverridesDetectedReserve(t *testing.T) {
 		return []byte("NVIDIA GB10, [N/A]"), nil
 	}}
 	probe = cudaPCIFixture(probe, true)
-	if err := setupCommandWithProbe([]string{"install", "worker", "--nas", home, "--reserve-memory-gb", "24", "--dry-run", "--environment-cache-bytes", "1048576"}, dryInstallProbe(t, home, probe), home); err != nil {
+	if err := setupCommandWithProbe([]string{"install", "worker", "--nas", home, "--checkpoint-mount", home, "--reserve-memory-gb", "24", "--dry-run", "--environment-cache-bytes", "1048576"}, dryInstallProbe(t, home, probe), home); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(out.Name())
@@ -656,7 +656,7 @@ func TestInstallWithoutPasswdEntry(t *testing.T) {
 			}
 			args := []string{"install", role, "--nas", home, "--dry-run"}
 			if role == "worker" {
-				args = append(args, "--gpu", "fake", "--memory-mode", "fixed", "--memory-gb", "2", "--environment-cache-bytes", "1048576")
+				args = append(args, "--checkpoint-mount", home, "--gpu", "fake", "--memory-mode", "fixed", "--memory-gb", "2", "--environment-cache-bytes", "1048576")
 			}
 			captureJoiningOutput(t, func() error {
 				return setupCommandWithAccountLookup(args, dryInstallProbe(t, home, myce.MachineProbe{OS: "linux", Arch: "amd64"}), home, lookup)

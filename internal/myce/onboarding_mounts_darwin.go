@@ -35,10 +35,12 @@ func cachedDarwinMountInventory(ctx context.Context, getfsstat func([]unix.Statf
 	var out strings.Builder
 	for _, m := range mounts[:n] {
 		kind := unix.ByteSliceToString(m.Fstypename[:])
-		if !networkMountType(kind) {
-			continue
+		source := "local"
+		if networkMountType(kind) {
+			source = unix.ByteSliceToString(m.Mntfromname[:])
 		}
-		fmt.Fprintf(&out, "%s on %s (%s)\n", unix.ByteSliceToString(m.Mntfromname[:]), unix.ByteSliceToString(m.Mntonname[:]), kind)
+		// Local mountpoints can shadow network backing beneath a parent share.
+		fmt.Fprintf(&out, "%s on %s (%s)\n", source, unix.ByteSliceToString(m.Mntonname[:]), kind)
 	}
 	return []byte(out.String()), ctx.Err()
 }

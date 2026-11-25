@@ -133,7 +133,7 @@ func savedInstallFixture(t *testing.T, roles ...string) (myce.ServiceConfig, myc
 		}
 		name := field.Name
 		switch name {
-		case "Version", "LocalDisableReceipts", "PrivateDevices", "RequireMemoryCeilings", "Detection", "Role", "Config", "Binary", "Credentials", "State", "Service", "HostID", "Name", "Queue", "NAS":
+		case "Version", "LocalDisableReceipts", "PrivateDevices", "RequireMemoryCeilings", "Detection", "Role", "Config", "Binary", "Credentials", "State", "Service", "HostID", "Name", "Queue", "NAS", "CheckpointMount":
 			continue
 		}
 		switch f.Kind() {
@@ -218,6 +218,7 @@ func TestInstallPreservesEveryConfigField(t *testing.T) {
 		t.Run(role, func(t *testing.T) {
 			c, p := savedInstallFixture(t, role)
 			if role == "worker" {
+				c.CheckpointMount = filepath.Dir(c.Checkpoints)
 				c.JoiningFile = filepath.Join(c.NAS, "private-invitation.json")
 				invitation := myce.Invitation{Version: 1, Fingerprint: strings.Repeat("ab", 32), Token: "synthetic-install-fixture", Address: "https://queue.invalid"}
 				if err := myce.WriteInvitation(c.JoiningFile, invitation); err != nil {
@@ -389,7 +390,7 @@ func TestInstallExplicitQueueNASName(t *testing.T) {
 func TestInstallWorkerExplicitOverlayAndIdentity(t *testing.T) {
 	c, p := savedInstallFixture(t, "worker")
 	checkpoint := filepath.Join(c.NAS, "new-checkpoints")
-	args := []string{"install", "worker", "--config", c.Config, "--memory-gb=7", "--reserve-memory-gb=0", "--require-memory-ceilings=false", "--checkpoint-root", checkpoint}
+	args := []string{"install", "worker", "--config", c.Config, "--memory-gb=7", "--reserve-memory-gb=0", "--require-memory-ceilings=false", "--checkpoint-root", checkpoint, "--checkpoint-mount", c.NAS}
 	if err := setupCommandWithProbe(args, p, c.NAS); err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +398,7 @@ func TestInstallWorkerExplicitOverlayAndIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Detection.MemoryGB != 7 || got.Detection.ReserveGB != 0 || got.RequireMemoryCeilings || got.Checkpoints != checkpoint {
+	if got.Detection.MemoryGB != 7 || got.Detection.ReserveGB != 0 || got.RequireMemoryCeilings || got.Checkpoints != checkpoint || got.CheckpointMount != c.NAS {
 		t.Fatal("worker explicit overlay ignored")
 	}
 	for _, flag := range []string{"--state-dir", "--host-id", "--device"} {

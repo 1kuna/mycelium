@@ -21,7 +21,7 @@ func init() {
 		workerCustodians = false
 	}
 	workerHostHealthSource = nil
-	workerMountRoots = func(context.Context) ([]string, error) { return []string{"/"}, nil }
+	workerMountInventory = func(context.Context) ([]nasMount, error) { return mountInventoryFromPaths([]string{"/"}, nil) }
 	workerDeviceFaultSource = func() DeviceFaultSource { return nil }
 	workerFaultHost = func() (map[string]string, []string) { return nil, []string{"synthetic_host"} }
 	workerSignalEvidence = func(SignalCapture) *SignalEvidence { return &SignalEvidence{CoreCapture: "unavailable"} }

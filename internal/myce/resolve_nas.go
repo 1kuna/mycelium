@@ -34,7 +34,7 @@ type ResolveNASInput struct {
 }
 
 func checkpointRootUnavailable(m *Machine) bool {
-	return m.CheckpointUnavailable || slices.ContainsFunc(m.UnavailableRoots, func(root UnavailableRoot) bool { return root.Root == "checkpoint" })
+	return slices.ContainsFunc(m.UnavailableRoots, func(root UnavailableRoot) bool { return root.Root == "checkpoint" })
 }
 
 type resolveNASEntry struct {

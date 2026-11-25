@@ -458,7 +458,7 @@ func custodiansDetached(actors map[attemptKey]*attemptSupervisor) bool {
 // launch dependencies here; coordinator-only loops and retention stay in Run.
 func (w *Worker) initAttemptRuntime(stop context.Context, s *workerStore) error {
 	if w.rootMonitor == nil {
-		w.rootMonitor = &workerRootMonitor{stateDir: s.dir}
+		w.rootMonitor = &workerRootMonitor{}
 	}
 	if w.ExtensionRoot == "" {
 		w.ExtensionRoot = filepath.Join(s.dir, "extensions")

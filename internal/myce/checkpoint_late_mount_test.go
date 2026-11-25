@@ -66,7 +66,7 @@ func TestWorkerHeartbeatAfterLateCheckpointMount(t *testing.T) {
 			return
 		}
 		heartbeats++
-		if heartbeats <= 2 && !c.Machine.CheckpointUnavailable {
+		if heartbeats <= 2 && (!c.Machine.CheckpointUnavailable || !checkpointRootUnavailable(&c.Machine)) {
 			t.Error("worker admitted missing checkpoint root")
 		}
 		if heartbeats == 2 {
@@ -77,7 +77,7 @@ func TestWorkerHeartbeatAfterLateCheckpointMount(t *testing.T) {
 			// the next normal observation without outrunning the I/O deadline.
 			clock.Advance(checkpointMetadataInterval)
 		}
-		if heartbeats > 2 && !c.Machine.CheckpointUnavailable {
+		if heartbeats > 2 && !c.Machine.CheckpointUnavailable && !checkpointRootUnavailable(&c.Machine) {
 			recovered = true
 		}
 		if err := json.NewEncoder(rw).Encode(Reply{AttemptProtocol: keyedAttemptProtocol, Leave: recovered}); err != nil {

@@ -22,7 +22,7 @@ import (
 func storageFaultFixture(t *testing.T) (Worker, *hostHealthMonitor, *fakeClock) {
 	t.Helper()
 	m, clock := healthFixture(t, 1)
-	w := Worker{Clock: clock, CheckpointRoot: "/share/checkpoints", JobFileRoot: "/share/inputs", ServiceConfig: &ServiceConfig{NAS: "/share"}, storageHealth: m}
+	w := Worker{Clock: clock, CheckpointRoot: "/share/checkpoints", JobFileRoot: "/share/inputs", ServiceConfig: &ServiceConfig{NAS: "/share", CheckpointMount: "/share"}, storageHealth: m}
 	w.MountRoots = func(context.Context) ([]string, error) { return []string{"/share"}, nil }
 	w.sampleStorageRoots(context.Background(), w.CheckpointRoot)
 	m.storageRoots = w.storageRoots()
@@ -385,7 +385,7 @@ func TestStorageFaultCheckpointPreparationPublishesExactFault(t *testing.T) {
 	_, m, clock := storageFaultFixture(t)
 	w.storageHealth, w.Clock = m, clock
 	w.CheckpointRoot = "/share/checkpoints"
-	w.ServiceConfig = &ServiceConfig{NAS: "/share"}
+	w.ServiceConfig = &ServiceConfig{NAS: "/share", CheckpointMount: "/share"}
 	w.MountRoots = func(context.Context) ([]string, error) { return []string{"/share"}, nil }
 	s, err := w.openStore()
 	if err != nil {
@@ -411,7 +411,7 @@ func TestStorageFaultBlocksPreparationRetryBeforeHeartbeat(t *testing.T) {
 	w := recoveryWorker(t)
 	_, m, clock := storageFaultFixture(t)
 	w.storageHealth, w.Clock = m, clock
-	w.CheckpointRoot, w.ServiceConfig = "/share/checkpoints", &ServiceConfig{NAS: "/share"}
+	w.CheckpointRoot, w.ServiceConfig = "/share/checkpoints", &ServiceConfig{NAS: "/share", CheckpointMount: "/share"}
 	w.MountRoots = func(context.Context) ([]string, error) { return []string{"/share"}, nil }
 	s, err := w.openStore()
 	if err != nil {

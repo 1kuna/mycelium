@@ -43,7 +43,7 @@ func TestOnboardingInstallWholeMachineSelectorsAndDriverRefusal(t *testing.T) {
 		return []byte("GPU, 24576"), nil
 	}}
 	text := captureJoiningOutput(t, func() error {
-		return setupCommandWithProbe([]string{"install", "worker", "--device=1,0", "--nas", home, "--dry-run", "--environment-cache-bytes", "1048576"}, dryInstallProbe(t, home, p), home)
+		return setupCommandWithProbe([]string{"install", "worker", "--device=1,0", "--nas", home, "--checkpoint-mount", home, "--dry-run", "--environment-cache-bytes", "1048576"}, dryInstallProbe(t, home, p), home)
 	})
 	for _, want := range []string{"--device", `1,0`, "--device-settings", "GPU-a", "GPU-b"} {
 		if !strings.Contains(text, want) {
@@ -64,6 +64,7 @@ func TestOnboardingInstallWholeMachineSelectorsAndDriverRefusal(t *testing.T) {
 func TestOnboardingInstallRedetectionFromSavedCPU(t *testing.T) {
 	home := t.TempDir()
 	c, _ := myce.PlanInstall("worker", home, "", home, "http://queue.invalid", "hypha", myce.Detection{OS: "darwin", Arch: "arm64", Platform: "cpu", MemoryMode: "fixed"})
+	c.CheckpointMount = home
 	c.HostID = "saved-host"
 	c.EnvironmentCacheBytes = 1 << 20
 	c.DailyUse, c.Laptop = true, true

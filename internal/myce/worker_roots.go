@@ -2,7 +2,6 @@ package myce
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,53 +20,19 @@ type UnavailableRoot struct {
 }
 
 type workerRootMonitor struct {
-	mu                   sync.Mutex
-	paths                map[string]string
-	expected             map[string]string // Last positively observed backing, never a configured directory.
-	readiness            *workerStorageReadiness
-	stateDir             string
-	checkpointBacking    checkpointMountBacking
-	checkpointLoaded     bool
-	checkpointUnreadable bool
+	mu        sync.Mutex
+	paths     map[string]string
+	expected  map[string]string // Observed backing or required checkpoint mount.
+	readiness *workerStorageReadiness
 }
 
-const checkpointMountBackingFile = "checkpoint-mount.json"
-
-type checkpointMountBacking struct {
-	Path  string `json:"path"`
-	Mount string `json:"mount"`
-}
-
-// Called under mu by the same monitor that publishes root readiness. The
-// coordinator owns writes; detached attempts can consume its durable receipt.
-func (m *workerRootMonitor) loadCheckpointBacking() {
-	if m.stateDir == "" || m.checkpointLoaded {
-		return
+// An ancestor is eligible only when the operator has identified it as the
+// checkpoint backing. The old mountpoint-only receipt could record a fallback.
+func (c ServiceConfig) checkpointMount(path string) string {
+	if c.CheckpointMount != "" && withinNAS(c.CheckpointMount, path) {
+		return filepath.Clean(c.CheckpointMount)
 	}
-	m.checkpointLoaded = true
-	data, err := os.ReadFile(filepath.Join(m.stateDir, checkpointMountBackingFile))
-	if errors.Is(err, os.ErrNotExist) {
-		return
-	}
-	var saved checkpointMountBacking
-	if err != nil || decodeWorkerJSON(data, &saved) != nil ||
-		!filepath.IsAbs(saved.Path) || !filepath.IsAbs(saved.Mount) || !withinNAS(saved.Mount, saved.Path) {
-		m.checkpointUnreadable = true
-		return
-	}
-	m.checkpointBacking = saved
-}
-
-func (m *workerRootMonitor) recordCheckpointBacking(path, mount string, readOnly bool) bool {
-	next := checkpointMountBacking{Path: path, Mount: mount}
-	if m.stateDir == "" || m.checkpointBacking == next {
-		return true
-	}
-	if readOnly || saveWorkerJSON(m.stateDir, checkpointMountBackingFile, next) != nil {
-		return false
-	}
-	m.checkpointBacking = next
-	return true
+	return filepath.Clean(path)
 }
 
 // Published after actual cache discovery. Actor/engine Worker values share this
@@ -136,7 +101,7 @@ func (w Worker) storageMachine() Machine {
 // directory. Independently configured roots learn network backing when seen.
 func (w *Worker) sampleStorageRoots(ctx context.Context, checkpoint string) []UnavailableRoot {
 	if w.rootMonitor == nil {
-		w.rootMonitor = &workerRootMonitor{stateDir: w.StateDir}
+		w.rootMonitor = &workerRootMonitor{}
 	}
 	w.rootMonitor.mu.Lock()
 	defer w.rootMonitor.mu.Unlock()
@@ -152,29 +117,27 @@ func (w *Worker) sampleStorageRoots(ctx context.Context, checkpoint string) []Un
 	if w.ServiceConfig != nil {
 		nas = w.ServiceConfig.NAS
 	}
-	probe := w.MountRoots
-	if probe == nil {
-		probe = workerMountRoots
-	}
-	mounts, err := probe(ctx)
+	mounts, err := w.storageMountInventory(ctx)
 	missing := []UnavailableRoot{}
 	for role, path := range w.rootMonitor.paths {
 		expected := w.rootMonitor.expected[role]
 		if role == "checkpoint" {
-			w.rootMonitor.loadCheckpointBacking()
-			if w.rootMonitor.checkpointUnreadable {
-				missing = append(missing, UnavailableRoot{Root: role, Reason: "checkpoint mount backing unavailable"})
-				continue
+			if expected == "" && (nas != "" && withinNAS(nas, path) || networkMountCovers(mounts, path)) {
+				expected = path
+				if w.ServiceConfig != nil {
+					expected = w.ServiceConfig.checkpointMount(path)
+				}
+				w.rootMonitor.expected[role] = expected
 			}
-			if saved := w.rootMonitor.checkpointBacking; expected == "" && saved.Path == path {
-				expected = saved.Mount
+			if expected != "" && (err != nil || !checkpointMountConfirmed(mounts, path, expected)) {
+				missing = append(missing, UnavailableRoot{Root: role, Reason: "checkpoint NAS mount backing unverified"})
 			}
+			continue
 		}
 		if err == nil {
 			for _, mount := range mounts {
-				mount = filepath.Clean(mount)
-				if withinNAS(mount, path) && (expected == "" || len(mount) > len(expected)) {
-					expected = mount
+				if mount.activeNetwork() && withinNAS(mount.root, path) && (expected == "" || len(mount.root) > len(expected)) {
+					expected = mount.root
 				}
 			}
 		}
@@ -184,11 +147,7 @@ func (w *Worker) sampleStorageRoots(ctx context.Context, checkpoint string) []Un
 		if expected != "" {
 			w.rootMonitor.expected[role] = expected
 		}
-		mounted := slices.ContainsFunc(mounts, func(mount string) bool { return filepath.Clean(mount) == expected })
-		if role == "checkpoint" && mounted && err == nil && !w.rootMonitor.recordCheckpointBacking(path, expected, w.Custodian != "") {
-			missing = append(missing, UnavailableRoot{Root: role, Reason: "checkpoint mount backing unavailable"})
-			continue
-		}
+		mounted := slices.ContainsFunc(mounts, func(mount nasMount) bool { return mount.root == expected && mount.activeNetwork() })
 		if err != nil || !mounted {
 			reason := "configured NAS mount missing"
 			if err != nil {
@@ -317,25 +276,29 @@ func (w Worker) storageRootReason(j *Job) string {
 	return storageRootReason(j, &machine)
 }
 
-var workerMountRoots = localWorkerMountRoots
+var workerMountInventory = localWorkerMountInventory
 
-func localWorkerMountRoots(ctx context.Context) ([]string, error) {
+func localWorkerMountInventory(ctx context.Context) ([]nasMount, error) {
 	probeguard.Check()
-	return workerMountedNASRoots(ctx, runtime.GOOS, func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return mountedStorageInventory(ctx, runtime.GOOS, func(ctx context.Context, _ string, _ ...string) ([]byte, error) {
 		if runtime.GOOS == "linux" {
 			return os.ReadFile("/proc/mounts")
 		}
 		return cachedMountInventory(ctx)
-	})
+	}, true)
 }
 
-func workerMountedNASRoots(ctx context.Context, osname string, command func(context.Context, string, ...string) ([]byte, error)) ([]string, error) {
-	mounts, err := mountedNASInventory(ctx, osname, command)
-	roots := []string{}
-	for _, mount := range mounts {
-		if mount.kind != "autofs" {
-			roots = append(roots, mount.root)
-		}
+func (w Worker) storageMountInventory(ctx context.Context) ([]nasMount, error) {
+	if w.MountRoots != nil {
+		return mountInventoryFromPaths(w.MountRoots(ctx))
 	}
-	return roots, err
+	return workerMountInventory(ctx)
+}
+
+func mountInventoryFromPaths(roots []string, err error) ([]nasMount, error) {
+	mounts := make([]nasMount, 0, len(roots))
+	for _, root := range roots {
+		mounts = append(mounts, nasMount{root: filepath.Clean(root), kind: "nfs"})
+	}
+	return mounts, err
 }
