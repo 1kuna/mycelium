@@ -1,10 +1,12 @@
 package myce
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -392,4 +394,134 @@ func nativeFixtureClient(handler http.Handler) Client {
 		handler.ServeHTTP(recorder, r)
 		return recorder.Result(), nil
 	})}}
+}
+
+// Kill the worker with a committed gate reply still in flight. On restart,
+// exact custody must settle through cleanup, with the gated payload unopened.
+func TestNativeGroupLaunchBoundaryCrash(t *testing.T) {
+	for _, boundary := range []string{"reserved", "sidecar", "started"} {
+		t.Run(boundary, func(t *testing.T) {
+			q, _ := fixture(t)
+			s := spec("experiment")
+			s.Resumable = false
+			s.Needs.HostMemoryGB = 2
+			sideMarker := filepath.Join(t.TempDir(), "side")
+			mainMarker := filepath.Join(t.TempDir(), "main")
+			command := func(marker string) []string {
+				return []string{"/bin/sh", "-c", `printf x > "$1"; exec /bin/sleep 600`, "payload", marker}
+			}
+			s.Run.Command = command(mainMarker)
+			s.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: command(sideMarker), MemoryGB: 1}}
+			j := submit(t, q, s)
+			committed := make(chan struct{}, 1)
+			api := (API{Queue: q, Token: "review-synthetic"}).Handler()
+			server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+				hold := false
+				if r.URL.Path == "/api/workers/launch" || r.URL.Path == "/api/workers/started" {
+					body, err := io.ReadAll(r.Body)
+					var envelope struct{ Custody *nativeLaunchCustody }
+					if err != nil || json.Unmarshal(body, &envelope) != nil {
+						t.Error("invalid test control request", err)
+						http.Error(rw, "invalid control", http.StatusBadRequest)
+						return
+					}
+					r.Body = io.NopCloser(bytes.NewReader(body))
+					if c := envelope.Custody; c != nil {
+						switch boundary {
+						case "reserved":
+							hold = c.Phase == "reserved"
+						case "sidecar":
+							hold = c.Phase == "started" && r.URL.Path == "/api/workers/launch"
+						case "started":
+							hold = r.URL.Path == "/api/workers/started"
+						}
+					}
+				}
+				if !hold {
+					api.ServeHTTP(rw, r)
+					return
+				}
+				reply := httptest.NewRecorder()
+				api.ServeHTTP(reply, r)
+				if reply.Code != http.StatusOK {
+					t.Error("gate did not commit", reply.Code, reply.Body.String())
+					rw.WriteHeader(reply.Code)
+					return
+				}
+				committed <- struct{}{}
+				<-r.Context().Done()
+			}))
+			defer server.Close()
+			stateDir := t.TempDir()
+			child := exec.Command(os.Args[0], "-test.run=^TestNativeGroupWorkerCrashHelper$")
+			child.Env = append(os.Environ(), "NATIVE_CRASH_WORKER=1", "NATIVE_CRASH_URL="+server.URL, "NATIVE_CRASH_STATE="+stateDir)
+			child.Stderr = os.Stderr
+			if err := child.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = child.Process.Kill(); _ = child.Wait() }()
+			select {
+			case <-committed:
+			case <-time.After(testWaitTimeout):
+				t.Fatal("worker did not reach negotiated gate")
+			}
+			b, err := readSingleAttemptState(filepath.Join(stateDir, "state.json"))
+			var before workerState
+			if err != nil || json.Unmarshal(b, &before) != nil || (before.PID == 0) != (boundary == "reserved") {
+				t.Fatalf("unexpected durable state at %s: pid=%d, err=%v", boundary, before.PID, err)
+			}
+			if before.PID > 0 {
+				var custody workerState
+				data, err := os.ReadFile(filepath.Join(stateDir, "attempt-"+before.Identity+".json"))
+				if err != nil || json.Unmarshal(data, &custody) != nil || custody.Groups[before.PID][before.PID] == "" {
+					t.Fatal("gate reached before supervisor birth was durable", err)
+				}
+				t.Cleanup(func() {
+					if err := cleanupAttemptGroups(custody, RealClock{}); err != nil {
+						t.Error(err)
+					}
+				})
+			}
+			if err := child.Process.Kill(); err != nil {
+				t.Fatal(err)
+			}
+			_ = child.Wait()
+			got := job(t, q, j.ID)
+			if got.ReleaseConfirmed || got.Copies[0].ReleaseConfirmed || (got.StartedAt != nil) != (boundary == "started") {
+				t.Fatal("wrong queue custody after worker death", got.StartedAt, got.ReleaseConfirmed)
+			}
+			if err := q.Cancel(j.ID); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			w := Worker{EnvironmentLimit: 1 << 30, Clock: RealClock{}, StateDir: stateDir, Client: Client{URL: server.URL, Token: "review-synthetic"}, Machine: machine("review-worker", "fake"), Interval: 5 * time.Millisecond, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
+			done := make(chan error, 1)
+			go func() { done <- w.Run(ctx) }()
+			defer func() {
+				cancel()
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Error(err)
+					}
+				case <-time.After(testWaitTimeout):
+					t.Error("restarted worker did not stop")
+				}
+			}()
+			await(t, func() bool { return job(t, q, j.ID).ReleaseConfirmed })
+			if before.PID > 0 {
+				if live, err := workerGroupMembers(before.PID); err != nil || len(live) > 0 {
+					t.Fatalf("released custody with live members: %v, %v", live, err)
+				}
+			}
+			if _, err := os.Stat(mainMarker); !os.IsNotExist(err) {
+				t.Fatal("main ran without receiving Started", err)
+			}
+			if boundary != "started" {
+				if _, err := os.Stat(sideMarker); !os.IsNotExist(err) {
+					t.Fatal("sidecar ran without receiving authorization", err)
+				}
+			}
+		})
+	}
 }

@@ -93,9 +93,10 @@ type workerStore struct {
 
 	liveEvidence          *ExecutionEvidence // Monotonic only while this exact attempt is observed.
 	liveEvidenceKey       attemptKey
-	storageObserver       *storageObserver // Exact attempt; shared with its publication callbacks.
-	inputStaging          *atomic.Bool     // Shared by all attempt stores; bounds detached ordinary staging.
-	sharedRelease         func()           // Idempotent; retained until exact process cleanup.
+	nativeLaunchRetry     *nativeLaunchRetry // Live pre-fork observation, never restored from disk.
+	storageObserver       *storageObserver   // Exact attempt; shared with its publication callbacks.
+	inputStaging          *atomic.Bool       // Shared by all attempt stores; bounds detached ordinary staging.
+	sharedRelease         func()             // Idempotent; retained until exact process cleanup.
 	faultTiming           probeTiming
 	deviceFaults          checkpointIO[KernelLogSnapshot]
 	deviceHealth          checkpointIO[map[string]deviceHealthObservation]

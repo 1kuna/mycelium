@@ -138,13 +138,19 @@ func (s *workerStore) startFailure(j Job, kind string, cause error) error {
 	return s.startFailureAt(j, kind, cause, time.Now().UTC())
 }
 func (s *workerStore) startFailureAt(j Job, kind string, cause error, at time.Time) error {
+	return s.recordStartFailure(j, kind, cause, at, false)
+}
+
+func (s *workerStore) recordStartFailure(j Job, kind string, cause error, at time.Time, beforeFork bool) error {
 	// Identity alone is assigned before admission. Custody/launch intent, in
 	// contrast, is written before any process can start and is never inferred
 	// from an absent Started report. Persist this positive refusal proof with
 	// the facts so release-only replay carries it too.
 	prelaunch := kind == launchRefused && !s.state.hasProcessCustody()
 	fact := infrastructureFact{Kind: kind, At: at, Predicate: launchFailurePredicate(kind, cause), Admission: admissionDetail(cause, j), PrelaunchRefused: prelaunch}
-	if prelaunch && fact.Predicate == "launch_authorization" {
+	// The initial reservation gate is before fork even with durable launch
+	// intent. Its RPC boundary is evidence independent of release custody.
+	if (prelaunch || beforeFork) && fact.Predicate == "launch_authorization" {
 		fact.LaunchRefusal = launchRefusalBoundary(cause)
 	}
 	facts := memberOutcome{Infrastructure: []infrastructureFact{fact}}

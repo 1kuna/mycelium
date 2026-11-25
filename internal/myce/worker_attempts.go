@@ -361,7 +361,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					if p == nil && d.Stop && s.state.Custodian == "" && !errors.Is(err, errWorkerReleasePending) {
 						err = s.startFailureAt(a.job, launchRefused, errAssignmentWithdrawn, now)
 					}
-					if err != nil && !errors.Is(err, errWorkerCheckpoint) && !errors.Is(err, errWorkerUnavailable) {
+					if err != nil && !retryableAttemptStart(err) {
 						if initial.serviceStop != nil && initial.serviceStop.Err() != nil && errors.Is(err, context.Canceled) {
 							// Cancellation of staging/launch belongs to installed
 							// shutdown, not a payload failure. Preserve exact helper
@@ -1409,6 +1409,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 					// Retry next successful check-in; no filesystem paths or errors in logs.
 					log.Printf("enrollment receipt unavailable; will retry")
 				}
+				w.compactNativeLaunch = reply.NativeLaunchProtocol == nativeLaunchProtocol
 				w.fleet.noteReply(reply)
 				w.inspectNASPaths(reply.NASPathChecks, root.state.CheckpointRoot)
 				if reply.CheckpointExpiryProtocol == checkpointExpiryProtocol {

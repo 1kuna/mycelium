@@ -73,7 +73,13 @@ func (q *Queue) appendJobLedger(j *Job, e JobLedgerEntry) {
 	}
 	j.LedgerEntries = append(j.LedgerEntries, e)
 	// Replace, never mutate: snapshots/undo may borrow this immutable metadata.
-	j.Ledger = &JobLedgerInfo{Complete: j.Ledger.Complete, HighWater: e.Sequence}
+	complete := j.Ledger.Complete
+	if e.Kind == "custody_released" && e.CustodyStart == nil {
+		// A released reservation without a birth receipt may have forked a
+		// supervisor that never reached a combined member gate.
+		complete = false
+	}
+	j.Ledger = &JobLedgerInfo{Complete: complete, HighWater: e.Sequence}
 }
 
 // ledgerShowsLaunch reports any start, process or custody evidence for one
@@ -217,32 +223,52 @@ type NativeCustodyReport struct {
 	Phase           string `json:"phase"` // reserved, started, released
 }
 
-func (q *Queue) NativeCustody(r NativeCustodyReport, requestContexts ...context.Context) error {
-	requestCtx := requestContext(requestContexts)
+const nativeLaunchProtocol = "native-launch-custody-v1"
 
-	if r.CustodyID == "" || len(r.CustodyID) > 128 || r.ProcessID == "" || len(r.ProcessID) > 128 || !slices.Contains([]string{"reserved", "started", "released"}, r.Phase) {
-		return &HTTPError{Status: 400, Code: "native_custody_invalid", Message: "invalid native custody identity or phase"}
+// These fields ride on an exact attempt gate. The envelope owns the job,
+// machine and session so reservation and authorization cannot disagree.
+type nativeLaunchCustody struct {
+	ProcessID       string `json:"process_id"`
+	CustodyID       string `json:"custody_id"`
+	Phase           string `json:"phase"`
+	SupervisorPID   int    `json:"supervisor_pid,omitempty"`
+	SupervisorBirth string `json:"supervisor_birth,omitempty"`
+}
+
+func (c nativeLaunchCustody) report(r Result) NativeCustodyReport {
+	return NativeCustodyReport{Execution: r.Execution, Machine: r.Machine, Session: r.Session,
+		ProcessID: c.ProcessID, CustodyID: c.CustodyID, Phase: c.Phase,
+		SupervisorPID: c.SupervisorPID, SupervisorBirth: c.SupervisorBirth}
+}
+
+func (c nativeLaunchCustody) valid() bool {
+	return c.report(Result{}).valid() &&
+		(c.Phase == "reserved" && c.SupervisorPID == 0 && c.SupervisorBirth == "" ||
+			c.Phase == "started" && c.SupervisorPID > 0 && c.SupervisorBirth != "")
+}
+
+func (r NativeCustodyReport) valid() bool {
+	return r.CustodyID != "" && len(r.CustodyID) <= 128 && r.ProcessID != "" && len(r.ProcessID) <= 128 &&
+		slices.Contains([]string{"reserved", "started", "released"}, r.Phase)
+}
+
+func invalidNativeCustody() error {
+	return &HTTPError{Status: 400, Code: "native_custody_invalid", Message: "invalid native custody identity or phase"}
+}
+
+func (q *Queue) NativeCustody(r NativeCustodyReport, requestContexts ...context.Context) error {
+	if !r.valid() {
+		return invalidNativeCustody()
 	}
 	var refused error
-	err := q.updateRequest(requestCtx, func() error {
+	err := q.updateRequest(requestContext(requestContexts), func() error {
 		j, err := q.current(Result{Execution: r.Execution, Machine: r.Machine, Session: r.Session})
 		if err != nil {
 			return err
 		}
-		var old *JobLedgerEntry
-		for i := len(j.LedgerEntries) - 1; i >= 0; i-- {
-			e := &j.LedgerEntries[i]
-			if e.CustodyID == r.CustodyID {
-				old = e
-				break
-			}
-		}
-		if old != nil && (old.Attempt != r.Attempt || old.Machine != r.Machine || old.Session != r.Session || old.ProcessID != r.ProcessID) {
-			return ErrStale
-		}
-		kind := "custody_" + r.Phase
-		if old == nil && r.Phase != "reserved" || old != nil && old.Kind != kind && (r.Phase == "reserved" || old.Release == "confirmed") {
-			return ErrStale
+		old, err := nativeCustodyPrevious(j, r)
+		if err != nil {
+			return err
 		}
 		if r.Phase != "released" {
 			q.maintainStartDeadlines()
@@ -260,43 +286,92 @@ func (q *Queue) NativeCustody(r NativeCustodyReport, requestContexts ...context.
 			}
 			q.clearStartRefusal(j)
 		}
-		if old != nil && old.Kind == kind {
-			return nil
-		} // Replay still passes the live launch fence above.
-		for i := range j.Copies {
-			c := &j.Copies[i]
-			if c.Attempt == r.Attempt && c.Machine == r.Machine && c.Session == r.Session {
-				if c.ReleaseConfirmed || c.ProcessID != "" && c.ProcessID != r.ProcessID {
-					return ErrStale
-				}
-				c.ProcessID = r.ProcessID
-			}
-		}
-		e := ledgerAttempt(j, kind, "native_"+r.Phase)
-		e.ProcessID, e.CustodyID = r.ProcessID, r.CustodyID
-		e.SupervisorPID, e.SupervisorBirth = r.SupervisorPID, r.SupervisorBirth
-		if old != nil {
-			e.CustodyStart = old.CustodyStart
-			if r.Phase == "released" {
-				e.SupervisorPID, e.SupervisorBirth = old.SupervisorPID, old.SupervisorBirth
-			}
-		}
-		at := q.clock.Now()
-		if r.Phase == "started" {
-			e.CustodyStart = &at
-		}
-		if r.Phase == "released" {
-			e.Release = "confirmed"
-			e.CustodyEnd = &at
-			e.Reason = "native_group_verified_empty"
-		}
-		q.appendJobLedger(j, e)
-		return nil
+		return q.recordNativeCustody(j, r, old)
 	}, nil)
 	if err != nil {
 		return err
 	}
 	return refused
+}
+
+// Only the exact live generation can advance. Each combined gate calls
+// this under the same queue transaction as its existing authorization.
+func nativeCustodyPrevious(j *Job, r NativeCustodyReport) (*JobLedgerEntry, error) {
+	var old *JobLedgerEntry
+	for i := len(j.LedgerEntries) - 1; i >= 0; i-- {
+		e := &j.LedgerEntries[i]
+		if e.CustodyID == r.CustodyID {
+			old = e
+			break
+		}
+	}
+	if old == nil {
+		if r.Phase != "reserved" {
+			return nil, ErrStale
+		}
+		return nil, nil
+	}
+	if old.Attempt != r.Attempt || old.Machine != r.Machine || old.Session != r.Session || old.ProcessID != r.ProcessID {
+		return nil, ErrStale
+	}
+	if old.Kind != "custody_"+r.Phase && (r.Phase == "reserved" || old.Release == "confirmed") {
+		return nil, ErrStale
+	}
+	return old, nil
+}
+
+func (q *Queue) recordNativeLaunchCustody(j *Job, c nativeLaunchCustody) error {
+	// Maintenance may preserve an expired assignment while it awaits a
+	// previously recorded refusal report. That hold grants no new exec.
+	if q.startupPending(j) && expired(j.Spec.StartBy, q.clock.Now()) {
+		return ErrStale
+	}
+	r := c.report(Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session})
+	old, err := nativeCustodyPrevious(j, r)
+	if err != nil {
+		return err
+	}
+	if r.Phase == "started" && old.Kind == "custody_started" &&
+		(old.SupervisorPID != r.SupervisorPID || old.SupervisorBirth != r.SupervisorBirth) {
+		return ErrStale
+	}
+	return q.recordNativeCustody(j, r, old)
+}
+
+func (q *Queue) recordNativeCustody(j *Job, r NativeCustodyReport, old *JobLedgerEntry) error {
+	kind := "custody_" + r.Phase
+	if old != nil && old.Kind == kind {
+		return nil
+	} // Replay still passes the caller's live launch fence.
+	for i := range j.Copies {
+		c := &j.Copies[i]
+		if c.Attempt == r.Attempt && c.Machine == r.Machine && c.Session == r.Session {
+			if c.ReleaseConfirmed || c.ProcessID != "" && c.ProcessID != r.ProcessID {
+				return ErrStale
+			}
+			c.ProcessID = r.ProcessID
+		}
+	}
+	e := ledgerAttempt(j, kind, "native_"+r.Phase)
+	e.ProcessID, e.CustodyID = r.ProcessID, r.CustodyID
+	e.SupervisorPID, e.SupervisorBirth = r.SupervisorPID, r.SupervisorBirth
+	if old != nil {
+		e.CustodyStart = old.CustodyStart
+		if r.Phase == "released" {
+			e.SupervisorPID, e.SupervisorBirth = old.SupervisorPID, old.SupervisorBirth
+		}
+	}
+	at := q.clock.Now()
+	if r.Phase == "started" {
+		e.CustodyStart = &at
+	}
+	if r.Phase == "released" {
+		e.Release = "confirmed"
+		e.CustodyEnd = &at
+		e.Reason = "native_group_verified_empty"
+	}
+	q.appendJobLedger(j, e)
+	return nil
 }
 
 func (w Worker) reportNativeCustody(j Job, session, execution, custody, phase string, supervisors ...int) error {

@@ -1707,7 +1707,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 	preparedMachine := cloneMachine(&c.Machine)
 	preparedMachine.EphemeralRefusal = c.ephemeralRefusal
 	preparedMachine.FleetProofIssue = c.fleetProofIssue
-	reply := Reply{AttemptProtocol: keyedAttemptProtocol, WorkerDiskBudgetProtocol: workerDiskBudgetProtocol, WorkerDiskHeadroomProtocol: workerDiskHeadroomProtocol, WorkerDiskTrendProtocol: workerDiskTrendProtocol, DeviceHealthProtocol: deviceHealthProtocol, DeviceRecoveryProtocol: deviceRecoveryProtocol, HostMountProgressProtocol: hostMountProgressProtocol, DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, HostMemorySampleProtocol: hostMemorySampleProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, HostForeignProtocol: hostForeignProtocol, ToolInventoryProtocol: toolInventoryProtocol, CheckpointExpiryProtocol: checkpointExpiryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
+	reply := Reply{NativeLaunchProtocol: nativeLaunchProtocol, AttemptProtocol: keyedAttemptProtocol, WorkerDiskBudgetProtocol: workerDiskBudgetProtocol, WorkerDiskHeadroomProtocol: workerDiskHeadroomProtocol, WorkerDiskTrendProtocol: workerDiskTrendProtocol, DeviceHealthProtocol: deviceHealthProtocol, DeviceRecoveryProtocol: deviceRecoveryProtocol, HostMountProgressProtocol: hostMountProgressProtocol, DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, HostMemorySampleProtocol: hostMemorySampleProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, HostForeignProtocol: hostForeignProtocol, ToolInventoryProtocol: toolInventoryProtocol, CheckpointExpiryProtocol: checkpointExpiryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
 	q.kickCheckpointShards()
 	reports := c.Attempts
 	progresses := make([]attemptProgress, len(reports))
@@ -3121,11 +3121,22 @@ func (q *Queue) Started(r Result, requestContexts ...context.Context) error {
 	return err
 }
 func (q *Queue) startedWithWallTime(r Result, requestContexts ...context.Context) (*float64, error) {
-	requestCtx := requestContext(requestContexts)
+	return q.startedWithCustody(requestContext(requestContexts), workerStartedRequest{Result: r})
+}
 
+type workerStartedRequest struct {
+	Result
+	Custody *nativeLaunchCustody `json:"custody,omitempty"`
+}
+
+func (q *Queue) startedWithCustody(ctx context.Context, request workerStartedRequest) (*float64, error) {
+	r := request.Result
+	if request.Custody != nil && (request.Custody.Phase != "started" || !request.Custody.valid()) {
+		return nil, invalidNativeCustody()
+	}
 	var remaining *float64
 	var rejected error
-	err := q.updateRequest(requestCtx, func() error {
+	err := q.updateRequest(ctx, func() error {
 		q.maintain()
 		j, e := q.current(r)
 		if e != nil {
@@ -3149,6 +3160,11 @@ func (q *Queue) startedWithWallTime(r Result, requestContexts ...context.Context
 			q.recordStartRefusal(j, predicate)
 			rejected = ErrStale
 			return nil
+		}
+		if request.Custody != nil {
+			if err := q.recordNativeLaunchCustody(j, *request.Custody); err != nil {
+				return err
+			}
 		}
 		q.clearStartRefusal(j)
 		q.retainAttemptResources(j, r.Resources)

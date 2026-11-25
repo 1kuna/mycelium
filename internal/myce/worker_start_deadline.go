@@ -108,6 +108,10 @@ func (w Worker) launchContext() context.Context {
 
 // A positive reply means this exact attempt is durably started, before execution.
 func (w Worker) authorizeStart(j Job, session string, receiptDirs ...string) error {
+	return w.authorizeStartWithCustody(j, session, nil, receiptDirs...)
+}
+
+func (w Worker) authorizeStartWithCustody(j Job, session string, custody *nativeLaunchCustody, receiptDirs ...string) error {
 	timing := w.launchTiming
 	defer timing.within(launchStartChecks)()
 	if err := w.checkAvailability(); err != nil {
@@ -125,14 +129,16 @@ func (w Worker) authorizeStart(j Job, session string, receiptDirs ...string) err
 		WallTimeRemainingSeconds *float64 `json:"wall_time_remaining_seconds"`
 		OK                       bool     `json:"ok"`
 		StartGate                string   `json:"start_gate"`
+		NativeLaunch             string   `json:"native_launch_protocol"`
 	}
 	done := timing.within(launchStartedRPC)
-	requested, err := w.controlHandshake("/api/workers/started", Result{LaunchTimings: timing.snapshot(), InputsStagedAt: j.InputsStagedAt, StagingTimings: j.StagingTimings, Machine: w.Machine.ID, Session: session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, &reply)
+	request := workerStartedRequest{Result: Result{LaunchTimings: timing.snapshot(), InputsStagedAt: j.InputsStagedAt, StagingTimings: j.StagingTimings, Machine: w.Machine.ID, Session: session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, Custody: custody}
+	requested, err := w.controlHandshake("/api/workers/started", request, &reply)
 	done()
 	if err != nil {
 		return fmt.Errorf("%w: %w", errWorkerStartHandoff, err)
 	}
-	if !reply.OK || reply.StartGate != startGateProtocol {
+	if !reply.OK || reply.StartGate != startGateProtocol || custody != nil && reply.NativeLaunch != nativeLaunchProtocol {
 		return fmt.Errorf("queue start-gate protocol mismatch: upgrade queue and workers together")
 	}
 	if j.Spec.WallTime != "" {

@@ -27,6 +27,7 @@ var workerCheckpointPrepare = prepareCheckpoint
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	compactNativeLaunch  bool            // Queue capability from check-in, inherited by the attempt owner.
 	launchTiming         *launchRecorder // Set only on the attempt runner copy.
 	cleanupFS            workerDataFS    // nil uses the real filesystem; tests inject unlink/sync faults.
 	ephemeralProbe       func() error    // test-only capability seam; production always probes the kernel.
@@ -644,7 +645,13 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	}
 	// An assignment is only an offer. Fence the exact attempt before creating
 	// a writable checkpoint copy; keep the final exec/Started gates as well.
-	if err := w.authorizeLaunch(HostLaunch{Machine: w.Machine.ID, Session: s.state.Session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)}); err != nil {
+	launch := HostLaunch{Machine: w.Machine.ID, Session: s.state.Session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)}
+	if !w.compactNativeLaunch || needsCheckpoint(&j) {
+		err = w.authorizeLaunch(launch)
+	} else {
+		err = w.checkLocalBatchAdmission(launch)
+	}
+	if err != nil {
 		return nil, s.startFailure(j, launchRefused, err)
 	}
 	timing.enter(launchCheckpoint)
@@ -782,7 +789,18 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		return nil, err
 	}
 	timing.enter(launchCommandSetup)
-	identity := ID()
+	group := len(j.Spec.Run.Sidecars) > 0 || j.Spec.Run.MemoryGB > 0
+	reservation := nativeLaunchCustody{ProcessID: ID(), Phase: "reserved"}
+	reservation.CustodyID = reservation.ProcessID
+	if group {
+		reservation.CustodyID = ID()
+	}
+	logFlags := os.O_EXCL
+	if retry := s.nativeLaunchRetry; retry != nil && retry.key == jobKey(j) {
+		reservation = retry.custody
+		logFlags = os.O_APPEND // The reserved identity already owns this log.
+	}
+	identity := reservation.ProcessID
 	memoryAttempt, err := w.executionCeilings().createAttempt("attempt-"+identity, ceilingBytes, w.MemorySwapMaxBytes, pooledMemory(&j))
 	if err != nil {
 		return nil, fmt.Errorf("memory ceiling setup: %w", err)
@@ -917,8 +935,8 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if os.Getenv(processSessionVariable) != "" {
 		env[processSessionVariable] = "1"
 	}
-	if len(j.Spec.Run.Sidecars) > 0 || j.Spec.Run.MemoryGB > 0 {
-		p, e := w.startNativeGroup(s, j, identity, memoryAttempt, env, environmentPath, extensionRelease, release)
+	if group {
+		p, e := w.startNativeGroup(s, j, reservation, logFlags, memoryAttempt, env, environmentPath, extensionRelease, release)
 		if e == nil {
 			environmentStarted, extensionStarted, sharedStarted, started = true, true, true, true
 		}
@@ -949,7 +967,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 			return nil, err
 		}
 	}
-	output, err := openCommandOutput(s.dir, logName, j.Spec.Logs, os.O_EXCL)
+	output, err := openCommandOutput(s.dir, logName, j.Spec.Logs, logFlags)
 	if err != nil {
 		return nil, err
 	}
@@ -1009,10 +1027,19 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		output.Close()
 		return nil, s.startFailure(j, launchRefused, err)
 	}
-	if err = w.reportNativeCustody(j, s.state.Session, identity, identity, "reserved"); err != nil {
-		output.Close()
-		return nil, s.startFailure(j, launchRefused, err)
+	if w.compactNativeLaunch {
+		err = w.reserveInitialNativeLaunch(s, j, launch, reservation)
+	} else {
+		err = w.reportNativeCustody(j, s.state.Session, identity, reservation.CustodyID, "reserved")
+		if err != nil {
+			err = s.startFailure(j, launchRefused, err)
+		}
 	}
+	if err != nil {
+		output.Close()
+		return nil, err
+	}
+	s.nativeLaunchRetry = nil
 	if err = cmd.Start(); err != nil {
 		output.Close()
 		return nil, s.startFailure(j, launchFailed, err)
@@ -1065,7 +1092,10 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if err = s.save(); err != nil {
 		return nil, abort(err)
 	}
-	if err = w.reportNativeCustody(j, s.state.Session, identity, identity, "started", cmd.Process.Pid); err != nil {
+	var startCustody *nativeLaunchCustody
+	if w.compactNativeLaunch {
+		startCustody = &nativeLaunchCustody{ProcessID: identity, CustodyID: identity, Phase: "started", SupervisorPID: cmd.Process.Pid, SupervisorBirth: custody.Groups[cmd.Process.Pid][cmd.Process.Pid]}
+	} else if err = w.reportNativeCustody(j, s.state.Session, identity, identity, "started", cmd.Process.Pid); err != nil {
 		return nil, abort(s.startFailure(j, launchRefused, err))
 	}
 	p := &process{cancelStart: w.cancelStart, job: j, stopAdmission: w.stopAdmission, stopGrace: w.AcceleratorStopGrace, cmd: cmd, birth: custody.Groups[cmd.Process.Pid][cmd.Process.Pid], done: make(chan workerFinish, 1), savePriorityStop: s.priorityStopRecorder(), memory: memoryAttempt}
@@ -1112,7 +1142,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		w.control.set(p)
 	}
 	if j.Spec.StartBy == nil {
-		if err = w.authorizeStart(j, s.state.Session, s.dir); err != nil {
+		if err = w.authorizeStartWithCustody(j, s.state.Session, startCustody, s.dir); err != nil {
 			return nil, abort(s.startFailure(j, launchRefused, err))
 		}
 	}
@@ -1148,7 +1178,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		if _, e := io.ReadFull(readyReader, ready[:]); e != nil || ready[0] != 'R' {
 			return nil, abort(fmt.Errorf("command start gate unavailable: %v", e))
 		}
-		err = w.authorizeStart(j, s.state.Session, s.dir)
+		err = w.authorizeStartWithCustody(j, s.state.Session, startCustody, s.dir)
 		if err == nil {
 			// Queue waiting must not consume the local exec-receipt I/O budget.
 			_ = readyReader.SetReadDeadline(time.Now().Add(2 * time.Second))

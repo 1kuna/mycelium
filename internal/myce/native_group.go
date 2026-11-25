@@ -47,6 +47,7 @@ type nativeMember struct {
 	signalTarget *os.File // Transient pidfd for a namespace member's joined child.
 }
 type nativeGroup struct {
+	custodyStart           *nativeLaunchCustody // Supervisor birth saved before any member gate.
 	namespace              *nativeNamespace
 	isolationPorts         []string
 	stageFailure           bool // guarded by p.mu
@@ -288,7 +289,8 @@ func (g *nativeGroup) recordInfrastructureLocked(kind, member, port string, caus
 	return cause
 }
 
-func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory *memoryAttempt, env map[string]string, mainEnvironment string, releases ...func()) (*process, error) {
+func (w Worker) startNativeGroup(s *workerStore, j Job, reservation nativeLaunchCustody, logFlags int, memory *memoryAttempt, env map[string]string, mainEnvironment string, releases ...func()) (*process, error) {
+	identity := reservation.ProcessID
 	logName := identity + ".log"
 	if j.Spec.ephemeral() {
 		logName = ephemeralLogName(j)
@@ -296,7 +298,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 			return nil, err
 		}
 	}
-	output, err := openCommandOutput(s.dir, logName, j.Spec.Logs, os.O_EXCL)
+	output, err := openCommandOutput(s.dir, logName, j.Spec.Logs, logFlags)
 	if err != nil {
 		return nil, err
 	}
@@ -319,6 +321,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 	// directives must not cancel a running group before stop authorization).
 	ctx, cancel := context.WithCancel(context.Background())
 	g := &nativeGroup{p: p, worker: w, dir: s.dir, identity: identity, session: s.state.Session, ctx: ctx, cancel: cancel, memory: memory, custody: workerState{Identity: identity, Accelerator: !j.Spec.Needs.cpuOnly(), StopGrace: acceleratorStopGrace(w.AcceleratorStopGrace), Groups: map[int]map[int]string{}}}
+	g.custody.CustodyID = reservation.CustodyID
 	p.native = g
 	// Preparation cancellation runs before process control takes p.mu. Once
 	// registered, g.ctx must be cancelled by stopLocked under that mutex, after
@@ -534,10 +537,9 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 	if err == nil {
 		err = saveWorkerJSON(g.dir, "attempt-"+g.identity+".json", g.custody)
 	}
-	if err == nil {
-		err = g.handshakeLocked(func() error {
-			return g.worker.authorizeLaunch(HostLaunch{Machine: g.worker.Machine.ID, Session: g.session, Kind: "batch", Key: g.p.job.ID, Attempt: strconv.Itoa(g.p.job.Attempt)})
-		})
+	launch := HostLaunch{Machine: g.worker.Machine.ID, Session: g.session, Kind: "batch", Key: g.p.job.ID, Attempt: strconv.Itoa(g.p.job.Attempt)}
+	if err == nil && !g.worker.compactNativeLaunch {
+		err = g.handshakeLocked(func() error { return g.worker.authorizeLaunch(launch) })
 		if err != nil {
 			if s != nil {
 				err = s.startFailure(g.p.job, launchRefused, err)
@@ -547,15 +549,30 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 		}
 	}
 	if err == nil {
-		g.custody.CustodyID = ID()
+		if s == nil {
+			g.custody.CustodyID = ID()
+		}
 		err = g.saveLocked()
-		if err == nil {
-			err = g.handshakeLocked(func() error {
-				return g.worker.reportNativeCustody(g.p.job, g.session, g.identity, g.custody.CustodyID, "reserved")
-			})
+	}
+	if err == nil {
+		err = g.handshakeLocked(func() error {
+			if g.worker.compactNativeLaunch {
+				c := nativeLaunchCustody{ProcessID: g.identity, CustodyID: g.custody.CustodyID, Phase: "reserved"}
+				if s != nil {
+					return g.worker.reserveInitialNativeLaunch(s, g.p.job, launch, c)
+				}
+				return g.worker.authorizeLaunchWithCustody(g.worker.launchContext(), launch, &c)
+			}
+			return g.worker.reportNativeCustody(g.p.job, g.session, g.identity, g.custody.CustodyID, "reserved")
+		})
+		if err != nil && g.worker.compactNativeLaunch && s == nil {
+			err = g.recordInfrastructureLocked(launchRefused, "control", "", err)
 		}
 	}
 	if err == nil {
+		if s != nil {
+			s.nativeLaunchRetry = nil
+		}
 		err = cmd.Start()
 		if err != nil {
 			if s != nil {
@@ -593,7 +610,9 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 	if err = saveWorkerJSON(g.dir, "attempt-"+g.identity+".json", g.custody); err != nil {
 		return abort(err)
 	}
-	if err = g.handshakeLocked(func() error {
+	if g.worker.compactNativeLaunch {
+		g.custodyStart = &nativeLaunchCustody{ProcessID: g.identity, CustodyID: g.custody.CustodyID, Phase: "started", SupervisorPID: cmd.Process.Pid, SupervisorBirth: birth}
+	} else if err = g.handshakeLocked(func() error {
 		return g.worker.reportNativeCustody(g.p.job, g.session, g.identity, g.custody.CustodyID, "started", cmd.Process.Pid)
 	}); err != nil {
 		return abort(err)
@@ -745,18 +764,20 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 		return g.recordInfrastructure(launchRefused, m.Name, "", err)
 	}
 	l := HostLaunch{Machine: g.worker.Machine.ID, Session: g.session, Kind: "batch", Key: g.p.job.ID, Attempt: strconv.Itoa(g.p.job.Attempt)}
-	if m.Name == "main" {
-		// Started already checks the live batch launch fences. Keep the local
-		// admission check before committing Started, and the separate exec gate
-		// below after the main process has been forked and its custody saved.
+	main := m.Name == "main"
+	if main || g.worker.compactNativeLaunch {
+		// Gated processes still need local admission before fork. For negotiated
+		// launches the queue rechecks placement after birth custody is saved.
 		if err := g.worker.checkAvailability(); err != nil {
 			return g.recordInfrastructure(launchRefused, m.Name, "", err)
 		}
 		if err := g.worker.checkLocalBatchAdmission(l); err != nil {
 			return g.recordInfrastructure(launchRefused, m.Name, "", err)
 		}
-		if err := g.worker.authorizeStart(g.p.job, g.session, g.dir); err != nil {
-			return g.recordInfrastructure(launchRefused, m.Name, "", err)
+		if !g.worker.compactNativeLaunch {
+			if err := g.worker.authorizeStart(g.p.job, g.session, g.dir); err != nil {
+				return g.recordInfrastructure(launchRefused, m.Name, "", err)
+			}
 		}
 	} else if err := g.worker.authorizeLaunch(l); err != nil {
 		return g.recordInfrastructure(launchRefused, m.Name, "", err)
@@ -901,7 +922,15 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	if err = g.saveLocked(); err != nil {
 		return err
 	}
-	if err = g.handshakeLocked(func() error { return g.worker.authorizeLaunch(l) }); err != nil {
+	if err = g.handshakeLocked(func() error {
+		if !g.worker.compactNativeLaunch {
+			return g.worker.authorizeLaunch(l)
+		}
+		if main {
+			return g.worker.authorizeStartWithCustody(g.p.job, g.session, g.custodyStart, g.dir)
+		}
+		return g.worker.authorizeLaunchWithCustody(g.worker.launchContext(), l, g.custodyStart)
+	}); err != nil {
 		return g.recordInfrastructureLocked(launchRefused, m.Name, "", err)
 	}
 	// Mark before opening the gate: a failed write/handshake can still let

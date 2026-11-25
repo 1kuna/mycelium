@@ -37,11 +37,12 @@ func (w Worker) detachesAssignedAttempts() bool {
 }
 
 type custodianRequest struct {
-	Protocol        int         `json:"protocol"`
-	ID              string      `json:"id"`
-	Machine         Machine     `json:"machine"`
-	State           workerState `json:"state"`
-	AccountingRoots []string    `json:"accounting_roots,omitempty"`
+	CompactNativeLaunch bool        `json:"compact_native_launch,omitempty"`
+	Protocol            int         `json:"protocol"`
+	ID                  string      `json:"id"`
+	Machine             Machine     `json:"machine"`
+	State               workerState `json:"state"`
+	AccountingRoots     []string    `json:"accounting_roots,omitempty"`
 }
 
 func (r custodianRequest) unstartedFor(id string, a attemptRecord) bool {
@@ -207,7 +208,7 @@ func (w Worker) startCustodian(ctx context.Context, s *workerStore, j Job) (*pro
 	j.LaunchTimings = timing.snapshot()
 	state := s.state
 	state.Job, state.Custodian = &j, ""
-	r := custodianRequest{Protocol: custodianProtocol, ID: id, Machine: w.Machine, State: state}
+	r := custodianRequest{Protocol: custodianProtocol, ID: id, Machine: w.Machine, State: state, CompactNativeLaunch: w.compactNativeLaunch}
 	if w.memoryCeilings != nil {
 		r.AccountingRoots = []string{w.memoryCeilings.root}
 	}
@@ -513,6 +514,7 @@ func (w Worker) runCustodian(stop context.Context) error {
 		return errors.New("custodian request identity mismatch")
 	}
 	w.Machine = req.Machine
+	w.compactNativeLaunch = req.CompactNativeLaunch
 	if w.Interval <= 0 {
 		w.Interval = time.Second
 	}
@@ -667,7 +669,7 @@ func (w Worker) runCustodian(stop context.Context) error {
 		stopHeartbeat := w.keepCustodianPreparationLive(dir, id)
 		p, err = w.startAssignedAttempt(prepareCtx, s, *req.State.Job)
 		stopHeartbeat()
-		if err != nil && !errors.Is(err, errWorkerCheckpoint) && !errors.Is(err, errWorkerUnavailable) {
+		if err != nil && !retryableAttemptStart(err) {
 			r := startFailureOutcome(Result{Machine: w.Machine.ID, Session: req.State.Session, Execution: Execution{ID: req.State.Job.ID, Attempt: req.State.Job.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}, err)
 			if cause := safeRuntimeCause(r.ExecutionCause); cause != nil {
 				log.Printf("event=attempt_start_failed job=%s attempt=%d cause=%s", r.ID, r.Attempt, cause.String())

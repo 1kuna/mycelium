@@ -15,11 +15,16 @@ import (
 // A real ready helper has custody before either final main launch gate. A local
 // capacity refusal remains typed even if durable Started authorization won.
 func TestNativeMemberAdmissionClassification(t *testing.T) {
-	for _, phase := range []string{"helper-final-gate", "before-started", "after-started"} {
+	for _, phase := range []string{"helper-final-gate", "before-started", "after-started", "compact-after-started"} {
 		t.Run(phase, func(t *testing.T) {
+			compact := phase == "compact-after-started"
+			measure := compact || phase == "after-started"
 			q, clock := fixture(t)
 			s := nativeSpec(t)
 			s.Priority = "production"
+			// Host-RAM admission applies to CPU work too. This fixture holds
+			// time at the refused gate, so GPU stop grace could never elapse.
+			s.Needs.MemoryGB, s.Needs.CPUCores = 0, 1
 			s.Run.Env["NATIVE_TEST_BLOCK"] = "0"
 			m := machine("worker", "fake", "host")
 			m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 64
@@ -32,7 +37,7 @@ func TestNativeMemberAdmissionClassification(t *testing.T) {
 			const requestDelay = 3 * time.Second
 			api := (API{Queue: q, Token: "test"}).Handler()
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if phase == "after-started" && (r.URL.Path == "/api/workers/launch" || r.URL.Path == "/api/workers/started") {
+				if measure && (r.URL.Path == "/api/workers/launch" || r.URL.Path == "/api/workers/started" || r.URL.Path == "/api/workers/native-custody") {
 					clock.Advance(requestDelay)
 					controlTime.Add(int64(requestDelay))
 				}
@@ -41,6 +46,7 @@ func TestNativeMemberAdmissionClassification(t *testing.T) {
 			defer server.Close()
 			w := recoveryWorker(t)
 			w.Clock, w.Machine, w.Client = clock, m, Client{URL: server.URL, Token: "test"}
+			w.compactNativeLaunch = compact
 			w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
 			w.nativeListenerProbe = func(string, int) error { return nil }
 			var store *workerStore
@@ -83,7 +89,7 @@ func TestNativeMemberAdmissionClassification(t *testing.T) {
 				if d == nil || d.Subcheck != "live_host_growth" || d.Unit != "GiB" || d.Required != 4 || d.Available == nil || *d.Available != 3 || d.Unavailable {
 					t.Fatalf("member comparison lost: %+v", d)
 				}
-				if started := job(t, q, offer.ID).StartedAt != nil; started != (phase == "after-started") {
+				if started := job(t, q, offer.ID).StartedAt != nil; started != measure {
 					t.Fatal("Started race not exercised", started, phase)
 				}
 				if _, err := os.Stat(filepath.Join(p.job.Spec.Run.Workdir, "main.json")); !os.IsNotExist(err) {
@@ -98,13 +104,17 @@ func TestNativeMemberAdmissionClassification(t *testing.T) {
 					t.Fatal("helper custody was not exercised", helperErr)
 				}
 				nativeNoSurvivors(t, &nativeTestRun{p: p, dir: p.job.Spec.Run.Workdir})
-				if phase == "after-started" {
-					// Initial preparation, supervisor, both helper gates, and
-					// Started for main. The final main exec gate is still ahead.
-					if got := time.Duration(controlTime.Load()); got != 5*requestDelay {
-						t.Fatalf("control time through Started = %s, want %s", got, 5*requestDelay)
+				if measure {
+					// This refusal is immediately after Started, before the
+					// legacy path's additional main exec RPC.
+					trips := 7
+					if compact {
+						trips = 3
 					}
-					t.Logf("control time through Started = %s", time.Duration(controlTime.Load()))
+					if got := time.Duration(controlTime.Load()); got != time.Duration(trips)*requestDelay {
+						t.Fatalf("control time through Started = %s for %d requests", got, trips)
+					}
+					t.Logf("control through Started: %d requests, %s at %s per request", trips, time.Duration(controlTime.Load()), requestDelay)
 				}
 			case <-time.After(testWaitTimeout):
 				p.stop(clock.Now(), 0, true)
