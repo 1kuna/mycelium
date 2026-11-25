@@ -47,6 +47,11 @@ func TestMemoryAdmissionPreservesCancelledOwnerThroughDeadline(t *testing.T) {
 	clock.Advance(time.Second)
 	m.HostAvailableMemoryGB = 4
 	machineCheck(t, q, m)
+	// Check-in accepts the sample; the periodic planning pass retains the
+	// background comparison for a job that did not receive an offer.
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
 	wait := q.s.Jobs[queued.ID].LastMemoryAdmission
 	if wait == nil {
 		t.Fatal("no blocked comparison retained")
