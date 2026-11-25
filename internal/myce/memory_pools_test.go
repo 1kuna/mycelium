@@ -311,6 +311,20 @@ func TestMemoryPoolNativeMemberAdmissionCreditsResidentRAM(t *testing.T) {
 		batchSupervisors:     map[attemptKey]*attemptSupervisor{key: actor},
 		poolHostMemorySource: func(context.Context) (float64, error) { return 34, nil }}
 	launch := HostLaunch{Machine: m.ID, Session: job.Session, Kind: "batch", Key: job.ID, Attempt: "1"}
+	dir := t.TempDir()
+	pid := os.Getpid()
+	birth, err := processBirth(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch.nativeGroup = &nativeAdmissionGroup{PID: pid, Birth: birth, Cgroup: dir}
+	writeResident := func(gb int64) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "memory.stat"), fmt.Appendf(nil, "anon %d\nshmem 0\nkernel 0\n", gb<<30), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeResident(8)
 	if err := runtime.checkBatchLaunchMemory(t.Context(), launch); err != nil {
 		t.Fatalf("28 GiB of remaining demand did not fit 30 GiB of room: %v", err)
 	}
@@ -319,9 +333,36 @@ func TestMemoryPoolNativeMemberAdmissionCreditsResidentRAM(t *testing.T) {
 		t.Fatalf("resident credit escaped the allowance: %+v", d)
 	}
 	runtime.memoryMachine.HostMemoryBudgetGB = 96
-	clock.Advance(hostMemorySampleFreshFor)
+	runtime.poolHostMemorySource = func(context.Context) (float64, error) {
+		writeResident(0) // The helper released RAM before the physical read.
+		return 34, nil
+	}
 	if d := admissionDetail(runtime.checkBatchLaunchMemory(t.Context(), launch), job); d == nil || d.ResidentGB != 0 || d.Required != 36 {
-		t.Fatalf("stale helper sample was credited: %+v", d)
+		t.Fatalf("a same-group release during the read still got credit: %+v", d)
+	}
+	runtime.poolHostMemorySource = func(context.Context) (float64, error) { return 34, nil }
+	writeResident(8)
+	launch.nativeGroup.Birth = "previous-supervisor"
+	if d := admissionDetail(runtime.checkBatchLaunchMemory(t.Context(), launch), job); d == nil || d.ResidentGB != 0 || d.Required != 36 {
+		t.Fatalf("a different supervisor birth got credit: %+v", d)
+	}
+}
+
+func TestMemoryPoolNativeMemberAdmissionRejectsCachedHelperRAM(t *testing.T) {
+	_, clock := fixture(t)
+	m := cpuMachine("worker", "worker", "cpu", 8, 96)
+	j := Job{ID: "attempt", Machine: m.ID, Session: m.Session, Attempt: 1,
+		Memory: &MemoryPools{RAM: memoryPoolEstimate{TypicalGB: 36, ChargeGB: 36}, KeepGB: 4}}
+	j.Spec.Run.Sidecars = []NativeSidecar{{Name: "helper"}}
+	key := jobKey(j)
+	actor := &attemptSupervisor{job: j, report: AttemptReport{Execution: Execution{ID: j.ID, Attempt: 1}, Session: j.Session,
+		CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: 8, sampledAt: clock.Now()}}}
+	runtime := &modelRuntime{machine: m.ID, memoryMachine: m, clock: clock, batchJobs: []Job{j},
+		batchSupervisors:     map[attemptKey]*attemptSupervisor{key: actor},
+		poolHostMemorySource: func(context.Context) (float64, error) { return 34, nil }}
+	launch := HostLaunch{Machine: m.ID, Session: j.Session, Kind: "batch", Key: j.ID, Attempt: "1"}
+	if d := admissionDetail(runtime.checkBatchLaunchMemory(t.Context(), launch), j); d == nil || d.ResidentGB != 0 || d.Required != 36 {
+		t.Fatalf("gate spent a fresh cached 8 GiB sample without a live group: %+v", d)
 	}
 }
 

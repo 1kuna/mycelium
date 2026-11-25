@@ -12,8 +12,9 @@ import (
 // must get a fresh exact-request receipt at every existing final launch gate.
 // During worker replacement it waits; already-running guards need no worker.
 type custodianGate struct {
-	Nonce  string     `json:"nonce"`
-	Launch HostLaunch `json:"launch"`
+	Nonce       string                `json:"nonce"`
+	Launch      HostLaunch            `json:"launch"`
+	NativeGroup *nativeAdmissionGroup `json:"native_group,omitempty"`
 }
 type custodianGateReceipt struct {
 	Nonce     string           `json:"nonce"`
@@ -36,7 +37,7 @@ func (r custodianGateReceipt) refusal() error {
 }
 
 func custodianLaunchGate(ctx context.Context, dir, id string, launch HostLaunch) error {
-	r := custodianGate{Nonce: ID(), Launch: launch}
+	r := custodianGate{Nonce: ID(), Launch: launch, NativeGroup: launch.nativeGroup}
 	if err := saveWorkerJSON(dir, custodianName(id, "gate"), r); err != nil {
 		return err
 	}
@@ -84,6 +85,7 @@ func (w Worker) serveCustodianGate(ctx context.Context, g *attemptCustodian, j J
 	}
 	receipt := custodianGateReceipt{Nonce: r.Nonce}
 	if w.batchAdmission != nil {
+		l.nativeGroup = r.NativeGroup
 		if err := w.batchAdmission(ctx, l); err != nil {
 			receipt.Error = err.Error()
 			receipt.Admission = admissionDetail(err, j)

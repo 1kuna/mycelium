@@ -48,6 +48,7 @@ type nativeMember struct {
 }
 type nativeGroup struct {
 	custodyStart           *nativeLaunchCustody // Supervisor birth saved before any member gate.
+	admissionGroup         *nativeAdmissionGroup
 	namespace              *nativeNamespace
 	isolationPorts         []string
 	stageFailure           bool // guarded by p.mu
@@ -64,6 +65,31 @@ type nativeGroup struct {
 	memberMemory           map[string]*memoryAttempt
 	custody                workerState
 	supervisor             *exec.Cmd
+}
+
+// Only a live supervisor birth can name the group for a member's local gate.
+// Bind retries replace the supervisor but reuse the attempt cgroup.
+type nativeAdmissionGroup struct {
+	PID    int    `json:"pid"`
+	Birth  string `json:"birth"`
+	Cgroup string `json:"cgroup"`
+}
+
+func (g *nativeAdmissionGroup) residentRAM(fs memoryFS) float64 {
+	if g == nil || g.PID <= 0 || g.Birth == "" || g.Cgroup == "" {
+		return 0
+	}
+	if birth, err := processBirth(g.PID); err != nil || birth != g.Birth {
+		return 0
+	}
+	data, err := fs.ReadFile(filepath.Join(g.Cgroup, "memory.stat"))
+	if err != nil {
+		return 0
+	}
+	if gb, ok := nonreclaimableMemoryGB(memoryCounters(data)); ok {
+		return gb
+	}
+	return 0
 }
 
 // Only this attempt's payload leaves are shared for metrics. The aggregate
@@ -640,6 +666,7 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 		g.p.cmd = cmd
 	}
 	g.supervisor = cmd
+	g.admissionGroup = &nativeAdmissionGroup{PID: cmd.Process.Pid, Birth: birth, Cgroup: g.custody.Cgroup}
 	g.p.outcome = memberOutcome{} // New members cannot inherit a previous group's probe facts.
 	g.members = nil
 	g.custody.StopAt = nil // The previous group is verified empty before retry.
@@ -769,7 +796,9 @@ func environmentList(env map[string]string) []string {
 }
 
 func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]string, dir string, output *os.File) error {
-	timing := g.worker.launchTiming
+	w := g.worker
+	w.nativeAdmissionGroup = g.admissionGroup
+	timing := w.launchTiming
 	if m.Name == "main" {
 		timing.enter(launchSupervisor)
 	}
@@ -784,15 +813,15 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 		if err := g.worker.checkAvailability(); err != nil {
 			return g.recordInfrastructure(launchRefused, m.Name, "", err)
 		}
-		if err := g.worker.checkLocalBatchAdmission(l); err != nil {
+		if err := w.checkLocalBatchAdmission(l); err != nil {
 			return g.recordInfrastructure(launchRefused, m.Name, "", err)
 		}
 		if !g.worker.compactNativeLaunch {
-			if err := g.worker.authorizeStart(g.p.job, g.session, g.dir); err != nil {
+			if err := w.authorizeStart(g.p.job, g.session, g.dir); err != nil {
 				return g.recordInfrastructure(launchRefused, m.Name, "", err)
 			}
 		}
-	} else if err := g.worker.authorizeLaunch(l); err != nil {
+	} else if err := w.authorizeLaunch(l); err != nil {
 		return g.recordInfrastructure(launchRefused, m.Name, "", err)
 	}
 	g.p.mu.Lock()
@@ -937,12 +966,12 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	}
 	if err = g.handshakeLocked(func() error {
 		if !g.worker.compactNativeLaunch {
-			return g.worker.authorizeLaunch(l)
+			return w.authorizeLaunch(l)
 		}
 		if main {
-			return g.worker.authorizeStartWithCustody(g.p.job, g.session, g.custodyStart, g.dir)
+			return w.authorizeStartWithCustody(g.p.job, g.session, g.custodyStart, g.dir)
 		}
-		return g.worker.authorizeLaunchWithCustody(g.worker.launchContext(), l, g.custodyStart)
+		return w.authorizeLaunchWithCustody(w.launchContext(), l, g.custodyStart)
 	}); err != nil {
 		return g.recordInfrastructureLocked(launchRefused, m.Name, "", err)
 	}

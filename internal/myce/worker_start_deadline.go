@@ -133,6 +133,7 @@ func (w Worker) authorizeStartWithCustody(j Job, session string, custody *native
 	}
 	done := timing.within(launchStartedRPC)
 	request := workerStartedRequest{Result: Result{LaunchTimings: timing.snapshot(), InputsStagedAt: j.InputsStagedAt, StagingTimings: j.StagingTimings, Machine: w.Machine.ID, Session: session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, Custody: custody}
+	request.ResumeCheckpointGeneration = w.resumeCheckpointGeneration
 	requested, err := w.controlHandshake("/api/workers/started", request, &reply)
 	done()
 	if err != nil {

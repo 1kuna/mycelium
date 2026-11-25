@@ -174,9 +174,12 @@ durability is required. Status comes from the running worker.
   job's own status for its exact digest and hold.
 - Work blocked by live RAM can report `memory_wait` with room after the
   reserve and other attempts' pending growth. A `memory_wait` or occupied-card
-  `capacity` hold clears as room or custody becomes available.
+  `capacity` hold clears as room or custody becomes available. After a
+  measured RAM refusal, retry needs exact release and a fresh worker reading
+  with enough room for the full attempt.
   `memory_pressure_retry` means the same host stopped the job twice for memory
-  pressure without saved progress. Check `myce status --history --json JOB_ID`
+  pressure without new saved progress past its resume point.
+  Check `myce status --history --json JOB_ID`
   for the stop measurements. Another compatible host can run it. After
   addressing the pressure, pause and resume the queued job to retry there.
   A unified-memory GPU can run one attempt per work family when measured

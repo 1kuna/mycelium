@@ -1134,15 +1134,25 @@ func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostL
 	key := attemptKey{launch.Key, attempt, launch.Session}
 	rt.mu.Lock()
 	actor := rt.batchSupervisors[key]
-	// Freeze occupancy before measuring physical room. This includes helpers
-	// prepared by a compiled extension that isn't in the original run spec.
+	// Freeze peers' occupancy before measuring physical room.
 	samples := rt.admissionMemorySamplesLocked()
 	rt.mu.Unlock()
+	var fs memoryFS = osMemoryFS{}
+	if rt.memoryCeilings != nil {
+		fs = rt.memoryCeilings.fs
+	}
+	resident := launch.nativeGroup.residentRAM(fs)
 	free, known := 0.0, false
 	if rt.poolHostMemorySource != nil {
 		var probeErr error
 		free, probeErr = rt.poolHostMemorySource(ctx)
 		known = probeErr == nil && validMemoryValue(free)
+	}
+	// Retain only RAM resident on both sides of the physical reading. Growth
+	// must not be credited against older free memory, and a helper's release
+	// must not count both as resident and as free.
+	if resident > 0 {
+		resident = min(resident, launch.nativeGroup.residentRAM(fs))
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -1161,11 +1171,6 @@ func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostL
 		return refuseAdmission("aggregate_cpu_allowance", "cores", float64(ledger.cores), float64(capacity), false)
 	}
 	held, pending := ledger.chargesExcept(key)
-	own := samples[key]
-	resident := 0.0
-	if rt.clock != nil && own.freshAt(rt.clock.Now()) {
-		resident = own.gb // Credit exact nonreclaimable host RAM, without an accelerator estimate.
-	}
 	// Keep already-resident RAM inside the attempt's allowance while checking
 	// only its remaining demand against the physical headroom.
 	credited := min(resident, pools.RAM.TypicalGB)

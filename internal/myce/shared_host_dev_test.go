@@ -11,7 +11,7 @@ import (
 
 func TestSharedHostDevPressureCheckpointRequeueAndCancel(t *testing.T) {
 	oldPrepare := workerCheckpointPrepare
-	workerCheckpointPrepare = prepareCheckpoint
+	workerCheckpointPrepare = prepareCheckpointWithGeneration
 	t.Cleanup(func() { workerCheckpointPrepare = oldPrepare })
 	oldRSS := workerMemoryRSS
 	workerMemoryRSS = func(context.Context) (float64, error) { return 0, nil }

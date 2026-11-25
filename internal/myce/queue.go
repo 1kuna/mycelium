@@ -1904,7 +1904,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		m.Gone = false
 		q.touchMachine(m.ID)
 		m.LastSeen = q.clock.Now()
-		m.DiskReceivedAt = m.LastSeen // Ignore worker-supplied queue timestamps.
+		m.DiskReceivedAt = memoryReceivedAt // Ignore worker-supplied queue timestamps.
 		// Recovery is queue-observed admission state, not worker-supplied status.
 		m.Recovering, m.RecoveringSince, m.RecoveryNeedsAttention = c.Recovering, nil, false
 		if m.Recovering {
@@ -3126,7 +3126,8 @@ func (q *Queue) startedWithWallTime(r Result, requestContexts ...context.Context
 
 type workerStartedRequest struct {
 	Result
-	Custody *nativeLaunchCustody `json:"custody,omitempty"`
+	Custody                    *nativeLaunchCustody `json:"custody,omitempty"`
+	ResumeCheckpointGeneration *int64               `json:"resume_checkpoint_generation,omitempty"`
 }
 
 func (q *Queue) startedWithCustody(ctx context.Context, request workerStartedRequest) (*float64, error) {
@@ -3167,6 +3168,15 @@ func (q *Queue) startedWithCustody(ctx context.Context, request workerStartedReq
 			}
 		}
 		q.clearStartRefusal(j)
+		if generation := request.ResumeCheckpointGeneration; j.Spec.Resumable && !j.FileTransport && generation != nil && *generation >= 0 {
+			for i := range j.Copies {
+				c := &j.Copies[i]
+				if c.Attempt == j.Attempt && c.Machine == j.Machine && c.Session == j.Session && c.ResumeCheckpointGeneration == nil {
+					value := *generation
+					c.ResumeCheckpointGeneration = &value
+				}
+			}
+		}
 		q.retainAttemptResources(j, r.Resources)
 		retainInputsStagedAt(j, r.InputsStagedAt)
 		retainStagingTimings(j, r.StagingTimings)

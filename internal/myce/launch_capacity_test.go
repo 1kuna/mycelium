@@ -20,7 +20,7 @@ func capacityResult(j *Job, pending bool) Result {
 	return r
 }
 
-func TestLaunchCapacityPooledRefusalRequiresMeasuredImprovement(t *testing.T) {
+func TestLaunchCapacityPooledRefusalRequiresEnoughRoom(t *testing.T) {
 	q, clock := fixture(t)
 	m := cpuMachine("pooled-relaunch", "pooled-relaunch", "cpu", 8, 60)
 	m.Devices = []MachineDevice{}
@@ -39,17 +39,92 @@ func TestLaunchCapacityPooledRefusalRequiresMeasuredImprovement(t *testing.T) {
 	if err != nil || got.Hold == nil || got.Hold.Kind != memoryWaitReason || !strings.Contains(got.Hold.Detail, "29.529 GiB") {
 		t.Fatalf("status did not explain the comparison: hold=%+v err=%v", got.Hold, err)
 	}
-	for _, room := range []float64{59.8, 60.5, 66.4} {
+	// The original 59.906 GiB of worker-side pending growth is absent from
+	// this fixture's queue ledger. Replay the resulting net room here instead
+	// of adding the shortfall to the queue's stale 60 GiB observation.
+	for _, room := range []float64{29.4, 30.029, 35.9} {
 		clock.Advance(time.Second)
 		m.HostAvailableMemoryGB = room
 		if next := assignedJob(machineCheck(t, q, m)); next != nil {
-			t.Fatalf("only %.3f GiB of improvement reopened a 6.471 GiB deficit", room-60)
+			t.Fatalf("only %.3f GiB of room reopened a 36 GiB demand", room)
 		}
 	}
-	m.HostAvailableMemoryGB = 66.5
+	m.HostAvailableMemoryGB = 36
 	clock.Advance(time.Second)
 	if next := assignedJob(machineCheck(t, q, m)); next == nil || next.ID != queued.ID || next.Attempt != 2 {
 		t.Fatalf("sufficient measured improvement did not reopen admission: %+v", next)
+	}
+}
+
+func TestLaunchCapacityPooledRefusalRecoversAtPreviousQueueReading(t *testing.T) {
+	q, clock := fixture(t)
+	m := cpuMachine("worker", "worker", "cpu", 8, 60)
+	m.Devices = []MachineDevice{}
+	m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
+	j := submit(t, q, cpuSpec(1, 36))
+	offer := assignedJob(machineCheck(t, q, m))
+	if offer == nil || offer.ID != j.ID {
+		t.Fatal("missing initial offer")
+	}
+	refusal := capacityResult(offer, true)
+	refusal.ExecutionCause.Admission = admissionDetail(checkMemoryPool(36, 34, 4, 0, true), *offer)
+	if err := q.Complete(refusal); err != nil {
+		t.Fatal(err)
+	}
+	// Contact from a release acknowledgement cannot refresh the old reading.
+	q.mu.Lock()
+	blocked := q.launchCapacityBlocked(q.s.Jobs[j.ID], cpuMachineView(q.s.Machines[m.ID]))
+	q.mu.Unlock()
+	if !blocked {
+		t.Fatal("refusal reused stale room")
+	}
+	clock.Advance(time.Second)
+	if next := assignedJob(machineCheck(t, q, m)); next != nil {
+		t.Fatal("recovered memory bypassed exact release")
+	}
+	release := result(offer, false)
+	release.ReleaseOnly = true
+	if err := q.Complete(release); err != nil {
+		t.Fatal(err)
+	}
+	if next := assignedJob(machineCheck(t, q, m)); next == nil || next.ID != j.ID || next.Attempt != 2 {
+		t.Fatalf("fresh 60 GiB reading did not reopen the 36 GiB demand: %+v", next)
+	}
+}
+
+func TestLaunchCapacityPooledProjectionKeepsRemainingDeficit(t *testing.T) {
+	q, clock := fixture(t)
+	m := cpuMachine("worker", "worker", "cpu", 8, 60)
+	m.Devices = []MachineDevice{}
+	m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
+	s := cpuSpec(1, 36)
+	s.Priority = "production"
+	j := submit(t, q, s)
+	offer := assignedJob(machineCheck(t, q, m))
+	if offer == nil || offer.ID != j.ID {
+		t.Fatal("missing initial offer")
+	}
+	clock.Advance(time.Second)
+	m.HostAvailableMemoryGB = 30
+	machineCheck(t, q, m, offer)
+	refusal := capacityResult(offer, false)
+	refusal.ExecutionCause.Admission = admissionDetail(checkMemoryPool(36, 34, 4, 0, true), *offer)
+	if err := q.Complete(refusal); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	m.HostAvailableMemoryGB = 30.5
+	if next := assignedJob(machineCheck(t, q, m)); next != nil {
+		t.Fatal("dispatch reused a route that is still short 5.5 GiB")
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	target := cpuMachineView(q.s.Machines[m.ID])
+	// Isolate the worker-side projection from the ordinary release plan's
+	// headroom. The projection must carry the unfilled part of the refusal.
+	target.FreeHostMemoryGB = 36
+	if got := q.launchCapacityProjection(q.s.Jobs[j.ID], target); got.FreeHostMemoryGB != 30.5 {
+		t.Fatalf("remaining deficit disappeared from release planning: got %.3f GiB, want 30.5", got.FreeHostMemoryGB)
 	}
 }
 

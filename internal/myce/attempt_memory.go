@@ -37,11 +37,7 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 	}
 	if data, err := a.fs.ReadFile(filepath.Join(a.path, "memory.stat")); err == nil {
 		stats := memoryCounters(data)
-		anon, aok := stats["anon"]
-		shmem, sok := stats["shmem"]
-		kernel, kok := stats["kernel"]
-		if aok && sok && kok {
-			gb := (float64(anon) + float64(shmem) + float64(kernel)) / (1 << 30)
+		if gb, ok := nonreclaimableMemoryGB(stats); ok {
 			peak.HostGB = &gb
 			if device := a.device.Load(); device != nil && device.pinnedGB > 0 {
 				combined := gb + device.pinnedGB
@@ -87,6 +83,13 @@ func memoryCounters(b []byte) map[string]uint64 {
 		}
 	}
 	return values
+}
+
+func nonreclaimableMemoryGB(stats map[string]uint64) (float64, bool) {
+	anon, aok := stats["anon"]
+	shmem, sok := stats["shmem"]
+	kernel, kok := stats["kernel"]
+	return (float64(anon) + float64(shmem) + float64(kernel)) / (1 << 30), aok && sok && kok
 }
 
 // Keep pressure evidence across samples, rather than training from a later

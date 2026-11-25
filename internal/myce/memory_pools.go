@@ -639,6 +639,14 @@ func checkMemoryPool(typical, available, keep, pending float64, known bool) erro
 	return &admissionError{detail}
 }
 
+func checkCardMemoryPool(typical, available, pending float64, known bool) error {
+	if err := checkMemoryPool(typical, available, 0, pending, known); err != nil {
+		err.(*admissionError).detail.CardMemory = true
+		return err
+	}
+	return nil
+}
+
 func localPooledAdmission(w Worker, jobs []Job, next Job, models []ModelReport, preparationCores []int) error {
 	pools := memoryPools(&next)
 	cores := next.Spec.Needs.cores()
@@ -698,7 +706,7 @@ func localPooledAdmission(w Worker, jobs []Job, next Job, models []ModelReport, 
 		for _, model := range models {
 			if model.Device == id && (model.State == "ready" || model.State == "loading" || model.State == "draining") {
 				if pools.Card.Alone {
-					return checkMemoryPool(pools.Card.TypicalGB, 0, 0, used, false)
+					return checkCardMemoryPool(pools.Card.TypicalGB, 0, used, false)
 				}
 				if budget, ok := w.localModelBudget(model); ok {
 					used += budget.MemoryGB
@@ -707,14 +715,14 @@ func localPooledAdmission(w Worker, jobs []Job, next Job, models []ModelReport, 
 		}
 		index := slices.IndexFunc(w.Machine.Devices, func(d MachineDevice) bool { return d.ID == id })
 		if index < 0 {
-			return checkMemoryPool(pools.Card.TypicalGB, 0, 0, used, false)
+			return checkCardMemoryPool(pools.Card.TypicalGB, 0, used, false)
 		}
 		card := w.Machine.Devices[index]
 		free := max(0, card.BudgetGB-used)
 		if card.MemoryMeasured {
 			free = min(free, card.FreeMemoryGB)
 		}
-		if err := checkMemoryPool(pools.Card.TypicalGB, free, 0, 0, card.MemoryMeasured || card.MemoryMode == "fixed" && card.BudgetGB > 0); err != nil {
+		if err := checkCardMemoryPool(pools.Card.TypicalGB, free, 0, card.MemoryMeasured || card.MemoryMode == "fixed" && card.BudgetGB > 0); err != nil {
 			return err
 		}
 	}

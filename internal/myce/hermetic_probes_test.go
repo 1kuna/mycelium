@@ -24,14 +24,14 @@ func syntheticProfileProbe() ProfileProbe {
 
 func installSyntheticWorkerHost() {
 	workerMountRoots = func(context.Context) ([]string, error) { return []string{"/"}, nil }
-	workerCheckpointPrepare = func(j Job) (string, error) {
+	workerCheckpointPrepare = func(j Job) (preparedCheckpoint, error) {
 		dir := attemptCheckpoint(j)
 		if !filepath.IsAbs(dir) {
 			// Without a checkpoint root the path resolves against the package
 			// directory; fail the test that caused it, not the whole binary.
-			return "", fmt.Errorf("test worker has no checkpoint root: relative checkpoint %s", dir)
+			return preparedCheckpoint{}, fmt.Errorf("test worker has no checkpoint root: relative checkpoint %s", dir)
 		}
-		return dir, os.MkdirAll(dir, 0700)
+		return preparedCheckpoint{path: dir}, os.MkdirAll(dir, 0700)
 	}
 	extensionIdentityProbe = syntheticIdentityProbe
 	workerDeviceFaultSource = func() DeviceFaultSource { return nil }

@@ -102,7 +102,11 @@ func TestAdmissionDiagnosticRetained(t *testing.T) {
 				t.Fatal(err)
 			}
 			clock.Advance(time.Second)
-			// #1011 requires changed capacity before another launch offer.
+			if subcheck == "live_host_ram" {
+				// A fresh report at the old 64 GiB would show recovery from
+				// the worker's 21.9 GiB refusal. Replay the unrecovered dip.
+				m.HostAvailableMemoryGB = *live.ExecutionCause.Admission.Available
+			}
 			if got := check(t, q, m, nil).Job; got != nil {
 				t.Fatal("unchanged refusal re-offered", got)
 			}

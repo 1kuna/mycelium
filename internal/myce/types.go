@@ -438,6 +438,9 @@ type Copy struct {
 	Attempt          int                 `json:"attempt"`
 	Progress         int64               `json:"progress"`
 
+	// Prepared NAS generation reported by the exact Started handoff.
+	ResumeCheckpointGeneration *int64 `json:"resume_checkpoint_generation,omitempty"`
+
 	// Exact cleanup evidence, retained even after another attempt is assigned.
 	ReleaseConfirmed bool   `json:"release_confirmed,omitempty"`
 	ReleaseReason    string `json:"release_reason,omitempty"`

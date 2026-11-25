@@ -22,7 +22,7 @@ import (
 
 // Ordinary builds use the real NAS preparation; package fixtures replace it
 // before workers start. A worker override still exercises storage faults.
-var workerCheckpointPrepare = prepareCheckpoint
+var workerCheckpointPrepare = prepareCheckpointWithGeneration
 
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
@@ -129,6 +129,10 @@ type Worker struct {
 	launchCtx         context.Context // Exact attempt/preparation owner; cancels handshake waits.
 	serviceStop       context.Context // Installed TERM cancels observation/I/O, not durable cleanup.
 	batchAdmission    func(context.Context, HostLaunch) error
+
+	nativeAdmissionGroup       *nativeAdmissionGroup
+	resumeCheckpointGeneration *int64
+
 	// The worker ledger without one attempt: others' charges and pending growth.
 	hostChargesExcept     func(attemptKey) (charge, pending float64)
 	stopAdmission         func()
@@ -633,7 +637,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 				value, err := w.MemorySource(ctx)
 				free, known = value, err == nil && validMemoryValue(value)
 			}
-			if err := checkMemoryPool(card.TypicalGB, free, 0, 0, known); err != nil {
+			if err := checkCardMemoryPool(card.TypicalGB, free, 0, known); err != nil {
 				return nil, s.recordMemoryWait(j, err)
 			}
 		}
@@ -656,11 +660,15 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	}
 	timing.enter(launchCheckpoint)
 	prepare := workerCheckpointPrepare
-	if j.FileTransport {
-		prepare = func(value Job) (string, error) { return w.prepareFileCheckpoint(value, s.dir) }
-	}
-	if w.checkpointPrepare != nil {
-		prepare = w.checkpointPrepare
+	if j.FileTransport || w.checkpointPrepare != nil {
+		prepare = func(value Job) (preparedCheckpoint, error) {
+			if w.checkpointPrepare != nil {
+				path, err := w.checkpointPrepare(value)
+				return preparedCheckpoint{path: path}, err
+			}
+			path, err := w.prepareFileCheckpoint(value, s.dir)
+			return preparedCheckpoint{path: path}, err
+		}
 	}
 	var checkpoint string
 	if j.Spec.ephemeral() {
@@ -670,11 +678,12 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 			return nil, err
 		}
 	} else if needsCheckpoint(&j) {
-		checkpoint, err = s.nasPrepare.runBounded(ctx, attemptCheckpoint(j), func() (string, error) {
-			path, err := prepare(j)
+		prepared, prepareErr := s.nasPrepare.runBounded(ctx, attemptCheckpoint(j), func() (preparedCheckpoint, error) {
+			value, err := prepare(j)
 			w.observeStorageError(err)
-			return path, err
+			return value, err
 		}, false)
+		err = prepareErr
 		if err == nil {
 			err = ctx.Err()
 		}
@@ -683,6 +692,10 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		s.checkpointUnavailable = err != nil && !errors.Is(err, errCheckpointIOPending) && !errors.Is(err, context.Canceled)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", errWorkerCheckpoint, err)
+		}
+		checkpoint = prepared.path
+		if j.Spec.Resumable && !j.FileTransport && w.checkpointPrepare == nil {
+			w.resumeCheckpointGeneration = &prepared.generation
 		}
 	} else {
 		s.checkpointUnavailable = false

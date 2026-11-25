@@ -16,6 +16,7 @@ const defaultWorkerInterval = time.Second
 // HostLaunch is exact queue custody for a preparation, or an engine attempt.
 // A cached reply is an offer, never permission to launch.
 type HostLaunch struct {
+	nativeGroup *nativeAdmissionGroup // Local member gate only.
 	// Zero preserves legacy preparation sharing with an execution reservation.
 	CPUCores     int                 `json:"cpu_cores,omitempty"`
 	Device       string              `json:"device,omitempty"`
@@ -393,6 +394,7 @@ func (w Worker) checkLocalBatchAdmission(l HostLaunch) error {
 		return nil
 	}
 	defer w.launchTiming.within(launchAdmission)()
+	l.nativeGroup = w.nativeAdmissionGroup
 	return w.batchAdmission(w.launchContext(), l)
 }
 

@@ -171,6 +171,15 @@ func (q *Queue) stopForPoolPressure(victim *Job, demand string, decision *PoolPr
 	for i := range victim.Copies {
 		c := &victim.Copies[i]
 		if c.Attempt == victim.Attempt && c.Machine == victim.Machine && c.Session == victim.Session {
+			if decision != nil && !victim.FileTransport && victim.Spec.Resumable {
+				if c.ResumeCheckpointGeneration != nil {
+					decision.Checkpoint = max(decision.Checkpoint, *c.ResumeCheckpointGeneration)
+				} else if origin := victim.CheckpointTarget; origin != nil && origin.Attempt < victim.Attempt {
+					// Older workers do not report what they copied. Keep
+					// the previously accepted generation as their floor.
+					decision.Checkpoint = max(decision.Checkpoint, origin.Generation)
+				}
+			}
 			c.StopCause = memoryPressureCause
 			c.PriorityStop = &PriorityPreemption{Cause: memoryPressureCause, Demand: demand, Victim: victim.ID, Policy: q.priorityMatch(victim.Spec), PoolPressure: decision}
 			c.Recoverable = false
@@ -199,7 +208,8 @@ func poolPressureReadmissionHold(j *Job, m *Machine) *Hold {
 	progress := poolPressureCheckpoint(j)
 	stops := 0
 	for i := len(j.Copies) - 1; i >= 0; i-- {
-		stop := j.Copies[i].PriorityStop
+		copy := &j.Copies[i]
+		stop := copy.PriorityStop
 		if stop == nil || stop.Cause != memoryPressureCause || stop.Demand != host || stop.PoolPressure == nil {
 			continue
 		}
@@ -207,13 +217,17 @@ func poolPressureReadmissionHold(j *Job, m *Machine) *Hold {
 		if d.PauseRevision != j.PauseRevision {
 			break
 		}
-		if stops == 0 && progress > d.Checkpoint {
-			break // A checkpoint landed after issuing the last stop.
+		baseline := d.Checkpoint
+		if copy.ResumeCheckpointGeneration != nil {
+			baseline = *copy.ResumeCheckpointGeneration
+		}
+		if stops == 0 && progress > baseline {
+			break // This attempt produced a newer checkpoint than it started with.
 		}
 		if stops == 0 {
-			progress = d.Checkpoint
+			progress = baseline
 		}
-		if d.Checkpoint != progress {
+		if baseline != progress {
 			break
 		}
 		stops++

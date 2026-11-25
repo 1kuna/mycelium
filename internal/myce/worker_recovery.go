@@ -111,7 +111,7 @@ type workerStore struct {
 	checkpointUnavailable bool
 	nasProbe              checkpointAvailability
 	nasProgress           checkpointProgressReader
-	nasPrepare            checkpointIO[string]
+	nasPrepare            checkpointIO[preparedCheckpoint]
 	nasCleanup            checkpointIO[bool]
 	dir                   string
 	lock                  *os.File
@@ -918,10 +918,30 @@ func scanCheckpointProgressWalk(dir string, jobRoot bool, walk func(string, fs.W
 func prepareCheckpoint(j Job) (string, error) {
 	return prepareCheckpointCopy(j, io.Copy)
 }
+
+type preparedCheckpoint struct {
+	path       string
+	generation int64
+}
+
+func prepareCheckpointWithGeneration(j Job) (preparedCheckpoint, error) {
+	return prepareCheckpointCopyWithGeneration(j, io.Copy, syncWorkerDir)
+}
+
 func prepareCheckpointCopy(j Job, copyFile func(io.Writer, io.Reader) (int64, error)) (string, error) {
 	return prepareCheckpointCopySync(j, copyFile, syncWorkerDir)
 }
 func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64, error), syncDir func(string) error) (string, error) {
+	prepared, err := prepareCheckpointCopyWithGeneration(j, copyFile, syncDir)
+	return prepared.path, err
+}
+
+func prepareCheckpointCopyWithGeneration(j Job, copyFile func(io.Writer, io.Reader) (int64, error), syncDir func(string) error) (prepared preparedCheckpoint, err error) {
+	prepared.path, err = prepareCheckpointCopyTo(j, copyFile, syncDir, &prepared.generation)
+	return prepared, err
+}
+
+func prepareCheckpointCopyTo(j Job, copyFile func(io.Writer, io.Reader) (int64, error), syncDir func(string) error, generation *int64) (string, error) {
 	// A relative path would resolve against the process working directory.
 	if !filepath.IsAbs(j.Checkpoint) {
 		return "", fmt.Errorf("checkpoint path %q is not absolute", j.Checkpoint)
@@ -936,6 +956,7 @@ func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64
 	if _, err := os.Stat(dest); err == nil {
 		progress, err := checkpointProgress(dest)
 		if err != nil || progress >= 0 {
+			*generation = max(0, progress)
 			return dest, err // A prepared retry must not overwrite its own durable saves.
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -1068,6 +1089,7 @@ func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64
 	}
 	if err == nil {
 		err = syncDir(j.Checkpoint)
+		*generation = max(0, newest)
 	}
 	return dest, err
 }

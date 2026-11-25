@@ -58,6 +58,9 @@
         "available": {
           "type": "number"
         },
+        "card_memory": {
+          "type": "boolean"
+        },
         "contributors": {
           "items": {
             "$ref": "#/$defs/HostGrowthContributor"
@@ -1553,6 +1556,9 @@
         "released_at": {
           "format": "date-time",
           "type": "string"
+        },
+        "resume_checkpoint_generation": {
+          "type": "integer"
         },
         "session": {
           "type": "string"
@@ -4575,10 +4581,11 @@
         "evidence": {
           "type": "string"
         },
-        "live_growth_surplus_gb": {
-          "type": "number"
-        },
         "machine": {
+          "type": "string"
+        },
+        "refused_at": {
+          "format": "date-time",
           "type": "string"
         },
         "session": {

@@ -1,10 +1,103 @@
 package myce
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestMemoryPoolPressureDoesNotCountCopiedCheckpointAsProgress(t *testing.T) {
+	q, clock := fixture(t)
+	m := cpuMachine("worker", "worker", "cpu", 8, 90)
+	m.Devices = []MachineDevice{}
+	m.HostMemoryBudgetGB = 96
+	m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
+	s := cpuSpec(1, 60)
+	s.Resumable = true
+	j := submit(t, q, s)
+	if err := os.MkdirAll(j.Checkpoint, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(j.Checkpoint, "save.json"), []byte(`{"myce_checkpoint":{"generation":7}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	healthy := func() {
+		m.HostAvailableMemoryGB = 90
+		m.MemoryObservation = &HostMemoryObservation{TotalGB: 121, UsedGB: 31, ReserveGB: 4}
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		healthy()
+		run := assignedJob(machineCheck(t, q, m))
+		if run == nil || run.Attempt != attempt {
+			t.Fatalf("expected attempt %d, got %+v", attempt, run)
+		}
+		run.Checkpoint = j.Checkpoint // The worker expands the queue's relative offer.
+		prepared, err := prepareCheckpointWithGeneration(*run)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if generation, err := checkpointProgress(prepared.path); err != nil || generation != 7 || generation != prepared.generation {
+			t.Fatalf("expected copied generation 7, got %d, %v", generation, err)
+		}
+		var start workerStartedRequest
+		data, err := json.Marshal(struct {
+			Generation int64 `json:"resume_checkpoint_generation"`
+		}{prepared.generation})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(data, &start); err != nil {
+			t.Fatal(err)
+		}
+		start.Result = result(run, true)
+		if _, err := q.startedWithCustody(t.Context(), start); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(time.Second)
+		m.HostAvailableMemoryGB, m.MemoryObservation.UsedGB = 0, 118
+		run.Progress = -1 // Arbitrary NAS writes have no live generation signal.
+		machineCheck(t, q, m, run)
+		if got := job(t, q, j.ID); got.State != "stopping" || got.Progress != -1 {
+			t.Fatalf("expected a pressure stop with unknown live progress, got %s/%d", got.State, got.Progress)
+		}
+		release := result(run, false)
+		release.ReleaseOnly = true
+		await(t, func() bool {
+			err := q.Complete(release)
+			if err != nil && err != errCheckpointIOPending {
+				t.Fatal(err)
+			}
+			return err == nil
+		})
+		clock.Advance(time.Second)
+	}
+	healthy()
+	if next := assignedJob(machineCheck(t, q, m)); next != nil {
+		t.Fatalf("copied checkpoint reopened the same host for attempt %d", next.Attempt)
+	}
+	if got, err := q.jobSnapshot(j.ID); err != nil || got.Hold == nil || got.Hold.Kind != memoryPressureRetryHold {
+		t.Fatalf("expected typed pressure hold after two stops, got %+v, %v", got.Hold, err)
+	}
+}
+
+func TestMemoryPoolPressureRetryAfterNewCheckpointBeforeStop(t *testing.T) {
+	m := cpuMachine("worker", "worker", "cpu", 8, 90)
+	stop := &PriorityPreemption{Cause: memoryPressureCause, Demand: "host/" + hostID(&m), PoolPressure: &PoolPressureDecision{Checkpoint: 8}}
+	firstResume, secondResume := int64(7), int64(8)
+	j := &Job{Spec: Spec{Resumable: true}, State: "queued", Progress: 8, Copies: []Copy{
+		{PriorityStop: stop, ResumeCheckpointGeneration: &firstResume},
+		{PriorityStop: stop, ResumeCheckpointGeneration: &secondResume},
+	}}
+	if hold := poolPressureReadmissionHold(j, &m); hold != nil {
+		t.Fatalf("first attempt advanced from 7 to 8, one unchanged retry should remain: %+v", hold)
+	}
+	j.Copies = append(j.Copies, Copy{PriorityStop: stop, ResumeCheckpointGeneration: &secondResume})
+	if hold := poolPressureReadmissionHold(j, &m); hold == nil || hold.Kind != memoryPressureRetryHold {
+		t.Fatalf("after two stops without advancing past 8, expected pressure hold: %+v", hold)
+	}
+}
 
 func TestMemoryPoolPressureRequiresSustainedDeclineWithHeadroom(t *testing.T) {
 	q, clock := fixture(t)

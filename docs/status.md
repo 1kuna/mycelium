@@ -193,12 +193,12 @@ target pool's allowance. A temporary shortage uses `memory_wait` with the RAM
 or card comparison. An occupied card reports queue-owned `capacity` and names
 the holder when known. If every compatible pool is too small even when empty,
 `memory_capacity` identifies the limiting estimates and allowances.
-For a launch refusal, `execution_cause.admission.available` is the worker's
+For a RAM launch refusal, `execution_cause.admission.available` is the worker's
 allowance-limited physical reading before subtracting `keep_gb` and other
 attempts' outstanding growth (`held_gb`). The text shows the resulting room.
-`required` is the remaining demand after any fresh, same-attempt resident credit
-(`resident_gb`). A measured refusal holds the route until the queue observes
-enough improvement in physical room to cover the measured deficit.
+`required` is the remaining demand after any resident credit (`resident_gb`)
+verified against the current native group. A measured RAM refusal holds the
+route until a fresh worker check-in shows enough room for a new attempt.
 
 Attempt history distinguishes OOM/resource-limit stops from entry coverage
 findings. `myce status JOB_ID` prints each stopped attempt's retained memory
@@ -206,9 +206,10 @@ bound in GiB, available cgroup/non-reclaimable peaks and kernel event counts.
 The `priority_stop.pool_pressure` record shows the headroom, reserve and
 forecast at the time a host pool stop was ordered. `stop_observation` is sampled
 later and can already show recovered memory. Two stops on the same host without
-checkpoint progress yield `memory_pressure_retry` for that host. An eligible
-alternative can still run the job. After addressing the pressure, the owner can
-pause and resume the queued job to retry on that host.
+checkpoint progress yield `memory_pressure_retry` for that host. For NAS resumes,
+`resume_checkpoint_generation` records the generation prepared for the attempt.
+An eligible alternative can still run the job. After addressing the pressure,
+the owner can pause and resume the queued job to retry on that host.
 Attempt-owned limits never mark an unproven machine type incompatible; auto
 memory recovery and authored ceilings keep their existing policies.
 `myce logs JOB_ID` labels every chunk by attempt, including the appended
@@ -228,7 +229,7 @@ maps link to their element types; timestamps are JSON time strings.
 | --- | --- |
 | <a id="fields-acceleratorprofile"></a>**AcceleratorProfile** | `type`: string; `name?`: string; `memory_bytes?`: number |
 | <a id="fields-admissiondecision"></a>**AdmissionDecision** | `at`: timestamp; `checkin_machine`: string; `checkin_session`: string; `device?`: string; `outcome`: string; `stage`: string; `predicate`: string; `hold?`: [Hold](#fields-hold); `opportunity_seconds`: number |
-| <a id="fields-admissiondetail"></a>**AdmissionDetail** | `subcheck`: string; `unit`: string; `required`: number; `available?`: number; `unavailable?`: boolean; `keep_gb?`: number; `held_gb?`: number; `resident_gb?`: number; `envelope_source?`: string; `envelope_host_gb`: number; `envelope_device_gb`: number; `contributors?`: array of [HostGrowthContributor](#fields-hostgrowthcontributor); `memory_room?`: [MemoryRoomDecision](#fields-memoryroomdecision) |
+| <a id="fields-admissiondetail"></a>**AdmissionDetail** | `subcheck`: string; `unit`: string; `required`: number; `available?`: number; `unavailable?`: boolean; `keep_gb?`: number; `held_gb?`: number; `resident_gb?`: number; `card_memory?`: boolean; `envelope_source?`: string; `envelope_host_gb`: number; `envelope_device_gb`: number; `contributors?`: array of [HostGrowthContributor](#fields-hostgrowthcontributor); `memory_room?`: [MemoryRoomDecision](#fields-memoryroomdecision) |
 | <a id="fields-admissionwaitevidence"></a>**AdmissionWaitEvidence** | `first?`: [AdmissionWaitSnapshot](#fields-admissionwaitsnapshot); `latest?`: [AdmissionWaitSnapshot](#fields-admissionwaitsnapshot); `transitions?`: array of [AdmissionWaitSnapshot](#fields-admissionwaitsnapshot); `dropped?`: number; `history_budget_bytes`: number; `history_bytes`: number; `capture_gaps?`: number; `deferred_at?`: string; `budget_unknown?`: boolean |
 | <a id="fields-admissionwaitholder"></a>**AdmissionWaitHolder** | `key`: string; `kind`: string; `job?`: string; `machine`: string; `session`: string; `attempt?`: number; `engine_attempt?`: string; `devices?`: array of string; `tier?`: [PriorityMatch](#fields-prioritymatch); `cores`: number; `declared_host_gb?`: number; `admission_host_gb?`: number; `charged_host_gb?`: number; `remaining_growth_gb?`: number; `forecast_host_gb?`: number; `sample_age_seconds?`: number; `sample_fresh`: boolean; `enforced_host_gb?`: number; `enforcement_basis`: string; `preemptible`: boolean; `preemption_reason`: string |
 | <a id="fields-admissionwaitplan"></a>**AdmissionWaitPlan** | `at`: timestamp; `preemption`: [WaitPreemption](#fields-waitpreemption); `concurrency?`: number; `required_cores`: number; `required_host_gb`: number; `required_device_gb`: number |
@@ -273,7 +274,7 @@ maps link to their element types; timestamps are JSON time strings.
 | <a id="fields-completionstate"></a>**CompletionState** | `collected_at?`: string; `superseded_by?`: string; `delivery_id?`: string; `delivered_at?`: string |
 | <a id="fields-componentexclusion"></a>**ComponentExclusion** | `selector`: string; `reason`: string; `set_by`: string; `updated_at`: timestamp; `revision`: number; `active`: boolean; `host?`: string; `kind?`: string; `platform?`: string; `devices?`: array of [ExclusionDevice](#fields-exclusiondevice) |
 | <a id="fields-controlstoragestatus"></a>**ControlStorageStatus** | `database_bytes`: number; `wal_bytes`: number; `shared_bytes`: number; `allocated_bytes`: number |
-| <a id="fields-copy"></a>**Copy** | `memory?`: [MemoryPools](#fields-memorypools); `liveness?`: [AttemptLiveness](#fields-attemptliveness); `started_at?`: string; `stopped_at?`: string; `released_at?`: string; `process_id?`: string; `allocated_devices?`: array of string; `priority_stop?`: [PriorityPreemption](#fields-prioritypreemption); `stop_cause?`: string; `extension?`: [ExtensionSelection](#fields-extensionselection); `loss_charged?`: boolean; `recoverable`: boolean; `machine`: string; `session`: string; `attempt`: number; `progress`: number; `release_confirmed?`: boolean; `release_reason?`: string |
+| <a id="fields-copy"></a>**Copy** | `memory?`: [MemoryPools](#fields-memorypools); `liveness?`: [AttemptLiveness](#fields-attemptliveness); `started_at?`: string; `stopped_at?`: string; `released_at?`: string; `process_id?`: string; `allocated_devices?`: array of string; `priority_stop?`: [PriorityPreemption](#fields-prioritypreemption); `stop_cause?`: string; `extension?`: [ExtensionSelection](#fields-extensionselection); `loss_charged?`: boolean; `recoverable`: boolean; `machine`: string; `session`: string; `attempt`: number; `progress`: number; `resume_checkpoint_generation?`: number; `release_confirmed?`: boolean; `release_reason?`: string |
 | <a id="fields-copyreport"></a>**CopyReport** | `attempt?`: string; `bytes_per_second?`: number; `model`: string; `state`: string; `bytes`: number; `total`: number; `error?`: string |
 | <a id="fields-coveragefinding"></a>**CoverageFinding** | `target`: [ExecutionTarget](#fields-executiontarget); `job`: string; `attempt`: number; `at`: timestamp; `action`: string |
 | <a id="fields-dailyusage"></a>**DailyUsage** | `date`: string; `project?`: string; `machine?`: string; `gpu_hours`: number; `busy_percent`: number |
@@ -381,7 +382,7 @@ maps link to their element types; timestamps are JSON time strings.
 | <a id="fields-jobruntime"></a>**JobRuntime** | `elapsed_seconds?`: number; `last_accepted_seconds?`: number; `reason?`: string; `limitation`: string; `remaining_work_unknown`: boolean; `samples`: number |
 | <a id="fields-jobstorageenvelope"></a>**JobStorageEnvelope** | `key?`: [StorageKey](#fields-storagekey); `evidence?`: [StorageObservation](#fields-storageobservation); `source`: string; `basis?`: string; `samples`: number; `output_bytes?`: number; `scratch_bytes?`: number; `spool_bytes?`: number; `checkpoint_bytes?`: number; `metadata_bytes?`: number; `managed_bytes?`: number; `files?`: number; `input_bytes`: number; `predicted_need?`: number; `margin`: number; `positive_error`: number; `multiplier`: number; `hard_limit?`: number; `enforcement`: string; `exploration?`: string |
 | <a id="fields-keepfile"></a>**KeepFile** | `path`: string; `format?`: string |
-| <a id="fields-launchcapacitywait"></a>**LaunchCapacityWait** | `machine`: string; `session`: string; `attempt`: number; `evidence`: string; `admission?`: [AdmissionDetail](#fields-admissiondetail); `live_growth_surplus_gb?`: number |
+| <a id="fields-launchcapacitywait"></a>**LaunchCapacityWait** | `machine`: string; `session`: string; `attempt`: number; `evidence`: string; `admission?`: [AdmissionDetail](#fields-admissiondetail); `refused_at?`: string |
 | <a id="fields-launchphasetiming"></a>**LaunchPhaseTiming** | `phase`: string; `seconds`: number |
 | <a id="fields-launchtimings"></a>**LaunchTimings** | `assignment_received_at`: timestamp; `observed_at`: timestamp; `inputs_ready_at?`: string; `preparation_ready_at?`: string; `command_start_at?`: string; `command_start_boundary?`: string; `current_phase?`: string; `phases`: array of [LaunchPhaseTiming](#fields-launchphasetiming) |
 | <a id="fields-learnedmemory"></a>**LearnedMemory** | `host_gb`: number; `device_gb?`: number; `evidence`: number; `source`: string; `peak_host_gb?`: number; `peak_device_gb?`: number |

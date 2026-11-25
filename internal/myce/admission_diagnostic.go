@@ -18,6 +18,7 @@ type AdmissionDetail struct {
 	KeepGB           float64                 `json:"keep_gb,omitempty"`
 	HeldGB           float64                 `json:"held_gb,omitempty"`
 	ResidentGB       float64                 `json:"resident_gb,omitempty"`
+	CardMemory       bool                    `json:"card_memory,omitempty"`
 	EnvelopeSource   string                  `json:"envelope_source,omitempty"`
 	EnvelopeHostGB   float64                 `json:"envelope_host_gb"`
 	EnvelopeDeviceGB float64                 `json:"envelope_device_gb"`
@@ -107,6 +108,7 @@ func safeAdmissionDetail(d *AdmissionDetail) *AdmissionDetail {
 	if d.Subcheck != memoryWaitReason || !validMemoryValue(d.ResidentGB) {
 		out.ResidentGB = 0
 	}
+	out.CardMemory = d.Subcheck == memoryWaitReason && d.CardMemory
 	out.MemoryRoom = safeMemoryRoom(d.MemoryRoom)
 	out.Contributors = nil
 	if d.Subcheck == "live_host_growth" {

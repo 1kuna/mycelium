@@ -3,20 +3,19 @@ package myce
 import (
 	"fmt"
 	"slices"
+	"time"
 )
 
 // LaunchCapacityWait remembers the evidence behind a refused offer. It is
 // admission policy only; Copies/HostReleases remain the exact custody authority.
-// No timer clears it: an unchanged heartbeat is not new capacity.
+// Measured RAM waits need a new reading; other waits need changed evidence.
 type LaunchCapacityWait struct {
 	Machine   string           `json:"machine"`
 	Session   string           `json:"session"`
 	Attempt   int              `json:"attempt"`
 	Evidence  string           `json:"evidence"`
 	Admission *AdmissionDetail `json:"admission,omitempty"`
-	// Required surplus above Admission.Required in the queue's RAM ledger.
-	// Preserve the queue-to-worker room difference measured at refusal.
-	LiveGrowthSurplusGB *float64 `json:"live_growth_surplus_gb,omitempty"`
+	RefusedAt *time.Time       `json:"refused_at,omitempty"`
 }
 
 const launchCapacityWaitReason = "waiting for launch capacity"
@@ -72,7 +71,8 @@ func (q *Queue) recordLaunchCapacityWait(j *Job, r Result) {
 	}
 	if m != nil {
 		key := targetKey(m)
-		wait := LaunchCapacityWait{Machine: j.Machine, Session: j.Session, Attempt: j.Attempt,
+		now := q.clock.Now()
+		wait := LaunchCapacityWait{Machine: j.Machine, Session: j.Session, Attempt: j.Attempt, RefusedAt: &now,
 			Admission: safeAdmissionDetail(r.ExecutionCause.Admission)}
 
 		if prior := j.LaunchCapacityWait[key]; prior.Session == wait.Session && prior.Attempt == wait.Attempt {
@@ -80,37 +80,45 @@ func (q *Queue) recordLaunchCapacityWait(j *Job, r Result) {
 		}
 		if !q.unreported[m.ID] {
 			wait.Evidence = q.launchCapacityEvidence(j, m)
-			q.captureLaunchMemoryThreshold(j, m, &wait)
 		}
 		j.LaunchCapacityWait[key] = wait
 	}
 }
 
-func (q *Queue) captureLaunchMemoryThreshold(j *Job, m *Machine, wait *LaunchCapacityWait) {
+// Compare the next launch's full demand against the current physical and
+// allowance arms. The refused helper has to start again, so its credit expires
+// with that attempt. Before a fresh check-in, retain the measured shortfall.
+func (q *Queue) pooledLaunchDeficit(j *Job, m *Machine, wait LaunchCapacityWait) (float64, bool) {
 	d := wait.Admission
-	if d == nil || d.Subcheck != memoryWaitReason || d.Available == nil {
-		return
+	if wait.RefusedAt == nil || d == nil || d.Subcheck != memoryWaitReason || d.CardMemory || d.Available == nil {
+		return 0, false
 	}
-	room := *d.Available - d.KeepGB - d.HeldGB
-	if room >= d.Required {
-		return
+	deficit := d.Required + d.KeepGB + d.HeldGB - *d.Available
+	if deficit <= 0 {
+		return 0, false
 	}
-	capacity, _, known, _ := q.hostLiveCapacity(m)
-	if !known {
-		return
+	if wait.Session != m.Session {
+		return 0, true
 	}
-	ledger := q.hostMemoryLedger(m)
-	growth := ledger.GrowthGB
+	// DiskReceivedAt is stamped only on check-in. LastSeen also moves on
+	// results and logs, which provide contact but no new physical reading.
+	ledger := q.hostMemoryLedgers[m.ID]
+	if q.unreported[m.ID] || !m.DiskReceivedAt.After(*wait.RefusedAt) || ledger == nil || !ledger.AvailableKnown {
+		return deficit, true
+	}
+	capacity := ledger.CapacityGB
+	if o := m.MemoryObservation; validHostMemoryObservation(o) {
+		capacity = min(capacity, o.TotalGB-o.UsedGB-d.KeepGB)
+	}
+	held, growth := ledger.ReservedGB, ledger.GrowthGB
 	for _, owner := range ledger.Owners {
 		if owner.Execution != nil && owner.Execution.ID == j.ID {
+			held -= owner.ChargeGB
 			growth -= owner.GrowthGB
 		}
 	}
-	// Calibrate against the physical arm. A static allowance can cap signed
-	// scheduler room even as the physical shortage recovers. The ordinary
-	// planner still enforces the allowance before it reoffers the job.
-	surplus := capacity - growth - room
-	wait.LiveGrowthSurplusGB = &surplus
+	available := memoryWithinAllowance(m, capacity+d.KeepGB, d.KeepGB, held, growth)
+	return max(0, d.Required+d.ResidentGB-(available-d.KeepGB-growth)), true
 }
 
 func (q *Queue) waitLaunchCapacity(j *Job, r Result) {
@@ -152,8 +160,8 @@ func (q *Queue) launchCapacityBlocked(j *Job, m *Machine) bool {
 	if !ok {
 		return false
 	}
-	if h.LiveGrowthSurplusGB != nil && h.Session != m.Session {
-		return false // Let the replacement worker make its own measurements.
+	if deficit, ok := q.pooledLaunchDeficit(j, m, h); ok {
+		return deficit > 0
 	}
 	if h.Evidence == "" {
 		// Refused before the first post-restart report. Only a committed
@@ -161,14 +169,9 @@ func (q *Queue) launchCapacityBlocked(j *Job, m *Machine) bool {
 		if !q.unreported[m.ID] && q.records != nil && q.records.updating {
 			q.touchJob(j.ID)
 			h.Evidence = q.launchCapacityEvidence(j, m)
-			q.captureLaunchMemoryThreshold(j, m, &h)
 			j.LaunchCapacityWait[targetKey(m)] = h
 		}
 		return true
-	}
-	if h.LiveGrowthSurplusGB != nil && h.Admission != nil {
-		ledger := q.hostMemoryLedgers[m.ID]
-		return ledger == nil || !ledger.AvailableKnown || ledger.CapacityGB-ledger.GrowthGB < h.Admission.Required+*h.LiveGrowthSurplusGB
 	}
 	return h.Evidence == q.launchCapacityEvidence(j, m)
 }
@@ -242,19 +245,27 @@ func (q *Queue) queuedCapacityStatus(j *Job, scans ...*placementScan) (waiting, 
 
 // Feed the worker's measured deficit into ordinary release planning only.
 // This neither discounts reservations nor authorizes admission. The existing
-// planner chooses lower tiers; same-tier work remains protected. Exact releases
-// and a changed capacity snapshot are still required by dispatch.
+// planner chooses lower tiers; same-tier work remains protected.
 func (q *Queue) launchCapacityProjection(j *Job, m *Machine) *Machine {
 	h, ok := j.LaunchCapacityWait[targetKey(m)]
-	if !ok || h.Evidence != q.launchCapacityEvidence(j, m) || h.Admission == nil {
+	if !ok || h.Admission == nil {
 		return m
 	}
 	d := h.Admission
-	if d.Unavailable || d.Available == nil || d.Required+d.HeldGB+d.KeepGB <= *d.Available {
+	if d.Unavailable || d.CardMemory || d.Available == nil {
+		return m
+	}
+	deficit, pooled := q.pooledLaunchDeficit(j, m, h)
+	if !pooled {
+		if h.Evidence != q.launchCapacityEvidence(j, m) {
+			return m
+		}
+		deficit = d.Required + d.HeldGB + d.KeepGB - *d.Available
+	}
+	if deficit <= 0 {
 		return m
 	}
 	copy := *m
-	deficit := d.Required + d.HeldGB + d.KeepGB - *d.Available
 	switch d.Subcheck {
 	case memoryWaitReason, "live_host_ram", "live_host_growth", "aggregate_host_allowance", "configured_host_allowance":
 		copy.FreeHostMemoryGB = min(copy.FreeHostMemoryGB, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)-deficit)
