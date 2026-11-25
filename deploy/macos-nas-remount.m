@@ -182,8 +182,10 @@ static BOOL recordNetworkFailure(int directory, RetryState retry, int result) {
     return saved;
 }
 
-// NetFS returns a status without the SMB phase. Transport errors can follow
-// session setup, so they debit the budget and leave the attempt held.
+// NetFS returns a status without the SMB phase. A transport error is not a
+// rejected login: the saved credential is unchanged, so retrying cannot add a
+// failed-login count. Transport errors therefore retry automatically, bounded
+// by the per-window budget and backoff; rejected or unknown results hold.
 static BOOL networkError(int status) {
     switch (status) {
         case ENETDOWN:
@@ -286,11 +288,17 @@ static int mountWithHold(NSURL *url, NSString *point, const char *source, DIR *t
             status = EX_CANTCREAT;
         }
     }
-    if (called && networkError(netfsStatus) && !recordNetworkFailure(directory, retry, netfsStatus)) {
-        status = EX_CANTCREAT;
+    BOOL transient = NO;
+    if (called && networkError(netfsStatus)) {
+        if (!recordNetworkFailure(directory, retry, netfsStatus)) {
+            status = EX_CANTCREAT;
+        } else if (status == EX_NOPERM) {
+            transient = YES;
+            status = EX_TEMPFAIL;
+        }
     }
 
-    if (!called || status == EX_OK) {
+    if (!called || status == EX_OK || transient) {
         if (!holdAtPath(directory, hold) || unlinkat(directory, authHold, 0) != 0 || fsync(directory) != 0) {
             status = EX_CANTCREAT;
         }

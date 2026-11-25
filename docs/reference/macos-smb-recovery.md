@@ -101,8 +101,8 @@ outside the supported configuration.
 | 69 | `--check` found the share absent and verified the empty, canonical, user-owned local target. |
 | 71 | The cached mount table could not be read before attempting recovery. |
 | 73 | The helper could not read, persist or clear its attempt state. |
-| 75 | The persistent network retry budget defers a NetFS call. |
-| 77 | An authentication attempt is held after an interrupted, authentication-like or otherwise uncertain NetFS outcome. |
+| 75 | A transport failure was recorded, or the persistent network retry budget defers a NetFS call. A later tick retries automatically. |
+| 77 | An authentication attempt is held after an interrupted, authentication-like or unknown NetFS outcome. |
 | 78 | A URL, target or inventory check refused recovery. A refusal after NetFS records a persistent hold. |
 | 79 | A prior NetFS attempt left a refused mount that needs operator inspection. |
 | 80 | The recovery directory is missing or fails its pinned identity, local-path, ownership or mode check. |
@@ -119,17 +119,22 @@ uncertain attempt keeps the hold. A refusal after NetFS changes the hold
 to `refused-mount`. Later ticks and checks return 79 even if an exact mount
 appears in the inventory. The helper leaves any mount it finds in place.
 
-After a transport failure, the helper persists a budget of two failures
-per 15-minute window, with at least two minutes from the recorded failure
-to the next eligible attempt. The window starts at the first recorded
-failure. The budget limits repeated logins against the server's account
-lockout policy even if the operator clears a hold. Timeout counts toward
-the limit and keeps the hold because the authentication outcome is
-uncertain. The helper also holds `ENOTCONN` and `EPIPE`. Apple's SMB client
-can return both after session setup, and NetFS's return code gives no
-authentication phase. A network drop that reaches NetFS can therefore
-require operator re-arming. [Apple SMB client session retry][apple-session]
-and [mount code][apple-mount] show the relevant paths.
+After a transport failure (`ENETDOWN`, `ENETUNREACH`, `EHOSTDOWN`,
+`EHOSTUNREACH`, `ECONNREFUSED`, `ENOTCONN`, `EPIPE` or `ETIMEDOUT`), the
+helper clears `auth-hold`, returns 75 and retries on a later tick without
+operator action. It persists a budget of two failures per 15-minute window,
+with at least two minutes from the recorded failure to the next eligible
+attempt. The window starts at the first recorded failure, so recovery after
+the network returns takes at most about 15 minutes, and the helper makes at
+most about eight attempts an hour while the network stays down.
+
+A transport failure is not a rejected login. The saved credential is
+unchanged, so a retry cannot add a failed-login count even when Apple's SMB
+client returns `ENOTCONN`, `EPIPE` or a timeout after session setup
+([session retry][apple-session], [mount code][apple-mount]). Account lockout
+comes from rejected credentials. Those results (`EAUTH`, unsupported
+authentication and any unknown status) keep `auth-hold` until an operator
+clears it. The budget also bounds load on the server during an outage.
 
 [apple-session]: https://github.com/apple-oss-distributions/SMBClient/blob/99da2d9a4bbe17cde3cee382ad3edc16e25f5535/lib/smb/ctx.c#L3129-L3147
 [apple-mount]: https://github.com/apple-oss-distributions/SMBClient/blob/99da2d9a4bbe17cde3cee382ad3edc16e25f5535/lib/smb/ctx.c#L3326-L3340

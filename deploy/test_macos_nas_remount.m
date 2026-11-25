@@ -254,39 +254,39 @@ static void directorySyncFailurePreventsAuthentication(void) {
     assertSyncFailurePreventsAuthentication(2);
 }
 
-static void holdsDisconnectsAndBoundsOperatorRetries(void) {
+static void retriesDisconnectsWithinBudget(void) {
     mountStatus = ENOTCONN;
-    assert(runRemount() == EX_NOPERM);
-    assert(holdPresentAtCall);
-    assert(runRemount() == EX_NOPERM && mountCalls == 1);
-    clearHold();
+    assert(runRemount() == EX_TEMPFAIL);
+    assert(holdPresentAtCall && mountCalls == 1);
+    assertNoHold();
     now += 119;
     assert(runRemount() == EX_TEMPFAIL && mountCalls == 1);
 
     now++;
     mountStatus = EPIPE;
-    assert(runRemount() == EX_NOPERM && mountCalls == 2);
-    assert(runRemount() == EX_NOPERM && mountCalls == 2);
-    clearHold();
-    now += 779;
-    mountStatus = 0;
-    publishMount = YES;
+    assert(runRemount() == EX_TEMPFAIL && mountCalls == 2);
+    assertNoHold();
+    now += 120;
+    assert(runRemount() == EX_TEMPFAIL && mountCalls == 2);
+    now += 659;
     assert(runRemount() == EX_TEMPFAIL && mountCalls == 2);
     now++;
+    mountStatus = 0;
+    publishMount = YES;
     assert(runRemount() == EX_OK && mountCalls == 3);
     assertNoHold();
 }
 
-static void holdsUncertainTimeout(void) {
+static void retriesUncertainTimeoutWithinBudget(void) {
     mountStatus = ETIMEDOUT;
-    assert(runRemount() == EX_NOPERM);
-    assert(holdPresentAtCall);
-    assert(runCheck() == EX_NOPERM);
-    now += 900;
-    assert(runRemount() == EX_NOPERM && mountCalls == 1);
-    clearHold();
-    now -= 900;
+    assert(runRemount() == EX_TEMPFAIL);
+    assert(holdPresentAtCall && mountCalls == 1);
+    assertNoHold();
+    assert(runCheck() == EX_UNAVAILABLE);
+    now += 119;
     assert(runRemount() == EX_TEMPFAIL && mountCalls == 1);
+    now++;
+    assert(runRemount() == EX_TEMPFAIL && mountCalls == 2);
 }
 
 static void holdsNonTransientResults(void) {
@@ -446,8 +446,8 @@ int main(int argc, const char *argv[]) {
             {"missingStatePreventsAuthentication", missingStatePreventsAuthentication},
             {"firstSyncFailurePreventsAuthentication", firstSyncFailurePreventsAuthentication},
             {"directorySyncFailurePreventsAuthentication", directorySyncFailurePreventsAuthentication},
-            {"holdsDisconnectsAndBoundsOperatorRetries", holdsDisconnectsAndBoundsOperatorRetries},
-            {"holdsUncertainTimeout", holdsUncertainTimeout},
+            {"retriesDisconnectsWithinBudget", retriesDisconnectsWithinBudget},
+            {"retriesUncertainTimeoutWithinBudget", retriesUncertainTimeoutWithinBudget},
             {"holdsNonTransientResults", holdsNonTransientResults},
             {"holdsUnsupportedAuthentication", holdsUnsupportedAuthentication},
             {"rejectsReplacedAttemptStateBeforeNetFS", rejectsReplacedAttemptStateBeforeNetFS},
