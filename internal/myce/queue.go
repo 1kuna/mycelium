@@ -2366,6 +2366,9 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 				if cancelled(j) {
 					q.finishCancellation(j)
 				} else {
+					if automaticExtensionCheck(j) != nil && plannedMaintenanceStop(j) && unheldNeverLaunched(j, r) {
+						j.ExecutionEvidence = unstartedExecution(j.Attempt)
+					}
 					q.recordSharedHostLatencyStop(j, r)
 					q.retry(j, j.Reason)
 				}
@@ -2477,7 +2480,7 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 	ceilingFailure := !r.Success && strings.HasPrefix(ceilingDiagnostic(r.Error, ""), "exceeded its ")
 	oomFailure := !r.Success && (r.OutOfMemory || ceilingFailure)
 	outcome.OutOfMemory = oomFailure
-	stageFailure := (j.Spec.Priority == "production" || plannedPriorityStop(j)) && !r.Success && !r.Interrupted
+	stageFailure := (j.Spec.Priority == "production" || plannedPriorityStop(j) || automaticExtensionCheck(j) != nil) && !r.Success && !r.Interrupted
 	poolPressure := j.Reason == memoryPressureCause || r.ExecutionCause != nil && r.ExecutionCause.Class == memoryPressureCause
 	// Bridge cleanup-to-inventory telemetry with the same absolute bound as
 	// pending cleanup. Completion and heartbeats cannot renew planning credit.

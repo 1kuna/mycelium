@@ -37,52 +37,64 @@ func automaticExtensionCheckID(machine string, r ExtensionReport) string {
 	return "auto-" + identityHash([2]string{machine, extensionReportIdentity(r)})
 }
 
-// A cancelled automatic check or one stopped before its main command has no native verdict.
+// An automatic check retired by the queue or interrupted during startup can
+// end without a native verdict.
 // Its successor gets a new immutable key derived from the previous one; the
 // queue reruns the check itself instead of waiting for an explicit retry.
 func automaticExtensionRetryCheckID(machine string, r ExtensionReport, previous string) string {
 	return "auto-" + identityHash([3]string{machine, extensionReportIdentity(r), previous})
 }
 
-func automaticCheckCancelled(r ExtensionReport) bool {
-	return strings.HasPrefix(r.CheckID, "auto-") && r.CheckState == "cancelled" && !r.Qualified
-}
-
 // Require released custody and positive evidence for this exact attempt before
 // treating a failed check as having ended without a native verdict.
 func automaticCheckNoVerdict(j *Job) bool {
-	if j == nil || !terminal(j.State) {
+	if j == nil || !terminal(j.State) || j.Attempt != 0 && !j.ReleaseConfirmed {
 		return false
 	}
-	if cancelled(j) {
-		return true
+	if j.State == "cancelled" {
+		return j.Reason != explicitNativeCheckCancel
 	}
 	if j.State != "failed" || !j.ReleaseConfirmed || j.StartedAt != nil {
 		return false
 	}
 	c := j.ExecutionCause
 	e := safeExecutionEvidence(j.ExecutionEvidence, j.Attempt)
-	if c == nil {
-		return (e == nil || e.Main == executionNotStarted) && qualificationStartupPreemption(j) != nil
+	if qualificationStartupInterruption(j) != nil {
+		return true
 	}
-	if c.Operation != "launch" || e == nil || e.Main != executionNotStarted || e.Sidecars != executionNotStarted {
+	if c == nil || c.Operation != "launch" || e == nil || e.Main != executionNotStarted || e.Sidecars != executionNotStarted {
 		return false
 	}
 	return c.Class == launchRefused && c.Predicate == "launch_authorization" && c.PrelaunchRefused ||
 		c.Class == "resource_limit" && e.EnvironmentPreparation == executionNotStarted
 }
 
-// A release-only report after a queue-issued priority stop can lack a worker
-// execution cause. Match the queue's accepted interruption to this assignment.
-func qualificationStartupPreemption(j *Job) *AttemptOutcome {
+// Match a startup interruption to the attempt that owned the stop. Maintenance
+// needs cancellation or exact no-launch evidence in addition to stop intent.
+func qualificationStartupInterruption(j *Job) *AttemptOutcome {
 	if j.Attempt == 0 || j.Machine == "" || j.Session == "" {
+		return nil
+	}
+	e := safeExecutionEvidence(j.ExecutionEvidence, j.Attempt)
+	if e != nil && e.Main != executionNotStarted {
+		return nil
+	}
+	c := j.ExecutionCause
+	stopped := maintenanceStoppedCopy(j)
+	maintenance := e != nil && stopped != nil && stopped.StartedAt == nil &&
+		(c != nil && (c.Operation == "command" && c.Class == "cancelled" ||
+			c.Operation == "launch" && c.Class == launchRefused && c.Predicate == "preparation_cancelled" ||
+			c.Operation == "start_authorization" && c.Class == "admission_changed") ||
+			c == nil && e.Sidecars == executionNotStarted && e.EnvironmentPreparation == executionNotStarted)
+	if !maintenance && c != nil {
 		return nil
 	}
 	for i := len(j.AttemptHistory) - 1; i >= 0; i-- {
 		h := &j.AttemptHistory[i]
 		if h.Attempt == j.Attempt && h.Machine == j.Machine && h.Session == j.Session &&
-			h.State == "failed" && h.Interrupted && !h.OutOfMemory && h.ExecutionCause == nil &&
-			h.PriorityStop != nil && h.PriorityStop.Cause == priorityPreemptionCause && h.PriorityStop.Victim == j.ID {
+			h.State == "failed" && h.Interrupted && !h.OutOfMemory &&
+			(maintenance && h.OperatorStop || c == nil && h.ExecutionCause == nil &&
+				h.PriorityStop != nil && h.PriorityStop.Cause == priorityPreemptionCause && h.PriorityStop.Victim == j.ID) {
 			return h
 		}
 	}
@@ -90,14 +102,15 @@ func qualificationStartupPreemption(j *Job) *AttemptOutcome {
 }
 
 func (q *Queue) automaticCheckRetryable(machine string, r ExtensionReport) bool {
-	if automaticCheckCancelled(r) {
-		return true
-	}
-	if !strings.HasPrefix(r.CheckID, "auto-") || r.Qualified || r.CheckState != "failed" {
+	if !terminalAutomaticCheckReport(r) {
 		return false
 	}
 	j := q.qualificationCheckJob(r.CheckID)
-	return j != nil && j.Machine == machine && automaticCheckNoVerdict(j)
+	return j != nil && j.State == r.CheckState && (j.Machine == machine || j.Attempt == 0) && automaticCheckNoVerdict(j)
+}
+
+func terminalAutomaticCheckReport(r ExtensionReport) bool {
+	return strings.HasPrefix(r.CheckID, "auto-") && !r.Qualified && (r.CheckState == "failed" || r.CheckState == "cancelled")
 }
 
 // Receipt projections omit cold terminal jobs. Retain only the accepted
@@ -107,7 +120,7 @@ func (q *Queue) qualificationReportInputs() map[string]*submissionRecord {
 	for _, owner := range q.s.Machines {
 		for _, m := range q.machineTargets(owner) {
 			for _, r := range m.ExtensionReports {
-				if r.CheckState != "failed" || !strings.HasPrefix(r.CheckID, "auto-") || r.Qualified {
+				if !terminalAutomaticCheckReport(r) {
 					continue
 				}
 				key := submissionDigest("extension-check", r.CheckID)
@@ -119,14 +132,21 @@ func (q *Queue) qualificationReportInputs() map[string]*submissionRecord {
 					StartedAt: j.StartedAt, ReleaseConfirmed: j.ReleaseConfirmed,
 					NativeCheckFailures: j.NativeCheckFailures}
 				proof.Spec.ExtensionCheck = &ExtensionCheckRequest{Automatic: automaticExtensionCheck(j)}
+				if j.State == "cancelled" {
+					proof.Reason = j.Reason
+				}
 				if q.automaticCheckRetryable(m.ID, r) {
 					proof.ExecutionEvidence = safeExecutionEvidence(j.ExecutionEvidence, j.Attempt)
 					if c := j.ExecutionCause; c != nil {
 						proof.ExecutionCause = &RuntimeCause{Operation: c.Operation, Class: c.Class, Predicate: c.Predicate, PrelaunchRefused: c.PrelaunchRefused}
-					} else if h := qualificationStartupPreemption(j); h != nil {
+					}
+					if h := qualificationStartupInterruption(j); h != nil {
 						proof.Session = j.Session
+						if c := maintenanceStoppedCopy(j); c != nil {
+							proof.Copies = []Copy{{Attempt: c.Attempt, Machine: c.Machine, Session: c.Session, StartedAt: c.StartedAt, StopCause: c.StopCause}}
+						}
 						proof.AttemptHistory = []AttemptOutcome{{Attempt: h.Attempt, Machine: h.Machine, Session: h.Session,
-							State: h.State, Interrupted: true, PriorityStop: h.PriorityStop}}
+							State: h.State, Interrupted: true, OperatorStop: h.OperatorStop, PriorityStop: h.PriorityStop}}
 					}
 				}
 				inputs[key] = &submissionRecord{JobID: j.ID, Job: proof}

@@ -766,14 +766,14 @@ func (g *readGeneration) liveInputs(ctx context.Context) (state, error) {
 	return g.nativeCheckInputs(ctx, g.liveState)
 }
 
-// Fetch failed checks referenced by current inventory for failure diagnostics
+// Fetch terminal unqualified checks referenced by current inventory for diagnostics
 // and no-execution proof. Decode only those immutable answers, outside q.mu.
 // The maps in liveState stay shared.
 func (g *readGeneration) nativeCheckInputs(ctx context.Context, s state) (state, error) {
 	var extra map[string]*submissionRecord
 	visit := func(reports []ExtensionReport) error {
 		for _, r := range reports {
-			if r.CheckState != "failed" || !strings.HasPrefix(r.CheckID, "auto-") {
+			if !terminalAutomaticCheckReport(r) {
 				continue
 			}
 			key := submissionDigest("extension-check", r.CheckID)
@@ -800,7 +800,7 @@ func (g *readGeneration) nativeCheckInputs(ctx context.Context, s state) (state,
 					return err
 				}
 			}
-			if answer.Job != nil && answer.Job.State == "failed" {
+			if answer.Job != nil && answer.Job.State == r.CheckState {
 				if extra == nil {
 					extra = map[string]*submissionRecord{}
 				}

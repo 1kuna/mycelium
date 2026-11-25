@@ -61,7 +61,12 @@ sizing. Use a pin only for a [hard requirement](references/submit.md#explicit-pl
 - [Environments and isolation](references/submit.md#environments) covers locked
   uv, Pixi and npm, installed tools, and native execution. Use
   [native checks](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md#probe-a-software-capability-instead-of-pinning-a-host)
-  for capabilities that executable names alone cannot establish.
+  for capabilities that executable names alone cannot establish. If maintenance
+  or a validation reservation interrupts an automatic check before the queue
+  authorizes its main command, Mycelium retries the check after confirmed release
+  and restored eligibility. Keep the waiting job and its submission key.
+  Independent sidecar failures and failures after main authorization require
+  investigation. An explicitly cancelled check requires a new explicit check.
 - [One PyTorch entry across accelerators](https://github.com/1kuna/mycelium/tree/main/docs/examples/run-anywhere)
   shows a multi-platform lock and runtime device selection using `MYCE_DEVICE`.
   Use qualified variants when implementations differ. GPU work requires an

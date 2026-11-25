@@ -425,6 +425,10 @@ func (q *Queue) nativeCheckProgress(e Extension, work string, m *Machine, resolv
 			releasedWithoutVerdict = releasedWithoutVerdict || r.CheckState == "failed"
 			continue
 		}
+		if r.CheckState == "cancelled" && terminalAutomaticCheckReport(r) {
+			h := withAction(newHold("no_eligible_host", "the native check was cancelled"), ownerConsumer, "run an explicit native check on "+host)
+			return holdSource(h, "native check cancellation"), true, false
+		}
 		reason, action := nativeFailureReason, nativeFailureAction
 		if failure := q.qualificationCheckFailure(m.ID, r); failure != nil {
 			var evidence string

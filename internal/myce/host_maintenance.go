@@ -145,13 +145,23 @@ func (q *Queue) maintenanceHold(host string) *Hold {
 }
 
 func plannedMaintenanceStop(j *Job) bool {
-	for _, c := range j.Copies {
+	return maintenanceStoppedCopy(j) != nil
+}
+
+func maintenanceStoppedCopy(j *Job) *Copy {
+	for i := range j.Copies {
+		c := &j.Copies[i]
 		if c.Attempt == j.Attempt && c.Machine == j.Machine && c.Session == j.Session {
-			return c.StopCause == maintenanceStopCause || c.StopCause == deviceMaintenanceStopCause
+			switch c.StopCause {
+			case maintenanceStopCause, deviceMaintenanceStopCause, reservationStopCause:
+				return c
+			}
+			break
 		}
 	}
-	return false
+	return nil
 }
+
 func (q *Queue) registerMaintenanceHost(m *Machine) error {
 	if q.s.HostMaintenance == nil {
 		q.s.HostMaintenance = map[string]HostMaintenance{}
@@ -404,21 +414,28 @@ func (q *Queue) maintainHostObligationGrace(p HostObligation, deadline *time.Tim
 			return
 		}
 		if !cancelled(j) && (deadline != nil || j.StartedAt == nil) {
-			for i := range j.Copies {
-				c := &j.Copies[i]
-				if c.Attempt == r.Attempt && c.Machine == r.Machine && c.Session == r.Session && c.StopCause == "" && j.State == "running" {
-					c.StopCause = maintenanceStopCause
-				}
-			}
-			q.stop(j, maintenanceStopCause)
-			if !plannedLeave && gracefulGPUStop(j) {
-				boundStop(&j.StopAt, q.clock.Now().Add(q.gpuStopGrace()))
-			}
-			if deadline != nil {
-				boundStop(&j.StopAt, *deadline)
-			}
+			q.stopBatchForMaintenance(j, maintenanceStopCause, deadline, plannedLeave)
 		}
 		q.retainRelease(j)
+	}
+}
+
+func (q *Queue) stopBatchForMaintenance(j *Job, cause string, deadline *time.Time, plannedLeave bool) {
+	q.touchJob(j.ID)
+	if j.State == "running" {
+		for i := range j.Copies {
+			c := &j.Copies[i]
+			if c.Attempt == j.Attempt && c.Machine == j.Machine && c.Session == j.Session && c.StopCause == "" {
+				c.StopCause = cause
+			}
+		}
+	}
+	q.stop(j, cause)
+	if !plannedLeave && gracefulGPUStop(j) {
+		boundStop(&j.StopAt, q.clock.Now().Add(q.gpuStopGrace()))
+	}
+	if deadline != nil {
+		boundStop(&j.StopAt, *deadline)
 	}
 }
 
