@@ -136,15 +136,6 @@ func latencyPercentile(total uint64, counts *[64]uint64, maxima *[64]time.Durati
 	return 0
 }
 
-func (l *requestLatencies) routeP99(route string) time.Duration {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if v := l.routes[route]; v != nil {
-		return latencyPercentile(v.count, &v.counts, &v.maxima, .99)
-	}
-	return 0
-}
-
 // p99 aggregates every completed route except one (the liveness probe itself),
 // using the same exact per-bin maxima as snapshot.
 func (l *requestLatencies) p99(exclude string) time.Duration {

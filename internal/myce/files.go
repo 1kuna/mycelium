@@ -764,7 +764,7 @@ func (a API) registerFiles(mux *requestMux) {
 }
 
 // File transfers have no whole-request deadline. Each direction learns its
-// own byte service time. Upload PATCH also uses measured request service and
+// own byte service time. Upload responses also use measured queue service and
 // pressure; other pre-header verification remains bounded by the owner.
 var errFileTransferStalled = errors.New("file transfer stalled")
 
@@ -816,8 +816,16 @@ type fileTransferConn struct {
 	deadlineMu                  sync.Mutex
 }
 
+// Thirty seconds allows nearly three times the measured production p95 mutex
+// wait of 11 seconds while bounding the time a silent queue can hold an upload.
+const maxHintedUploadResponseWindow = 30 * time.Second
+
 func (c *fileTransferConn) responseWindow() time.Duration {
-	return max(c.idle, c.timing.window(), growDuration(growDuration(c.queueService)))
+	window := max(c.idle, c.timing.window())
+	if c.queueService > 0 {
+		window = min(maxHintedUploadResponseWindow, max(window, growDuration(growDuration(c.queueService))))
+	}
+	return window
 }
 
 func (c *fileTransferConn) deadline(read bool, bytes int) error {

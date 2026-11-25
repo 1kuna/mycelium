@@ -1,8 +1,12 @@
 package myce
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -52,7 +56,9 @@ func TestOutputUploadWaitsForMeasuredQueueService(t *testing.T) {
 	if err := c.uploadOutputFile(ctx, firstPath, first); err != nil {
 		t.Fatal(err)
 	}
-	q.requestLatencies.record("POST /api/workers/checkin", service)
+	q.checkinService.record(clock, service)
+	clock.Advance(checkinServiceBucket)
+	q.checkinService.record(clock, time.Millisecond)
 	entered := make(chan struct{})
 	continueAccounting := make(chan struct{})
 	var blockOnce sync.Once
@@ -134,6 +140,112 @@ func TestOutputUploadWaitsForMeasuredQueueService(t *testing.T) {
 	if got := job(t, q, j.ID); got.State != "succeeded" || got.Attempt != j.Attempt || got.Session != j.Session || got.OutputRefs["output"] != ref {
 		t.Fatalf("output lost exact attempt custody: %+v", got)
 	}
+	clock.Advance(checkinServiceBucket)
+	if got := outputUploadServiceHint(q, time.Second); got != "" {
+		t.Fatalf("expired queue service was still advertised: %s", got)
+	}
+}
+
+func outputUploadServiceHint(q *Queue, period time.Duration) string {
+	r := httptest.NewRequest(http.MethodPost, "/api/files/uploads/", nil)
+	r.Header.Set(uploadQueueServiceHeader, "1")
+	r.Header.Set("X-Myce-Upload-Progress", period.String())
+	w := httptest.NewRecorder()
+	q.reportUploadQueueService(w, r)
+	if w.Code == http.StatusProcessing {
+		return w.Result().Header.Get(uploadQueueServiceHeader)
+	}
+	return ""
+}
+
+func TestOutputUploadHintExcludesSlowCheckinBody(t *testing.T) {
+	q, _ := fixture(t)
+	var duration, occupied time.Duration
+	q.observeRequest = func(route string, elapsed, wait, hold, _ time.Duration) {
+		if route == "POST /api/workers/checkin" {
+			duration, occupied = elapsed, wait+hold
+		}
+	}
+	body, err := json.Marshal(keyedFixtureCheckin(Checkin{Machine: machine("worker", "fake")}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodPost, "/api/workers/checkin", &slowCheckinBody{Reader: bytes.NewReader(body)})
+	r.Header.Set("Authorization", "Bearer fixture")
+	r.Header.Set("X-Myce-Start-Gate", startGateProtocol)
+	w := httptest.NewRecorder()
+	(API{Queue: q, Token: "fixture"}).Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK || occupied <= 0 || duration-occupied < slowCheckinBodyDelay {
+		t.Fatalf("expected successful check-in with a slow body: status=%d duration=%s occupied=%s body=%s", w.Code, duration, occupied, w.Body)
+	}
+	raw := outputUploadServiceHint(q, time.Nanosecond)
+	hint, err := time.ParseDuration(raw)
+	if err != nil || hint <= 0 || hint > occupied {
+		t.Fatalf("hint = %q, want positive queue service within the full request's mutex wait and hold %s", raw, occupied)
+	}
+	if got := outputUploadServiceHint(q, occupied+(duration-occupied)/2); got != "" {
+		t.Fatalf("slow check-in body inflated hint to %s", got)
+	}
+}
+
+const slowCheckinBodyDelay = 75 * time.Millisecond
+
+type slowCheckinBody struct {
+	io.Reader
+	once sync.Once
+}
+
+func (b *slowCheckinBody) Read(p []byte) (int, error) {
+	b.once.Do(func() { time.Sleep(slowCheckinBodyDelay) })
+	return b.Reader.Read(p)
+}
+
+func TestOutputUploadTimesOutAfterQueueServiceHint(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(uploadQueueServiceHeader) != "1" {
+			t.Error("upload did not opt into queue service hints")
+		}
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			t.Error(err)
+			return
+		}
+		w.Header().Set(uploadQueueServiceHeader, "2m")
+		w.WriteHeader(http.StatusProcessing)
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+	transport := &http.Transport{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return fastHintDeadlineConn{conn}, nil
+	}}
+	c := Client{URL: server.URL, HTTP: &http.Client{Transport: transport}}
+	const content = "one output"
+	path := filepath.Join(t.TempDir(), "output")
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := c.uploadOutputFile(ctx, path, creationRef(content))
+	if !errors.Is(err, errFileTransferStalled) || !strings.Contains(err.Error(), "no network progress for 30s") {
+		t.Fatalf("silent peer should hit the 30s socket window before the test context: %v", err)
+	}
+}
+
+type fastHintDeadlineConn struct{ net.Conn }
+
+func (c fastHintDeadlineConn) SetReadDeadline(end time.Time) error {
+	// Compress long deadlines 100:1 on the real test socket. The 30s window
+	// expires in 300ms, while the uncapped 8m window exceeds the test context.
+	if now := time.Now(); end.Sub(now) > 2*clientRecoveryPeriod {
+		end = now.Add(end.Sub(now) / 100)
+	}
+	return c.Conn.SetReadDeadline(end)
 }
 
 // ResponseRecorder treats the first 1xx as final; a real HTTP transport consumes

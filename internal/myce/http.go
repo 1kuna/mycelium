@@ -458,6 +458,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		_, _ = a.Queue.checkinResponseContext(r.Context(), c, func(v Reply, err error) {
 			accepted = err == nil
 			if err == nil {
+				a.Queue.recordCheckinService(r.Context())
 				v.NASPathChecks = nas.checkin(c)
 			}
 			respondOperation(w, v, err, "worker_checkin_invalid")

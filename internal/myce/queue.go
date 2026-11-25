@@ -149,6 +149,7 @@ type Queue struct {
 	detachedRead         bool          // Private immutable source: never owns the live writer mutex.
 	hostHealthReports    atomic.Uint64 // Queue receipt order; never worker wall time.
 	requestBudgets       requestBudgets
+	checkinService       recentCheckinService
 	evidencePending      map[string]bool
 	evidenceRows         []string
 	evidenceBytes        uint64

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tus/tusd/v2/pkg/filestore"
@@ -18,6 +19,54 @@ import (
 type uploadDiagnosticKey struct{}
 
 const uploadQueueServiceHeader = "X-Myce-Upload-Queue-Service"
+
+// Keep the peak across two short buckets so a burst of fast check-ins cannot
+// immediately erase contention. Evidence ages out after 15–30 seconds, roughly
+// one to three turns at the measured 11-second p95 wait under production load.
+const checkinServiceBucket = 15 * time.Second
+
+type recentCheckinService struct {
+	mu                sync.Mutex
+	start             time.Time
+	current, previous time.Duration
+}
+
+func (s *recentCheckinService) advance(now time.Time) {
+	elapsed := now.Sub(s.start)
+	switch {
+	case elapsed >= 2*checkinServiceBucket:
+		s.start, s.current, s.previous = now, 0, 0
+	case elapsed >= checkinServiceBucket:
+		s.start, s.current, s.previous = s.start.Add(checkinServiceBucket), 0, s.current
+	}
+}
+
+func (s *recentCheckinService) record(clock Clock, service time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.advance(clock.Now())
+	s.current = max(s.current, service)
+}
+
+func (s *recentCheckinService) peak(clock Clock) time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.advance(clock.Now())
+	return max(s.current, s.previous)
+}
+
+func (q *Queue) recordCheckinService(ctx context.Context) {
+	span := spanFrom(ctx)
+	if span == nil {
+		return
+	}
+	span.mu.Lock()
+	service := span.wait + max(0, span.hold-span.writerWait)
+	span.mu.Unlock()
+	// This runs before NAS checks and the HTTP reply. Body reads and reply
+	// writes never contribute to the mutex intervals or refresh their age.
+	q.checkinService.record(q.clock, service)
+}
 
 // Before the upload can block on custody or accounting, give this connection
 // the queue's own service measurement. Verification 102s still represent only
@@ -32,7 +81,7 @@ func (q *Queue) reportUploadQueueService(w http.ResponseWriter, r *http.Request)
 	}
 	// Each check-in takes a turn through the same mutex. Long polls and
 	// unrelated transfers can wait by design, and do not estimate that turn.
-	service := q.requestLatencies.routeP99("POST /api/workers/checkin")
+	service := q.checkinService.peak(q.clock)
 	if p := q.mu.pressure.Load(); p != nil && q.mu.waiting.Load() > 0 {
 		_, wait, _ := p.measurement()
 		service = max(service, wait)
