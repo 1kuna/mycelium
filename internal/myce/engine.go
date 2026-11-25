@@ -994,6 +994,13 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 func (rt *modelRuntime) admissionMemorySnapshot() map[attemptKey]hostMemorySample {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	samples := rt.admissionMemorySamplesLocked()
+	rt.batchHostMemorySamples = maps.Clone(samples)
+	rt.publishHostLedgerLocked()
+	return samples
+}
+
+func (rt *modelRuntime) admissionMemorySamplesLocked() map[attemptKey]hostMemorySample {
 	now := time.Time{}
 	if rt.clock != nil {
 		now = rt.clock.Now()
@@ -1014,8 +1021,6 @@ func (rt *modelRuntime) admissionMemorySnapshot() map[attemptKey]hostMemorySampl
 			samples[key] = sample
 		}
 	}
-	rt.batchHostMemorySamples = maps.Clone(samples)
-	rt.publishHostLedgerLocked()
 	return samples
 }
 
@@ -1076,6 +1081,10 @@ type hostLedger struct {
 
 // Call with rt.mu held.
 func (rt *modelRuntime) publishHostLedgerLocked() {
+	rt.hostLedger.Store(rt.hostLedgerLocked(rt.batchHostMemorySamples))
+}
+
+func (rt *modelRuntime) hostLedgerLocked(samples map[attemptKey]hostMemorySample) *hostLedger {
 	now := time.Time{}
 	if rt.clock != nil {
 		now = rt.clock.Now()
@@ -1089,7 +1098,7 @@ func (rt *modelRuntime) publishHostLedgerLocked() {
 			continue
 		}
 		owner := allocationMachine(&rt.memoryMachine, j.AllocatedDevices)
-		c, p := pooledHostCharge(&j, owner, rt.batchHostMemorySamples[jobKey(j)], now, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB))
+		c, p := pooledHostCharge(&j, owner, samples[jobKey(j)], now, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB))
 		l.cores += j.Spec.Needs.cores()
 		l.charge, l.pending, l.attempts[jobKey(j)] = l.charge+c, l.pending+p, [2]float64{c, p}
 	}
@@ -1100,13 +1109,16 @@ func (rt *modelRuntime) publishHostLedgerLocked() {
 			l.charge, l.pending = l.charge+need, l.pending+need
 		}
 	}
-	rt.hostLedger.Store(l)
+	return l
 }
 
 // hostChargesExcept is the published ledger without one attempt: what every
 // other attempt and model is charged, and the part of that not yet resident.
 func (rt *modelRuntime) hostChargesExcept(key attemptKey) (charge, pending float64) {
-	l := rt.hostLedger.Load()
+	return rt.hostLedger.Load().chargesExcept(key)
+}
+
+func (l *hostLedger) chargesExcept(key attemptKey) (charge, pending float64) {
 	if l == nil {
 		return 0, 0
 	}
@@ -1122,6 +1134,9 @@ func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostL
 	key := attemptKey{launch.Key, attempt, launch.Session}
 	rt.mu.Lock()
 	actor := rt.batchSupervisors[key]
+	// Freeze occupancy before measuring physical room. This includes helpers
+	// prepared by a compiled extension that isn't in the original run spec.
+	samples := rt.admissionMemorySamplesLocked()
 	rt.mu.Unlock()
 	free, known := 0.0, false
 	if rt.poolHostMemorySource != nil {
@@ -1141,14 +1156,25 @@ func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostL
 		Worker{Machine: rt.memoryMachine}.acceptMemoryOffer(&job)
 	}
 	pools := memoryPools(&job)
-	if ledger := rt.hostLedger.Load(); ledger != nil {
-		if capacity, reason := cpuCapacity(&rt.memoryMachine); reason == "" && ledger.cores > capacity {
-			return refuseAdmission("aggregate_cpu_allowance", "cores", float64(ledger.cores), float64(capacity), false)
-		}
+	ledger := rt.hostLedgerLocked(samples)
+	if capacity, reason := cpuCapacity(&rt.memoryMachine); reason == "" && ledger.cores > capacity {
+		return refuseAdmission("aggregate_cpu_allowance", "cores", float64(ledger.cores), float64(capacity), false)
 	}
-	held, pending := rt.hostChargesExcept(key)
-	free = memoryWithinAllowance(&rt.memoryMachine, free, pools.KeepGB, held, pending)
-	return checkMemoryPool(pools.RAM.TypicalGB, free, pools.KeepGB, pending, known)
+	held, pending := ledger.chargesExcept(key)
+	own := samples[key]
+	resident := 0.0
+	if rt.clock != nil && own.freshAt(rt.clock.Now()) {
+		resident = own.gb // Credit exact nonreclaimable host RAM, without an accelerator estimate.
+	}
+	// Keep already-resident RAM inside the attempt's allowance while checking
+	// only its remaining demand against the physical headroom.
+	credited := min(resident, pools.RAM.TypicalGB)
+	free = memoryWithinAllowance(&rt.memoryMachine, free, pools.KeepGB, held+resident, pending)
+	err = checkMemoryPool(pools.RAM.TypicalGB-credited, free, pools.KeepGB, pending, known)
+	if refusal, ok := err.(*admissionError); ok {
+		refusal.detail.ResidentGB = credited
+	}
+	return err
 }
 
 func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerModel) error {

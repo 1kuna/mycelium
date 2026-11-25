@@ -298,6 +298,33 @@ func TestMemoryPoolReplay1962(t *testing.T) {
 	}
 }
 
+func TestMemoryPoolNativeMemberAdmissionCreditsResidentRAM(t *testing.T) {
+	_, clock := fixture(t)
+	m := cpuMachine("member-admission", "member-admission", "cpu", 8, 96)
+	job := Job{ID: "attempt", Machine: m.ID, Session: m.Session, Attempt: 1,
+		Memory: &MemoryPools{RAM: memoryPoolEstimate{TypicalGB: 36, ChargeGB: 36}, KeepGB: 4}}
+	job.Spec.Run.Sidecars = []NativeSidecar{{Name: "helper"}}
+	key := jobKey(job)
+	actor := &attemptSupervisor{job: job, report: AttemptReport{Execution: Execution{ID: job.ID, Attempt: 1}, Session: job.Session,
+		CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: 8, sampledAt: clock.Now()}}}
+	runtime := &modelRuntime{machine: m.ID, memoryMachine: m, clock: clock, batchJobs: []Job{job},
+		batchSupervisors:     map[attemptKey]*attemptSupervisor{key: actor},
+		poolHostMemorySource: func(context.Context) (float64, error) { return 34, nil }}
+	launch := HostLaunch{Machine: m.ID, Session: job.Session, Kind: "batch", Key: job.ID, Attempt: "1"}
+	if err := runtime.checkBatchLaunchMemory(t.Context(), launch); err != nil {
+		t.Fatalf("28 GiB of remaining demand did not fit 30 GiB of room: %v", err)
+	}
+	runtime.memoryMachine.HostMemoryBudgetGB = 35
+	if d := admissionDetail(runtime.checkBatchLaunchMemory(t.Context(), launch), job); d == nil || d.ResidentGB != 8 || d.Required != 28 || *d.Available-d.KeepGB != 27 {
+		t.Fatalf("resident credit escaped the allowance: %+v", d)
+	}
+	runtime.memoryMachine.HostMemoryBudgetGB = 96
+	clock.Advance(hostMemorySampleFreshFor)
+	if d := admissionDetail(runtime.checkBatchLaunchMemory(t.Context(), launch), job); d == nil || d.ResidentGB != 0 || d.Required != 36 {
+		t.Fatalf("stale helper sample was credited: %+v", d)
+	}
+}
+
 func TestMemoryPoolReplayBackfill(t *testing.T) {
 	for _, tc := range []struct {
 		issue                  string

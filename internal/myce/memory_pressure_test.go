@@ -51,6 +51,75 @@ func TestMemoryPoolPressureRequiresSustainedDeclineWithHeadroom(t *testing.T) {
 	}
 }
 
+func TestMemoryPoolPressureReadmissionAfterExactRelease(t *testing.T) {
+	q, clock := fixture(t)
+	m := sharedUnifiedMachine()
+	m.HostMemoryBudgetGB = 96
+	m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
+	s := sharedSpec("experiment", 35)
+	s.Needs.HostMemoryGB = 25
+	for i := 1; i <= 2; i++ {
+		m.HostAvailableMemoryGB = 90
+		m.MemoryObservation = &HostMemoryObservation{TotalGB: 121, UsedGB: 31, ReserveGB: 4}
+		if i == 1 {
+			submit(t, q, s)
+		}
+		run := assignedJob(machineCheck(t, q, m))
+		if run == nil || run.Attempt != i {
+			t.Fatalf("automatic retry %d did not start: %+v", i, run)
+		}
+		if run.Memory.RAM.ChargeGB != 60 || run.Memory.Card != nil {
+			t.Fatalf("unified replay did not carry the same 60 GiB charge: %+v", run.Memory)
+		}
+		if err := q.Started(result(run, true)); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(time.Second)
+		m.HostAvailableMemoryGB = 0
+		m.MemoryObservation = &HostMemoryObservation{TotalGB: 121, UsedGB: 118, ReserveGB: 4}
+		machineCheck(t, q, m, run)
+		got := job(t, q, run.ID)
+		if got.State != "stopping" {
+			t.Fatalf("pressure did not order a stop: %s", got.State)
+		}
+		decision := priorityStop(got).PoolPressure
+		if decision == nil || decision.Check != "reserve" || decision.FreeGB != 3 || decision.KeepGB != 4 {
+			t.Fatalf("stop lost decision-time evidence: %+v", decision)
+		}
+		release := result(run, false)
+		release.ReleaseOnly = true
+		if err := q.Complete(release); err != nil {
+			t.Fatal(err)
+		}
+		if i == 1 {
+			clock.Advance(time.Second)
+			continue
+		}
+		for _, free := range []float64{94, 116, 95} {
+			clock.Advance(time.Second)
+			m.HostAvailableMemoryGB = free - 4
+			m.MemoryObservation = &HostMemoryObservation{TotalGB: 121, UsedGB: 121 - free, ReserveGB: 4}
+			if next := assignedJob(machineCheck(t, q, m)); next != nil {
+				t.Fatalf("same host started a third attempt: %+v", next)
+			}
+		}
+		got, err := q.jobSnapshot(run.ID)
+		if err != nil || got.Hold == nil || got.Hold.Kind != memoryPressureRetryHold || got.Losses != 0 || got.InfrastructureRetries != 0 {
+			t.Fatalf("missing typed pressure hold: state=%s hold=%+v err=%v", got.State, got.Hold, err)
+		}
+		if got.AttemptHistory[1].PriorityStop.PoolPressure.FreeGB != 3 {
+			t.Fatal("release-only outcome lost the pressure decision")
+		}
+		other := sharedUnifiedMachine()
+		other.ID, other.HostID, other.Session = "alternate", "alternate", "alternate"
+		other.Capabilities = m.Capabilities
+		other.MemoryObservation = m.MemoryObservation
+		if next := assignedJob(machineCheck(t, q, other)); next == nil || next.Attempt != 3 {
+			t.Fatalf("another compatible host did not get the job: %+v", next)
+		}
+	}
+}
+
 func TestMemoryPoolShortageStopsLowestTierOverrun(t *testing.T) {
 	q, clock := fixture(t)
 	m := machine("pooled-safety", "cpu")

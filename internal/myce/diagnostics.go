@@ -213,6 +213,12 @@ func (c RuntimeCause) String() string {
 			available = fmt.Sprintf("%g", *d.Available)
 		}
 		text += fmt.Sprintf("; %s required=%g available=%s unit=%s envelope_source=%q host_gb=%g device_gb=%g", d.Subcheck, d.Required, available, d.Unit, d.EnvelopeSource, d.EnvelopeHostGB, d.EnvelopeDeviceGB)
+		if d.Subcheck == memoryWaitReason && d.Available != nil {
+			text += fmt.Sprintf(" room=%.3f keep=%.3f pending=%.3f", *d.Available-d.KeepGB-d.HeldGB, d.KeepGB, d.HeldGB)
+			if d.ResidentGB > 0 {
+				text += fmt.Sprintf(" own_resident_credit=%.3f", d.ResidentGB)
+			}
+		}
 	}
 	return text
 }

@@ -72,6 +72,7 @@ func (q *Queue) ResizeJobs(ctx context.Context, req ResizeJobsRequest) (ResizeJo
 			entry.Release, entry.Resize = "confirmed", audit
 			q.appendJobLedger(j, entry)
 			j.HostMemoryOverrideGB = req.HostMemoryGB
+			j.LaunchCapacityWait = nil // The prior worker refused a different demand.
 			j.Spec.Needs.HostMemoryGB = req.HostMemoryGB
 			limit := req.HostMemoryGB
 			j.Spec.MemoryLimitGB = &limit

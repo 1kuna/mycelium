@@ -83,6 +83,7 @@ var holdKinds = map[string]holdKind{
 	workerMemoryReleaseReason:     {ownerOperator, "worker upgrade required", "a compatible worker is available", "upgrade the worker"},
 	workerMemoryContainmentReason: {ownerOperator, "worker memory containment unavailable", "a compatible worker confirms containment", "check the worker memory slice"},
 	memoryWaitReason:              {ownerQueue, "waiting for physical memory", "enough memory is free and any earlier attempt has released", "wait; Mycelium retries admission automatically"},
+	memoryPressureRetryHold:       {ownerConsumer, "repeated host memory-pressure stops without saved progress", "another eligible host can run it, or the owner pauses and resumes after addressing the pressure", "inspect the attempt history and memory needs before retrying"},
 	"memory_capacity":             {ownerConsumer, "estimated memory exceeds eligible pool capacity", "an eligible pool can fit the job's estimate", "check the job's memory estimate and allowed machines"},
 	"checkpoint_root":             {ownerStorage, "saved progress storage is unavailable", "the queue's checkpoint root is reachable again", "restore the queue's checkpoint storage mount"},
 	checkpointTargetHold:          {ownerQueue, "resuming on the target that wrote its checkpoint", "a host of that target can take it, or none remains in the fleet", "wait; if its checkpoints resume correctly on other targets, declare resume_compatibility for them"},

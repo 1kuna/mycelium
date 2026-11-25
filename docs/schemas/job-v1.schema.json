@@ -88,6 +88,9 @@
         "required": {
           "type": "number"
         },
+        "resident_gb": {
+          "type": "number"
+        },
         "subcheck": {
           "type": "string"
         },
@@ -5649,6 +5652,46 @@
       },
       "type": "object"
     },
+    "PoolPressureDecision": {
+      "properties": {
+        "check": {
+          "type": "string"
+        },
+        "checkpoint_generation": {
+          "type": "integer"
+        },
+        "free_gb": {
+          "type": "number"
+        },
+        "keep_gb": {
+          "type": "number"
+        },
+        "next_sample_gb": {
+          "type": "number"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "pause_revision": {
+          "type": "integer"
+        },
+        "stop_horizon_gb": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "check",
+        "observed_at",
+        "free_gb",
+        "keep_gb",
+        "next_sample_gb",
+        "stop_horizon_gb",
+        "checkpoint_generation",
+        "pause_revision"
+      ],
+      "type": "object"
+    },
     "PreemptionPlacement": {
       "properties": {
         "device": {
@@ -5733,6 +5776,9 @@
         },
         "policy": {
           "$ref": "#/$defs/PriorityMatch"
+        },
+        "pool_pressure": {
+          "$ref": "#/$defs/PoolPressureDecision"
         },
         "victim": {
           "type": "string"

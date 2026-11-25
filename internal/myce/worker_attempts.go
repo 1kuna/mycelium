@@ -435,7 +435,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			}
 			a.mu.Unlock()
 		}
-		if p != nil && (report.Started || p.native != nil) {
+		if p != nil && (report.Started || p.native != nil || p.custodian != nil) {
 			report.CurrentHostMemory = w.currentAttemptHostMemory(p, a.job, s.state.Cgroup)
 		}
 		if s.state.Job != nil {

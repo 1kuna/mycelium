@@ -172,9 +172,13 @@ durability is required. Status comes from the running worker.
   If `myce host status HOST` reports some unreadable local extension
   registrations, qualification can still proceed for other digests. Use the
   job's own status for its exact digest and hold.
-- CPU work blocked by live RAM can report `memory_wait` with the current
-  room and the attempts that hold RAM. A `memory_wait` or occupied-card
+- Work blocked by live RAM can report `memory_wait` with room after the
+  reserve and other attempts' pending growth. A `memory_wait` or occupied-card
   `capacity` hold clears as room or custody becomes available.
+  `memory_pressure_retry` means the same host stopped the job twice for memory
+  pressure without saved progress. Check `myce status --history --json JOB_ID`
+  for the stop measurements. Another compatible host can run it. After
+  addressing the pressure, pause and resume the queued job to retry there.
   A unified-memory GPU can run one attempt per work family when measured
   overlap lowers that family's throughput. Other families can use remaining
   room under the ordinary memory and tier rules. Keep queued peers on their

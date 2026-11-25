@@ -3,6 +3,24 @@ package myce
 import "time"
 
 const memoryPressureCause = "memory_pressure"
+const memoryPressureRetryHold = "memory_pressure_retry"
+
+// One retry tests whether the first interruption was transient. A second stop
+// on the same pool without saved progress is evidence against repeating it.
+const poolPressureStopsWithoutProgress = 2
+
+// PoolPressureDecision captures the sample used to order the stop. The
+// completion-time host snapshot can already reflect the memory it released.
+type PoolPressureDecision struct {
+	Check         string    `json:"check"`
+	ObservedAt    time.Time `json:"observed_at"`
+	FreeGB        float64   `json:"free_gb"`
+	KeepGB        float64   `json:"keep_gb"`
+	NextSampleGB  float64   `json:"next_sample_gb"`
+	StopHorizonGB float64   `json:"stop_horizon_gb"`
+	Checkpoint    int64     `json:"checkpoint_generation"`
+	PauseRevision uint64    `json:"pause_revision"`
+}
 
 type poolAvailability struct {
 	session         string
@@ -40,33 +58,49 @@ func (q *Queue) observePoolAvailability(m *Machine, period time.Duration, receiv
 	q.poolAvailability[m.ID] = reading
 }
 
-func (q *Queue) memoryPoolShort(m *Machine, r poolAvailability) bool {
+func (q *Queue) memoryPoolShort(m *Machine, r poolAvailability) *PoolPressureDecision {
 	if !workerUsesMemoryPools(m) || m.Gone || q.unreported[m.ID] || !m.HostMemoryMeasured || m.HostMemoryError != "" || r.session != m.Session {
-		return false
+		return nil
 	}
 	if !q.workerFresh(m, q.clock.Now()) {
-		return false
+		return nil
+	}
+	d := PoolPressureDecision{ObservedAt: r.at, FreeGB: r.free, KeepGB: q.pooledKeep(m),
+		NextSampleGB: r.growth * r.period.Seconds(), StopHorizonGB: r.sustainedGrowth * (r.period + q.preemptionGrace()).Seconds()}
+	room := d.FreeGB - d.KeepGB
+	switch {
+	case room < 0:
+		d.Check = "reserve"
+	case room < d.NextSampleGB:
+		d.Check = "next_sample"
+	case room < d.StopHorizonGB:
+		d.Check = "stop_horizon"
 	}
 	if m.CapabilityProfile != nil && m.CapabilityProfile.OS == "darwin" && m.HostHealth != nil && len(m.HostHealth.History) > 0 {
 		if latest := m.HostHealth.History[len(m.HostHealth.History)-1]; latest.Error == "" && latest.Pressure > 1 {
-			return true
+			d.Check = "os_pressure"
 		}
 	}
-	room := r.free - q.pooledKeep(m)
-	// Act immediately below the reserve or if even the next sample could
-	// arrive too late. Use the sustained rate for the longer stop horizon.
-	return room < r.growth*r.period.Seconds() ||
-		room < r.sustainedGrowth*(r.period+q.preemptionGrace()).Seconds()
+	if d.Check == "" {
+		return nil
+	}
+	return &d
 }
 
 func (q *Queue) yieldPooledMemory() {
-	short := map[string]bool{}
+	short := map[string]*PoolPressureDecision{}
 	for id, r := range q.poolAvailability {
-		if m := q.s.Machines[id]; m != nil && r.at.After(q.poolLastStop[hostID(m)]) && q.memoryPoolShort(m, r) {
-			short[hostID(m)] = true
+		if m := q.s.Machines[id]; m != nil && r.at.After(q.poolLastStop[hostID(m)]) {
+			if d := q.memoryPoolShort(m, r); d != nil {
+				host := hostID(m)
+				if old := short[host]; old == nil || d.ObservedAt.After(old.ObservedAt) ||
+					d.ObservedAt.Equal(old.ObservedAt) && d.FreeGB-d.KeepGB < old.FreeGB-old.KeepGB {
+					short[host] = d
+				}
+			}
 		}
 	}
-	for host := range short {
+	for host, decision := range short {
 		var victim *Job
 		production, pending := 0, false
 		for _, j := range q.liveJobs() {
@@ -94,7 +128,7 @@ func (q *Queue) yieldPooledMemory() {
 		if pending || victim == nil || jobClass(victim.Spec) == "production" && production < 2 {
 			continue
 		}
-		q.stopForPoolPressure(victim, "host/"+host)
+		q.stopForPoolPressure(victim, "host/"+host, decision)
 		if q.poolLastStop == nil {
 			q.poolLastStop = map[string]time.Time{}
 		}
@@ -129,16 +163,63 @@ func (q *Queue) poolPressureBefore(a, b *Job) bool {
 	return a.ID < b.ID
 }
 
-func (q *Queue) stopForPoolPressure(victim *Job, demand string) {
+func (q *Queue) stopForPoolPressure(victim *Job, demand string, decision *PoolPressureDecision) {
 	q.touchJob(victim.ID)
+	if decision != nil {
+		decision.Checkpoint, decision.PauseRevision = poolPressureCheckpoint(victim), victim.PauseRevision
+	}
 	for i := range victim.Copies {
 		c := &victim.Copies[i]
 		if c.Attempt == victim.Attempt && c.Machine == victim.Machine && c.Session == victim.Session {
 			c.StopCause = memoryPressureCause
-			c.PriorityStop = &PriorityPreemption{Cause: memoryPressureCause, Demand: demand, Victim: victim.ID, Policy: q.priorityMatch(victim.Spec)}
+			c.PriorityStop = &PriorityPreemption{Cause: memoryPressureCause, Demand: demand, Victim: victim.ID, Policy: q.priorityMatch(victim.Spec), PoolPressure: decision}
 			c.Recoverable = false
 		}
 	}
 	q.stopFor(victim, "memory pool", "memory")
 	victim.Reason = memoryPressureCause
+}
+
+func poolPressureCheckpoint(j *Job) int64 {
+	if !j.Spec.Resumable {
+		return 0
+	}
+	generation := max(0, j.Progress, j.LocalCheckpointGeneration)
+	if save := bestFileCheckpoint(j); save != nil {
+		generation = max(generation, save.Generation)
+	}
+	return generation
+}
+
+func poolPressureReadmissionHold(j *Job, m *Machine) *Hold {
+	if j.State != "queued" {
+		return nil
+	}
+	host := "host/" + hostID(m)
+	progress := poolPressureCheckpoint(j)
+	stops := 0
+	for i := len(j.Copies) - 1; i >= 0; i-- {
+		stop := j.Copies[i].PriorityStop
+		if stop == nil || stop.Cause != memoryPressureCause || stop.Demand != host || stop.PoolPressure == nil {
+			continue
+		}
+		d := stop.PoolPressure
+		if d.PauseRevision != j.PauseRevision {
+			break
+		}
+		if stops == 0 && progress > d.Checkpoint {
+			break // A checkpoint landed after issuing the last stop.
+		}
+		if stops == 0 {
+			progress = d.Checkpoint
+		}
+		if d.Checkpoint != progress {
+			break
+		}
+		stops++
+		if stops == poolPressureStopsWithoutProgress {
+			return newHold(memoryPressureRetryHold, "two host memory-pressure stops at the same checkpoint generation")
+		}
+	}
+	return nil
 }

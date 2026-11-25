@@ -96,6 +96,12 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 			if hold := workerMemoryHold(m); hold != nil {
 				block(hold.Kind, hold.Reason)
 			}
+			if hold := poolPressureReadmissionHold(j, m); hold != nil {
+				block(hold.Kind, hold.Detail)
+				reasons = append(reasons, m.ID+": "+strings.Join(blocked, "; "))
+				specific = true
+				continue
+			}
 			// A reservation cannot explain a job that cannot use this target's
 			// software or network. Preserve those actionable reasons instead.
 			if len(blocked) == 0 {

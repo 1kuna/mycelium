@@ -79,6 +79,26 @@ from the previous release keep the typed figure as the charge. With nothing
 learned the typed figure is the charge. The envelope shows `basis: learned`,
 `charge_host_gb` and `limit_host_gb` ([status](status.md)).
 
+### Pooled launch and pressure retries
+
+The worker compares remaining attempt RAM demand with physical room after its
+reserve and the other attempts' pending growth. Fresh nonreclaimable RAM owned
+by that attempt counts toward its demand, including RAM held by helpers before
+main starts. The configured allowance still covers the full attempt and its
+peers. When a measured refusal overrides placement, the queue requires physical
+room to improve by the measured deficit before reoffering that route. Exact
+release and ordinary placement checks still apply.
+
+On Linux, the queue's host pool stop compares physical headroom above its
+reserve with projected loss of headroom through the next sample or through
+the stop grace when the decline persists. The stop record retains both
+comparisons. A stop can interrupt an attempt below its own charge. The first
+stop permits one automatic same-host retry to account for transient host
+contention. A second stop at the same checkpoint generation holds that host
+for the job, preventing another restart with the same saved progress. Another
+eligible host can still run it, and the owner can pause and resume the job
+after addressing the pressure. See [status](status.md) for the hold and evidence.
+
 ### First runs start at their floor
 
 A CPU job with `memory: auto` and nothing learned is charged its floor on its

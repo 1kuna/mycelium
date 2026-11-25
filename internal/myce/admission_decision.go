@@ -312,6 +312,7 @@ const (
 	predicateHostBackfill         AdmissionPredicate = "host_backfill"
 	predicateInventory            AdmissionPredicate = "inventory"
 	predicateLaunchCapacity       AdmissionPredicate = "launch_capacity"
+	predicateMemoryPressureRetry  AdmissionPredicate = memoryPressureRetryHold
 	predicateLeaving              AdmissionPredicate = "leaving"
 	predicateLogPolicy            AdmissionPredicate = "log_policy"
 	predicateMachineCapacity      AdmissionPredicate = "machine_capacity"

@@ -193,10 +193,22 @@ target pool's allowance. A temporary shortage uses `memory_wait` with the RAM
 or card comparison. An occupied card reports queue-owned `capacity` and names
 the holder when known. If every compatible pool is too small even when empty,
 `memory_capacity` identifies the limiting estimates and allowances.
+For a launch refusal, `execution_cause.admission.available` is the worker's
+allowance-limited physical reading before subtracting `keep_gb` and other
+attempts' outstanding growth (`held_gb`). The text shows the resulting room.
+`required` is the remaining demand after any fresh, same-attempt resident credit
+(`resident_gb`). A measured refusal holds the route until the queue observes
+enough improvement in physical room to cover the measured deficit.
 
 Attempt history distinguishes OOM/resource-limit stops from entry coverage
 findings. `myce status JOB_ID` prints each stopped attempt's retained memory
 bound in GiB, available cgroup/non-reclaimable peaks and kernel event counts.
+The `priority_stop.pool_pressure` record shows the headroom, reserve and
+forecast at the time a host pool stop was ordered. `stop_observation` is sampled
+later and can already show recovered memory. Two stops on the same host without
+checkpoint progress yield `memory_pressure_retry` for that host. An eligible
+alternative can still run the job. After addressing the pressure, the owner can
+pause and resume the queued job to retry on that host.
 Attempt-owned limits never mark an unproven machine type incompatible; auto
 memory recovery and authored ceilings keep their existing policies.
 `myce logs JOB_ID` labels every chunk by attempt, including the appended
@@ -216,7 +228,7 @@ maps link to their element types; timestamps are JSON time strings.
 | --- | --- |
 | <a id="fields-acceleratorprofile"></a>**AcceleratorProfile** | `type`: string; `name?`: string; `memory_bytes?`: number |
 | <a id="fields-admissiondecision"></a>**AdmissionDecision** | `at`: timestamp; `checkin_machine`: string; `checkin_session`: string; `device?`: string; `outcome`: string; `stage`: string; `predicate`: string; `hold?`: [Hold](#fields-hold); `opportunity_seconds`: number |
-| <a id="fields-admissiondetail"></a>**AdmissionDetail** | `subcheck`: string; `unit`: string; `required`: number; `available?`: number; `unavailable?`: boolean; `keep_gb?`: number; `held_gb?`: number; `envelope_source?`: string; `envelope_host_gb`: number; `envelope_device_gb`: number; `contributors?`: array of [HostGrowthContributor](#fields-hostgrowthcontributor); `memory_room?`: [MemoryRoomDecision](#fields-memoryroomdecision) |
+| <a id="fields-admissiondetail"></a>**AdmissionDetail** | `subcheck`: string; `unit`: string; `required`: number; `available?`: number; `unavailable?`: boolean; `keep_gb?`: number; `held_gb?`: number; `resident_gb?`: number; `envelope_source?`: string; `envelope_host_gb`: number; `envelope_device_gb`: number; `contributors?`: array of [HostGrowthContributor](#fields-hostgrowthcontributor); `memory_room?`: [MemoryRoomDecision](#fields-memoryroomdecision) |
 | <a id="fields-admissionwaitevidence"></a>**AdmissionWaitEvidence** | `first?`: [AdmissionWaitSnapshot](#fields-admissionwaitsnapshot); `latest?`: [AdmissionWaitSnapshot](#fields-admissionwaitsnapshot); `transitions?`: array of [AdmissionWaitSnapshot](#fields-admissionwaitsnapshot); `dropped?`: number; `history_budget_bytes`: number; `history_bytes`: number; `capture_gaps?`: number; `deferred_at?`: string; `budget_unknown?`: boolean |
 | <a id="fields-admissionwaitholder"></a>**AdmissionWaitHolder** | `key`: string; `kind`: string; `job?`: string; `machine`: string; `session`: string; `attempt?`: number; `engine_attempt?`: string; `devices?`: array of string; `tier?`: [PriorityMatch](#fields-prioritymatch); `cores`: number; `declared_host_gb?`: number; `admission_host_gb?`: number; `charged_host_gb?`: number; `remaining_growth_gb?`: number; `forecast_host_gb?`: number; `sample_age_seconds?`: number; `sample_fresh`: boolean; `enforced_host_gb?`: number; `enforcement_basis`: string; `preemptible`: boolean; `preemption_reason`: string |
 | <a id="fields-admissionwaitplan"></a>**AdmissionWaitPlan** | `at`: timestamp; `preemption`: [WaitPreemption](#fields-waitpreemption); `concurrency?`: number; `required_cores`: number; `required_host_gb`: number; `required_device_gb`: number |
@@ -413,6 +425,7 @@ maps link to their element types; timestamps are JSON time strings.
 | <a id="fields-placementdecision"></a>**PlacementDecision** | `origin`: string; `attempt`: number; `assigned_at`: timestamp; `host`: string; `devices?`: array of string; `host_choice`: string; `device_choice`: string; `reason`: string; `limited_by`: array of string |
 | <a id="fields-placementintent"></a>**PlacementIntent** | `origin`: string; `scope`: string; `host_constraint`: string; `device_constraint`: string; `targets?`: array of [ExecutionTarget](#fields-executiontarget); `recipe_device_targets?`: array of [ExecutionTarget](#fields-executiontarget); `required_backends?`: array of string; `preferred_backends?`: array of string; `environment`: [PlacementCoverage](#fields-placementcoverage); `qualification`: string; `parity`: string |
 | <a id="fields-platform"></a>**Platform** | `required?`: array of string; `preferred?`: array of string; `any?`: boolean |
+| <a id="fields-poolpressuredecision"></a>**PoolPressureDecision** | `check`: string; `observed_at`: timestamp; `free_gb`: number; `keep_gb`: number; `next_sample_gb`: number; `stop_horizon_gb`: number; `checkpoint_generation`: number; `pause_revision`: number |
 | <a id="fields-predictionerror"></a>**PredictionError** | `job_id`: string; `attempt`: number; `work`: string; `basis`: string; `reserved_host_gb`: number; `accepted_host_peak_gb`: number; `host_error_gb`: number; `reserved_device_gb`: number; `accepted_device_peak_gb`: number; `device_error_gb`: number; `predicted_seconds`: number; `actual_seconds`: number; `duration_error_seconds`: number |
 | <a id="fields-preemption"></a>**Preemption** | `at`: timestamp; `job`: string; `project`: string; `for`: string |
 | <a id="fields-preemptionplacement"></a>**PreemptionPlacement** | `machine`: string; `session`: string; `device`: string; `releases?`: array of string |
@@ -420,7 +433,7 @@ maps link to their element types; timestamps are JSON time strings.
 | <a id="fields-prioritymatch"></a>**PriorityMatch** | `tier`: string; `index`: number; `selector`: string; `revision`: number |
 | <a id="fields-prioritypolicy"></a>**PriorityPolicy** | `version`: number; `tiers`: array of [PriorityTier](#fields-prioritytier); `projects`: map of [ProjectPolicy](#fields-projectpolicy); `models?`: [ModelPolicy](#fields-modelpolicy); `hosts?`: map of [HostPolicy](#fields-hostpolicy) |
 | <a id="fields-prioritypolicyrecord"></a>**PriorityPolicyRecord** | `revision`: number; `policy`: [PriorityPolicy](#fields-prioritypolicy); `warnings?`: array of string |
-| <a id="fields-prioritypreemption"></a>**PriorityPreemption** | `cause`: string; `demand`: string; `victim`: string; `policy`: [PriorityMatch](#fields-prioritymatch) |
+| <a id="fields-prioritypreemption"></a>**PriorityPreemption** | `cause`: string; `demand`: string; `victim`: string; `policy`: [PriorityMatch](#fields-prioritymatch); `pool_pressure?`: [PoolPressureDecision](#fields-poolpressuredecision) |
 | <a id="fields-prioritytier"></a>**PriorityTier** | `name`: string; `selectors`: array of string |
 | <a id="fields-probeobservation"></a>**ProbeObservation** | `period_seconds`: number; `cost_seconds`: number; `valid_seconds`: number |
 | <a id="fields-productionbackoff"></a>**ProductionBackoff** | `last_at`: timestamp; `until?`: timestamp |

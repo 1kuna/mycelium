@@ -20,6 +20,39 @@ func capacityResult(j *Job, pending bool) Result {
 	return r
 }
 
+func TestLaunchCapacityPooledRefusalRequiresMeasuredImprovement(t *testing.T) {
+	q, clock := fixture(t)
+	m := cpuMachine("pooled-relaunch", "pooled-relaunch", "cpu", 8, 60)
+	m.Devices = []MachineDevice{}
+	m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
+	queued := submit(t, q, cpuSpec(1, 36))
+	offer := assignedJob(machineCheck(t, q, m))
+	if offer == nil || offer.ID != queued.ID {
+		t.Fatal("initial offer missing")
+	}
+	refusal := capacityResult(offer, false)
+	refusal.ExecutionCause.Admission = admissionDetail(checkMemoryPool(36, 93.435, 4, 59.906, true), *offer)
+	if err := q.Complete(refusal); err != nil {
+		t.Fatal(err)
+	}
+	got, err := q.jobSnapshot(queued.ID)
+	if err != nil || got.Hold == nil || got.Hold.Kind != memoryWaitReason || !strings.Contains(got.Hold.Detail, "29.529 GiB") {
+		t.Fatalf("status did not explain the comparison: hold=%+v err=%v", got.Hold, err)
+	}
+	for _, room := range []float64{59.8, 60.5, 66.4} {
+		clock.Advance(time.Second)
+		m.HostAvailableMemoryGB = room
+		if next := assignedJob(machineCheck(t, q, m)); next != nil {
+			t.Fatalf("only %.3f GiB of improvement reopened a 6.471 GiB deficit", room-60)
+		}
+	}
+	m.HostAvailableMemoryGB = 66.5
+	clock.Advance(time.Second)
+	if next := assignedJob(machineCheck(t, q, m)); next == nil || next.ID != queued.ID || next.Attempt != 2 {
+		t.Fatalf("sufficient measured improvement did not reopen admission: %+v", next)
+	}
+}
+
 // Older workers label the post-Started local refusal io_error. Positive
 // no-main-exec evidence still requires an uncharged wait, not a lost attempt.
 func TestLaunchCapacityLateLegacyRefusal(t *testing.T) {

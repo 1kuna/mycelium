@@ -17,6 +17,7 @@ type AdmissionDetail struct {
 	Unavailable      bool                    `json:"unavailable,omitempty"`
 	KeepGB           float64                 `json:"keep_gb,omitempty"`
 	HeldGB           float64                 `json:"held_gb,omitempty"`
+	ResidentGB       float64                 `json:"resident_gb,omitempty"`
 	EnvelopeSource   string                  `json:"envelope_source,omitempty"`
 	EnvelopeHostGB   float64                 `json:"envelope_host_gb"`
 	EnvelopeDeviceGB float64                 `json:"envelope_device_gb"`
@@ -50,6 +51,10 @@ func (e *admissionError) Error() string {
 	available := "unavailable"
 	if e.detail.Available != nil {
 		available = fmt.Sprintf("%g %s", *e.detail.Available, e.detail.Unit)
+		if check == memoryWaitReason {
+			available = fmt.Sprintf("%.3f GiB after %.3f GiB reserve and %.3f GiB pending growth (%.3f GiB before deductions)",
+				*e.detail.Available-e.detail.KeepGB-e.detail.HeldGB, e.detail.KeepGB, e.detail.HeldGB, *e.detail.Available)
+		}
 	}
 	return fmt.Sprintf("%s: %s need %g %s, available %s", errWorkerMemory, check, e.detail.Required, e.detail.Unit, available)
 }
@@ -98,6 +103,9 @@ func safeAdmissionDetail(d *AdmissionDetail) *AdmissionDetail {
 	out := *d
 	if d.Subcheck != memoryWaitReason || !validMemoryValue(d.KeepGB) || !validMemoryValue(d.HeldGB) {
 		out.KeepGB, out.HeldGB = 0, 0
+	}
+	if d.Subcheck != memoryWaitReason || !validMemoryValue(d.ResidentGB) {
+		out.ResidentGB = 0
 	}
 	out.MemoryRoom = safeMemoryRoom(d.MemoryRoom)
 	out.Contributors = nil

@@ -14,8 +14,8 @@ type LaunchCapacityWait struct {
 	Attempt   int              `json:"attempt"`
 	Evidence  string           `json:"evidence"`
 	Admission *AdmissionDetail `json:"admission,omitempty"`
-	// Required surplus above the candidate's charge in the queue's physical
-	// RAM ledger. It can be signed because queue room can already be short.
+	// Required surplus above Admission.Required in the queue's RAM ledger.
+	// Preserve the queue-to-worker room difference measured at refusal.
 	LiveGrowthSurplusGB *float64 `json:"live_growth_surplus_gb,omitempty"`
 }
 
@@ -80,9 +80,37 @@ func (q *Queue) recordLaunchCapacityWait(j *Job, r Result) {
 		}
 		if !q.unreported[m.ID] {
 			wait.Evidence = q.launchCapacityEvidence(j, m)
+			q.captureLaunchMemoryThreshold(j, m, &wait)
 		}
 		j.LaunchCapacityWait[key] = wait
 	}
+}
+
+func (q *Queue) captureLaunchMemoryThreshold(j *Job, m *Machine, wait *LaunchCapacityWait) {
+	d := wait.Admission
+	if d == nil || d.Subcheck != memoryWaitReason || d.Available == nil {
+		return
+	}
+	room := *d.Available - d.KeepGB - d.HeldGB
+	if room >= d.Required {
+		return
+	}
+	capacity, _, known, _ := q.hostLiveCapacity(m)
+	if !known {
+		return
+	}
+	ledger := q.hostMemoryLedger(m)
+	growth := ledger.GrowthGB
+	for _, owner := range ledger.Owners {
+		if owner.Execution != nil && owner.Execution.ID == j.ID {
+			growth -= owner.GrowthGB
+		}
+	}
+	// Calibrate against the physical arm. A static allowance can cap signed
+	// scheduler room even as the physical shortage recovers. The ordinary
+	// planner still enforces the allowance before it reoffers the job.
+	surplus := capacity - growth - room
+	wait.LiveGrowthSurplusGB = &surplus
 }
 
 func (q *Queue) waitLaunchCapacity(j *Job, r Result) {
@@ -124,15 +152,23 @@ func (q *Queue) launchCapacityBlocked(j *Job, m *Machine) bool {
 	if !ok {
 		return false
 	}
+	if h.LiveGrowthSurplusGB != nil && h.Session != m.Session {
+		return false // Let the replacement worker make its own measurements.
+	}
 	if h.Evidence == "" {
 		// Refused before the first post-restart report. Only a committed
 		// pass after that report records the baseline; views stay blocked.
 		if !q.unreported[m.ID] && q.records != nil && q.records.updating {
 			q.touchJob(j.ID)
 			h.Evidence = q.launchCapacityEvidence(j, m)
+			q.captureLaunchMemoryThreshold(j, m, &h)
 			j.LaunchCapacityWait[targetKey(m)] = h
 		}
 		return true
+	}
+	if h.LiveGrowthSurplusGB != nil && h.Admission != nil {
+		ledger := q.hostMemoryLedgers[m.ID]
+		return ledger == nil || !ledger.AvailableKnown || ledger.CapacityGB-ledger.GrowthGB < h.Admission.Required+*h.LiveGrowthSurplusGB
 	}
 	return h.Evidence == q.launchCapacityEvidence(j, m)
 }
@@ -148,9 +184,9 @@ func launchCapacityHold(j *Job) *Hold {
 		if d := w.Admission; d.Subcheck == memoryWaitReason {
 			available := "unknown"
 			if d.Available != nil {
-				available = fmt.Sprintf("%.3f GiB", *d.Available)
+				available = fmt.Sprintf("%.3f GiB after reserve and pending growth (%.3f GiB before deductions)", *d.Available-d.KeepGB-d.HeldGB, *d.Available)
 			}
-			return newHold(memoryWaitReason, fmt.Sprintf("needs %.3f GiB, available %s, keep %.3f GiB, outstanding reservations %.3f GiB", d.Required, available, d.KeepGB, d.HeldGB))
+			return newHold(memoryWaitReason, fmt.Sprintf("last launch needed %.3f GiB, available %s, keep %.3f GiB, outstanding reservations %.3f GiB", d.Required, available, d.KeepGB, d.HeldGB))
 		}
 	}
 	return newHold("launch_capacity", detail)
@@ -192,7 +228,7 @@ func (q *Queue) queuedCapacityStatus(j *Job, scans ...*placementScan) (waiting, 
 			if !fitsResources(c, &room, room.TotalMemoryGB) {
 				continue
 			}
-			if drained || !hostFits(m, c.Spec.Needs.MemoryGB, c.Spec.Needs.HostMemoryGB) || !cpuFits(c, m) || !q.batchSlotFree(m, c) || m.FreeMemoryGB < c.Spec.Needs.MemoryGB || !q.poolCustodyAllows(c, m) {
+			if drained || poolPressureReadmissionHold(j, m) != nil || !hostFits(m, c.Spec.Needs.MemoryGB, c.Spec.Needs.HostMemoryGB) || !cpuFits(c, m) || !q.batchSlotFree(m, c) || m.FreeMemoryGB < c.Spec.Needs.MemoryGB || !q.poolCustodyAllows(c, m) {
 				waiting = true
 			} else if pooledMemory(c) && !q.hostBackfillAllows(c, m, q.hostBackfillFences(scan)[hostID(m)]) {
 				waiting = true
