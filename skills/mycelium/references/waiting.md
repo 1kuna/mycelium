@@ -149,6 +149,14 @@ snapshot the host has not cached. The reason names the volume, `disk: N GiB need
 Keep the same job; it starts when a host frees space or a larger one joins.
 Lowering the hint below a measured peak changes nothing, because the measured peak wins.
 
+`staging_storage_full` means a worker refused an input before the command
+started and every currently eligible route has reported a staging storage
+failure. Mycelium keeps the same job and can place it on an eligible host that
+has not refused it. The refusal survives restart. Ask the worker owner to
+inspect the retained staging cause and restore space or cache headroom. Then
+pause and explicitly resume the same job to allow a fresh try on affected
+hosts. If it is already paused, resume it after repair.
+
 Mycelium's own staging, hashing and checkpoint I/O failures withhold work that
 depends on the affected network root, through the host-health reason and alerts;
 independent local work stays eligible. Data faults clear only after three fresh

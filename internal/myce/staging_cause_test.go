@@ -97,6 +97,16 @@ func TestStagingCauseClassificationAndRetry(t *testing.T) {
 			if err := q.Complete(stale); !errors.Is(err, ErrStale) {
 				t.Fatal("stale cause accepted", err)
 			}
+			if tc.reason == "ENOSPC" {
+				got, err := w.Client.GetJob(context.Background(), submitted.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.Hold == nil || got.Hold.Kind != stagingStorageHold {
+					t.Fatalf("missing storage hold: %+v", got.Hold)
+				}
+				return
+			}
 			if tc.retry {
 				for retry := 1; retry <= DefaultProductionInfrastructureRetries; retry++ {
 					clock.Advance(time.Second)

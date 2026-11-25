@@ -1,8 +1,81 @@
 package myce
 
-import "slices"
+import (
+	"fmt"
+	"slices"
+)
 
 const stagingHostRetryHold = "staging_host_retry"
+const stagingStorageHold = "staging_storage_full"
+
+func stagingStorageFull(c *RuntimeCause) bool {
+	return c != nil && c.Operation == "input_staging" && c.Predicate == "" &&
+		(c.Class == "storage_full" || c.Class == "resource_limit" && c.Staging != nil &&
+			(c.Staging.Error == "cache_space" || c.Staging.Error == "cache_limit"))
+}
+
+func stagingStorageFailure(j *Job, h *AttemptOutcome) bool {
+	return h.Attempt > j.StagingStorageRetryAfter && h.State == "queued" &&
+		h.Interrupted && stagingStorageFull(h.ExecutionCause)
+}
+
+func pendingStagingStorageFailure(j *Job) bool {
+	for i := range j.AttemptHistory {
+		if stagingStorageFailure(j, &j.AttemptHistory[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// Keep the refusal on the physical host across worker and queue restarts.
+// Neither a new session nor aggregate free space proves that the refusing
+// cache, filesystem or quota has room for this input.
+func (q *Queue) stagingStorageHostHold(j *Job, m *Machine) *Hold {
+	for i := len(j.AttemptHistory) - 1; i >= 0; i-- {
+		h := &j.AttemptHistory[i]
+		if !stagingStorageFailure(j, h) {
+			continue
+		}
+		host := h.Machine
+		if h.Placement != nil && h.Placement.Host != "" {
+			host = h.Placement.Host
+		} else if worker := q.s.Machines[host]; worker != nil {
+			host = hostID(worker)
+		}
+		if host == hostID(m) {
+			return newHold(stagingStorageHold, fmt.Sprintf("%s: attempt %d: %s", host, h.Attempt, h.ExecutionCause))
+		}
+	}
+	return nil
+}
+
+func (q *Queue) stagingStorageWait(j *Job, machines []*Machine) *Hold {
+	if !pendingStagingStorageFailure(j) {
+		return nil
+	}
+	var hold *Hold
+	for _, m := range machines {
+		if q.maintenanceBlocked(hostID(m)) || !q.structuralDemandPolicyIgnoringMaintenance(j, m) ||
+			!fitsWithoutHostMemory(j, m, max(m.TotalMemoryGB, m.FreeMemoryGB)) {
+			continue
+		}
+		h := q.stagingStorageHostHold(j, m)
+		if h == nil {
+			return nil // An alternate route can still accept this job.
+		}
+		hold = h
+	}
+	return hold
+}
+
+// An explicit owner resume after repair grants one new staging try per host.
+// Keep the original causes in attempt history.
+func clearStagingStorageHolds(j *Job) {
+	if pendingStagingStorageFailure(j) {
+		j.StagingStorageRetryAfter = j.Attempt
+	}
+}
 
 // Hosts where this job lost an attempt to input staging or checkpoint storage. Retained attempt
 // history is the evidence, so the preference survives a queue restart without

@@ -191,7 +191,7 @@ func safeStagingCause(d *StagingCause) *StagingCause {
 	if out.Errno < 0 {
 		out.Errno = 0
 	}
-	if !contains([]string{"shared_input_cache", "file_cache", "disk_free_floor"}, out.Capacity) || out.RequiredBytes < 0 || out.AvailableBytes < 0 || out.LimitBytes < 0 {
+	if !contains([]string{"shared_input_cache", "model_snapshot_cache", "file_cache", "disk_free_floor"}, out.Capacity) || out.RequiredBytes < 0 || out.AvailableBytes < 0 || out.LimitBytes < 0 {
 		out.Capacity = ""
 		out.RequiredBytes, out.AvailableBytes, out.LimitBytes = 0, 0, 0
 	}

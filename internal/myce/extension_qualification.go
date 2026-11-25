@@ -270,7 +270,8 @@ func (q *Queue) extensionQualificationDemands(m *Machine, only *Extension) map[s
 // ran. The check, once submitted, still passes every admission hold itself.
 // Dead-end judgements use the same view: a busy host is still a host.
 func (q *Queue) structuralDemandPolicy(j *Job, m *Machine) bool {
-	return !q.maintenanceBlocked(hostID(m)) && q.structuralDemandPolicyIgnoringMaintenance(j, m)
+	return !q.maintenanceBlocked(hostID(m)) && q.structuralDemandPolicyIgnoringMaintenance(j, m) &&
+		(j.State != "queued" || q.stagingStorageHostHold(j, m) == nil)
 }
 
 func (q *Queue) structuralDemandPolicyIgnoringMaintenance(j *Job, m *Machine) bool {

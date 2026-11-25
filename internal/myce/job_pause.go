@@ -89,6 +89,7 @@ func (q *Queue) changeJobPause(id string, request *PauseJobRequest, revision uin
 				return &HTTPError{Status: 409, Code: "job_pause_revision_conflict", Message: "resume requires the current pause revision; parent-owned children resume with their parent"}
 			}
 			q.resumeJob(j)
+			clearStagingStorageHolds(j)
 		}
 		q.settleMaintenance()
 		copy := cloneJob(j)
