@@ -1082,7 +1082,7 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 			capable := false
 			refusals := map[string]bool{}
 			for _, m := range q.s.Machines {
-				if m.Gone {
+				if m.Gone || !s.allowsMachine(m.ID) || !q.projectAllows(s.Project, m.ID) {
 					continue
 				}
 				refusal := ephemeralWorkerRefusal(s, m)
@@ -1096,7 +1096,7 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 				if len(refusals) == 0 {
 					refusals[ephemeralRequirements] = true
 				}
-				return rejectFieldRule("job_worker_data_unsupported", errors.New("no worker advertises "+s.ephemeralRequiredCapability()+": "+strings.Join(slices.Sorted(maps.Keys(refusals)), "; ")))
+				return rejectFieldRule("job_worker_data_unsupported", errors.New("no permitted worker advertises "+s.ephemeralRequiredCapability()+": "+strings.Join(slices.Sorted(maps.Keys(refusals)), "; ")))
 			}
 		}
 		if s.OutputDelivery == asyncNAS {
@@ -2098,7 +2098,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 					}
 					break
 				}
-				if c.Recovering || q.maintenanceBlocked(hostID(&m)) || !logPolicyFits(j.Spec.Logs, &m) || !sharedInputsFit(j.Spec, &m) || !q.checkpointReady(j, &m) {
+				if c.Recovering || q.maintenanceBlocked(hostID(&m)) || !logPolicyFits(j.Spec.Logs, &m) || !workerDataFits(j.Spec, &m) || !sharedInputsFit(j.Spec, &m) || !q.checkpointReady(j, &m) {
 					return nil
 				}
 				out := cloneJob(j)

@@ -66,6 +66,10 @@ func ephemeralWorkerRefusal(s Spec, m *Machine) string {
 	return ""
 }
 
+func workerDataFits(s Spec, m *Machine) bool {
+	return !s.ephemeral() || ephemeralWorkerRefusal(s, m) == ""
+}
+
 // The policy opts into the ci boundary, including extension-owned executions.
 func validateWorkerData(s Spec) error {
 	if s.WorkerData == "" {
@@ -385,6 +389,9 @@ func cloneCleanup(c *WorkerDataCleanup) *WorkerDataCleanup {
 // logs stay until delivery. Recovery calls this same idempotent state machine.
 func (w Worker) finishEphemeralAttempt(ctx context.Context, s *workerStore, connected bool) (bool, error) {
 	j, r := *s.state.Job, *s.state.Result
+	if !attemptRecordFor(&j, w.Machine.ID).ownsResult(&r) {
+		return false, errors.New("mismatched result; ephemeral data retained")
+	}
 	if r.ReleasePending || s.extensionFiles.inFlight() {
 		return false, errors.New("attempt writers still held")
 	}
@@ -439,9 +446,12 @@ func (w Worker) finishEphemeralAttempt(ctx context.Context, s *workerStore, conn
 		if !confirmed {
 			return false, errors.New("exact result acceptance is unconfirmed; local bytes retained")
 		}
+		prior := s.state.Result
 		s.state.Result = &r
 		s.state.WorkerDataAccepted = true
 		if err = s.save(); err != nil {
+			s.state.Result = prior
+			s.state.WorkerDataAccepted = false
 			return false, err
 		}
 	}

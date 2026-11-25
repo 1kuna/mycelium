@@ -91,8 +91,14 @@ sizing. Use a pin only for a [hard requirement](references/submit.md#explicit-pl
   upstream client. The queue copies weights when a model loads. Set
   `idle_timeout` to control retention.
 - [Ephemeral worker data](https://github.com/1kuna/mycelium/blob/main/docs/files.md#ephemeral-worker-data)
-  covers compatibility, cleanup receipts and release. Check the cleanup receipt
-  for the exact attempt before claiming local removal.
+  supports offline, non-resumable commands and extensions with declared outputs.
+  Set `advanced: {worker_data: ephemeral}` and supply payload through managed
+  inputs. Extension sidecars and dependency inputs use the same private attempt
+  tree. A permitted Linux worker must advertise `worker_data_ephemeral_v2`;
+  `job_worker_data_unsupported` reports missing host qualification or an
+  unsupported job setting. Before claiming local removal, verify the exact
+  attempt's `worker_data_cleanup.state: complete` and confirmed release in
+  `myce status JOB_ID --history --json`.
 - [Disk needs](references/submit.md#disk-needs) covers first-run sizing for
   large scratch, unknown input/output sizes and checkpoint storage. Use
   `MYCE_CPUS` for thread pools and `TMPDIR` or `MYCE_SCRATCH_DIR` for scratch.
