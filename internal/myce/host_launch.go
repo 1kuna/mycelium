@@ -334,11 +334,8 @@ func (w Worker) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 		}
 		return errWorkerStartAuthorization
 	}
-	if l.Kind == "batch" && w.batchAdmission != nil {
-		done := w.launchTiming.within(launchAdmission)
-		err := w.batchAdmission(ctx, l)
-		done()
-		if err != nil {
+	if l.Kind == "batch" {
+		if err := w.checkLocalBatchAdmission(l); err != nil {
 			return err
 		}
 	}
@@ -346,6 +343,14 @@ func (w Worker) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 		return err
 	}
 	return w.checkAvailability()
+}
+
+func (w Worker) checkLocalBatchAdmission(l HostLaunch) error {
+	if w.batchAdmission == nil {
+		return nil
+	}
+	defer w.launchTiming.within(launchAdmission)()
+	return w.batchAdmission(w.launchContext(), l)
 }
 
 type launchGateKey struct{}

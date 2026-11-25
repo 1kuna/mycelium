@@ -745,13 +745,21 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 		return g.recordInfrastructure(launchRefused, m.Name, "", err)
 	}
 	l := HostLaunch{Machine: g.worker.Machine.ID, Session: g.session, Kind: "batch", Key: g.p.job.ID, Attempt: strconv.Itoa(g.p.job.Attempt)}
-	if err := g.worker.authorizeLaunch(l); err != nil {
-		return g.recordInfrastructure(launchRefused, m.Name, "", err)
-	}
 	if m.Name == "main" {
+		// Started already checks the live batch launch fences. Keep the local
+		// admission check before committing Started, and the separate exec gate
+		// below after the main process has been forked and its custody saved.
+		if err := g.worker.checkAvailability(); err != nil {
+			return g.recordInfrastructure(launchRefused, m.Name, "", err)
+		}
+		if err := g.worker.checkLocalBatchAdmission(l); err != nil {
+			return g.recordInfrastructure(launchRefused, m.Name, "", err)
+		}
 		if err := g.worker.authorizeStart(g.p.job, g.session, g.dir); err != nil {
 			return g.recordInfrastructure(launchRefused, m.Name, "", err)
 		}
+	} else if err := g.worker.authorizeLaunch(l); err != nil {
+		return g.recordInfrastructure(launchRefused, m.Name, "", err)
 	}
 	g.p.mu.Lock()
 	defer g.p.mu.Unlock()
