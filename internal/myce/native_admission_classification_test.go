@@ -3,9 +3,11 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -26,7 +28,16 @@ func TestNativeMemberAdmissionClassification(t *testing.T) {
 			if offer == nil {
 				t.Fatal("missing native offer")
 			}
-			server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+			var controlTime atomic.Int64
+			const requestDelay = 3 * time.Second
+			api := (API{Queue: q, Token: "test"}).Handler()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if phase == "after-started" && (r.URL.Path == "/api/workers/launch" || r.URL.Path == "/api/workers/started") {
+					clock.Advance(requestDelay)
+					controlTime.Add(int64(requestDelay))
+				}
+				api.ServeHTTP(w, r)
+			}))
 			defer server.Close()
 			w := recoveryWorker(t)
 			w.Clock, w.Machine, w.Client = clock, m, Client{URL: server.URL, Token: "test"}
@@ -87,6 +98,14 @@ func TestNativeMemberAdmissionClassification(t *testing.T) {
 					t.Fatal("helper custody was not exercised", helperErr)
 				}
 				nativeNoSurvivors(t, &nativeTestRun{p: p, dir: p.job.Spec.Run.Workdir})
+				if phase == "after-started" {
+					// Initial preparation, supervisor, both helper gates, and
+					// Started for main. The final main exec gate is still ahead.
+					if got := time.Duration(controlTime.Load()); got != 5*requestDelay {
+						t.Fatalf("control time through Started = %s, want %s", got, 5*requestDelay)
+					}
+					t.Logf("control time through Started = %s", time.Duration(controlTime.Load()))
+				}
 			case <-time.After(testWaitTimeout):
 				p.stop(clock.Now(), 0, true)
 				t.Fatal("native refusal did not finish exact cleanup")

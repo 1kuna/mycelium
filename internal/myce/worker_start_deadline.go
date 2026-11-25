@@ -143,13 +143,8 @@ func (w Worker) authorizeStart(j Job, session string, receiptDirs ...string) err
 			return err
 		}
 	}
-	if w.batchAdmission != nil {
-		done := timing.within(launchAdmission)
-		err := w.batchAdmission(w.launchContext(), HostLaunch{Machine: w.Machine.ID, Session: session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})
-		done()
-		if err != nil {
-			return err
-		}
+	if err := w.checkLocalBatchAdmission(HostLaunch{Machine: w.Machine.ID, Session: session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)}); err != nil {
+		return err
 	}
 	// A queue reply can predate a fault observed while the request was in
 	// flight. Reuse the live dependency resolver at the payload hand-off.
