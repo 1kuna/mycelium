@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +18,7 @@ type proofPostgres struct {
 	t         *testing.T
 	root, dsn string
 	pgCtl     string
+	port      string
 	running   bool
 }
 
@@ -35,8 +38,16 @@ func startProofPostgres(t *testing.T) *proofPostgres {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	pg := &proofPostgres{t: t, root: root, pgCtl: pgCtl,
-		dsn: "host=" + root + " dbname=postgres user=proof sslmode=disable"}
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := strconv.Itoa(probe.Addr().(*net.TCPAddr).Port)
+	if err := probe.Close(); err != nil {
+		t.Fatal(err)
+	}
+	pg := &proofPostgres{t: t, root: root, pgCtl: pgCtl, port: port,
+		dsn: "host=" + root + " port=" + port + " dbname=postgres user=proof sslmode=disable"}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	// This private socket is inside a mode-0700 directory. TCP is disabled.
@@ -53,7 +64,7 @@ func (pg *proofPostgres) data() string { return filepath.Join(pg.root, "data") }
 
 func (pg *proofPostgres) start() {
 	pg.t.Helper()
-	pg.ctl("-l", filepath.Join(pg.root, "postgres.log"), "-o", "-p 5432 -c listen_addresses='' -c unix_socket_directories="+pg.root, "start")
+	pg.ctl("-l", filepath.Join(pg.root, "postgres.log"), "-o", "-p "+pg.port+" -c listen_addresses='' -c unix_socket_directories="+pg.root, "start")
 	pg.running = true
 }
 
@@ -184,6 +195,19 @@ func TestSharedQueueRowsReplayLostCommitReply(t *testing.T) {
 	next.add("INSERT INTO logs(job,attempt,text) VALUES(?,?,?)", "example", 1, "third")
 	if err := w.apply(ctx, leader, &next, nil); err != nil {
 		t.Fatal(err)
+	}
+	// A missing reply without a matching commit must close the writer turn.
+	a.commit = func(tx *sql.Tx) error {
+		return errors.Join(tx.Rollback(), context.DeadlineExceeded)
+	}
+	var unconfirmed queueWriteBatch
+	unconfirmed.add(upsertQueueState, "sample", []byte("unconfirmed"))
+	if err := w.apply(ctx, leader, &unconfirmed, nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("unconfirmed write = %v", err)
+	}
+	a.commit = (*sql.Tx).Commit
+	if err := w.apply(ctx, leader, &unconfirmed, nil); !errors.Is(err, errSharedTurn) {
+		t.Fatalf("grant after an unconfirmed write = %v", err)
 	}
 	// Stop and restart the same PostgreSQL authority before replay.
 	pg.stop()

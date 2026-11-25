@@ -409,10 +409,17 @@ func (m *sharedQueueMember) forward(w http.ResponseWriter, r *http.Request, turn
 }
 
 func (m *sharedQueueMember) serveReplica(w http.ResponseWriter, r *http.Request) {
+	// The persisted job also contains its execution payload. Replica reads
+	// expose only lifecycle fields and leave full projections to the API.
+	type replicaJob struct {
+		ID        string     `json:"id"`
+		State     string     `json:"state"`
+		StartedAt *time.Time `json:"started_at,omitempty"`
+	}
 	type replicaStatus struct {
-		LastKnown bool  `json:"last_known"`
-		Sequence  int64 `json:"sequence"`
-		Job       *Job  `json:"job,omitempty"`
+		LastKnown bool        `json:"last_known"`
+		Sequence  int64       `json:"sequence"`
+		Job       *replicaJob `json:"job,omitempty"`
 	}
 	out := replicaStatus{LastKnown: true}
 	ctx := r.Context()
@@ -443,9 +450,6 @@ func (m *sharedQueueMember) serveReplica(w http.ResponseWriter, r *http.Request)
 
 func (c Client) verifySharedTurn(ctx context.Context, response *http.Response) error {
 	turn := response.Header.Get(sharedTurnHeader)
-	if turn == "" {
-		return nil // Single-queue mode has no shared turn.
-	}
 	if _, err := strconv.ParseUint(turn, 10, 63); err != nil {
 		return queueStopping()
 	}

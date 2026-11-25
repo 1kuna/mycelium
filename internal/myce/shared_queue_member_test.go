@@ -246,7 +246,8 @@ func startProofWorker(t *testing.T, c Client, dir string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	w := Worker{
 		Clock: RealClock{}, serviceStop: ctx, StateDir: run.state, Client: c, Interval: 100 * time.Millisecond,
-		sharedCPUDev: true, CPUIsolationProbe: func(context.Context) error { return nil },
+		// Advertise the same sampled-memory admission capability as a CPU dev worker.
+		sharedCPUDev: true, devEnvironmentSizing: true, CPUIsolationProbe: func(context.Context) error { return nil },
 		Machine: machine("proof-worker", "cpu", "proof-worker-host"),
 	}
 	if workerDevProcessMemory != nil {
@@ -276,7 +277,22 @@ func proofBlockingJob(t *testing.T, c Client, dir string) (*Job, func(), func())
 	}
 	t.Cleanup(unblock)
 	s := proofSpec("running")
-	s.Run.Command = []string{"/bin/sh", "-c", `printf 'start\n' >> "$1"; while [ ! -f "$2" ]; do sleep 0.05; done; : > "$3"`, "proof", starts, release, finished}
+	source := filepath.Join(dir, "seed")
+	if err := os.WriteFile(source, []byte("proof"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := IdentifyFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := c.UploadFile(ctx, source, ref); err != nil {
+		t.Fatal(err)
+	}
+	s.Files = FileManifest{"seed": ref}
+	s.Outputs = map[string]string{"result.txt": "results"}
+	s.Run.Command = []string{"/bin/sh", "-c", `printf 'start\n' >> "$1"; while [ ! -f "$2" ]; do sleep 0.05; done; cat seed > result.txt || exit; : > "$3"`, "proof", starts, release, finished}
 	job := proofSubmit(t, c, s)
 	job = proofJobState(t, c, job.ID, func(j *Job) bool { return j.State == "running" && j.StartedAt != nil })
 	proofEventually(t, "CPU process starts", func() bool { _, err := os.Stat(starts); return err == nil })
@@ -332,6 +348,15 @@ func TestSharedQueueMemberRunningHandover(t *testing.T) {
 			old := startProofMember(t, dir, "old", "127.0.0.1:0", pg.dsn)
 			first := proofLeader(t, a, old, 0)
 			next := startProofMember(t, dir, "next", "127.0.0.1:0", pg.dsn)
+			unauthenticated := next.client
+			unauthenticated.Token = ""
+			for _, path := range []string{"/api/ping", sharedReplicaPath} {
+				var refusal *HTTPError
+				err := unauthenticated.Call(t.Context(), http.MethodGet, path, nil, nil)
+				if !errors.As(err, &refusal) || refusal.Status != http.StatusUnauthorized {
+					t.Fatalf("unauthenticated access to %s = %v", path, err)
+				}
+			}
 			startProofWorker(t, next.client, dir)
 			before, unblock, finished := proofBlockingJob(t, next.client, dir)
 			proofEventually(t, "follower replays running job", func() bool {
@@ -345,10 +370,29 @@ func TestSharedQueueMemberRunningHandover(t *testing.T) {
 			}
 			active := proofJobState(t, next.client, before.ID, func(j *Job) bool { return j.State == "running" })
 			assertProofAttempt(t, before, active)
+			for _, bad := range []Result{
+				{Execution: Execution{ID: active.ID, Attempt: active.Attempt + 1}, Machine: active.Machine, Session: active.Session},
+				{Execution: Execution{ID: active.ID, Attempt: active.Attempt}, Machine: active.Machine, Session: "wrong-session"},
+			} {
+				var refusal *HTTPError
+				err := next.client.Call(t.Context(), http.MethodPost, "/api/workers/started", bad, nil)
+				if !errors.As(err, &refusal) || refusal.Status != http.StatusConflict {
+					t.Fatalf("start under the wrong attempt identity = %v", err)
+				}
+			}
 			unblock()
 			finished()
 			after := proofJobState(t, next.client, before.ID, proofSucceeded)
 			assertProofAttempt(t, before, after)
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			dest := filepath.Join(dir, "download")
+			if err := next.client.DownloadResult(ctx, after.ID, "result.txt", dest); err != nil {
+				t.Fatal(err)
+			}
+			if b, err := os.ReadFile(dest); err != nil || string(b) != "proof" {
+				t.Fatalf("verified result = %q, %v", b, err)
+			}
 		})
 	}
 }
@@ -368,6 +412,10 @@ func TestSharedQueueMemberDatabaseOutage(t *testing.T) {
 	})
 	pg.stop()
 	err := local.client.Call(t.Context(), http.MethodPost, "/api/jobs", proofSpec("during-outage"), nil)
+	proofUnavailable(t, err)
+	err = local.client.Call(t.Context(), http.MethodPost, "/api/workers/started", result(before, true), nil)
+	proofUnavailable(t, err)
+	err = local.client.Call(t.Context(), http.MethodPost, "/api/workers/complete", result(before, true), nil)
 	proofUnavailable(t, err)
 	_, err = local.client.GetJob(t.Context(), before.ID)
 	proofUnavailable(t, err)
@@ -390,6 +438,64 @@ func TestSharedQueueMemberDatabaseOutage(t *testing.T) {
 }
 
 func proofSucceeded(j *Job) bool { return j.State == "succeeded" }
+
+func TestSharedQueueMemberFollowerLossPreservesAuthority(t *testing.T) {
+	pg := startProofPostgres(t)
+	a := pg.authority(t)
+	dir := t.TempDir()
+	leader := startProofMember(t, dir, "leader", "127.0.0.1:0", pg.dsn)
+	first := proofLeader(t, a, leader, 0)
+	follower := startProofMember(t, dir, "follower", "127.0.0.1:0", pg.dsn)
+	failed, peer := machine("lost-worker", "cpu"), machine("peer-worker", "cpu")
+	checkin := func(c Client, m Machine) Reply {
+		t.Helper()
+		var reply Reply
+		err := c.Call(t.Context(), http.MethodPost, "/api/workers/checkin",
+			Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, period: time.Second}, &reply)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return reply
+	}
+	checkin(leader.client, peer)
+	spec := proofSpec("lost-attempt")
+	spec.AllowedMachines = []string{failed.ID}
+	job := proofSubmit(t, leader.client, spec)
+	var assigned *Job
+	proofEventually(t, "follower's worker receives an assignment", func() bool {
+		assigned = assignedJob(checkin(follower.client, failed))
+		return assigned != nil
+	})
+	if assigned.ID != job.ID {
+		t.Fatalf("unexpected assignment: %s", assigned.ID)
+	}
+	if err := follower.client.Call(t.Context(), http.MethodPost, "/api/workers/started", result(assigned, true), nil); err != nil {
+		t.Fatal(err)
+	}
+	follower.stop(t, syscall.SIGKILL)
+	var after *Job
+	for elapsed := time.Second; elapsed <= 2*LossAfter; elapsed += time.Second {
+		if err := leader.client.Call(t.Context(), http.MethodPost, "/api/dev/clock/advance", map[string]int{"seconds": 1}, nil); err != nil {
+			t.Fatal(err)
+		}
+		checkin(leader.client, peer)
+		var err error
+		after, err = leader.client.GetJob(t.Context(), job.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.Losses != 0 {
+			break
+		}
+	}
+	if after == nil || after.State != "queued" || after.Losses != 1 || after.Attempt != assigned.Attempt {
+		t.Fatalf("follower loss did not requeue the exact attempt once: %+v", after)
+	}
+	turn, err := a.current(t.Context())
+	if err != nil || !turn.ready || !sameSharedTurn(first, turn) {
+		t.Fatalf("follower loss changed the coordinator: %+v, %v", turn, err)
+	}
+}
 
 func TestSharedQueueMemberSingleSurvivor(t *testing.T) {
 	pg := startProofPostgres(t)
@@ -509,7 +615,7 @@ func startProofPostgresLink(t *testing.T, pg *proofPostgres) (*proofPostgresLink
 	if err != nil {
 		t.Fatal(err)
 	}
-	l := &proofPostgresLink{listener: listener, socket: filepath.Join(pg.root, ".s.PGSQL.5432"), clients: make(map[net.Conn]bool), done: make(chan struct{})}
+	l := &proofPostgresLink{listener: listener, socket: filepath.Join(pg.root, ".s.PGSQL."+pg.port), clients: make(map[net.Conn]bool), done: make(chan struct{})}
 	go l.run()
 	t.Cleanup(func() {
 		l.cut(true)
