@@ -1,7 +1,7 @@
 # NAS mounts
 
-Operator boot integration for Linux CIFS mounts and how workers detect, hold and
-recover from NAS mount faults. NAS selection at install is in
+Operator recovery for Linux CIFS and [macOS SMB](macos-smb-recovery.md), and how
+workers detect, hold and recover from mount faults. NAS selection at install is in
 [onboarding storage](onboarding.md#onboarding-storage-and-tools).
 
 ## Linux CIFS boot recovery
@@ -173,6 +173,8 @@ an existing SMB session. If no mount/automount remains, or access is denied,
 and approve Keychain access if macOS requests it. This code identifies the need
 for owner action, not the exact cause of a Keychain refusal. It never launches
 Finder, displays a password dialog, reads Keychain, or reconstructs an SMB URL.
+A host operator can qualify a [separate macOS SMB LaunchAgent](macos-smb-recovery.md)
+to recreate a disappeared user mount with the existing login.
 A dead SMB request that never returns stays `mount_probe_stalled`; inspect the
 OS session through the storage owner rather than force-unmounting active data.
 
