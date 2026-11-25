@@ -1291,19 +1291,12 @@ func (q *Queue) retry(j *Job, why string) {
 		j.Reason = "scarce_host_yield: " + j.ScarceHostYield.Hold
 		return
 	}
-	if queuedPoolStop(j) && !cancelled(j) {
-		q.requeueMemoryPressure(j)
-		return
-	}
 	q.requeue(j, why, !plannedStop(j))
 }
 
 // Admission refusal and planned stops do not spend infrastructure retry budgets.
 func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	q.touchJob(j.ID)
-	if queuedPoolStop(j) && !j.ReleaseConfirmed && !cancelled(j) {
-		return // A concurrent failure or lost worker cannot release the victim.
-	}
 	if j.YieldPause != nil && !j.ReleaseConfirmed && !cancelled(j) {
 		// Planned stop expiry and missing heartbeats cannot surrender custody.
 		// The existing exact release path calls retry again after confirmation.
@@ -1328,7 +1321,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	if chargeInfrastructure && strings.HasPrefix(why, "machine quiet for ") {
 		q.alertAttemptLoss(j, outcome, true)
 	}
-	q.recordAttemptMemory(j, Result{Interrupted: true}, "")
+	q.recordAttemptMemory(j, Result{Interrupted: true})
 	defer func() { q.recordAttemptOutcome(j, outcome) }()
 	if cancelled(j) {
 		if !terminal(j.State) {
@@ -1823,7 +1816,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		}
 		old := q.s.Machines[m.ID]
 		if m.HostRAMGate != nil && !m.HostRAMGate.valid() {
-			return errors.New("invalid worker RAM gate reading")
+			m.HostRAMGate = nil
 		}
 		m.hostRAMGateAt = memoryReceivedAt
 		if old != nil && old.Session == m.Session {
@@ -2379,16 +2372,12 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 		}
 		q.settleRelease(r, true)
 		if j := q.touchJob(r.ID); j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
-			if j.Spec.ephemeral() && !cleanupComplete(r.WorkerDataCleanup) {
-				return nil
-			}
 			if cause := safeAttemptRuntimeCause(j, r.ExecutionCause); !terminal(j.State) && cause != nil && cause.Finalization != nil {
 				j.ExecutionCause = cause
 				j.CleanupCause = safeAttemptRuntimeCause(j, r.CleanupCause)
 				j.Reason = "finalization pending: " + cause.String()
 			}
-			pressureReason := q.recordPoolEvidence(j, r)
-			q.recordAttemptMemory(j, r, pressureReason)
+			q.recordAttemptMemory(j, r)
 			q.retainAttemptResources(j, r.Resources)
 			j.ReleaseConfirmed = true
 			if r.Forced {
@@ -2407,15 +2396,7 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 						j.ExecutionEvidence = unstartedExecution(j.Attempt)
 					}
 					q.recordSharedHostLatencyStop(j, r)
-					var pressureOutcome AttemptOutcome
-					if queuedPoolStop(j) {
-						r.PriorityStop = priorityStop(j)
-						pressureOutcome = attemptOutcome(j, r)
-					}
 					q.retry(j, j.Reason)
-					if pressureOutcome.PriorityStop != nil && terminal(j.State) {
-						q.recordAttemptOutcome(j, pressureOutcome)
-					}
 				}
 			}
 		}
@@ -2516,8 +2497,8 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 	q.retainYieldFinal(j, r)
 	outcome := attemptOutcome(j, r)
 	q.recordAttemptStorage(j, r)
-	pressureReason := q.recordPoolEvidence(j, r)
-	q.recordAttemptMemory(j, r, pressureReason) // Preserve facts before retry clears the envelope.
+	q.recordAttemptMemory(j, r) // Preserve facts before retry clears the envelope.
+	q.recordPoolEvidence(j, r)
 	j.ExecutionEvidence = safeExecutionEvidence(r.ExecutionEvidence, j.Attempt)
 	j.ExecutionCause = safeRuntimeCause(r.ExecutionCause)
 	j.CleanupCause = safeRuntimeCause(r.CleanupCause)
@@ -2684,9 +2665,6 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 	if terminal(j.State) {
 		now := q.clock.Now()
 		j.FinishedAt = &now
-	}
-	if j.State == "stopping" && queuedPoolStop(j) {
-		outcome.PriorityStop = priorityStop(j)
 	}
 	if j.State == "failed" && filesVerified && !r.Success && j.Spec.capturesFailure() {
 		outcome.Diagnostics = r.Diagnostics

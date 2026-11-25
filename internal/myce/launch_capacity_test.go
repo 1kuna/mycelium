@@ -633,6 +633,63 @@ func TestLaunchCapacityMeasuredRefusalRequiresNumberedHeartbeat(t *testing.T) {
 	if next := assignedJob(machineCheck(t, q, m)); next != nil {
 		t.Fatal("older numbered heartbeat reopened a measured refusal", next.ID)
 	}
+	m.HostRAMGate = &HostRAMGate{SampleID: 4, RawGB: 110, PendingGB: 1}
+	if next := assignedJob(machineCheck(t, q, m)); next != nil {
+		t.Fatal("invalid gate reopened a measured refusal", next.ID)
+	}
+}
+
+func TestLaunchCapacityStandalonePreflightUsesCheckinReceiptTime(t *testing.T) {
+	q, clock := fixture(t)
+	m := unifiedCUDAAdmissionMachine()
+	m.HostRAMGate = &HostRAMGate{SampleID: 1, RawGB: 110}
+	j := submit(t, q, sharedSpec("experiment", 36))
+	run := assignedJob(machineCheck(t, q, m))
+	if run == nil || run.ID != j.ID {
+		t.Fatal("expected initial offer", run)
+	}
+	w := Worker{Machine: m, Clock: clock, hostRawMemorySource: func(context.Context) (float64, error) {
+		return 20, nil
+	}}
+	d := admissionDetail(w.checkJobRAM(t.Context(), *run), *run)
+	if d == nil || d.Subcheck != memoryWaitReason || d.Required != run.Memory.RAM.TypicalGB || d.RAMGateSampleID != 0 || d.RAMGateEndNS != 0 {
+		t.Fatalf("expected unnumbered full-demand RAM refusal: %+v", d)
+	}
+	r := capacityResult(run, false)
+	r.ExecutionCause.Admission = d
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	m.HostRAMGate = &HostRAMGate{SampleID: 2, RawGB: 110}
+	if next := assignedJob(machineCheck(t, q, m)); next != nil {
+		t.Fatal("a gate received at the refusal time reopened the route", next.ID)
+	}
+	clock.Advance(time.Second)
+	m.HostRAMGate = &HostRAMGate{SampleID: 3, RawGB: 110}
+	if next := assignedJob(machineCheck(t, q, m)); next == nil || next.ID != j.ID || next.Attempt != 2 {
+		t.Fatal("a fitting gate received after the unnumbered refusal did not reopen the route", next)
+	}
+}
+
+func TestLaunchCapacityInvalidGateDoesNotRejectCheckin(t *testing.T) {
+	q, clock := fixture(t)
+	m := unifiedCUDAAdmissionMachine()
+	m.HostRAMGate = &HostRAMGate{SampleID: 1, RawGB: 20}
+	j := submit(t, q, sharedSpec("experiment", 36))
+	if next := assignedJob(machineCheck(t, q, m)); next != nil {
+		t.Fatal("offered a job against the reported shortage", next.ID)
+	}
+	clock.Advance(time.Second)
+	m.HostRAMGate = &HostRAMGate{SampleID: 2, RawGB: 20, HeldGB: 4, PendingGB: 5}
+	if next := assignedJob(machineCheck(t, q, m)); next == nil || next.ID != j.ID {
+		t.Fatal("check-in did not fall back to ordinary queue admission", next)
+	}
+	q.mu.Lock()
+	gate := q.s.Machines[m.ID].HostRAMGate
+	q.mu.Unlock()
+	if gate != nil {
+		t.Fatalf("check-in retained a gate after invalid input: %+v", gate)
+	}
 }
 
 // Check-in preparation is outside q.mu. A request received earlier can

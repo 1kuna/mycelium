@@ -207,28 +207,22 @@ func (q *Queue) resolvePooledSize(j *Job, m *Machine) pooledCandidateSize {
 	if j.Spec.MemoryLimitGB != nil {
 		pools.LimitGB = *j.Spec.MemoryLimitGB
 		pools.RAM.TypicalGB = min(pools.RAM.TypicalGB, pools.LimitGB)
+		pools.RAM.ChargeGB = min(pools.RAM.ChargeGB, pools.LimitGB)
 	}
 	if gb := j.HostMemoryOverrideGB; gb > 0 {
-		// An owner resize fixes the hard ceiling and declares a reservation.
+		// An owner resize fixes both the reservation and the hard ceiling.
 		// Card sizing still uses its independent evidence on discrete hosts.
 		pools.LimitGB = gb
 		pools.RAM = memoryPoolEstimate{TypicalGB: gb, ChargeGB: gb}
+	} else {
+		fitPoolCharge(&pools.RAM, q.poolAllowance(m), evidence.exact[key].Lower)
 	}
-	ram := evidence.exact[key]
-	floor := max(pools.LimitGB, ram.peakFloor(), 2*ram.Lower)
-	if pools.LimitGB > 0 {
-		// A hard ceiling bounds a forecast, but cannot erase exact evidence.
-		pools.RAM.ChargeGB = floor
-	}
-	pools.RAM.TypicalGB = max(pools.RAM.TypicalGB, ram.PressurePeak)
-	fitPoolCharge(&pools.RAM, q.poolAllowance(m), floor)
 	size := pooledCandidateSize{pools: pools}
 	if !n.cpuOnly() && !m.UnifiedMemory {
 		key.Pool = "card"
 		count := max(1, len(m.groupMembers))
 		card := evidence.estimate(key, deviceHint/float64(count), confidence)
-		exact := evidence.exact[key]
-		fitPoolCharge(&card, m.TotalMemoryGB/float64(count), max(exact.peakFloor(), 2*exact.Lower))
+		fitPoolCharge(&card, m.TotalMemoryGB/float64(count), evidence.exact[key].Lower)
 		size.card, size.cardGB, size.hasCard = card, card.ChargeGB*float64(count), true
 	}
 	return size
@@ -255,8 +249,8 @@ func (q *Queue) applyPooledSize(j *Job, m *Machine, size pooledCandidateSize) *J
 // A cautious estimate above the entire pool would strand work even after all
 // holders release. Use the typical estimate on that target, preserving the
 // retry floor from measured shortages and the ordinary live-room check.
-func fitPoolCharge(estimate *memoryPoolEstimate, allowance, floor float64) {
-	floor = max(estimate.TypicalGB, floor)
+func fitPoolCharge(estimate *memoryPoolEstimate, allowance, lower float64) {
+	floor := max(estimate.TypicalGB, 2*lower)
 	if allowance > 0 && estimate.ChargeGB > allowance && floor <= allowance {
 		estimate.ChargeGB = floor
 	}
@@ -529,54 +523,14 @@ func retainPoolPeaks(j *Job, host, device float64) {
 	j.Memory = &p
 }
 
-const (
-	pressurePeakLearned      = "pressure_peak"
-	pressurePeakUnattributed = "pressure_peak_unattributed"
-)
-
-func (q *Queue) recordPressurePeak(j *Job, p *AttemptMemoryPeak) string {
-	m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
-	if j.StartedAt == nil || m == nil || m.Session != j.Session || p == nil || p.CgroupGB == nil || !validMemoryValue(*p.CgroupGB) {
-		return pressurePeakUnattributed
-	}
-	host, device := *p.CgroupGB, 0.0
-	if !j.Spec.Needs.cpuOnly() {
-		s := p.DeviceSampling
-		if s == nil || !s.Complete || s.OwnedPeakGB == nil || !validMemoryValue(*s.OwnedPeakGB) {
-			return pressurePeakUnattributed
-		}
-		device = *s.OwnedPeakGB
-	}
-	if m.UnifiedMemory {
-		// Device memory can already be in memory.peak. Each attributed
-		// maximum is a floor for the shared pool, and their sum is not.
-		host, device = max(host, device), 0
-	}
-	retainPoolPeaks(j, host, device)
-	key := pooledEvidenceKey(j, m)
-	e := q.stagedMemoryEvidence()
-	e.retainPressurePeak(key, host)
-	key.Pool = "card"
-	e.retainPressurePeak(key, device)
-	return pressurePeakLearned
-}
-
-// Queued pressure stops supply exact floors. Ordinary completions and kernel
-// backstops keep their existing evidence policy.
-func (q *Queue) recordPoolEvidence(j *Job, r Result) string {
-	if q.memoryEvidence != nil && queuedPoolStop(j) && !r.Success && !r.OutOfMemory {
-		return q.recordPressurePeak(j, r.MemoryPeak)
-	}
-	if q.memoryEvidence == nil || r.ReleaseOnly || r.MemoryPeak == nil || j.StartedAt == nil {
-		return ""
-	}
+func (q *Queue) recordPoolEvidence(j *Job, r Result) {
 	pressure := j.Reason == memoryPressureCause || r.ExecutionCause != nil && r.ExecutionCause.Class == memoryPressureCause
-	if !r.Success && !r.OutOfMemory && !pressure {
-		return ""
+	if q.memoryEvidence == nil || r.ReleaseOnly || r.MemoryPeak == nil || j.StartedAt == nil || !r.Success && !r.OutOfMemory && !pressure {
+		return
 	}
 	m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
 	if m == nil {
-		return ""
+		return
 	}
 	key := pooledEvidenceKey(j, m)
 	limited := r.OutOfMemory || pressure || pooledSampleLimited(r.MemoryPeak)
@@ -591,7 +545,7 @@ func (q *Queue) recordPoolEvidence(j *Job, r Result) string {
 		}
 	}
 	if len(points) == 0 {
-		return ""
+		return
 	}
 	evidence := q.stagedMemoryEvidence()
 	for _, point := range points {
@@ -604,13 +558,12 @@ func (q *Queue) recordPoolEvidence(j *Job, r Result) string {
 			if point.Key.Pool == "ram" {
 				evidence.observeFeedback(estimate.ChargeGB, point.Peak, pressure || r.OutOfMemory, r.Success && !limited)
 			}
-			if pressure && !r.OutOfMemory && point.Peak <= estimate.ChargeGB {
-				continue
+			if pressure && point.Peak <= estimate.ChargeGB {
+				continue // A bystander stop provides no new estimate.
 			}
 		}
 		evidence.observe(point)
 	}
-	return ""
 }
 
 func (q *Queue) stagedMemoryEvidence() *memoryEvidence {
@@ -629,40 +582,35 @@ func pooledSampleLimited(p *AttemptMemoryPeak) bool {
 }
 
 func (q *Queue) requeueMemoryPressure(j *Job) {
-	if queuedPoolStop(j) && !j.ReleaseConfirmed {
-		return // Keep delivering the exact stop until this attempt releases.
-	}
 	e := q.memoryEvidencePending
 	if e == nil {
 		e = q.memoryEvidence
 	}
 	var routes int
-	var largestFloor float64
+	var largestLowerBound float64
 	if e != nil {
 		for _, m := range q.plannerMachines() {
 			if !q.jobAllowsMachine(j, m.ID) || !memorySizingTargetFits(j, m) || !toolsFit(j, m) || !nativeNetworkFits(j, m) {
 				continue
 			}
 			key := pooledEvidenceKey(j, m)
-			ram := e.exact[key]
-			floor := max(ram.peakFloor(), 2*ram.Lower, memoryValue(j.Spec.MemoryLimitGB), j.HostMemoryOverrideGB)
+			lower := e.exact[key].Lower
 			allowance := q.poolAllowance(m)
 			if workerMemoryHold(m) != nil {
 				continue
 			}
 			card := key
 			card.Pool = "card"
-			cardFloor := 0.0
+			cardLower := 0.0
 			if !j.Spec.Needs.cpuOnly() && !m.UnifiedMemory {
-				exact := e.exact[card]
-				cardFloor = max(exact.peakFloor(), 2*exact.Lower) * float64(max(1, len(m.groupMembers)))
+				cardLower = e.exact[card].Lower
 			}
-			if (allowance <= 0 || floor <= allowance) && cardFloor <= m.TotalMemoryGB {
+			if (allowance <= 0 || 2*lower <= allowance) && (cardLower == 0 || 2*cardLower <= m.TotalMemoryGB) {
 				q.requeue(j, memoryPressureCause, false)
 				return
 			}
 			routes++
-			largestFloor = max(largestFloor, floor, cardFloor)
+			largestLowerBound = max(largestLowerBound, lower, cardLower)
 		}
 	}
 	if routes == 0 {
@@ -670,9 +618,7 @@ func (q *Queue) requeueMemoryPressure(j *Job) {
 		return
 	}
 	j.State, j.DiagnosticCode = "failed", "memory_capacity"
-	j.Reason = fmt.Sprintf("memory_capacity: %.3f GiB admission floor exceeds every eligible memory pool", largestFloor)
-	now := q.clock.Now()
-	j.FinishedAt = &now
+	j.Reason = fmt.Sprintf("memory_capacity: %.3f GiB measured under memory pressure, and the retry charge exceeds every eligible memory pool", largestLowerBound)
 }
 
 // HostRAMGate pairs the physical read with the worker's competing custody at

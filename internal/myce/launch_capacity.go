@@ -15,7 +15,7 @@ type LaunchCapacityWait struct {
 	Attempt    int              `json:"attempt"`
 	Evidence   string           `json:"evidence"`
 	Admission  *AdmissionDetail `json:"admission,omitempty"`
-	ObservedAt time.Time        `json:"observed_at,omitzero"`
+	ObservedAt time.Time        `json:"observed_at,omitempty,omitzero"`
 	// Required surplus above the candidate's charge in the queue's physical
 	// RAM ledger. It can be signed because queue room can already be short.
 	LiveGrowthSurplusGB *float64 `json:"live_growth_surplus_gb,omitempty"`

@@ -70,19 +70,14 @@ worker's pending growth and allowance. The worker repeats the same comparison
 at launch with current inputs. Native helpers receive no credit against the full
 launch requirement. If room falls between the first native member and a later
 member's refusal, subsequent offers on that route budget for the portion of
-the loss supported by measured growth in the attempt's cgroup. This evidence cannot authorize reclaim
-or release. For a refusal with a RAM sample identity, the same route needs
-exact release and a worker RAM probe sampled after the refusal that fits the
-full launch demand.
+the loss supported by measured growth in the attempt's cgroup. Reclaim and
+release still require their own evidence. For a refusal with a RAM sample
+identity, the same route needs exact release and a worker RAM probe sampled
+after the refusal that fits the full launch demand.
 
 The host pressure forecast projects physical loss through the next sample and
-sustained physical loss through the stop grace. The reserve and production
-protections still apply. A pressure-stopped attempt can establish an admission
-floor from its cgroup peak and a complete, directly owned device peak. Discrete
-memory uses separate pools. Unified memory uses the larger peak to avoid
-counting overlapping allocations twice. Existing exact peaks, OOM floors and
-explicit limits still bound the next charge. An incomplete or ambiguous sample
-adds no floor, and a pressure stop contributes no successful-run calibration.
+sustained physical loss through the stop grace. The attempt history records the
+[comparison that triggered a pool stop](reference/status-behavior.md#reading-myce-status).
 
 ### Typed memory is a limit, not a reservation
 

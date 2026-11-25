@@ -1,6 +1,19 @@
 package myce
 
+import "time"
+
 const sharedGPUPressureCause = "shared_gpu_pressure"
+
+// DevicePoolStop records the discrete pool comparison that triggered a stop.
+type DevicePoolStop struct {
+	ObservedAt     time.Time `json:"observed_at"`
+	BudgetGB       float64   `json:"budget_gb"`
+	UsedGB         float64   `json:"used_gb"`
+	FreeGB         float64   `json:"free_gb"`
+	MemoryMeasured bool      `json:"memory_measured"`
+	OverageGB      float64   `json:"overage_gb"`
+	Trigger        string    `json:"trigger"`
+}
 
 // The discrete pool uses current driver availability and per-attempt
 // footprints. Unified allocations are handled by the host pool.
@@ -34,10 +47,18 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 				}
 			}
 		}
-		short := used > d.BudgetGB || d.MemoryMeasured && d.FreeMemoryGB <= 0 && overage > 0
+		budgetExceeded := used > d.BudgetGB
+		short := budgetExceeded || d.MemoryMeasured && d.FreeMemoryGB <= 0 && overage > 0
 		if victim == nil || pending || !short {
 			continue
 		}
-		q.stopForPoolPressure(victim, "device/"+d.ID, nil)
+		trigger := "device_full"
+		if budgetExceeded {
+			trigger = "over_budget"
+		}
+		q.stopForPoolPressure(victim, PriorityPreemption{Demand: "device/" + d.ID, DevicePool: &DevicePoolStop{
+			ObservedAt: q.clock.Now(), BudgetGB: d.BudgetGB, UsedGB: used, FreeGB: d.FreeMemoryGB,
+			MemoryMeasured: d.MemoryMeasured, OverageGB: overage, Trigger: trigger,
+		}})
 	}
 }

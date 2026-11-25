@@ -101,7 +101,7 @@ type AttemptMemoryFacts struct {
 	LearningReason string             `json:"learning_reason,omitempty"`
 }
 
-func (q *Queue) recordAttemptMemory(j *Job, r Result, pressureReason string) {
+func (q *Queue) recordAttemptMemory(j *Job, r Result) {
 	if j != nil && q.s.Jobs[j.ID] == j {
 		q.touchJob(j.ID)
 	}
@@ -113,8 +113,6 @@ func (q *Queue) recordAttemptMemory(j *Job, r Result, pressureReason string) {
 	}
 	reason := "eligible"
 	switch {
-	case pressureReason != "":
-		reason = pressureReason
 	case r.ReleaseOnly:
 		reason = "release_only"
 	case r.OutOfMemory || j.Reason == memoryPressureCause:
@@ -142,17 +140,11 @@ func (q *Queue) recordAttemptMemory(j *Job, r Result, pressureReason string) {
 	}
 	for i, old := range j.MemoryAttempts {
 		if old.Attempt == facts.Attempt && old.Machine == facts.Machine && old.Session == facts.Session {
-			if facts.MemoryPeak != nil || pressureReason != "" {
-				// Cleanup can supply missing pressure attribution. Keep accepted
-				// OOM evidence and keep a usable peak across an incomplete receipt.
-				if r.ReleaseOnly && old.LearningReason != "" &&
-					(pressureReason == "" || old.LearningReason == "oom" ||
-						old.LearningReason == pressurePeakLearned && pressureReason == pressurePeakUnattributed) {
+			if facts.MemoryPeak != nil {
+				// Cleanup acknowledgements add telemetry, never rewrite the
+				// eligibility decision of the accepted completion.
+				if r.ReleaseOnly && old.LearningReason != "" {
 					facts.LearningReason = old.LearningReason
-				}
-				if r.ReleaseOnly && (facts.MemoryPeak == nil || old.LearningReason == pressurePeakLearned && pressureReason != pressurePeakLearned) {
-					facts.MemoryPeak = old.MemoryPeak
-				} else if r.ReleaseOnly && facts.MemoryPeak != nil {
 					if facts.LearningReason == "infrastructure_interrupted" {
 						facts.MemoryPeak.Constrained = false
 					}

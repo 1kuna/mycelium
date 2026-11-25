@@ -437,7 +437,7 @@ func (w Worker) finishEphemeralAttempt(ctx context.Context, s *workerStore, conn
 		confirmed := false
 		for _, h := range accepted.AttemptHistory {
 			if h.Attempt == j.Attempt && h.Machine == r.Machine && h.Session == r.Session {
-				confirmed = ephemeralOutcomeAccepted(h)
+				confirmed = h.State == "queued" || terminal(h.State)
 				if h.State == "succeeded" {
 					confirmed = accepted.Attempt == j.Attempt && accepted.Machine == r.Machine && accepted.Session == r.Session && maps.Equal(accepted.OutputRefs, r.OutputRefs)
 				}
@@ -490,12 +490,6 @@ func cleanupComplete(c *WorkerDataCleanup) bool {
 	return true
 }
 
-func ephemeralOutcomeAccepted(h AttemptOutcome) bool {
-	// A pressure stop retains the stopping state through exact cleanup.
-	return h.State == "queued" || terminal(h.State) ||
-		h.State == "stopping" && h.PriorityStop != nil && h.PriorityStop.Cause == memoryPressureCause
-}
-
 // Receipts bind the exact copy, including superseded executions. Never let a
 // late cleanup receipt change a newer attempt's outcome or certify its data.
 func (q *Queue) retainWorkerDataCleanup(r Result) error {
@@ -524,7 +518,7 @@ func (q *Queue) retainWorkerDataCleanup(r Result) error {
 	if cleanupComplete(c) {
 		accepted := false
 		for _, h := range j.AttemptHistory {
-			accepted = accepted || h.Attempt == r.Attempt && h.Machine == r.Machine && h.Session == r.Session && ephemeralOutcomeAccepted(h)
+			accepted = accepted || h.Attempt == r.Attempt && h.Machine == r.Machine && h.Session == r.Session && (h.State == "queued" || terminal(h.State))
 		}
 		if !r.ReleaseOnly || !accepted {
 			return reject("worker_data_cleanup_pending", errors.New("exact outcome must be durably accepted before cleanup release"))

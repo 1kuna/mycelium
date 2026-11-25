@@ -592,12 +592,8 @@ func (w Worker) observeDeviceMemoryWith(ctx context.Context, inventory func() (m
 		unreported := false
 		var growth processMemoryGrowth
 		sampling := deviceSampling{start: started}
-		owned := w.Machine.GPU == "cuda"
 		defer func() {
 			peak.DeviceSampling = sampling.finish(clock.Now(), period)
-			if owned && peak.DeviceSampling != nil && peak.DeviceSampling.Complete {
-				peak.DeviceSampling.OwnedPeakGB = &peak.DeviceSampling.MaxGB
-			}
 			result <- deviceMemoryResult{peak: peak, unreported: unreported}
 		}()
 		var sampleTick <-chan time.Time
@@ -631,18 +627,14 @@ func (w Worker) observeDeviceMemoryWith(ctx context.Context, inventory func() (m
 					continue
 				}
 
-				var pinned, largestCUDA float64
+				var pinned float64
 				var host *float64
-				switch {
-				case w.Machine.GPU == "cuda":
-					host = &largestCUDA
-				case w.Machine.GPU == "xpu" && !w.Machine.UnifiedMemory:
+				if w.Machine.GPU == "xpu" && !w.Machine.UnifiedMemory {
 					host = &pinned
 				}
 				gb, _, err := w.attemptDeviceMemoryReading(ctx, ids, fs, host, known)
 				if errors.Is(err, errDeviceMemoryNotReported) {
 					unreported = true
-					owned = false
 					report(&AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNotReported})
 					continue
 				}
@@ -657,10 +649,6 @@ func (w Worker) observeDeviceMemoryWith(ctx context.Context, inventory func() (m
 					continue
 				}
 
-				// CUDA exposes per-process use but not the allocation identities
-				// needed to deduplicate allocations shared by multiple processes.
-				// A sum with only one positive contributor is unambiguous.
-				owned = owned && gb == largestCUDA
 				report(&AttemptMemoryPeak{DeviceGB: &gb})
 				now := clock.Now()
 				sampling.observe(now, gb, period)

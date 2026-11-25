@@ -4,11 +4,6 @@ import "time"
 
 const memoryPressureCause = "memory_pressure"
 
-func queuedPoolStop(j *Job) bool {
-	stop := priorityStop(j)
-	return stop != nil && stop.Cause == memoryPressureCause
-}
-
 type poolAvailability struct {
 	session         string
 	at              time.Time
@@ -57,6 +52,7 @@ type MemoryPoolStop struct {
 	GraceLossGB         float64   `json:"grace_loss_gb"`
 	SampleSeconds       float64   `json:"sample_seconds"`
 	GraceSeconds        float64   `json:"grace_seconds"`
+	HostPressure        float64   `json:"host_pressure,omitempty"`
 	Trigger             string    `json:"trigger"`
 }
 
@@ -75,21 +71,23 @@ func (q *Queue) memoryPoolShort(m *Machine, r poolAvailability) *MemoryPoolStop 
 	if m.CapabilityProfile != nil && m.CapabilityProfile.OS == "darwin" && m.HostHealth != nil && len(m.HostHealth.History) > 0 {
 		if latest := m.HostHealth.History[len(m.HostHealth.History)-1]; latest.Error == "" && latest.Pressure > 1 {
 			d.Trigger = "host_pressure"
+			d.HostPressure = latest.Pressure
 			return &d
 		}
 	}
-	// Main's two comparisons use physical loss through the next sample
-	// and sustained physical loss through that sample plus stop grace.
+	// Act immediately below the reserve or if even the next sample could
+	// arrive too late. Use the sustained rate for the longer stop horizon.
 	room := d.AvailableGB - d.ReserveGB
 	switch {
-	case room < 0:
-		d.Trigger = "below_reserve"
 	case room < d.NextLossGB:
 		d.Trigger = "next_sample"
 	case room < d.GraceLossGB:
 		d.Trigger = "stop_grace"
 	default:
 		return nil
+	}
+	if room < 0 {
+		d.Trigger = "below_reserve"
 	}
 	return &d
 }
@@ -134,7 +132,7 @@ func (q *Queue) yieldPooledMemory() {
 		if pending || victim == nil || jobClass(victim.Spec) == "production" && production < 2 {
 			continue
 		}
-		q.stopForPoolPressure(victim, "host/"+host, observation)
+		q.stopForPoolPressure(victim, PriorityPreemption{Demand: "host/" + host, MemoryPool: observation})
 		if q.poolLastStop == nil {
 			q.poolLastStop = map[string]time.Time{}
 		}
@@ -169,13 +167,16 @@ func (q *Queue) poolPressureBefore(a, b *Job) bool {
 	return a.ID < b.ID
 }
 
-func (q *Queue) stopForPoolPressure(victim *Job, demand string, observation *MemoryPoolStop) {
+func (q *Queue) stopForPoolPressure(victim *Job, stop PriorityPreemption) {
 	q.touchJob(victim.ID)
+	stop.Cause = memoryPressureCause
+	stop.Victim = victim.ID
+	stop.Policy = q.priorityMatch(victim.Spec)
 	for i := range victim.Copies {
 		c := &victim.Copies[i]
 		if c.Attempt == victim.Attempt && c.Machine == victim.Machine && c.Session == victim.Session {
 			c.StopCause = memoryPressureCause
-			c.PriorityStop = &PriorityPreemption{Cause: memoryPressureCause, Demand: demand, Victim: victim.ID, Policy: q.priorityMatch(victim.Spec), MemoryPool: observation}
+			c.PriorityStop = &stop
 			c.Recoverable = false
 		}
 	}

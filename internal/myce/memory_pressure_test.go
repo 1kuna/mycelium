@@ -88,9 +88,6 @@ func TestMemoryPoolShortageStopsLowestTierOverrun(t *testing.T) {
 	}
 	if got := job(t, q, active[2].ID); got.State != "stopping" || got.Reason != memoryPressureCause {
 		t.Fatalf("overrun was not selected: %s %s", got.State, got.Reason)
-	} else if stop := priorityStop(got); stop == nil || stop.MemoryPool == nil ||
-		stop.MemoryPool.Trigger != "next_sample" || stop.MemoryPool.AvailableGB != 4 || stop.MemoryPool.NextLossGB <= 4 {
-		t.Fatalf("pressure stop lost the decision-time comparison: %+v", stop)
 	}
 	for _, j := range active[:2] {
 		if got := job(t, q, j.ID); got.State != "running" {
@@ -100,7 +97,7 @@ func TestMemoryPoolShortageStopsLowestTierOverrun(t *testing.T) {
 	r := result(active[2], false)
 	r.Interrupted = true
 	peak := 6.0
-	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, CgroupGB: &peak}
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak}
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
@@ -108,8 +105,8 @@ func TestMemoryPoolShortageStopsLowestTierOverrun(t *testing.T) {
 		t.Fatalf("memory stop spent a retry budget: %s %s", got.State, got.Reason)
 	}
 	key := pooledEvidenceKey(active[2], &m)
-	if got := q.memoryEvidence.estimate(key, 3, initialMemoryConfidence); got.ChargeGB != 6 || got.TypicalGB != 6 || q.memoryEvidence.confidence() != initialMemoryConfidence {
-		t.Fatalf("overrun did not keep exactly its attributed floor without calibrating: %+v", got)
+	if got := q.memoryEvidence.estimate(key, 3, initialMemoryConfidence); got.ChargeGB != 12 || got.TypicalGB != 6 || q.memoryEvidence.confidence() <= initialMemoryConfidence {
+		t.Fatalf("overrun did not double its floor and tighten the confidence target: %+v", got)
 	}
 }
 
@@ -158,17 +155,18 @@ func TestMemoryPoolPressureProjectsPhysicalLoss(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		age  float64
+		lost bool
 	}{
 		{name: "growth beyond reservation"},
-		{name: "old cgroup sample with unrelated physical loss", age: 7},
+		{name: "old cgroup sample with unrelated physical loss followed by worker loss", age: 7, lost: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			assertPressureProjectsPhysicalLoss(t, tc.age)
+			assertPressureProjectsPhysicalLoss(t, tc.age, tc.lost)
 		})
 	}
 }
 
-func assertPressureProjectsPhysicalLoss(t *testing.T, age float64) {
+func assertPressureProjectsPhysicalLoss(t *testing.T, age float64, lost bool) {
 	t.Helper()
 	q, clock := fixture(t)
 	m := sharedUnifiedMachine()
@@ -212,151 +210,34 @@ func assertPressureProjectsPhysicalLoss(t *testing.T, age float64) {
 	if got.State != "stopping" {
 		t.Fatalf("still running with 26 GiB above reserve and 33.75 GiB projected loss: %s", got.State)
 	}
-	if stop := priorityStop(got); stop == nil || stop.MemoryPool == nil ||
-		stop.MemoryPool.Trigger != "stop_grace" || stop.MemoryPool.GraceLossGB < 33.74 || stop.MemoryPool.GraceLossGB > 33.76 {
+	stop := priorityStop(got)
+	if stop == nil || stop.MemoryPool == nil || stop.MemoryPool.Trigger != "stop_grace" ||
+		stop.MemoryPool.GraceLossGB < 33.74 || stop.MemoryPool.GraceLossGB > 33.76 {
 		t.Fatalf("stop lost the uncapped comparison: %+v", stop)
 	}
-
+	if lost {
+		clock.Advance(q.machineLossTimeout(m.ID))
+		machineCheck(t, q, cpuMachine("neighbor", "neighbor", "cpu", 8, 96))
+	} else {
+		finishInterrupted(t, q, run)
+	}
+	got = job(t, q, run.ID)
+	if got.State != "queued" {
+		t.Fatalf("pressure victim did not requeue: %s %s", got.State, got.Reason)
+	}
+	if len(got.AttemptHistory) != 1 || got.AttemptHistory[0].PriorityStop == nil ||
+		got.AttemptHistory[0].PriorityStop.MemoryPool == nil || *got.AttemptHistory[0].PriorityStop.MemoryPool != *stop.MemoryPool {
+		t.Fatalf("attempt history lost the pressure decision: %+v", got.AttemptHistory)
+	}
 }
 
-func TestMemoryPoolPressureReleaseLearnsExactPeak(t *testing.T) {
+func TestMemoryPoolDeviceStopRecordsComparison(t *testing.T) {
 	q, clock := fixture(t)
-	m := sharedUnifiedMachine()
-	m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
-	m.HostMemoryBudgetGB = 96
-	s := sharedSpec("experiment", 35)
-	s.Needs.HostMemoryGB = 25
+	m := m3Machine()
+	m.Devices = m.Devices[:1]
+	s := spec("experiment")
+	s.Needs.MemoryGB = 4
 	j := submit(t, q, s)
-	run := assignedJob(machineCheck(t, q, m))
-	if run == nil || run.ID != j.ID || run.Memory.RAM.ChargeGB != 60 {
-		t.Fatal("expected assigned attempt", run)
-	}
-	if err := q.Started(result(run, true)); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.update(func() error {
-		q.stopForPoolPressure(q.s.Jobs[j.ID], "host/test", nil)
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	// A completed stop report with unconfirmed cleanup still owns the attempt.
-	pending := result(run, false)
-	pending.Interrupted, pending.ReleasePending = true, true
-	ambiguous := 90.0
-	pending.MemoryPeak = &AttemptMemoryPeak{DeviceGB: &ambiguous}
-	generation := int64(7)
-	pending.FinalCheckpointGeneration = &generation
-	if err := q.Complete(pending); err != nil {
-		t.Fatal(err)
-	}
-	requireState(t, q, j.ID, "stopping")
-	if got := job(t, q, j.ID).MemoryAttempts; len(got) != 1 || got[0].LearningReason != "pressure_peak_unattributed" {
-		t.Fatalf("incomplete attribution missing from status: %+v", got)
-	}
-	other := m
-	other.ID, other.HostID, other.Session = "other", "other-host", "other-session"
-	if next := assignedJob(machineCheck(t, q, other)); next != nil {
-		t.Fatal("readmitted on another host before exact release", next)
-	}
-
-	key := pooledEvidenceKey(run, allocationMachine(&m, run.AllocatedDevices))
-	cgroup, want := 69.0, 79.0
-	r := result(run, false)
-	r.ReleaseOnly, r.Forced, r.MemoryPeak = true, true, &AttemptMemoryPeak{
-		CgroupGB: &cgroup, HostGB: &cgroup, DeviceGB: &want,
-		DeviceSampling: &DeviceMemorySampling{Complete: true, OwnedPeakGB: &want},
-	}
-	stale := r
-	stale.Session += "-stale"
-	if err := q.Complete(stale); err != nil {
-		t.Fatal(err)
-	}
-	requireState(t, q, j.ID, "stopping")
-	if got := q.memoryEvidence.estimate(key, 0, initialMemoryConfidence); got.ChargeGB != 0 {
-		t.Fatal("stale release added a peak", got)
-	}
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	requireState(t, q, j.ID, "queued")
-	if got := job(t, q, j.ID).MemoryAttempts; len(got) != 1 || got[0].LearningReason != "pressure_peak" {
-		t.Fatalf("exact pressure peak missing from attempt history: %+v", got)
-	}
-	if got := q.memoryEvidence.estimate(key, 0, initialMemoryConfidence); got.ChargeGB != want {
-		t.Fatalf("exact pressure release lost the %.1f GiB measured floor: %+v", want, got)
-	}
-	// Restore the durable evidence, then exercise ordinary placement. A
-	// lower hint for the same exact program cannot erase the retained peak.
-	q = reopenQueue(t, q, clock)
-	requireState(t, q, j.ID, "queued")
-	clock.Advance(time.Second)
-	m.HostAvailableMemoryGB = 70
-	m.MemoryObservation = &HostMemoryObservation{TotalGB: 128, UsedGB: 58}
-	if next := assignedJob(machineCheck(t, q, m)); next != nil {
-		t.Fatalf("readmitted at the old charge in 70 GiB of room: %+v", next.Memory)
-	}
-	requireState(t, q, j.ID, "queued")
-	clock.Advance(time.Second)
-	m.HostAvailableMemoryGB = 96
-	m.MemoryObservation = &HostMemoryObservation{TotalGB: 128, UsedGB: 32}
-	next := assignedJob(machineCheck(t, q, m))
-	if next == nil || next.ID != j.ID || next.Attempt != 2 || next.Memory.RAM.ChargeGB != want || next.Memory.RAM.TypicalGB != want {
-		t.Fatalf("recovery did not admit attempt 2 at %.0f GiB: %v, %s", want, next, job(t, q, j.ID).Reason)
-	}
-}
-
-func TestMemoryPoolPressurePeakPreservesLargerEvidenceFloors(t *testing.T) {
-	for _, tc := range []struct {
-		name                     string
-		previousPeak, oom, limit float64
-		want                     float64
-	}{
-		{name: "exact retained peak", previousPeak: 82, want: 82},
-		{name: "OOM floor", previousPeak: 82, oom: 50, want: 100},
-		{name: "explicit limit", previousPeak: 82, oom: 50, limit: 110, want: 110},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			q, _ := fixture(t)
-			m := cpuMachine("pressure-floor", "pressure-floor", "cpu", 8, 96)
-			m.HostMemoryBudgetGB = 96
-			j := Job{Spec: cpuSpec(1, 60)}
-			if tc.limit > 0 {
-				j.Spec.MemoryLimitGB = &tc.limit
-			}
-			key := pooledEvidenceKey(&j, &m)
-			q.memoryEvidence.exact[key] = memoryEvidenceSeries{Peaks: []float64{tc.previousPeak}, Lower: tc.oom, PressurePeak: 43.6}
-			estimate := q.resolvePooledSize(&j, &m).pools.RAM
-			if estimate.ChargeGB != tc.want {
-				t.Fatalf("got charge %.3f GiB, want %.3f", estimate.ChargeGB, tc.want)
-			}
-		})
-	}
-}
-
-func TestMemoryPoolPressureReleaseIgnoresHostWideLoss(t *testing.T) {
-	for _, tc := range []struct {
-		name, state string
-		owned       float64
-	}{
-		{name: "bystander", state: "queued", owned: 12},
-		{name: "genuinely too large", state: "failed", owned: 105},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			assertMemoryPoolPressureReleaseIgnoresHostWideLoss(t, tc.owned, tc.state)
-		})
-	}
-}
-
-func assertMemoryPoolPressureReleaseIgnoresHostWideLoss(t *testing.T, owned float64, state string) {
-	t.Helper()
-	q, _ := fixture(t)
-	m := cpuMachine("pressure-attribution", "pressure-attribution", "cpu", 8, 96)
-	m.Devices = []MachineDevice{}
-	m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
-	m.HostMemoryBudgetGB = 96
-	j := submit(t, q, cpuSpec(1, 60))
 	run := assignedJob(machineCheck(t, q, m))
 	if run == nil || run.ID != j.ID {
 		t.Fatal("expected assigned attempt", run)
@@ -364,28 +245,20 @@ func assertMemoryPoolPressureReleaseIgnoresHostWideLoss(t *testing.T, owned floa
 	if err := q.Started(result(run, true)); err != nil {
 		t.Fatal(err)
 	}
-	if err := q.update(func() error {
-		q.stopForPoolPressure(q.s.Jobs[j.ID], "host/test", nil)
-		return nil
-	}); err != nil {
+	clock.Advance(time.Second)
+	used := 9.0
+	c := Checkin{Machine: m, period: time.Second, AttemptProtocol: keyedAttemptProtocol,
+		Attempts: []AttemptReport{{Execution: Execution{ID: run.ID, Attempt: run.Attempt}, Session: run.Session, Started: true,
+			CurrentHostMemory: &CurrentHostMemory{DeviceGB: &used}}}}
+	if _, err := q.Checkin(c); err != nil {
 		t.Fatal(err)
 	}
-	hostDrop := 70.0
-	r := result(run, false)
-	r.ReleaseOnly, r.Forced = true, true
-	r.MemoryPeak = &AttemptMemoryPeak{CgroupGB: &owned, HostGB: &owned, CombinedHostGB: &hostDrop}
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
+	got := job(t, q, run.ID)
+	stop := priorityStop(got)
+	if got.State != "stopping" || stop == nil || stop.DevicePool == nil {
+		t.Fatalf("missing device pool stop: %s %+v", got.State, stop)
 	}
-	requireState(t, q, j.ID, state)
-	if state == "failed" {
-		got := job(t, q, j.ID)
-		if got.DiagnosticCode != "memory_capacity" || got.FinishedAt == nil {
-			t.Fatalf("missing typed capacity failure: %s %s", got.DiagnosticCode, got.Reason)
-		}
-	}
-	key := pooledEvidenceKey(run, &m)
-	if got := q.memoryEvidence.estimate(key, 0, initialMemoryConfidence); got.ChargeGB != owned {
-		t.Fatalf("host-wide loss changed the attributed floor: %+v", got)
+	if d := stop.DevicePool; d.Trigger != "over_budget" || d.BudgetGB != 8 || d.UsedGB != used || d.OverageGB != used-deviceShareGB(run) {
+		t.Fatalf("device pool stop lost the decision-time comparison: %+v", d)
 	}
 }

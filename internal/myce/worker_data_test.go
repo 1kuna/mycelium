@@ -780,34 +780,3 @@ func TestEphemeralManagedStagingAndDiskPlacement(t *testing.T) {
 		}
 	}
 }
-
-func TestEphemeralPressureStopAcceptsOutcomeBeforeExactRelease(t *testing.T) {
-	q, _, w, s := ephemeralFixture(t)
-	j := *s.state.Job
-	if err := q.Started(result(&j, true)); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.update(func() error {
-		q.stopForPoolPressure(q.s.Jobs[j.ID], "host/test", nil)
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	s.state.Result.Success, s.state.Result.Interrupted = false, true
-	w.cleanupFS = &faultWorkerDataFS{beforeRemove: func(path string) {
-		if path != filepath.Join(s.dir, ephemeralLogName(j)) {
-			return // Failed attempts can discard payload files before publishing logs.
-		}
-		got := job(t, q, j.ID)
-		if !s.state.WorkerDataAccepted || got.State != "stopping" || got.ReleaseConfirmed {
-			t.Fatal("pressure stop lost its acceptance or exact release fence", got.State, got.ReleaseConfirmed)
-		}
-	}}
-	if done, err := w.finishEphemeralAttempt(t.Context(), s, true); err != nil || !done {
-		t.Fatal("pressure-stopped attempt could not finish cleanup", done, err)
-	}
-	got := job(t, q, j.ID)
-	if got.State != "queued" || !cleanupComplete(got.WorkerDataCleanup) || !got.Copies[0].ReleaseConfirmed {
-		t.Fatal("exact removal receipt did not settle the pressure stop", got.State, got.WorkerDataCleanup)
-	}
-}

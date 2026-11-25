@@ -101,6 +101,7 @@ func (q *Queue) preemptionPlacementAllows(j *Job, m *Machine) bool {
 // member facts still decide whether the command completed or was interrupted.
 type PriorityPreemption struct {
 	MemoryPool *MemoryPoolStop `json:"memory_pool,omitempty"`
+	DevicePool *DevicePoolStop `json:"device_pool,omitempty"`
 	Cause      string          `json:"cause"`
 	Demand     string          `json:"demand"`
 	Victim     string          `json:"victim"`

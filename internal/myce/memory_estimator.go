@@ -44,17 +44,8 @@ type memoryEstimateEvidence struct {
 }
 
 type memoryEvidenceSeries struct {
-	Peaks        []float64
-	Lower        float64
-	PressurePeak float64 `json:",omitempty"`
-}
-
-func (s memoryEvidenceSeries) peakFloor() float64 {
-	floor := s.PressurePeak
-	for _, peak := range s.Peaks {
-		floor = max(floor, peak)
-	}
-	return floor
+	Peaks []float64
+	Lower float64
 }
 
 type memoryRatioKey struct {
@@ -241,23 +232,13 @@ func (e *memoryEvidence) estimate(k memoryEvidenceKey, hint, confidence float64)
 	return e.estimateWithFloor(k, hint, confidence, e.exact[k].Lower)
 }
 
-func (e *memoryEvidence) retainPressurePeak(key memoryEvidenceKey, peak float64) {
-	exact := e.exact[key]
-	if peak <= exact.PressurePeak || !validRate(peak) || key.Platform == "" || key.Family == "" || key.Exact == "" {
-		return
-	}
-	exact.PressurePeak = peak
-	e.exact[key] = exact
-	e.write(memoryEvidenceRowKey{kind: "exact", key: key}, exact)
-}
-
 func (e *memoryEvidence) estimateWithFloor(k memoryEvidenceKey, hint, confidence, lower float64) memoryPoolEstimate {
-	exact, family := e.exact[k], e.family[k.familyKey()]
 	var typical, charge float64
 	finish := func(level string, runs int, alone bool) memoryPoolEstimate {
-		typical = max(typical, lower, exact.PressurePeak)
-		return memoryPoolEstimate{TypicalGB: typical, ChargeGB: max(typical, charge, 2*lower, exact.peakFloor()), Evidence: memoryEstimateEvidence{Level: level, Runs: runs}, Alone: alone && exact.PressurePeak == 0}
+		typical = max(typical, lower)
+		return memoryPoolEstimate{TypicalGB: typical, ChargeGB: max(typical, charge, 2*lower), Evidence: memoryEstimateEvidence{Level: level, Runs: runs}, Alone: alone}
 	}
+	exact, family := e.exact[k], e.family[k.familyKey()]
 	for _, candidate := range []struct {
 		level string
 		peaks []float64

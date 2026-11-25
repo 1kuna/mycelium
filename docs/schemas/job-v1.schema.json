@@ -1749,9 +1749,6 @@
         "min_gb": {
           "type": "number"
         },
-        "owned_peak_gb": {
-          "type": "number"
-        },
         "peak_at_seconds": {
           "type": "number"
         },
@@ -1771,6 +1768,42 @@
         "peak_at_seconds",
         "elapsed_seconds",
         "max_interval_seconds"
+      ],
+      "type": "object"
+    },
+    "DevicePoolStop": {
+      "properties": {
+        "budget_gb": {
+          "type": "number"
+        },
+        "free_gb": {
+          "type": "number"
+        },
+        "memory_measured": {
+          "type": "boolean"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "overage_gb": {
+          "type": "number"
+        },
+        "trigger": {
+          "type": "string"
+        },
+        "used_gb": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "observed_at",
+        "budget_gb",
+        "used_gb",
+        "free_gb",
+        "memory_measured",
+        "overage_gb",
+        "trigger"
       ],
       "type": "object"
     },
@@ -4626,8 +4659,7 @@
         "machine",
         "session",
         "attempt",
-        "evidence",
-        "observed_at"
+        "evidence"
       ],
       "type": "object"
     },
@@ -4909,6 +4941,9 @@
           "type": "number"
         },
         "growth_gb_per_second": {
+          "type": "number"
+        },
+        "host_pressure": {
           "type": "number"
         },
         "next_loss_gb": {
@@ -5819,6 +5854,9 @@
         },
         "demand": {
           "type": "string"
+        },
+        "device_pool": {
+          "$ref": "#/$defs/DevicePoolStop"
         },
         "memory_pool": {
           "$ref": "#/$defs/MemoryPoolStop"
