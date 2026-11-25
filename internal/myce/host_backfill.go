@@ -32,11 +32,11 @@ type hostBackfillDemand struct {
 // cannot fit beside CPU holders yet (#1717). Parents describe demand; they
 // never own execution capacity.
 func backfillFiniteExecution(j *Job) bool {
-	return j.Spec.Needs.Model == "" && j.Spec.FanOut == nil
+	return j.Spec.Needs.Model == "" && !j.Spec.childFanOut()
 }
 
 func (q *Queue) backfillCandidates(j *Job, m, projected *Machine, resources map[batchResourceKey]batchResourceRoom) []*Job {
-	if j.Spec.FanOut != nil {
+	if j.Spec.childFanOut() {
 		if candidate := q.fanOutCandidateWithResources(j, projected, resources); candidate != nil {
 			return []*Job{candidate}
 		}
@@ -64,7 +64,7 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 	scan.hostBackfill = map[string]*hostBackfillDemand{}
 	demands := []*Job{}
 	for _, j := range q.liveJobs() {
-		if j.State == "queued" && (backfillFiniteExecution(j) || j.Spec.FanOut != nil) {
+		if j.State == "queued" && (backfillFiniteExecution(j) || j.Spec.childFanOut()) {
 			demands = append(demands, j)
 		}
 	}
@@ -85,7 +85,7 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 	}
 	for _, j := range demands {
 		var best *hostBackfillDemand
-		drain := maintenanceResume(j) && j.Spec.FanOut == nil
+		drain := maintenanceResume(j) && !j.Spec.childFanOut()
 		start := q.fleetStartReservation(j)
 
 		if !drain && start == nil && (q.s.FleetUpgrade == nil || q.s.FleetUpgrade.State != "running" || jobClass(j.Spec) != "production") {

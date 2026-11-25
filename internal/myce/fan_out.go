@@ -27,6 +27,7 @@ type PieceResult struct {
 	OutputFiles map[string]string `json:"output_files,omitempty"`
 }
 type FanOutProgress struct {
+	Warm     *WarmPieceProgress     `json:"warm,omitempty"`
 	Next     int                    `json:"next"`
 	Children []string               `json:"children,omitempty"`
 	Results  map[string]PieceResult `json:"results,omitempty"`
@@ -152,7 +153,7 @@ func plainPieceFiles(files FileManifest, key string) FileManifest {
 // ordinary job in the submit transaction, so the parent is fully dispatched
 // (Next == len) and never holds a slot, like an admitted extension fan-out.
 func (q *Queue) materializePlainPieces(parent *Job) {
-	if parent.Spec.FanOut == nil || parent.Spec.extensionJob() || parent.FanOut == nil || parent.FanOut.Next > 0 {
+	if !parent.Spec.childFanOut() || parent.Spec.extensionJob() || parent.FanOut == nil || parent.FanOut.Next > 0 {
 		return
 	}
 	q.touchJob(parent.ID)
@@ -263,7 +264,7 @@ func (q *Queue) assignFanOut(selected *Job, m *Machine) *Job {
 }
 
 func (q *Queue) maintainFanOutJob(parent *Job) {
-	if parent.Spec.FanOut == nil || parent.FanOut == nil {
+	if !parent.Spec.childFanOut() || parent.FanOut == nil {
 		return
 	}
 	if terminal(parent.State) {

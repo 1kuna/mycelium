@@ -519,6 +519,9 @@
         "wall_time": {
           "type": "string"
         },
+        "warm_pieces": {
+          "type": "string"
+        },
         "worker_data": {
           "type": "string"
         }
@@ -2760,6 +2763,9 @@
             "object",
             "null"
           ]
+        },
+        "warm": {
+          "$ref": "#/$defs/WarmPieceProgress"
         }
       },
       "required": [
@@ -6816,6 +6822,10 @@
           "type": "string",
           "x-contract": "diagnostic"
         },
+        "warm_pieces": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
         "worker_data": {
           "type": "string",
           "x-contract": "diagnostic"
@@ -7296,6 +7306,64 @@
       "required": [
         "limit"
       ],
+      "type": "object"
+    },
+    "WarmPieceDelivery": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "key": {
+          "type": "string"
+        },
+        "offered_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "sequence": {
+          "type": "integer"
+        },
+        "started_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "sequence",
+        "attempt",
+        "offered_at"
+      ],
+      "type": "object"
+    },
+    "WarmPieceProgress": {
+      "properties": {
+        "between_items_seconds": {
+          "type": "number"
+        },
+        "delivery": {
+          "$ref": "#/$defs/WarmPieceDelivery"
+        },
+        "failures": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Execution"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "item_seconds": {
+          "type": "number"
+        },
+        "last_settled_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "startup_seconds": {
+          "type": "number"
+        }
+      },
       "type": "object"
     },
     "WorkLearningChange": {

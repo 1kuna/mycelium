@@ -273,7 +273,7 @@ func visitJobFileManifests(j *Job, visit func(string, FileManifest)) {
 	visit("input", j.Spec.Files)
 	visit("shared_input", sharedStoredFiles(j.Spec))
 	visit("result", j.OutputRefs)
-	if j.Spec.localFirst() {
+	if j.Spec.localFirst() || j.Spec.warmPieces() {
 		for _, save := range j.FileCheckpoints {
 			visit("checkpoint", save.Files)
 		}

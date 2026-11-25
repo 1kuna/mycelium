@@ -277,6 +277,9 @@ func (q *Queue) placementPolicyWithoutReservation(j *Job, m *Machine) bool {
 // Useful demand survives temporary contact suspicion. This predicate grants no
 // assignment or preparation authority; those paths still require fresh contact.
 func (q *Queue) placementDemandPolicy(j *Job, m *Machine) bool {
+	if j.Spec.warmPieces() && !q.admissionHold(j, m, reasonHold("capability", warmWorkerRefusal(m)), predicateWarmPieces) {
+		return false
+	}
 	if j.State != "running" && j.State != "stopping" && !q.admissionHold(j, m, workerMemoryHold(m), predicateWorkerMemoryContract) {
 		return false
 	}

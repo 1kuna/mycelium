@@ -794,7 +794,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		return nil, err
 	}
 	timing.enter(launchCommandSetup)
-	group := len(j.Spec.Run.Sidecars) > 0 || j.Spec.Run.MemoryGB > 0
+	group := j.Spec.warmPieces() || len(j.Spec.Run.Sidecars) > 0 || j.Spec.Run.MemoryGB > 0
 	reservation := nativeLaunchCustody{ProcessID: ID(), Phase: "reserved"}
 	reservation.CustodyID = reservation.ProcessID
 	if group {

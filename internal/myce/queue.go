@@ -1045,6 +1045,9 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		if q.files != store || q.environmentRevision != environmentRevision {
 			return ErrStale
 		}
+		if err := validateWarmPieces(s); err != nil {
+			return rejectFieldRule("job_files_invalid", err)
+		}
 		if err := q.defaultMemory(&s); err != nil {
 			return specRejection(err)
 		}
@@ -1072,6 +1075,14 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		}
 		if err := validationErr; err != nil {
 			return specRejection(err)
+		}
+		if s.warmPieces() {
+			if store == nil {
+				return rejectFieldRule("job_files_invalid", errors.New("warm_pieces requires a queue file store"))
+			}
+			if s.Resumable && !q.fileCheckpoints {
+				return rejectFieldRule("job_files_invalid", errors.New("resumable warm_pieces requires file-store checkpoints"))
+			}
 		}
 		inputExpiries := q.checkpointInputExpiries(s)
 		for _, expiry := range inputExpiries {
@@ -1237,6 +1248,9 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		j = &copy
 		if s.FanOut != nil {
 			j.FanOut = &FanOutProgress{Results: map[string]PieceResult{}}
+			if s.warmPieces() {
+				j.FanOut.Warm = &WarmPieceProgress{}
+			}
 		}
 		if s.After != nil {
 			j.WaitingSince = time.Time{}
@@ -1314,6 +1328,14 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	}
 	// Read the stop cause while the attempt identity still names it.
 	maintenance := plannedMaintenanceStop(j)
+	if j.Spec.warmPieces() {
+		j.FanOut.Warm.Delivery = nil
+		// Once an interrupted delivery has been fenced, a returning copy
+		// can settle cleanup but cannot adopt the logical job again.
+		for i := range j.Copies {
+			j.Copies[i].Recoverable = false
+		}
+	}
 	j.PendingOutputRefs = nil
 	j.OutputAdmissionPending = j.Spec.OutputDelivery == asyncNAS
 	// Snapshot identity before requeue clears it, including loss without a result.
@@ -1568,7 +1590,7 @@ func (q *Queue) maintainControl(refreshStartReasons bool) {
 	// queued/paused expiry. Every terminal decision must carry its own timestamp;
 	// later maintenance need not see a job after it leaves the live set.
 	for _, j := range q.liveJobs() {
-		if (j.State == "queued" || j.State == "paused") && !(j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next > 0) && expired(j.Spec.GiveUpAt, now) {
+		if (j.State == "queued" || j.State == "paused") && !(j.Spec.childFanOut() && j.FanOut != nil && j.FanOut.Next > 0) && expired(j.Spec.GiveUpAt, now) {
 			q.touchJob(j.ID)
 			j.State, j.Reason, j.FinishedAt = "failed", "give-up time reached", &now
 		}
@@ -2200,7 +2222,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	}
 	// A quota failure remains terminal when a stop races it. Verify its opt-in
 	// diagnostics in either live state, with the same identity fences as outputs.
-	verify := err == nil && !(r.Success && wallTimeExpired(j, q.clock.Now())) && j.storedFileResults() && (j.State == "running" || j.State == "stopping" && (quotaFailure || plannedPriorityStop(j) || wallTimeStopped(j)) || wallTimeDiagnosticsAllowed(j, r)) && !cancelled(j) && (r.Success && !r.Interrupted || !r.Success && r.Diagnostics != nil && j.Spec.capturesFailure()) && !r.ReleaseOnly
+	verify := err == nil && !(r.Success && wallTimeExpired(j, q.clock.Now())) && j.storedFileResults() && (!j.Spec.warmPieces() || !r.Success) && (j.State == "running" || j.State == "stopping" && (quotaFailure || plannedPriorityStop(j) || wallTimeStopped(j)) || wallTimeDiagnosticsAllowed(j, r)) && !cancelled(j) && (r.Success && !r.Interrupted || !r.Success && r.Diagnostics != nil && j.Spec.capturesFailure()) && !r.ReleaseOnly
 	var yieldPath string
 	if err == nil && yieldMatches(j) && !j.FileTransport && !r.ReleaseOnly && r.Interrupted && r.FinalCheckpointGeneration != nil {
 		yieldPath = attemptCheckpoint(*j)
@@ -2623,7 +2645,10 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 		}
 		q.retry(j, reason)
 	} else if r.Success {
-		if j.storedFileResults() {
+		state := "succeeded"
+		if j.Spec.warmPieces() {
+			state, j.Reason = warmFinalState(j)
+		} else if j.storedFileResults() {
 			if !filesVerified {
 				return ErrStale
 			}
@@ -2639,9 +2664,11 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 		if strings.HasPrefix(j.Reason, "finalization pending:") {
 			j.Reason = ""
 		}
-		q.recordAttemptLearning(j, r)
-		q.recordEntryCoverageSuccess(j, r.Machine)
-		j.State = "succeeded"
+		if state == "succeeded" {
+			q.recordAttemptLearning(j, r)
+			q.recordEntryCoverageSuccess(j, r.Machine)
+		}
+		j.State = state
 	} else if q.entryCoverageFailure(j, r) {
 		// A coverage finding requeued the job onto another machine type, or
 		// failed it with the finding when no proven type remains.
@@ -3291,11 +3318,13 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 	if report.Started && j.State == "running" && !j.ReleaseConfirmed {
 		j.PreemptionPlacement = nil
 	}
-	if report.Started && j.Spec.StartBy == nil && j.StartedAt == nil && j.State == "running" && q.startPlacementPolicyAllowed(j) {
+	if report.Started && !j.Spec.warmPieces() && j.Spec.StartBy == nil && j.StartedAt == nil && j.State == "running" && q.startPlacementPolicyAllowed(j) {
 		q.markStarted(j)
 	}
-	j.Progress = report.Progress
-	noteCheckpointTarget(j, allocationMachine(m, j.AllocatedDevices), j.Attempt, report.Progress)
+	if !j.Spec.warmPieces() {
+		j.Progress = report.Progress
+		noteCheckpointTarget(j, allocationMachine(m, j.AllocatedDevices), j.Attempt, report.Progress)
+	}
 	q.retainApplicationProgress(j, report, m)
 	q.retainLiveness(j, report)
 	if j.State == "stopping" {
@@ -3375,7 +3404,7 @@ func (q *Queue) workerHasOtherAttempt(machine, session, job string, attempt int)
 func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	q.touchJob(j.ID)
 	values := q.placementValues(q.placementScan(scans...))
-	if j.Spec.FanOut != nil {
+	if j.Spec.childFanOut() {
 		placement := q.s.Jobs[j.ID].PreemptionPlacement
 		q.touchJob(j.ID).PreemptionPlacement = nil
 		j = q.assignFanOut(j, m)
@@ -3449,8 +3478,11 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	// Starts plus admission requeues is the issued-attempt high-water mark, so
 	// an uncounted refusal or a recovered older copy never reissues a number.
 	j.Attempt = max(j.Starts+j.AdmissionRequeues, j.Attempt) + 1
+	if j.Spec.warmPieces() {
+		j.FanOut.Warm.Delivery = nil
+	}
 	j.Starts = j.Attempt - j.AdmissionRequeues
-	if j.storedFileResults() {
+	if j.storedFileResults() && !j.Spec.warmPieces() {
 		j.OutputRefs = nil
 		j.PendingOutputRefs = nil
 	}

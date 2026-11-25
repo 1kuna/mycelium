@@ -21,6 +21,9 @@ type adapterPiece struct {
 // Per-piece inputs become ordinary profile inputs under the reserved piece
 // prefix, so they are identified, frozen and uploaded with the entry's inputs.
 func lowerAdapterPieces(p *executionProfile, pieces []adapterPiece) error {
+	if p.WarmPieces != "" && len(p.Check) != 0 {
+		return errors.New("warm_pieces validates each item before success; omit checks.result")
+	}
 	if len(pieces) == 0 {
 		return nil
 	}

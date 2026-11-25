@@ -123,7 +123,7 @@ func (q *Queue) acquireReservation(request ReservationRequest) (Reservation, err
 		return old, nil // Retrying never renews or resurrects the hold.
 	}
 	j := q.retainedJob(request.Job)
-	if j == nil || j.Spec.FanOut != nil || j.Spec.After != nil {
+	if j == nil || j.Spec.childFanOut() || j.Spec.After != nil {
 		return out, reservationRefusal("reservation requires an existing single job/check without dependencies")
 	}
 	for _, old := range q.s.Reservations {

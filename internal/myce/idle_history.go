@@ -216,7 +216,7 @@ func (q *Queue) idleObservations(trace *admissionTrace, now time.Time, previous 
 		}
 		if (j.State == "queued" || j.State == "paused" && j.Pause != nil) && !cancelled(j) &&
 			dependencyReady(j) && !expired(j.Spec.GiveUpAt, now) &&
-			(j.Spec.FanOut == nil || j.FanOut == nil || j.FanOut.Next < len(j.Spec.FanOut.Pieces)) {
+			(!j.Spec.childFanOut() || j.FanOut == nil || j.FanOut.Next < len(j.Spec.FanOut.Pieces)) {
 			demand = append(demand, j)
 		}
 	}
@@ -384,7 +384,7 @@ func (q *Queue) idleCompatibility(j *Job, m *Machine, fresh bool) (string, strin
 		copy.State = "queued"
 		j = &copy
 	}
-	if j.Spec.FanOut != nil {
+	if j.Spec.childFanOut() {
 		j = q.fanOutTemplate(j)
 		if j == nil {
 			return unknown, unknown

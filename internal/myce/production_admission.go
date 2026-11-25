@@ -140,7 +140,7 @@ func (q *Queue) findPendingProductionGap(key productionGapKey) string {
 		if d.State != "queued" {
 			continue
 		}
-		if d.FanOut != nil && d.Spec.FanOut != nil && d.FanOut.Next >= len(d.Spec.FanOut.Pieces) {
+		if d.FanOut != nil && d.Spec.childFanOut() && d.FanOut.Next >= len(d.Spec.FanOut.Pieces) {
 			continue // A fully launched parent has no new local demand.
 		}
 		if slices.Contains(q.startEligibleHosts(d), host) {
@@ -219,7 +219,7 @@ func (q *Queue) productionAdmissionHold(j *Job, m *Machine) *Hold {
 			continue
 		}
 		// A fan-out parent with every piece launched has no new local demand.
-		if demand.FanOut != nil && demand.Spec.FanOut != nil && demand.FanOut.Next >= len(demand.Spec.FanOut.Pieces) {
+		if demand.FanOut != nil && demand.Spec.childFanOut() && demand.FanOut.Next >= len(demand.Spec.FanOut.Pieces) {
 			continue
 		}
 		seconds, estimated := q.productionArrival(demand)
@@ -245,7 +245,7 @@ func (q *Queue) productionArrival(j *Job) (float64, bool) {
 		return 0, false
 	}
 	p := q.s.Jobs[a.Job]
-	if p == nil || p.Spec.Priority != "production" || terminal(p.State) || cancelled(p) || p.FanOut == nil || p.Spec.FanOut == nil {
+	if p == nil || p.Spec.Priority != "production" || terminal(p.State) || cancelled(p) || p.FanOut == nil || !p.Spec.childFanOut() {
 		return 0, false
 	}
 	remaining := map[string]float64{}

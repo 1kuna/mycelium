@@ -1437,6 +1437,61 @@ overlap a common input or an output. Omit `max_concurrency` and `share_xpu`.
 Plain pieces cannot be combined with `after:`, `workdir`,
 kind/program, `workload` or `fan_out:`. Native entries keep `fan_out:`.
 
+### Fixed warm pieces
+
+Use `advanced: {warm_pieces: fixed}` when a main command can load a model
+once and process a finite serial list. The queue places one parent
+attempt and holds its CPU, accelerator and memory reservations for the
+life of the group. Native sidecars stay with main. Each accepted result
+appears under the original piece key in `fan_out.results`. The parent
+can release the group at an item boundary when competing work wins the
+same resources.
+
+This adapter entry uses the [Python example](../clients/python/examples/warm_score.py)
+as its main command. Include the script in the source snapshot and make
+the [Python client](../clients/python/README.md) available in its environment.
+
+```yaml
+entries:
+  score:
+    run: {command: [python, warm_score.py]}
+    needs: {cpu_cores: 2, host_memory_gb: 4}
+    targets: [{os: darwin}, {os: linux}]
+    advanced: {warm_pieces: fixed, portable: true}
+    inputs: {model.json: weights/model.json}
+    outputs: {score.json: results}
+    pieces:
+      - {key: slot-a, inputs: {input.json: slots/a.json}}
+      - {key: slot-b, inputs: {input.json: slots/b.json}}
+```
+
+Submit with `myce run --entry score` and retain the parent ID. Main opens
+`mycelium.warm_pieces.WarmPieces()` in its own process, initializes the
+model, then calls `next()` until it returns `None`. Each item supplies
+its key, arguments, absolute input paths and an output directory. Write
+each declared output in that directory and call `success()` to verify and
+accept it, or call `failure()` to record an item error and continue. If
+main starts through a launcher, use `exec` to preserve its process
+identity. Sidecars and subprocesses cannot operate the helper.
+
+`myce result PARENT --out DIR` fetches the accepted `KEY/OUTPUT_NAME`
+files, including a partial result. A failed item fails the parent after
+the loop finishes. An interruption that requeues the parent starts at the
+first unsettled key. Use repeatable operations for each key because a
+worker can lose an item before accepting its receipt. With `resumable: true`
+and file-store checkpoints, write a complete generation to
+`item.checkpoint_dir` and call `checkpoint()` to publish it while main is
+active. The next attempt restores that generation for the same unsettled
+item. See [the checkpoint contract](files.md#resumable-jobs).
+
+Fixed warm pieces require a worker that advertises support, synchronous
+file-store outputs, and CPU or one accelerator device. Plain pieces' input
+and key bounds apply. Omit per-piece dependencies, result-check wrappers,
+NAS inputs or output delivery, ephemeral worker data, explicit
+checkpoint policies, multi-device requests, and extension work. Other
+jobs can use the ordinary `after.piece` binding to consume a warm receipt.
+The [warm pieces design](design-warm-jobs.md) describes the rollout stages.
+
 ## Observing parents and native children
 
 Save the parent job ID returned by submission. For a keyed submission, bind that

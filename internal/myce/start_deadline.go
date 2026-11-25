@@ -77,7 +77,7 @@ func (q *Queue) startupPending(j *Job) bool {
 	if relativeStartPaused(j) {
 		return false
 	}
-	if j.Spec.FanOut != nil && j.FanOut != nil {
+	if j.Spec.childFanOut() && j.FanOut != nil {
 		// A logical parent holds no launch slot. Its relative window belongs
 		// to each physical child from assignment, including the first wave.
 		if !absoluteStartBy(j) || j.FanOut.Next == len(j.Spec.FanOut.Pieces) {
@@ -167,7 +167,7 @@ func (q *Queue) maintainStartDeadlines() {
 				// Fence planning sizes the backlog. Keep it off ordinary check-ins;
 				// only an expired production budget needs this final expiry guard.
 				rearm := false
-				if ready && j.Spec.Priority == "production" && j.Spec.FanOut == nil && expired(j.Spec.StartBy, now) {
+				if ready && j.Spec.Priority == "production" && !j.Spec.childFanOut() && expired(j.Spec.StartBy, now) {
 					if q.hostBackfillWaitingReason(j, scan) != "" {
 						waiting, ready = true, false
 						rearm = true
@@ -203,7 +203,7 @@ func (q *Queue) maintainStartDeadlines() {
 		// Disabled-host rejection is an admission decision, independent of the
 		// relative timeout exemption for logical fan-out capacity waits.
 		pending := q.startupPending(j)
-		firstWave := j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next == 0
+		firstWave := j.Spec.childFanOut() && j.FanOut != nil && j.FanOut.Next == 0
 		disabled := anyDisabled && (pending || firstWave) && j.Spec.Priority == "production" && j.Spec.StartBy != nil && !cancelled(j) && dependencyReady(j) && j.State == "queued" && j.Attempt == 0 && q.allStartHostsDisabled(j)
 		executionExpired := false
 		if check := j.Spec.ExtensionCheck; check != nil && check.Timeout != "" && j.StartedAt != nil && !terminal(j.State) && !cancelled(j) {

@@ -213,6 +213,25 @@ uses the declared NAS source even when an ordinary shared-input cache holds a co
   [file holdings](references/results.md#large-outputs-and-release) before
   releasing finished files.
 
+## Fixed warm pieces
+
+Use `advanced: {warm_pieces: fixed}` with plain-command `pieces:` when one
+main process can load a model once and handle the items serially. Submit
+normally and keep the parent ID. Main opens the worker helper, loads the
+model, calls `next()` for the key, args and paths, writes the declared
+outputs for that item, and waits for `success()` or reports `failure()`.
+Pass the helper only to main and use an exec-style launcher. It authenticates
+main without placing the fleet token in any job process.
+
+Inspect the parent's `fan_out.results` for accepted keys. Fetch them as
+`KEY/OUTPUT_NAME` with `myce result PARENT --out DIR`, including partial
+results. An interrupted attempt can resume at the first unsettled key. Use
+repeatable item work and, for resumable submissions, publish complete
+file-store generations from the active item's checkpoint directory. A
+reported item failure settles the key and the loop continues. Plan the full
+attempt reservation for CPU or one device. See the
+[warm pieces contract and Python loop](../../docs/jobs.md#fixed-warm-pieces).
+
 ## Pause, resume and cancel
 
 Pause your own queued job with `myce pause JOB_ID --reason TEXT` and resume it

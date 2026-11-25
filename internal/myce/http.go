@@ -494,6 +494,14 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		allowed, err := a.Queue.authorizeYieldStop(r.Context(), c)
 		respondOperation(w, map[string]bool{"allowed": allowed}, err, "worker_yield_invalid")
 	})
+	mux.HandleFunc("POST /api/workers/warm-piece", func(w http.ResponseWriter, r *http.Request) {
+		var request warmPieceRequest
+		if !decode(w, r, &request) {
+			return
+		}
+		reply, err := a.Queue.warmPiece(r.Context(), request)
+		respondOperation(w, reply, err, "worker_complete_invalid")
+	})
 	mux.HandleFunc("POST /api/workers/complete", func(w http.ResponseWriter, r *http.Request) {
 		var c Result
 		if !decode(w, r, &c) {

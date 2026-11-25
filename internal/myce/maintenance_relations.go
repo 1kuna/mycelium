@@ -91,6 +91,7 @@ func (q *Queue) settleMaintenance() {
 		q.maintainJobPause(j)
 		q.maintainCheckpointInputs(j)
 		q.maintainFanOutJob(j)
+		q.maintainWarmPieces(j)
 		q.maintainPieceDependency(j)
 		after := relationVersion(j)
 		m.seen[id] = after

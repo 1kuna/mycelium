@@ -19,6 +19,8 @@ type FileCheckpoint struct {
 type checkpointPublication struct {
 	Result
 	Checkpoint FileCheckpoint `json:"checkpoint"`
+	Piece      string         `json:"piece,omitempty"`
+	Sequence   int            `json:"sequence,omitempty"`
 }
 
 func bestFileCheckpoint(j *Job) *FileCheckpoint {
@@ -117,6 +119,9 @@ func (q *Queue) publishCheckpoint(ctx context.Context, p checkpointPublication) 
 		if local && (j.Attempt != p.Attempt || j.Machine != p.Machine || j.Session != p.Session || (j.State != "running" && j.State != "stopping")) {
 			return ErrStale
 		}
+		if !q.warmCheckpointAllowed(j, p) {
+			return ErrStale
+		}
 		allowed := false
 		var devices []string
 		for _, copy := range j.Copies {
@@ -151,6 +156,9 @@ func (q *Queue) publishCheckpoint(ctx context.Context, p checkpointPublication) 
 			}
 		}
 		j.FileCheckpoints[p.Attempt] = p.Checkpoint
+		if j.Spec.warmPieces() {
+			j.Progress = p.Checkpoint.Generation
+		}
 		noteCheckpointTarget(j, allocationMachine(q.s.Machines[p.Machine], devices), p.Attempt, p.Checkpoint.Generation)
 		return nil
 	}, nil)
@@ -266,7 +274,18 @@ func (w Worker) publishFileCheckpoint(j Job, parent string) (int64, error) {
 	if j.Spec.localFirst() {
 		capture = captureLocalFirst
 	}
-	stage, save, err := capture(attemptCheckpoint(j), stagingRoot, w.storageObserver)
+	checkpoint := attemptCheckpoint(j)
+	var key string
+	var sequence int
+	if j.Spec.warmPieces() {
+		var err error
+		key, sequence, err = warmCheckpointDelivery(j, parent)
+		if err != nil || sequence == 0 {
+			return 0, err
+		}
+		checkpoint = warmCheckpointPath(j, key)
+	}
+	stage, save, err := capture(checkpoint, stagingRoot, w.storageObserver)
 	if err != nil {
 		return 0, err
 	}
@@ -285,7 +304,7 @@ func (w Worker) publishFileCheckpoint(j Job, parent string) (int64, error) {
 			return 0, err
 		}
 	}
-	p := checkpointPublication{Result: Result{Machine: w.Machine.ID, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, Checkpoint: save}
+	p := checkpointPublication{Result: Result{Machine: w.Machine.ID, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, Checkpoint: save, Piece: key, Sequence: sequence}
 	if err = w.Client.Call(ctx, "POST", "/api/files/checkpoint", p, nil); err != nil {
 		return 0, err
 	}
@@ -320,12 +339,19 @@ func (w Worker) prepareFileCheckpoint(j Job, stateDir string) (string, error) {
 		if err = j.ResumeFiles.Files.validate(); err != nil {
 			return "", err
 		}
+		resumeDir := stage
+		if j.Spec.warmPieces() {
+			if j.FanOut.Next == len(j.Spec.FanOut.Pieces) {
+				return "", errors.New("settled warm pieces cannot have an item checkpoint")
+			}
+			resumeDir = filepath.Join(stage, j.Spec.FanOut.Pieces[j.FanOut.Next].Key)
+		}
 		for name, ref := range j.ResumeFiles.Files {
-			if err = w.fileCache.copyTo(ctx, ref, filepath.Join(stage, name)); err != nil {
+			if err = w.fileCache.copyTo(ctx, ref, filepath.Join(resumeDir, name)); err != nil {
 				return "", err
 			}
 		}
-		generation, e := checkpointProgress(stage)
+		generation, e := checkpointProgress(resumeDir)
 		if e != nil || generation != j.ResumeFiles.Generation {
 			return "", errors.New("resume checkpoint generation mismatch")
 		}
@@ -385,7 +411,7 @@ func (w Worker) finishFileResultContext(ctx context.Context, j Job, result Resul
 		}
 		result.FinalCheckpointGeneration = &generation
 	}
-	if !result.Success || result.Interrupted || len(j.Spec.Outputs) == 0 || !j.storedFileResults() {
+	if j.Spec.warmPieces() || !result.Success || result.Interrupted || len(j.Spec.Outputs) == 0 || !j.storedFileResults() {
 		return result, nil
 	}
 	if j.Spec.OutputDelivery == asyncNAS {
