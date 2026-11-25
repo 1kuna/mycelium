@@ -7,10 +7,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -85,7 +87,8 @@ func (h *fakeHub) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var siblings []map[string]any
-		for name, content := range files {
+		for _, name := range slices.Sorted(maps.Keys(files)) {
+			content := files[name]
 			entry := map[string]any{"rfilename": name, "size": len(content)}
 			if strings.HasSuffix(name, ".json") {
 				sum := sha1.Sum([]byte(fmt.Sprintf("blob %d\x00%s", len(content), content)))
@@ -141,6 +144,70 @@ func acquireOnce(t *testing.T, w *Worker, j Job) (string, error) {
 }
 
 const tinyWeightsPath = "/org/tiny/resolve/" + tinyRevision + "/model.safetensors"
+
+func TestModelHubExplicitFileSelectionFitsCache(t *testing.T) {
+	hub := newFakeHub(t)
+	hub.add("org/tiny", tinyRevision, map[string]string{
+		"a-ignored.gguf":  tinyWeights,
+		"b-selected.gguf": tinyWeights,
+		"z-ignored.gguf":  strings.Repeat("z", 1<<20),
+	})
+	w := hubWorker(t, t.TempDir(), hub.URL)
+	w.modelSnapshots.cache.Limit = 128 << 10
+	job := snapshotJob("org/tiny")
+	model := job.Spec.ModelSnapshots["base"]
+	model.Files = []string{"b-selected.gguf"}
+	job.Spec.ModelSnapshots["base"] = model
+
+	dir, err := acquireOnce(t, w, job)
+	if err != nil {
+		t.Fatalf("selected file fits in the snapshot cache: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 || entries[0].Name() != model.Files[0] {
+		t.Fatalf("snapshot must contain exactly the selected file: %v %v", entries, err)
+	}
+	_, sizes := w.modelIndex.report(w.modelSnapshots.readyKeys())
+	if got := sizes[snapshotIdentity(model)]; got != uint64(len(tinyWeights)) {
+		t.Fatalf("learned size %d, want %d", got, len(tinyWeights))
+	}
+	for _, name := range []string{"a-ignored.gguf", "z-ignored.gguf"} {
+		if hub.count("/org/tiny/resolve/"+tinyRevision+"/"+name) != 0 {
+			t.Fatalf("unrequested file %q was downloaded", name)
+		}
+	}
+}
+
+func TestModelHubRejectsPreviouslyExpandedSelection(t *testing.T) {
+	hub := newFakeHub(t)
+	hub.add("org/tiny", tinyRevision, map[string]string{"model.safetensors": tinyWeights, "extra.json": tinyConfig})
+	cache := t.TempDir()
+	w := hubWorker(t, cache, hub.URL)
+	full := snapshotJob("org/tiny")
+	if _, err := acquireOnce(t, w, full); err != nil {
+		t.Fatal(err)
+	}
+	model := full.Spec.ModelSnapshots["base"]
+	input, ok := w.modelIndex.lookup(snapshotIdentity(model))
+	if !ok {
+		t.Fatal("missing whole-snapshot cache record")
+	}
+	model.Files = []string{"model.safetensors"}
+	full.Spec.ModelSnapshots["base"] = model
+	// Emulate an older worker that recorded the extra file under a selection.
+	w.modelIndex.record(w.modelSnapshots.cache.Root, model, input)
+	restarted := hubWorker(t, cache, hub.URL)
+	if held, sizes := restarted.modelIndex.report(restarted.modelSnapshots.readyKeys()); len(held) != 0 || len(sizes) != 0 {
+		t.Fatalf("advertised a legacy entry that violated its selection: held=%v sizes=%v", held, sizes)
+	}
+	dir, err := acquireOnce(t, w, full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 || entries[0].Name() != model.Files[0] {
+		t.Fatalf("reused a legacy entry that violated its selection: %v %v", entries, err)
+	}
+}
 
 // A host without the snapshot fetches it once into its own cache, two jobs on
 // that host share the download, and once held (also after a worker restart)

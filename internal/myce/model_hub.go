@@ -74,7 +74,8 @@ func (x *modelSnapshotIndex) load(c *SharedInputCache) {
 		}
 		var r modelSnapshotRecord
 		b, err := os.ReadFile(filepath.Join(c.cache.Root, d.Name(), modelSnapshotRecordName))
-		if err != nil || json.Unmarshal(b, &r) != nil || r.Input.key() != d.Name() {
+		if err != nil || json.Unmarshal(b, &r) != nil || r.Input.key() != d.Name() ||
+			!r.Snapshot.matchesFiles(r.Input.Manifest) {
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(c.cache.Root, d.Name(), "ready.json")); err != nil {
@@ -307,14 +308,14 @@ func (w Worker) resolveHubSnapshot(ctx context.Context, hub *modelHub, m ModelSn
 	if info.SHA != m.Revision {
 		return SharedInput{}, modelSnapshotError("model_snapshot_revision", "not_found", nil)
 	}
-	allowed := map[string]bool{}
+	missing := map[string]bool{}
 	for _, f := range m.Files {
-		allowed[f] = true
+		missing[f] = true
 	}
 	input := SharedInput{NAS: "snapshots/" + m.Revision, Manifest: FileManifest{}, sources: map[string]string{}, hub: true}
 	large := map[string]bool{}
 	for _, f := range info.Siblings {
-		if len(allowed) > 0 && !allowed[f.Name] {
+		if len(m.Files) > 0 && !missing[f.Name] {
 			continue
 		}
 		if !safeRelative(f.Name) {
@@ -340,9 +341,9 @@ func (w Worker) resolveHubSnapshot(ctx context.Context, hub *modelHub, m ModelSn
 		default:
 			return SharedInput{}, modelSnapshotError("model_snapshot_mismatch", "invalid_response", nil)
 		}
-		delete(allowed, f.Name)
+		delete(missing, f.Name)
 	}
-	if len(allowed) > 0 && len(m.Files) > 0 || len(input.Manifest) == 0 {
+	if len(missing) > 0 || len(input.Manifest) == 0 {
 		return SharedInput{}, modelSnapshotError("model_snapshot_mismatch", "not_found", nil)
 	}
 	input.fetch = func(ctx context.Context, name, target string, ref FileRef) error {

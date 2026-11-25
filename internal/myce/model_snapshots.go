@@ -30,6 +30,22 @@ type ModelSnapshot struct {
 	Files    []string `json:"files,omitempty" yaml:"files,omitempty"`
 }
 
+// Older Hub resolutions could record a superset under a filtered declaration.
+func (m ModelSnapshot) matchesFiles(manifest FileManifest) bool {
+	if len(m.Files) == 0 {
+		return true
+	}
+	if len(m.Files) != len(manifest) {
+		return false
+	}
+	for _, file := range m.Files {
+		if _, ok := manifest[file]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // ModelPolicy is local queue policy: which repositories may be used and how
 // large a snapshot copy may be. Absent source restrictions permit every repository.
 type ModelPolicy struct {
@@ -383,6 +399,9 @@ func (w Worker) acquireHeldSnapshot(ctx context.Context, j Job, id string, m Mod
 		return "", nil, false, nil
 	}
 	r := entry.Recovery
+	if !m.matchesFiles(r.Input.Manifest) {
+		return "", nil, false, nil
+	}
 	s := r.Input
 	s.sources, s.model, s.hub = r.Sources, &m, r.Hub
 	if s.hub {
