@@ -380,21 +380,33 @@ func TestStorageFaultRecoveryBypassAndRotatingOffsets(t *testing.T) {
 	}
 }
 
+func bindStorageFaultCheckpoint(t *testing.T, w *Worker, s *workerStore, j *Job) string {
+	t.Helper()
+	// Model mount inventory with a real temporary directory under the
+	// effective root, so preparation can verify its backing before I/O.
+	mount := t.TempDir()
+	w.CheckpointRoot = filepath.Join(mount, "checkpoints")
+	w.ServiceConfig = &ServiceConfig{NAS: mount}
+	w.MountRoots = func(context.Context) ([]string, error) { return []string{mount}, nil }
+	s.state.CheckpointRoot = w.CheckpointRoot
+	j.Checkpoint = filepath.Join(w.CheckpointRoot, j.ID)
+	if err := os.Mkdir(w.CheckpointRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(w.CheckpointRoot, "previous", "save")
+}
+
 func TestStorageFaultCheckpointPreparationPublishesExactFault(t *testing.T) {
 	w := recoveryWorker(t)
 	_, m, clock := storageFaultFixture(t)
 	w.storageHealth, w.Clock = m, clock
-	w.CheckpointRoot = "/share/checkpoints"
-	w.ServiceConfig = &ServiceConfig{NAS: "/share"}
-	w.MountRoots = func(context.Context) ([]string, error) { return []string{"/share"}, nil }
 	s, err := w.openStore()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.close()
-	s.state.CheckpointRoot = w.CheckpointRoot // Worker.Run publishes the effective root before attempts.
 	j := recoveryJob(t, []string{"true"})
-	fault := &os.PathError{Op: "read", Path: "/share/checkpoints/previous/save", Err: syscall.EIO}
+	fault := &os.PathError{Op: "read", Path: bindStorageFaultCheckpoint(t, &w, s, &j), Err: syscall.EIO}
 	w.checkpointPrepare = func(Job) (string, error) { return "", fault }
 	if _, err = startAfterFixtureInputs(t, w, s, j); !errors.Is(err, errWorkerCheckpoint) {
 		t.Fatal("preparation outcome changed", err)
@@ -411,20 +423,18 @@ func TestStorageFaultBlocksPreparationRetryBeforeHeartbeat(t *testing.T) {
 	w := recoveryWorker(t)
 	_, m, clock := storageFaultFixture(t)
 	w.storageHealth, w.Clock = m, clock
-	w.CheckpointRoot, w.ServiceConfig = "/share/checkpoints", &ServiceConfig{NAS: "/share"}
-	w.MountRoots = func(context.Context) ([]string, error) { return []string{"/share"}, nil }
 	s, err := w.openStore()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.close()
-	s.state.CheckpointRoot = w.CheckpointRoot
 	j := recoveryJob(t, []string{"true"})
+	faultPath := bindStorageFaultCheckpoint(t, &w, s, &j)
 	var calls int
 	w.checkpointPrepare = func(Job) (string, error) {
 		calls++
 		if calls == 1 {
-			return "", &os.PathError{Op: "read", Path: "/share/checkpoints/previous/save", Err: syscall.EIO}
+			return "", &os.PathError{Op: "read", Path: faultPath, Err: syscall.EIO}
 		}
 		return t.TempDir(), nil
 	}
