@@ -217,6 +217,7 @@ work and must survive their own restarts, see
 | What status fields mean | [Status](status.md) |
 | What a job can and can't reach on a machine | [Native isolation](native-isolation.md) |
 | Building and testing Mycelium itself | [Development](development.md) |
+| Qualifying a NAS to hold the shared queue database | [NAS qualification](shared-queue-nas-qualification.md) |
 
 For Python, install `./clients/python` into your project's Python 3.10+
 environment. The optional `[yaml,openai]` extras add YAML job files and
