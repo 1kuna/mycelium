@@ -82,6 +82,8 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/pci_inventory.go'] = (
 
 # Contact/loss and outage decisions have fake-clock coverage in the clock tests.
 SUPPLEMENTAL_CONSUMERS['internal/myce/queue_contact.go'] = ('control_clock_test.go',)
+SUPPLEMENTAL_CONSUMERS['internal/myce/history_persistence.go'] = (
+    'control_clock_test.go', 'efficiency_test.go', 'queue_write_test.go')
 
 # Actual check-in admission decisions are exercised by the admission wait tests.
 SUPPLEMENTAL_CONSUMERS['internal/myce/admission_decision.go'] = ('admission_wait_test.go',)

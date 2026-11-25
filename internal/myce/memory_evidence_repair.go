@@ -2,6 +2,7 @@ package myce
 
 import (
 	"cmp"
+	"context"
 	"database/sql"
 	"log"
 	"maps"
@@ -253,18 +254,12 @@ func repairMemoryEvidence(db *sql.DB, e *memoryEvidence, s state) (*memoryEviden
 		e.write(memoryEvidenceRowKey{kind: "exact", key: key}, series)
 		report.record(e, key, previous, series.Lower)
 	}
-	tx, err := db.Begin()
-	if err != nil {
+	var batch queueWriteBatch
+	if err := e.prepareWrite(&batch); err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
-	if err := e.persist(tx); err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(`INSERT OR IGNORE INTO memory_evidence(kind,key,data) VALUES ('projection','v2','true'), ('projection','v3','true')`); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
+	batch.add(`INSERT OR IGNORE INTO memory_evidence(kind,key,data) VALUES ('projection','v2','true'), ('projection','v3','true')`)
+	if err := (queueSQLiteWriter{db: db}).apply(context.Background(), &batch, nil, nil); err != nil {
 		return nil, err
 	}
 	e.writes = nil

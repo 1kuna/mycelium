@@ -217,45 +217,19 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming, observationOnly bool) er
 			q.observePersistence(measured)
 		}
 	}()
-	started := holdNow(q.holdClock)
-	var tx *sql.Tx
-	var e error
-	if timing != nil && timing.measureWriter {
-		// Keep the existing transaction and lock order; only separate pool
-		// acquisition from SQL work for the instruction request's slow span.
-		conn, err := timing.writer(q.db, q.clock)
-		if err != nil {
-			return err
-		}
-		defer conn.Close()
-		tx, e = conn.BeginTx(context.Background(), nil)
-	} else {
-		tx, e = q.db.Begin()
-	}
-	if e != nil {
-		return e
-	}
-	defer tx.Rollback()
+	var batch queueWriteBatch
 	for _, r := range q.usageWrites {
-		_, e = tx.Exec(`INSERT INTO usage_samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(at,span,machine,device,project,job,model) DO UPDATE SET busy=busy+excluded.busy,idle=idle+excluded.idle,pinned=pinned+excluded.pinned,memory_seconds=memory_seconds+excluded.memory_seconds,observed=observed+excluded.observed`, r.At, r.Span, r.Machine, r.Device, r.Project, r.Job, r.Model, r.Busy, r.Idle, r.Pinned, r.Memory, r.Observed)
-		if e != nil {
-			return e
-		}
+		batch.add(`INSERT INTO usage_samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(at,span,machine,device,project,job,model) DO UPDATE SET busy=busy+excluded.busy,idle=idle+excluded.idle,pinned=pinned+excluded.pinned,memory_seconds=memory_seconds+excluded.memory_seconds,observed=observed+excluded.observed`, r.At, r.Span, r.Machine, r.Device, r.Project, r.Job, r.Model, r.Busy, r.Idle, r.Pinned, r.Memory, r.Observed)
 	}
-
-	if e = q.memoryEvidencePending.persist(tx); e != nil {
-		return e
+	if err := q.memoryEvidencePending.prepareWrite(&batch); err != nil {
+		return err
 	}
-	measured.SQL += holdNow(q.holdClock).Sub(started)
-	next, e := q.persistStateChanges(tx, &measured, observationOnly)
-	if e != nil {
-		return e
+	next, err := q.prepareStateWrite(&batch, &measured, observationOnly)
+	if err != nil {
+		return err
 	}
-	started = holdNow(q.holdClock)
-	e = timing.commit(tx)
-	measured.Commit = holdNow(q.holdClock).Sub(started)
-	if e != nil {
-		return e
+	if err := q.writeQueue(&batch, timing, &measured, queueWriteJournaled); err != nil {
+		return err
 	}
 	if q.memoryEvidencePending != nil {
 		q.memoryEvidencePending.writes = nil
@@ -281,7 +255,7 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming, observationOnly bool) er
 				q.noteEvidenceRecord(key, q.persisted[key], value)
 			}
 		}
-		// persistState reuses the immutable byte slice for unchanged records.
+		// Preparation reuses the immutable byte slice for unchanged records.
 		// Invalidate only after SQLite commit, including removal, and never on
 		// ordinary check-ins that merely journal an unchanged live job.
 		if id, ok := strings.CutPrefix(key, "jobs/"); ok && (len(value) == 0 || len(q.persisted[key]) == 0 || &value[0] != &q.persisted[key][0]) {

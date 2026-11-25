@@ -47,34 +47,29 @@ func (q *Queue) MintEnrollmentTicket(pin string, ttl time.Duration, requestConte
 	out.Ticket = hex.EncodeToString(secret[:])
 	requestUnlock1 := requestLock(requestCtx, &q.mu)
 	defer requestUnlock1()
-	if _, err := q.db.Exec("DELETE FROM enrollment_tickets WHERE used=1 OR expires<=?", q.clock.Now().UnixNano()); err != nil {
-		return out, err
-	}
-	out.ExpiresAt = q.clock.Now().Add(ttl)
-	_, err := q.db.Exec("INSERT INTO enrollment_tickets (digest,pin,expires,used) VALUES (?,?,?,0)", ticketHash(out.Ticket), pin, out.ExpiresAt.UnixNano())
-	return out, err
+	now := q.clock.Now()
+	out.ExpiresAt = now.Add(ttl)
+	var batch queueWriteBatch
+	batch.add("DELETE FROM enrollment_tickets WHERE used=1 OR expires<=?", now.UnixNano())
+	batch.add("INSERT INTO enrollment_tickets (digest,pin,expires,used) VALUES (?,?,?,0)", ticketHash(out.Ticket), pin, out.ExpiresAt.UnixNano())
+	return out, q.writeQueue(&batch, nil, nil, queueWriteLocked)
 }
+
 func (q *Queue) RedeemEnrollmentTicket(ticket, pin string, requestContexts ...context.Context) error {
 	requestCtx := requestContext(requestContexts)
-
 	if len(ticket) != 64 || !validPin(pin) {
 		return enrollmentTicketRejected()
 	}
-	requestUnlock1 := requestLock(requestCtx, &q.mu)
-	defer requestUnlock1()
-	result, err := q.db.Exec("UPDATE enrollment_tickets SET used=1 WHERE digest=? AND pin=? AND used=0 AND expires>?", ticketHash(ticket), pin, q.clock.Now().UnixNano())
-	if err != nil {
-		return err
-	}
-	n, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n != 1 {
-		return enrollmentTicketRejected()
-	}
-	_, err = q.db.Exec("DELETE FROM enrollment_tickets WHERE used=1 OR expires<=?", q.clock.Now().UnixNano())
-	return err
+	unlock := requestLock(requestCtx, &q.mu)
+	defer unlock()
+	now := q.clock.Now().UnixNano()
+	batch := queueWriteBatch{rows: []queueRowWrite{{
+		query: "DELETE FROM enrollment_tickets WHERE digest=? AND pin=? AND used=0 AND expires>?",
+		args:  []any{ticketHash(ticket), pin, now},
+		miss:  enrollmentTicketRejected(),
+	}}}
+	batch.add("DELETE FROM enrollment_tickets WHERE used=1 OR expires<=?", now)
+	return q.writeQueue(&batch, nil, nil, queueWriteLocked)
 }
 func enrollmentTicketRejected() error {
 	return &HTTPError{Status: 403, Code: "invite_rejected", Message: "invite expired, already used, or does not match this queue"}

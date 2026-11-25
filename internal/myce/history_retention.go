@@ -102,7 +102,10 @@ func (q *Queue) pruneJobHistory(requestContexts ...context.Context) error {
 	if q.simulation || q.db == nil {
 		return nil
 	}
-	unlock := requestLock(ctx, &q.mu)
+	unlock, err := requestObservationLock(ctx, &q.mu)
+	if err != nil {
+		return err
+	}
 	if q.records == nil {
 		q.rebuildRecords()
 	}
@@ -144,7 +147,7 @@ func (q *Queue) pruneJobHistory(requestContexts ...context.Context) error {
 	}
 	unlock()
 	if len(unstamped) > 0 {
-		if err := q.updateRequest(ctx, func() error {
+		if err := q.updateTransaction(ctx, func() error {
 			for _, id := range unstamped {
 				if j := q.s.Jobs[id]; j != nil && terminal(j.State) && j.FinishedAt == nil {
 					ended := q.clock.Now()
@@ -152,7 +155,7 @@ func (q *Queue) pruneJobHistory(requestContexts ...context.Context) error {
 				}
 			}
 			return nil
-		}, nil); err != nil {
+		}, nil, true, nil); err != nil {
 			return err
 		}
 	}
@@ -161,24 +164,18 @@ func (q *Queue) pruneJobHistory(requestContexts ...context.Context) error {
 	}
 	// Summaries and learned inputs are durable before any record goes. A row
 	// whose record then survives (a recheck failed) is ignored on load.
-	tx, err := q.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
+	var batch queueWriteBatch
 	for i := range candidates {
 		row := &candidates[i].row
 		if row.learning.Memory != nil || len(row.learning.WorkLearning) > 0 {
+			var err error
 			if row.learned, err = json.Marshal(row.learning); err != nil {
-				_ = tx.Rollback()
 				return err
 			}
 		}
-		if _, err = tx.Exec("INSERT INTO job_summaries(id,finished,summary,learned) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET finished=excluded.finished, summary=excluded.summary, learned=excluded.learned", row.id, row.finished.UnixNano(), row.summary, row.learned); err != nil {
-			_ = tx.Rollback()
-			return err
-		}
+		batch.add("INSERT INTO job_summaries(id,finished,summary,learned) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET finished=excluded.finished, summary=excluded.summary, learned=excluded.learned", row.id, row.finished.UnixNano(), row.summary, row.learned)
 	}
-	if err = tx.Commit(); err != nil {
+	if err := q.writeDetachedQueue(ctx, &batch); err != nil {
 		return err
 	}
 	var expired []expiredJobRow
@@ -209,7 +206,7 @@ func (q *Queue) pruneJobHistory(requestContexts ...context.Context) error {
 			expired = append(expired, c.row)
 		}
 		return nil
-	}, nil, false, func() {
+	}, nil, true, func() {
 		for _, row := range expired {
 			q.learnExpired(row.learning)
 		}
@@ -222,12 +219,8 @@ func (q *Queue) pruneJobHistory(requestContexts ...context.Context) error {
 	for _, row := range expired {
 		for _, table := range []string{"logs", "log_offsets", "environment_log_offsets"} {
 			for {
-				r, e := q.db.ExecContext(ctx, "DELETE FROM "+table+" WHERE rowid IN (SELECT rowid FROM "+table+" WHERE job=? LIMIT 512)", row.id)
-				if e != nil {
-					err = errors.Join(err, e)
-					break
-				}
-				if n, e := r.RowsAffected(); e != nil || n < 512 {
+				n, e := q.deleteLogRows(ctx, table, row.id)
+				if e != nil || n < 512 {
 					err = errors.Join(err, e)
 					break
 				}

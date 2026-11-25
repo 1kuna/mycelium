@@ -14,6 +14,9 @@ type queueMutex struct {
 	writers  queueWriters
 	pressure atomic.Pointer[queuePressure]
 	control  *controlClock // Set before the queue is published; injected decision clock.
+	// Protected by mu. Raw readers wait for the writer's journal to be
+	// published or undone. Immutable committed views bypass this barrier.
+	committing chan struct{}
 
 	// Configure only while the queue is idle. The callback must not reenter
 	// the queue. Concurrent readers count as one occupied interval, since a
@@ -77,12 +80,38 @@ func (m *queueMutex) RLock() {
 	m.waiting.Add(1)
 	p, w := m.waitPressure()
 	m.mu.RLock()
+	for m.committing != nil {
+		done := m.committing
+		m.mu.RUnlock()
+		<-done
+		m.mu.RLock()
+	}
 	m.waiting.Add(-1)
 	if m.control != nil {
 		m.control.begin()
 	}
 	m.acquirePressure(p, w)
 	m.enter()
+}
+
+// Drop the physical lock, keeping the writer turn and its control-service
+// accounting. No later writer can invalidate the prepared row batch. A
+// reader of mutable state must wait while the transaction journal is live.
+func (m *queueMutex) commitOutsideLock(speculative bool, write func() error) error {
+	if speculative {
+		m.committing = make(chan struct{})
+	}
+	m.leave()
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		if m.committing != nil {
+			close(m.committing)
+			m.committing = nil
+		}
+		m.enter()
+	}()
+	return write()
 }
 
 func (m *queueMutex) RUnlock() {
@@ -193,6 +222,10 @@ type submissionTurnKey struct{}
 
 func (m *queueMutex) TryRLock() bool {
 	if !m.mu.TryRLock() {
+		return false
+	}
+	if m.committing != nil {
+		m.mu.RUnlock()
 		return false
 	}
 	if m.control != nil {

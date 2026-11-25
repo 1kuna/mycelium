@@ -58,13 +58,7 @@ func (q *Queue) pruneBatchLogs(requestContexts ...context.Context) error {
 	for _, id := range ids {
 		complete := true
 		for _, table := range []string{"logs", "log_offsets", "environment_log_offsets"} {
-			r, err := q.db.Exec("DELETE FROM "+table+" WHERE rowid IN (SELECT rowid FROM "+table+" WHERE job=? LIMIT 512)", id)
-			if err != nil {
-				result = errors.Join(result, err)
-				complete = false
-				break
-			}
-			n, err := r.RowsAffected()
+			n, err := q.deleteLogRows(requestCtx, table, id)
 			if err != nil {
 				result = errors.Join(result, err)
 				complete = false
@@ -84,6 +78,17 @@ func (q *Queue) pruneBatchLogs(requestContexts ...context.Context) error {
 		}
 	}
 	return result
+}
+
+func (q *Queue) deleteLogRows(ctx context.Context, table, id string) (int64, error) {
+	var n int64
+	batch := queueWriteBatch{rows: []queueRowWrite{{
+		query: "DELETE FROM " + table + " WHERE rowid IN (SELECT rowid FROM " + table + " WHERE job=? LIMIT 512)",
+		args:  []any{id},
+		count: &n,
+	}}}
+	err := q.writeDetachedQueue(ctx, &batch)
+	return n, err
 }
 
 func pruneWorkerLogs(dir, pending string, now time.Time, age time.Duration) error {

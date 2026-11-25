@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -197,5 +199,56 @@ func TestCheckinBodyPhaseTelemetry(t *testing.T) {
 	m.Session = "other-session"
 	if _, err := q.Checkin(Checkin{Machine: m}); err == nil || q.activeHold != nil {
 		t.Fatal("failed check-in lost its error or retained an active hold", err)
+	}
+}
+
+// #2017 was diagnosed from this line. Every writer waits through an off-lock
+// SQLite write, so a slow write after a short physical hold must still log.
+func TestSlowOffLockWriteLogsWriterTurn(t *testing.T) {
+	for _, rollback := range []bool{false, true} {
+		t.Run(fmt.Sprint("rollback=", rollback), func(t *testing.T) {
+			q, clock := fixture(t)
+			q.inLockCommit = rollback
+			check(t, q, machine("writer", "fake"), nil)
+			observational := &fakeClock{now: clock.Now()}
+			q.holdClock = observational
+			var stalled, locked bool
+			q.observeQueueRow = func(string, []any) {
+				if !stalled {
+					stalled = true
+					locked = !q.mu.mu.TryLock()
+					if !locked {
+						q.mu.mu.Unlock()
+					}
+					observational.Advance(900 * time.Millisecond)
+				}
+			}
+			fn := func() error {
+				q.s.LastWorkerContact = q.clock.Now().Add(time.Second)
+				return nil
+			}
+			operation := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
+			queueHoldTelemetry.Store(operation, &telemetryBudget{})
+			holdTelemetry(operation).admit(time.Millisecond)
+			logs := &launchLogWriter{q: q, t: t}
+			old := log.Writer()
+			log.SetOutput(logs)
+			defer log.SetOutput(old)
+			if err := q.update(fn); err != nil {
+				t.Fatal(err)
+			}
+			log.SetOutput(old)
+			if !stalled || locked != rollback {
+				t.Fatalf("fixture wrote=%t under lock=%t, want under lock=%t", stalled, locked, rollback)
+			}
+			line := testLogEvent(t, logs.String(), "slow_queue_mutex_hold")
+			turn, hold := "duration_ms=900.000", "mutex_hold_ms=0.000 off_lock_write_ms=900.000"
+			if rollback {
+				hold = "mutex_hold_ms=900.000 off_lock_write_ms=0.000"
+			}
+			if !strings.Contains(line, turn) || !strings.Contains(line, hold) || !strings.Contains(line, "operation="+operation) {
+				t.Fatalf("slow write logged without its writer turn: %s", line)
+			}
+		})
 	}
 }
