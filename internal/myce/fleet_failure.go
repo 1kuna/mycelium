@@ -124,7 +124,7 @@ func fleetFailureCode(code string) string {
 		"fleet_local_file_invalid", "fleet_credentials_unavailable", "fleet_queue_invalid",
 		"fleet_darwin_identity_refused", "fleet_existing_service_unavailable", "fleet_health_failed",
 		"fleet_helper_busy", "fleet_helper_launch_failed", "fleet_helper_launch_unclassified",
-		"fleet_install_changed", "fleet_instruction_invalid", "fleet_preflight_failed",
+		"fleet_install_changed", "fleet_instruction_invalid", "fleet_preflight_failed", "fleet_disk_preflight_failed",
 		"fleet_storage_preflight_failed", "fleet_publish_failed", "fleet_publisher_mismatch",
 		"fleet_publisher_unavailable", "fleet_signature_refused", "fleet_target_invalid",
 		"fleet_receipt_write_failed", "fleet_recovery_runtime_changed", "fleet_restart_failed",
@@ -134,6 +134,18 @@ func fleetFailureCode(code string) string {
 		return "fleet_failure_code_missing"
 	default:
 		return "fleet_failure_code_unrecognized"
+	}
+}
+
+// Only these typed installation refusals are candidates for deferral. The
+// queue must still verify that the helper never changed the installed image.
+func fleetWorkerPreflightFailure(code string) bool {
+	switch code {
+	case "fleet_preflight_failed", "fleet_storage_preflight_failed", "fleet_disk_preflight_failed",
+		"fleet_darwin_identity_refused", "fleet_publisher_mismatch", "fleet_publisher_unavailable", "fleet_signature_refused":
+		return true
+	default:
+		return false
 	}
 }
 

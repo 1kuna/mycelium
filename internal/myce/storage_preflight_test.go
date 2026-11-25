@@ -86,8 +86,14 @@ func TestFleetStorageFailureReceiptAndQueue(t *testing.T) {
 			if err := fleetAck(context.Background(), client, r); err != nil || !reflect.DeepEqual(got, live.StorageFailure) {
 				t.Fatalf("live ack lost detail: %+v %v", live, err)
 			}
-			q, _, _ := fleetFixture(t, "queue", "worker")
-			if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+			q, clock, _ := fleetFixture(t, "queue", "a", "b")
+			if fault == "inventory" {
+				// Exercise the takeover path, which needs to convert its temporary
+				// placement fence into an owned drain when the host is deferred.
+				q.s.Machines["worker-a"].Fleet.Adoption = &WorkerAdoptionProof{Protocol: custodianProtocol}
+			}
+			first, err := q.StartFleetUpgrade(FleetUpgradeRequest{})
+			if err != nil {
 				t.Fatal(err)
 			}
 			fleetTick(t, q)
@@ -101,6 +107,52 @@ func TestFleetStorageFailureReceiptAndQueue(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, fleetHostStatus(t, q, i.Host).StorageFailure) {
 				t.Fatal("status lost storage detail")
+			}
+			if fault != "inventory" {
+				return
+			}
+			if i.Host != "a" || q.maintenanceBlocked(i.Host) || !q.fleetTakeoverFence(i.Host) {
+				t.Fatal("the refused takeover must keep its fence until a drain can replace it")
+			}
+			if next, err := q.fleetInstruction(i.Host, i.Machine, i.Session); err != nil || next.Operation != "" {
+				t.Fatal("refused worker still authorized", next, err)
+			}
+			p := q.s.Machines[i.Machine].Fleet
+			p.InstalledSlot = &ReleaseSlotIdentity{SHA256: p.SHA256}
+			fleetTick(t, q)
+			if h := fleetHostStatus(t, q, i.Host); h.Phase != "worker_update" || h.Outcome != "" {
+				t.Fatal("accepted an observation from before the refusal", h)
+			}
+			fleetHeartbeatAdvance(t, q, clock)
+			fleetTick(t, q)
+			if service := fleetActivate(t, q, clock); service != "b/worker-b" {
+				t.Fatal("healthy worker did not advance", service)
+			}
+			fleetTick(t, q)
+			if service := fleetActivate(t, q, clock); service != "queue/@queue" {
+				t.Fatal("queue did not advance last", service)
+			}
+			fleetTick(t, q)
+			h := fleetHostStatus(t, q, i.Host)
+			policy := q.s.HostMaintenance[i.Host]
+			if q.fleetUpgradeStatus().State != "complete" || h.Phase != "skipped" || h.Outcome != FleetHostDeferred ||
+				h.FailureCode != replay.Failure || !reflect.DeepEqual(h.StorageFailure, got) || policy.Mode != "drained" || policy.DrainOwner != first.Operation ||
+				q.s.Machines[i.Machine].Fleet.SHA256 != p.SHA256 {
+				t.Fatalf("refused worker was not held on its previous release: %+v %+v", q.fleetUpgradeStatus(), policy)
+			}
+			// A repaired preflight can now replace the refused worker, and the
+			// next operation adopts and resumes only the drain the upgrade owns.
+			again, err := q.StartFleetUpgrade(FleetUpgradeRequest{})
+			if err != nil || again.Operation == first.Operation {
+				t.Fatal("could not rerun", again, err)
+			}
+			fleetTick(t, q)
+			if service := fleetActivate(t, q, clock); service != "a/worker-a" {
+				t.Fatal("retry did not upgrade the repaired worker", service)
+			}
+			fleetTick(t, q)
+			if q.fleetUpgradeStatus().State != "complete" || q.maintenanceBlocked(i.Host) || fleetHostStatus(t, q, i.Host).FailureCode != "" {
+				t.Fatal("retry did not clear the owned hold", q.fleetUpgradeStatus())
 			}
 		})
 	}

@@ -17,8 +17,9 @@ import (
 // rollouts proved: for each host in turn, drain it, wait for its running work,
 // let each Mycelium service on it fetch, verify and swap in the approved
 // release and restart, check health, resume the drain, then advance. The
-// queue's own host goes last. An unhealthy result stops advancing and keeps the
-// host drained; nothing rolls back. The operation lives in the queue state.
+// queue's own host goes last. An unhealthy result stops advancement. A worker
+// refusal proven to precede replacement can leave that host drained while a
+// protocol-compatible rollout continues. The operation lives in queue state.
 type FleetUpgradeStatus struct {
 	Urgency   string            `json:"urgency"`
 	Operation string            `json:"operation"`
@@ -140,7 +141,7 @@ func (q *Queue) fleetUpgradeStatus() *FleetUpgradeStatus {
 
 // StartFleetUpgrade starts a new operation for the approved release. Rerunning
 // while one runs returns it unchanged; after it stopped or completed, a rerun
-// is a new operation that adopts the drains the stopped one left and skips
+// is a new operation that adopts retained upgrade drains and skips
 // services already on the release.
 func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts ...context.Context) (*FleetUpgradeStatus, error) {
 	var out *FleetUpgradeStatus
@@ -233,6 +234,13 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 		abandoned := map[string]bool{}
 		if previous != nil && previous.State != "complete" {
 			abandoned[previous.Operation] = true
+		}
+		if previous != nil {
+			for _, old := range previous.Hosts {
+				if old.Owned && old.Policy.Mode == "drained" {
+					abandoned[old.Policy.DrainOwner] = true
+				}
+			}
 		}
 		for _, a := range q.s.FleetSuperseded {
 			abandoned[a.Operation] = true
@@ -424,7 +432,7 @@ func (q *Queue) fleetDrainTemporary(host string) bool {
 		return false
 	}
 	for _, h := range u.Hosts {
-		if h.Host == host && h.Owned && q.fleetPolicyMatches(h) && h.Policy.Mode == "drained" {
+		if h.Host == host && h.Phase != "skipped" && h.Owned && q.fleetPolicyMatches(h) && h.Policy.Mode == "drained" {
 			return true
 		}
 	}
@@ -632,6 +640,10 @@ func (q *Queue) maintainFleetUpgrade() {
 	if h.Phase == "draining" && !q.fleetDrain(u, h) {
 		return
 	}
+	if h.Phase == "worker_update" && h.Failure != "" {
+		q.fleetVerifyPreflightRefusal(u, h)
+		return
+	}
 	if h.Phase == "worker_update" || h.Phase == "worker_health" {
 		if h.Takeover && h.Phase == "worker_update" && q.fleetAdoptionReason(h) != "" {
 			h.Takeover = false
@@ -829,6 +841,49 @@ func (q *Queue) fleetVerify(h *fleetUpgradeHost, p, before *FleetRuntimeProof, g
 	return false
 }
 
+func (q *Queue) fleetPreflightSkewSafe(u *fleetUpgrade, worker *FleetRuntimeProof) bool {
+	if q.fleetQueue == nil || !q.fleetProofFresh(q.fleetQueue.Proof) {
+		return false
+	}
+	manifest := u.Release.Manifest
+	queue := q.fleetQueue.Proof
+	return worker != nil && worker.StartGate != "" && worker.AttemptProtocol != "" &&
+		worker.StartGate == manifest.StartGate && worker.AttemptProtocol == manifest.AttemptProtocol &&
+		queue.StartGate == manifest.StartGate && queue.AttemptProtocol == manifest.AttemptProtocol
+}
+
+// The running image can still be old after an interrupted swap. Require an
+// observation of the installed slot after the refusal. The recorded failure
+// closes update authorization while we wait, including across queue restarts.
+func (q *Queue) fleetVerifyPreflightRefusal(u *fleetUpgrade, h *fleetUpgradeHost) {
+	m := q.s.Machines[h.Machine]
+	if m != nil && q.fleetProofFresh(m.Fleet) && m.Fleet.ObservedAt.After(h.StepAt) {
+		p := m.Fleet
+		if m.Session != p.Session || fleetHealthIdentity(p) != fleetHealthIdentity(h.Before) || p.Version != h.Before.Version ||
+			!q.fleetPreflightSkewSafe(u, p) || p.SlotMismatch || p.SlotError != "" || p.InstalledSlot == nil || p.InstalledSlot.SHA256 != p.SHA256 {
+			q.fleetStop(h, h.Failure)
+			h.Wait = "the worker could not prove its installed release can safely stay in service; fix forward, then rerun myce fleet upgrade"
+			return
+		}
+		if !q.maintenanceBlocked(h.Host) {
+			if err := q.changeHostMaintenance(h.Host, HostMaintenanceRequest{Action: "drain", IfMode: h.Policy.Mode, IfUpdatedAt: &h.Policy.UpdatedAt, DrainOwner: u.Operation}); err != nil {
+				q.fleetStop(h, "drain_conflict")
+				return
+			}
+			h.Policy, h.Owned = q.s.HostMaintenance[h.Host], true
+		}
+		// Keep skipped as the terminal phase so the previous queue release can
+		// still read this operation if the queue service needs a rollback.
+		h.Phase, h.Outcome, h.ProgressAt = "skipped", FleetHostDeferred, q.clock.Now()
+		h.DeferredReason = h.FailureCode
+		h.Wait = "repair the worker preflight refusal, then rerun myce fleet upgrade"
+		return
+	}
+	if q.clock.Now().Sub(h.StepAt) >= fleetStepTimeout {
+		q.fleetStop(h, h.Failure)
+	}
+}
+
 func (q *Queue) fleetInstruction(host, machine, session string) (FleetUpdateInstruction, error) {
 	u, h := q.s.FleetUpgrade, q.fleetActiveHost()
 	if u == nil || u.State != "running" || h == nil || h.Host != host {
@@ -843,7 +898,7 @@ func (q *Queue) fleetInstruction(host, machine, session string) (FleetUpdateInst
 		ok = h.Phase == "queue_update" && h.QueueBefore != nil && h.QueueBefore.Session == session && q.fleetQueue != nil && q.fleetProofFresh(q.fleetQueue.Proof) && q.fleetQueue.Proof.Session == session && len(q.calls) == 0
 	case machine == h.Machine:
 		m := q.s.Machines[machine]
-		ok = h.Phase == "worker_update" && h.Before != nil && h.Before.Session == session && m != nil && m.Session == session && q.fleetProofFresh(m.Fleet)
+		ok = h.Phase == "worker_update" && h.Failure == "" && h.Before != nil && h.Before.Session == session && m != nil && m.Session == session && q.fleetProofFresh(m.Fleet)
 	}
 	// Updating only the queue cannot replace the already accepted worker or
 	// its command owners. Keep the ordinary worker takeover/custody fence;
@@ -876,7 +931,7 @@ func (q *Queue) AckFleetUpgrade(ack FleetUpgradeAck, requestContexts ...context.
 		}
 		queue := ack.Machine == "@queue" && h.QueueBefore != nil && ack.Session == h.QueueBefore.Session && strings.HasPrefix(h.Phase, "queue_")
 		worker := ack.Machine == h.Machine && h.Before != nil && ack.Session == h.Before.Session && strings.HasPrefix(h.Phase, "worker_")
-		if !queue && !worker {
+		if !queue && !worker || h.Phase == "worker_update" && h.Failure != "" {
 			return fleetError("fleet_ack_stale")
 		}
 		switch ack.Phase {
@@ -900,6 +955,13 @@ func (q *Queue) AckFleetUpgrade(ack FleetUpgradeAck, requestContexts ...context.
 				reason = "storage_preflight_failed"
 			case "fleet_health_failed":
 				reason = "service_health_failed"
+			}
+			if worker && h.Phase == "worker_update" && fleetWorkerPreflightFailure(h.FailureCode) && q.fleetPreflightSkewSafe(u, h.Before) {
+				h.Failure = reason
+				h.StepAt = q.clock.Now()
+				h.ProgressAt = h.StepAt
+				h.Wait = "waiting for proof that worker preflight left the installed binary unchanged"
+				return nil
 			}
 			q.fleetStop(h, reason)
 		default:

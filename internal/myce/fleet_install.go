@@ -509,10 +509,24 @@ func swapFleetBinary(ctx context.Context, c ServiceConfig, client Client, r *fle
 		return errors.New("fleet_install_changed")
 	}
 	st, err := os.Lstat(c.Binary)
-	if err != nil || writeInstallFile(c.Binary, data, st.Mode().Perm(), installFiles{}, nil) != nil {
+	if err != nil {
+		return errors.New("fleet_publish_failed")
+	}
+	published := false
+	if err := writeInstallFile(c.Binary, data, st.Mode().Perm(), installFiles{}, func() { published = true }); err != nil {
+		if !published {
+			return fleetDiskPreflightError(err, "fleet_publish_failed")
+		}
 		return errors.New("fleet_publish_failed")
 	}
 	return nil
+}
+
+func fleetDiskPreflightError(err error, fallback string) error {
+	if errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) {
+		return errors.New("fleet_disk_preflight_failed")
+	}
+	return errors.New(fallback)
 }
 
 func fleetBytesHash(data []byte) string {
@@ -543,7 +557,7 @@ func fetchFleetArtifact(ctx context.Context, c ServiceConfig, client Client, i F
 	// rebuildable and replaced.
 	f, err := os.OpenFile(fleetStagingPath(c, i), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
-		return "", errors.New("fleet_staging_write_failed")
+		return "", fleetDiskPreflightError(err, "fleet_staging_write_failed")
 	}
 	path := f.Name()
 	keep := false
@@ -556,7 +570,7 @@ func fetchFleetArtifact(ctx context.Context, c ServiceConfig, client Client, i F
 	h := sha256.New()
 	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(res.Body, a.Size))
 	if err != nil {
-		return "", errors.New("fleet_artifact_transfer_failed")
+		return "", fleetDiskPreflightError(err, "fleet_artifact_transfer_failed")
 	}
 	if n != a.Size {
 		return "", errors.New("fleet_artifact_refused")
@@ -566,7 +580,7 @@ func fetchFleetArtifact(ctx context.Context, c ServiceConfig, client Client, i F
 		return "", errors.New("fleet_artifact_refused")
 	}
 	if err := errors.Join(f.Chmod(0700), f.Sync(), f.Close()); err != nil {
-		return "", errors.New("fleet_staging_write_failed")
+		return "", fleetDiskPreflightError(err, "fleet_staging_write_failed")
 	}
 	keep = true
 	return path, nil

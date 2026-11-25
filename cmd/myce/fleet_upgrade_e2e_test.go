@@ -532,6 +532,27 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 		<-ctx.Done()
 		t.Fatal("outer attempt did not cancel the active stream")
 	}
+	const refusedHost = "worker-0"
+	refused := install("worker", refusedHost)
+	poll("refusal fixture worker runtime proof", func() bool {
+		if status() {
+			for _, m := range snapshot.Machines {
+				if m.ID == refusedHost && m.Fleet != nil && m.Fleet.ServiceHealthy && m.Fleet.InstalledSlot != nil {
+					before[m.ID] = *m
+					return true
+				}
+			}
+		}
+		return false
+	})
+	// Give only this host an incompatible storage format. Its running service
+	// can still report health, but the real updater must refuse activation.
+	marker := filepath.Join(refused.config.ModelCache, myce.FormatMarker)
+	markerBytes, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fleetE2EWrite(t, marker, []byte("unsupported\n"), 0600)
 	approve(target)
 	// The operator is an independent, short-lived CLI process. Its exit removes
 	// the operator connection while the queue continues durable coordination.
@@ -567,6 +588,17 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 		return -1
 	}
 	operation := upgrade()
+	poll("worker storage refusal is deferred", func() bool {
+		return status() && snapshot.FleetUpgrade != nil && host(refusedHost).Phase == "skipped"
+	})
+	refusal := host(refusedHost)
+	if refusal.Outcome != myce.FleetHostDeferred || refusal.FailureCode != "fleet_storage_preflight_failed" ||
+		refusal.StorageFailure == nil || refusal.StorageFailure.Root != "model_cache" || starts(refusedHost) != 1 {
+		t.Fatalf("worker lost its typed refusal or restarted: %+v", refusal)
+	}
+	if hash, err := myce.FileSHA256(refused.config.Binary); err != nil || hash != old.hash {
+		t.Fatalf("refused worker's installed binary changed: %s %v", hash, err)
+	}
 	// Each host in turn: drained, its running command finishes on its own,
 	// then the update. Nothing else is drained meanwhile.
 	for _, name := range []string{"worker-1", "worker-2"} {
@@ -668,6 +700,25 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 		return true
 	})
 	assertAttempts()
+	var held myce.HostMaintenanceStatus
+	if err := client.Call(ctx, "GET", "/api/hosts/"+refusedHost+"/maintenance", nil, &held); err != nil || held.Policy.Mode != "drained" || held.Policy.DrainOwner != operation.Operation {
+		t.Fatalf("refused worker lost its drain: %+v %v", held.Policy, err)
+	}
+	if host(refusedHost).Phase != "skipped" || host(refusedHost).FailureCode != refusal.FailureCode || starts(refusedHost) != 1 || starts("queue") != 2 {
+		t.Fatalf("partial rollout did not preserve the refusal across queue restart: %+v", snapshot.FleetUpgrade)
+	}
+	fleetE2EWrite(t, marker, markerBytes, 0600)
+	retry := upgrade()
+	if retry.Operation == operation.Operation {
+		t.Fatal("repair did not start a new upgrade operation")
+	}
+	poll("repaired worker upgraded and resumed its drain", func() bool {
+		return status() && snapshot.FleetUpgrade != nil && snapshot.FleetUpgrade.Operation == retry.Operation &&
+			snapshot.FleetUpgrade.State == "complete" && host(refusedHost).Phase == "complete" && starts(refusedHost) == 2
+	})
+	if err := client.Call(ctx, "GET", "/api/hosts/"+refusedHost+"/maintenance", nil, &held); err != nil || held.Policy.Mode != "enabled" || held.Policy.DrainOwner != "" {
+		t.Fatalf("repaired worker kept its upgrade drain: %+v %v", held.Policy, err)
+	}
 	if snapshot.JobsPage == nil || snapshot.JobsPage.Returned != 1 || snapshot.JobsPage.NextBefore == "" {
 		t.Fatalf("fixture did not exercise paginated completed jobs: %+v", snapshot.JobsPage)
 	}
@@ -676,9 +727,11 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 		if m.Fleet == nil || m.Fleet.SHA256 != target.hash || m.Fleet.Version != newVersion || m.Fleet.PID == old.Fleet.PID || m.Session == old.Session || m.Fleet.Session != m.Session || !m.Fleet.ServiceHealthy || !m.Fleet.RunnerSmoke {
 			t.Errorf("worker did not activate actual target runtime: %+v", m)
 		}
-		data, err := commandFixtureAppendBytes(filepath.Join(commandCheckpoint[m.ID], "starts-"+m.ID))
-		if err != nil || string(data) != "1\n" {
-			t.Errorf("real command executed more than once: %q %v", data, err)
+		if checkpoint := commandCheckpoint[m.ID]; checkpoint != "" {
+			data, err := commandFixtureAppendBytes(filepath.Join(checkpoint, "starts-"+m.ID))
+			if err != nil || string(data) != "1\n" {
+				t.Errorf("real command executed more than once: %q %v", data, err)
+			}
 		}
 	}
 	for _, m := range managers {
@@ -710,25 +763,31 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 			m.mu.Lock()
 			helpers := append([]*enrollmentTestChild(nil), m.helpers...)
 			m.mu.Unlock()
-			if len(helpers) != 1 {
+			want := 1
+			if m == refused {
+				want = 2
+			}
+			if len(helpers) != want {
 				return false
 			}
-			select {
-			case <-helpers[0].done:
-			default:
-				return false
+			for _, child := range helpers {
+				select {
+				case <-child.done:
+				default:
+					return false
+				}
 			}
 		}
 		return true
 	})
 	for _, m := range managers {
 		m.mu.Lock()
-		for _, child := range m.helpers {
-			if !child.cmd.ProcessState.Success() {
-				t.Errorf("%s updater failed: %s", m.config.HostID, child.cmd.ProcessState)
+		for attempt, child := range m.helpers {
+			if want := m != refused || attempt != 0; child.cmd.ProcessState.Success() != want {
+				t.Errorf("%s updater %d success=%t, want %t", m.config.HostID, attempt+1, child.cmd.ProcessState.Success(), want)
 			}
 		}
 		m.mu.Unlock()
 	}
-	t.Logf("two locally signed releases; each worker drained in turn and waited for its own production command and model stream; queue restarted last; every service restarted once with unchanged attempt/session and no losses or retries")
+	t.Logf("two locally signed releases; one worker held for storage repair; healthy workers preserved their jobs and stream; queue restarted last; retry upgraded only the repaired worker")
 }
