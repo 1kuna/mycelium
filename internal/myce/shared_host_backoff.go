@@ -81,7 +81,7 @@ func (q *Queue) recoverSharedHostBackoff(m *Machine) {
 func (q *Queue) hostRetryStorageWait(j *Job) *Hold {
 	blocked := false
 	for _, m := range q.s.Machines {
-		if len(m.UnavailableRoots) > 0 || q.sharedHostBackoffReason(j, m) != "" {
+		if len(m.UnavailableRoots) > 0 || needsDefaultCheckpoint(j) && m.CheckpointUnavailable || q.sharedHostBackoffReason(j, m) != "" {
 			blocked = true
 			break
 		}
@@ -100,6 +100,7 @@ func (q *Queue) hostRetryStorageWait(j *Job) *Hold {
 		candidate := *m
 		candidate.UnavailableRoots = nil
 		candidate.CheckpointUnavailable = false
+		candidate.DiskVolumes = diskCapacityVolumes(m.DiskVolumes)
 		if !fits(j, &candidate, max(m.TotalMemoryGB, m.FreeMemoryGB)) {
 			continue
 		}
@@ -108,6 +109,9 @@ func (q *Queue) hostRetryStorageWait(j *Job) *Hold {
 			kind = "shared_host_backoff"
 		} else {
 			reason = q.storageRootReason(j, m)
+			if reason == "" && needsDefaultCheckpoint(j) && m.CheckpointUnavailable {
+				reason = "waiting for saved progress storage: checkpoint root unavailable"
+			}
 		}
 		if reason == "" {
 			return nil

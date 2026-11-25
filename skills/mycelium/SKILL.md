@@ -146,7 +146,12 @@ the output tree. Read [the checkpoint guide](https://github.com/1kuna/mycelium/b
 for storage holds, target compatibility, NAS save notification, retention and
 the `checkpoint: local_first` opt-in. A queue-accepted generation is portable
 to a compatible worker. Check verified NAS mirror state separately when NAS
-durability is required. Status comes from the running worker.
+durability is required. Status comes from the running worker. A worker with a
+missing NAS mount can run any class of job whose dependencies are served locally
+or through the queue file store, including compatible `local_first` jobs.
+When a job requires a missing worker root, `hold.kind: storage_root` names
+the affected role in `hold.detail`. Keep the job and its submission key while
+the storage owner restores the mount.
 
 ## Wait, inspect and recover
 

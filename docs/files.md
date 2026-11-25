@@ -1368,10 +1368,14 @@ and the [Python checkpoint helper](../clients/python/README.md#resumable-command
 The helper owns atomic generation publication, including the CIFS exception above.
 Test stop/save/restart on a later attempt and verify complete output.
 
-Non-resumable production (`priority: production`, `resumable: false`) starts
-without NAS checkpoint access and receives a local scratch checkpoint directory
-under the worker state directory. Declare `resumable: true` when production needs
-NAS checkpoints. Experiments and resumable production still wait for NAS recovery.
+Jobs in every class can start on a worker with a missing NAS mount when their
+declared dependencies can be satisfied locally or through the queue file store.
+This includes release and test jobs. Jobs that need a worker NAS root wait with
+`hold.kind: storage_root` and the affected root role in `hold.detail`. Jobs
+that need the queue's unreachable NAS checkpoint root report `checkpoint_root`.
+Explicit [local-first checkpoints](#local-first-checkpoints-1600) use the worker
+state volume and the queue file store. They can resume on another compatible
+worker while either worker lacks the NAS mount.
 
 The host-hygiene mount probe also checks configured checkpoint/NAS roots with a
 stat and one directory-entry read, using this host's healthy latency history.
@@ -1382,9 +1386,9 @@ human-action code and an existing health wake; the worker never prompts for or
 stores credentials. See [worker mount recovery](reference/nas-mounts.md#worker-mount-recovery-linux-and-macos)
 for platform ownership, cold-start deadlines and stuck-request behavior.
 
-The worker heartbeat allows 750 ms for its checkpoint-root probe, including
-creating and removing a temporary file; slower or blocked probes report the root
-unavailable. One-shot onboarding allows ten seconds per filesystem operation
+The worker checks mount inventory before sampling NAS checkpoint capacity or
+rewriting its fixed checkpoint probe file. One-shot onboarding allows ten
+seconds per filesystem operation
 and has a cancellable 15-second total validation limit, including mount inventory.
 Standalone mount selection retains its five-second limit, including dry runs.
 Probe failures and recovery are logged on state changes. Worker

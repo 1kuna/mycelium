@@ -836,6 +836,12 @@ SQLite queue, plain commands, injected scheduling clock and attempt ownership
 remain. Explicit NAS configuration remains supported. One store is not a backup.
 See [files without a NAS](files.md) for configuration and retention limits.
 
+An installed worker with a missing NAS mount stays eligible for jobs whose
+declared dependencies it can satisfy. Missing roots remain visible and hold
+only work that requires them. An in-place update can proceed when the worker
+retains its verified storage configuration and can fence the absent NAS roles
+from startup. See [worker mount recovery](reference/nas-mounts.md#worker-mount-recovery-linux-and-macos).
+
 ### Explicit local-first checkpoint generations (#1600)
 
 `advanced: {resumable: true, checkpoint: local_first}` opts an individual plain

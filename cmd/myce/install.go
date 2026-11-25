@@ -368,6 +368,7 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 		if err := myce.ValidateInstallIdentity(*installed, c); err != nil {
 			return err
 		}
+		c = c.WithInstalledStorage(*installed)
 		fmt.Println("Intended configuration changes:\n" + myce.InstallConfigDiff(*installed, c))
 		if c.EnvironmentFile != "" && c.EnvironmentFile == installed.EnvironmentFile && c.JoiningFile == installed.JoiningFile {
 			fmt.Println("Joining authority: preserve saved EnvironmentFile credential reference (no authority migration).")

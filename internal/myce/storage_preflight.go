@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"path/filepath"
 	"syscall"
 	"time"
 )
@@ -117,7 +118,36 @@ func preflightFleetStorageResult(ctx context.Context, c ServiceConfig, command f
 			return nil, storageCheckError(name, "format", time.Since(started), err)
 		}
 	}
-	return prepareInstallStorage(ctx, c, command, installStorageProbe, fs)
+	return prepareInstallStorage(ctx, c.WithInstalledStorage(c), command, installStorageProbe, fs)
+}
+
+// WithInstalledStorage allows an in-place worker update to defer checks on an
+// absent NAS. The unchanged path roles must be covered by the runtime's
+// configured-NAS fence even at cold start, before it has seen any mounts.
+func (c ServiceConfig) WithInstalledStorage(previous ServiceConfig) ServiceConfig {
+	c.allowMissingInstalledNAS = false
+	if c.Role != "worker" || !previous.RequireMountedNAS || !c.RequireMountedNAS ||
+		ValidateInstallIdentity(previous, c) != nil || !filepath.IsAbs(c.NAS) ||
+		filepath.Dir(c.NAS) == filepath.Clean(c.NAS) || c.NAS != previous.NAS || c.Checkpoints != previous.Checkpoints ||
+		c.ModelRoot != previous.ModelRoot || c.EnvironmentRoot != previous.EnvironmentRoot {
+		return c
+	}
+	for _, path := range []string{c.Checkpoints, c.ModelRoot, c.EnvironmentRoot} {
+		if !filepath.IsAbs(path) || !withinNAS(c.NAS, path) {
+			return c
+		}
+	}
+	roots, err := c.StateRoots()
+	if err != nil {
+		return c
+	}
+	for _, root := range roots {
+		if withinNAS(c.NAS, root) {
+			return c
+		}
+	}
+	c.allowMissingInstalledNAS = true
+	return c
 }
 
 func fleetStorageFailure(code string, detail *StoragePreflightFailure) *StoragePreflightFailure {
@@ -146,7 +176,7 @@ func fleetReceiptStorageFailure(r fleetInstallReceipt) *StoragePreflightFailure 
 
 // Transient reachability says nothing about the installed binary or service.
 // Keep definitive path, permission, namespace and filesystem errors fatal.
-func installStorageOutcome(ctx context.Context, err error) (*StoragePreflightFailure, error) {
+func installStorageOutcome(ctx context.Context, c ServiceConfig, err error) (*StoragePreflightFailure, error) {
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
@@ -155,6 +185,11 @@ func installStorageOutcome(ctx context.Context, err error) (*StoragePreflightFai
 		return nil, err
 	}
 	transient := detail.TimedOut || detail.Operation == "pending"
+	var refusal *PreflightError
+	if c.allowMissingInstalledNAS && detail.Root == "nas" && detail.Operation == "inventory" &&
+		errors.As(err, &refusal) && refusal.Code == "nas_not_mounted" {
+		transient = true
+	}
 	switch syscall.Errno(detail.Errno) {
 	case syscall.EIO, syscall.ETIMEDOUT, syscall.ENETUNREACH, syscall.EHOSTUNREACH, syscall.ENOTCONN, syscall.ECONNRESET, syscall.ESTALE:
 		transient = true
@@ -182,7 +217,7 @@ func prepareInstallStorage(ctx context.Context, c ServiceConfig, command func(co
 	} else {
 		err = prepareInstallNASMode(ctx, c, command, mode)
 	}
-	warning, err := installStorageOutcome(ctx, err)
+	warning, err := installStorageOutcome(ctx, c, err)
 	var typed *PreflightError
 	if err != nil && ctx.Err() == nil && !errors.As(err, &typed) {
 		err = storageRefusal(preflightError("nas_unreachable", "storage", "storage validation failed; check the selected roots and permissions"), err)

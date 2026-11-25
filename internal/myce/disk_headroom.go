@@ -147,6 +147,13 @@ func diskVolumeNeedWith(j *Job, v DiskVolume, work diskWork, machines ...*Machin
 	if j.Spec.OutputDelivery == asyncNAS {
 		spool = output // Immutable unaccepted spool beside the work files.
 	}
+	var checkpoint uint64
+	if j.ResumeFiles != nil {
+		checkpoint = manifestDiskBytes(j.ResumeFiles.Files)
+	}
+	if checkpoint == 0 && j.Spec.Disk != nil {
+		checkpoint = j.Spec.Disk.CheckpointBytes
+	}
 	// Outputs are written inside the work dir, so scratch covers them.
 	output = addDiskBytes(max(output, work.scratch), spool)
 	var need uint64
@@ -156,6 +163,9 @@ func diskVolumeNeedWith(j *Job, v DiskVolume, work diskWork, machines ...*Machin
 		case "data":
 			relevant = true
 			need = addDiskBytes(need, addDiskBytes(input, output))
+			if j.Spec.localFirst() {
+				need = addDiskBytes(need, checkpoint)
+			}
 			if j.Spec.ephemeral() {
 				for _, private := range j.Spec.SharedInputs {
 					need = addDiskBytes(need, uint64(private.bytes()))
@@ -186,18 +196,8 @@ func diskVolumeNeedWith(j *Job, v DiskVolume, work diskWork, machines ...*Machin
 				}
 			}
 		case "checkpoint":
-			if j.Spec.ephemeral() {
-				continue
-			}
-			if j.Spec.Resumable || j.ResumeFiles != nil || j.Spec.Disk != nil && j.Spec.Disk.CheckpointBytes > 0 {
+			if needsDefaultCheckpoint(j) || !j.Spec.ephemeral() && !j.Spec.localFirst() && j.ResumeFiles != nil {
 				relevant = true
-				checkpoint := uint64(0)
-				if j.ResumeFiles != nil {
-					checkpoint = manifestDiskBytes(j.ResumeFiles.Files)
-				}
-				if checkpoint == 0 && j.Spec.Disk != nil {
-					checkpoint = j.Spec.Disk.CheckpointBytes
-				}
 				need = addDiskBytes(need, checkpoint)
 			}
 		case "environment":

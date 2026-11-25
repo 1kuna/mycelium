@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -65,7 +66,7 @@ func TestInstallStorageClassifiesMisconfigurationAndReachability(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := installStorageOutcome(ctx, storageCheckError("nas", "inventory", time.Second, context.DeadlineExceeded)); !errors.Is(err, context.Canceled) {
+	if _, err := installStorageOutcome(ctx, ServiceConfig{}, storageCheckError("nas", "inventory", time.Second, context.DeadlineExceeded)); !errors.Is(err, context.Canceled) {
 		t.Fatal("caller cancellation swallowed", err)
 	}
 }
@@ -123,6 +124,86 @@ func TestFleetInstallStorageWarningReceiptAndStatus(t *testing.T) {
 	r.Instruction.StorageWarnings = false
 	if fleetReceiptStorageWarning(r) != nil {
 		t.Fatal("unsupported field sent to previous queue")
+	}
+}
+
+func TestFleetInstallMissingNASWarning(t *testing.T) {
+	for _, goos := range []string{"darwin", "linux"} {
+		t.Run(goos, func(t *testing.T) {
+			f := newFleetInstallFixture(t, goos)
+			f.c.RequireMountedNAS = true
+			f.c.NAS = filepath.Join(f.c.NAS, "nas")
+			f.c.Checkpoints = filepath.Join(f.c.NAS, "checkpoints")
+			f.c.ModelRoot = filepath.Join(f.c.NAS, "models")
+			f.c.EnvironmentRoot = filepath.Join(f.c.NAS, "environments")
+			f.i.StorageWarnings = true
+			data, err := json.Marshal(f.c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(f.c.Config, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			command := f.deps.command
+			f.deps.command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+				if name == cachedMountInventoryCommand || name == "cat" {
+					return nil, nil
+				}
+				return command(ctx, name, args...)
+			}
+			if err := f.launch(); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.apply(); err != nil {
+				t.Fatal(err)
+			}
+			f.assertBinary(f.next)
+			r, err := readFleetReceipt(filepath.Join(f.c.State, fleetUpdateReceiptFile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			warning := fleetReceiptStorageWarning(r)
+			if f.restarts != 1 || r.Phase != "restarting" || r.StorageFailure != nil ||
+				warning == nil || warning.Root != "nas" || warning.Operation != "inventory" || warning.Errno != 0 || warning.TimedOut {
+				t.Fatalf("missing NAS did not retain a typed warning after activation: %+v", r)
+			}
+			if _, err := os.Lstat(f.c.Checkpoints); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("missing NAS was populated locally: %v", err)
+			}
+		})
+	}
+}
+
+func TestPreservedWorkerInstallMissingNAS(t *testing.T) {
+	saved, _ := onboardingNAS(t, "linux")
+	saved.RequireMountedNAS = true
+	missing := func(context.Context, string, ...string) ([]byte, error) { return nil, nil }
+	for _, tc := range []struct {
+		name string
+		edit func(*ServiceConfig)
+	}{
+		{"preserved", func(*ServiceConfig) {}},
+		{"changed selection", func(c *ServiceConfig) { c.Checkpoints = filepath.Join(c.NAS, "other-checkpoints") }},
+		{"unclassified root", func(c *ServiceConfig) { c.Checkpoints = filepath.Join(filepath.Dir(c.NAS), "other-checkpoints") }},
+		{"state on NAS", func(c *ServiceConfig) { c.ModelCache = filepath.Join(c.NAS, "cache") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, previous := saved, saved
+			tc.edit(&c)
+			if tc.name == "unclassified root" {
+				previous = c // Historical config whose backing cannot be inferred at boot.
+			}
+			for _, mode := range []installStorageMode{installStoragePreview, installStorageProbe, installStorageWrite} {
+				warning, err := prepareInstallStorage(context.Background(), c.WithInstalledStorage(previous), missing, mode, nil)
+				if tc.name != "preserved" {
+					requirePreflightCode(t, err, "nas_not_mounted")
+					continue
+				}
+				if err != nil || warning == nil || warning.Root != "nas" || warning.Operation != "inventory" {
+					t.Fatalf("mode %d: missing NAS was not advisory: %+v, %v", mode, warning, err)
+				}
+			}
+		})
 	}
 }
 

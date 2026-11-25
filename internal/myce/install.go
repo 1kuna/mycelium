@@ -116,6 +116,7 @@ func (p MachineProbe) Detect(ctx context.Context) (Detection, error) {
 
 type ServiceConfig struct {
 	storageWarning           *StoragePreflightFailure // Current invocation only; never configuration authority.
+	allowMissingInstalledNAS bool                     `json:"-"` // Derived from the unchanged installed storage selection.
 	SaveSettingsOnly         bool                     `json:"-"` // Prepare queue override retirement without activation.
 	InstalledReleaseManifest string                   `json:"-"` // Signed incumbent artifact evidence for local recovery.
 
@@ -447,6 +448,7 @@ func prepareInstall(ctx context.Context, c ServiceConfig, executable, token stri
 		}
 		existing = true
 		installed = old
+		c = c.WithInstalledStorage(old)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return installPreparation{}, err
 	}

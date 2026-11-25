@@ -1181,7 +1181,14 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			}
 			m.UnavailableRoots = w.sampleStorageRoots(ctx, root.state.CheckpointRoot)
 			w.Machine.UnavailableRoots = slices.Clone(m.UnavailableRoots)
-			m.DiskVolumes = w.sampleDisks(root.dir, root.state.CheckpointRoot)
+			checkpointRoot := root.state.CheckpointRoot
+			mountMissing := slices.ContainsFunc(m.UnavailableRoots, func(r UnavailableRoot) bool { return r.Root == "checkpoint" })
+			if mountMissing {
+				// Avoid reporting the unmounted directory's local volume as NAS
+				// capacity, or writing the periodic sentinel into that directory.
+				checkpointRoot = ""
+			}
+			m.DiskVolumes = w.sampleDisks(root.dir, checkpointRoot)
 			m.FileTransferError = diagnostics.FileTransferError
 			m.ResultPublications = diagnostics.ResultPublications
 			observed, probeErr, observation := inventory.snapshotWithObservation()
@@ -1278,12 +1285,14 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.SharedCPUEnforcement = ""
 			}
 
-			checkpointRoot := root.state.CheckpointRoot
-			available, _ := root.nasProbe.periodic(w.Clock, checkpointRoot, func(progress func()) (bool, error) {
-				err := workerCheckpointAvailable(checkpointRoot, progress)
-				probeWorker.observeStorageError(err)
-				return err == nil, err
-			})
+			available := false
+			if !mountMissing {
+				available, _ = root.nasProbe.periodic(w.Clock, checkpointRoot, func(progress func()) (bool, error) {
+					err := workerCheckpointAvailable(checkpointRoot, progress)
+					probeWorker.observeStorageError(err)
+					return err == nil, err
+				})
+			}
 			m.CheckpointUnavailable = !available || diagnostics.CheckpointUnavailable
 			if m.CapabilityProfile != nil {
 				profile := *m.CapabilityProfile

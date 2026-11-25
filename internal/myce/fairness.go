@@ -629,7 +629,7 @@ func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
 	}
 	// Every target's checkpoint admission fails while the queue's own root is
 	// unreachable, so that is the wait for runnable work, whatever else holds it.
-	if j.State == "queued" && needsCheckpoint(j) && !q.checkpointsAvailable() && dependencyReady(j) {
+	if j.State == "queued" && needsDefaultCheckpoint(j) && !q.checkpointsAvailable() && dependencyReady(j) {
 		return newHold("checkpoint_root", "NAS checkpoint root is unreachable")
 	}
 	if reason := q.deviceFaultRetryWaitingReason(j, scans...); reason != "" {

@@ -368,7 +368,7 @@ func TestCheckpointRootHold(t *testing.T) {
 						t.Fatalf("GET=%+v %q aggregate=%+v", got.Hold, got.Reason, aggregate)
 					}
 					if unavailable == "worker" {
-						if !strings.Contains(got.Reason, "waiting for saved progress storage") {
+						if got.Hold.Kind != "storage_root" || !strings.Contains(got.Reason, "waiting for saved progress storage: checkpoint root unavailable") {
 							t.Fatalf("worker storage hold changed: %+v %q", got.Hold, got.Reason)
 						}
 					} else if got.Hold.Kind != "checkpoint_root" || got.Hold.Reason != "saved progress storage is unavailable" || !strings.HasPrefix(got.Reason, got.Hold.Reason) {

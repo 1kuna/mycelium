@@ -373,6 +373,9 @@ func TestLocalFirstPlannedStopAndLossResumeAccepted(t *testing.T) {
 			}
 			m := machine("next-worker", "fake")
 			m.Capabilities = append(m.Capabilities, localFirstProtocol)
+			m.CheckpointUnavailable = true
+			m.UnavailableRoots = []UnavailableRoot{{Root: "checkpoint", Reason: "configured NAS mount missing"}}
+			fakeCheckpointAvailability(t, q, false)
 			next := check(t, q, m, nil).Job
 			if next == nil || next.ResumeFiles == nil || next.ResumeFiles.Generation != 1 {
 				t.Fatal("resume guessed unpublished progress", next)

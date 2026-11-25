@@ -453,11 +453,14 @@ The measured 30-second no-progress bound (twice the recorded 14.90-second
 contention tail, #289) limits waiting for one probe operation, not installation
 eligibility. Completed operations renew the observation window. A syscall may
 outlive the warning; the process retains single-sequence ownership until it
-returns; no second sequence starts in that process while it is pending. Missing selected mounts,
-invalid directories/symlinks, wrong filesystems and completed permission errors
-still fail with typed errors. An unavailable mount cannot be distinguished from
-a wrong selection when absent from OS mount inventory, so that refusal stays.
-Local state/cache format errors remain fatal.
+returns; no second sequence starts in that process while it is pending.
+During an in-place worker update, an absent NAS mount is also a warning when
+the saved selection is unchanged, all NAS source paths are inside it and
+worker state and caches are outside it. New selections and paths whose backing
+cannot be determined from the saved configuration still require mount proof.
+Invalid directories, symlinks, completed permission errors and local
+state/cache format errors remain fatal. See
+[the first upgrade of a worker with a missing NAS](reference/fleet-upgrades.md#first-upgrade-of-a-worker-with-a-missing-nas).
 
 An installed service can be healthy while storage is unavailable. Current
 runtime mount health, `unavailable_roots` and checkpoint admission continue to

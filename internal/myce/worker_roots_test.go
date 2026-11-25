@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -129,6 +130,67 @@ func TestWorkerRootsProductionAdmissionAndExactCustody(t *testing.T) {
 		t.Fatal("mount loss revoked started custody")
 	}
 	finish(t, q, recovered, true)
+}
+
+func TestWorkerRootsReadmissionAndCheckpointPlacement(t *testing.T) {
+	for _, mounted := range []bool{true, false} {
+		for _, class := range []string{"production", "deadline", "experiment", "test", "local_first", "default_checkpoint"} {
+			name := fmt.Sprintf("%s/mounted=%t", class, mounted)
+			t.Run(name, func(t *testing.T) {
+				q, clock := fixture(t)
+				m := cpuMachine("worker", "worker", "cpu", 4, 16)
+				m.Capabilities = append(m.Capabilities, localFirstProtocol)
+				m = reportDisk(t, m, clock, "data", []string{"data", "file-cache"}, 100<<30, 50<<30)
+				if mounted {
+					nas := reportDisk(t, m, clock, "checkpoint", []string{"checkpoint"}, 100<<30, 50<<30)
+					m.DiskVolumes = append(m.DiskVolumes, nas.DiskVolumes...)
+				} else {
+					m.UnavailableRoots = []UnavailableRoot{{Root: "checkpoint", Reason: "configured NAS mount missing"}}
+					m.CheckpointUnavailable = true
+					m.DiskVolumes = append(m.DiskVolumes, DiskVolume{Roots: []string{"checkpoint"}, Error: "disk reading unavailable"})
+				}
+				check(t, q, m, nil)
+				drained, err := q.ChangeHostMaintenance(m.HostID, HostMaintenanceRequest{Action: "drain"})
+				if err != nil || !drained.Quiescent {
+					t.Fatalf("fixture drain: %+v %v", drained, err)
+				}
+				resumed, err := q.ChangeHostMaintenance(m.HostID, HostMaintenanceRequest{Action: "resume", IfMode: "drained", IfUpdatedAt: &drained.Policy.UpdatedAt})
+				if err != nil || resumed.Policy.Mode != "enabled" || !mounted && resumed.State != "degraded" {
+					t.Fatalf("readmission: %+v %v", resumed, err)
+				}
+				s := cpuSpec(1, 1)
+				s.Class, s.Priority = class, ""
+				switch class {
+				case "deadline":
+					deadline := clock.Now().Add(time.Hour)
+					s.Deadline = &deadline
+				case "local_first", "default_checkpoint":
+					s.Class, s.Resumable, s.Disk = "experiment", true, &DiskNeeds{CheckpointBytes: 1 << 20}
+					if class == "local_first" {
+						s.Advanced = &Advanced{CheckpointPolicy: "local_first"}
+						fakeCheckpointAvailability(t, q, mounted)
+					}
+				}
+				queued := submit(t, q, s)
+				assigned := check(t, q, m, nil).Job
+				if !mounted && class == "default_checkpoint" {
+					got, err := q.jobSnapshot(queued.ID)
+					if assigned != nil || err != nil || got.Hold == nil || got.Hold.Kind != "storage_root" ||
+						!strings.Contains(got.Hold.Detail, "checkpoint unavailable") {
+						t.Fatalf("expected a typed checkpoint hold: %+v %v", got.Hold, err)
+					}
+					return
+				}
+				if assigned == nil || assigned.ID != queued.ID {
+					t.Fatal("compatible job was not placed", job(t, q, queued.ID).Reason)
+				}
+				if err := q.Started(result(assigned, false)); err != nil {
+					t.Fatal(err)
+				}
+				finish(t, q, assigned, true)
+			})
+		}
+	}
 }
 
 func TestWorkerRootsDependencyChecks(t *testing.T) {

@@ -63,7 +63,7 @@ func fitsTargetResourcesChecked(j *Job, m *Machine, memory float64, report *targ
 		report.check(j.Spec.Needs.cpuOnly() || inventoryWaitingReason(m) == "", "device inventory") &&
 		report.check(j.Spec.Needs.cpuOnly() || m.MemoryError == "", "GPU memory telemetry") &&
 		report.check(!m.Gone, "gone") && report.check(!m.Leaving, "leaving") &&
-		report.check(!needsCheckpoint(j) || !m.CheckpointUnavailable, "checkpoint") &&
+		report.check(!needsDefaultCheckpoint(j) || !m.CheckpointUnavailable, "checkpoint") &&
 		report.check(memory >= j.Spec.Needs.MemoryGB, "GPU memory") &&
 		report.check(machineAllowed(j.Spec.AllowedMachines, m.ID), "allow-list") &&
 		report.check(!contains(j.Spec.ExcludedMachines, m.ID), "excluded_machines") &&
@@ -296,7 +296,7 @@ func (q *Queue) noFitDetail(j *Job, idle bool) string {
 		if state == "available for work" && q.machineLimitReason(m) != "" {
 			state = admissionWords(q.machineLimitReason(m))
 		}
-		if state == "available for work" && m.CheckpointUnavailable && needsCheckpoint(j) {
+		if state == "available for work" && m.CheckpointUnavailable && needsDefaultCheckpoint(j) {
 			state = "waiting for saved progress storage"
 		}
 		if state != "available for work" {

@@ -56,10 +56,17 @@ func probeRecoveryMount(path, required, osname string, probe func(string) error,
 	if err != nil {
 		return mountRecoveryError("mount_inventory_unavailable")
 	}
+	found := false
 	for _, m := range mounts {
-		if withinNAS(m.root, path) && (required == "" || len(m.root) > len(required)) {
-			required = m.root
+		if withinNAS(m.root, path) {
+			found = true
+			if required == "" || len(m.root) > len(required) {
+				required = m.root
+			}
 		}
+	}
+	if required != "" && !found {
+		return mountHumanReason(osname)
 	}
 	err = probe(path)
 	if required == "" {

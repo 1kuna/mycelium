@@ -86,6 +86,15 @@ NAS-dependent work waits with a typed root reason; local/cached work continues
 when its own dependencies are available. Existing operator drains and attempt
 custody are unchanged.
 
+An in-place update of an installed worker can report a storage warning when
+mount inventory lacks its unchanged configured NAS. This applies when the
+checkpoint, model and environment source paths are inside the configured NAS
+and state and caches are outside it, so the affected roles can be identified
+before the worker has seen the mount. Local state and service preflights
+still apply. After an owner resumes a drained worker, `myce host status`
+continues to report `degraded` and the unavailable roles until the mount
+recovers. See [the first upgrade from a strict helper](fleet-upgrades.md#first-upgrade-of-a-worker-with-a-missing-nas).
+
 From the owned-NAS fault follow-up, errors in Mycelium-owned shared-input
 staging/hash reads, ordinary input staging, checkpoint preparation/progress and
 existing probes latch the same dependency-scoped mount health failure. Only

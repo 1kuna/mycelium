@@ -171,7 +171,7 @@ var onboardingNASIO = checkpointIO[bool]{timeout: -1} // Each operation cancels 
 // may outlive the caller, but no second sequence is launched while it is pending.
 func PrepareOnboardingStorage(ctx context.Context, c ServiceConfig, discover bool, command func(context.Context, string, ...string) ([]byte, error)) (ServiceConfig, error) {
 	c, err := prepareOnboardingStorageFS(ctx, c, discover, command, onboardingStorageFS{lstat: os.Lstat, mkdir: os.Mkdir, probeContext: probeNASDirectoryContext})
-	c.storageWarning, err = installStorageOutcome(ctx, err)
+	c.storageWarning, err = installStorageOutcome(ctx, c, err)
 	if err == nil {
 		c.RequireMountedNAS = true
 	}
