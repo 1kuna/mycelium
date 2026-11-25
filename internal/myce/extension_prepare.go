@@ -115,6 +115,29 @@ func (q *Queue) extensionPreparationOffer(e Extension, m *Machine, demand *Job) 
 	return []EnvironmentRecipe{{Key: key, Platform: m.GPU, Preparation: &ExtensionSelection{Name: e.Name, Version: e.Version, Digest: e.Digest}, Launch: &launch}}
 }
 
+// Assigning an accelerator job first closes this worker's preparation window.
+// On an idle check-in, let an eligible setup demand with scheduling precedence
+// use that window before assigning a later accelerator job.
+func (q *Queue) offerExtensionPreparationBeforeAssignment(m, target *Machine, next *Job, reply *Reply) bool {
+	if next.Spec.Needs.cpuOnly() || !q.environmentPreparationAvailable(target) {
+		return false
+	}
+	plan := q.checkinEnvironmentPlan(m)
+	if len(plan) == 0 || plan[0].Preparation == nil || plan[0].Platform == "cpu" {
+		return false
+	}
+	l := plan[0].Launch
+	demand := q.s.Jobs[l.Demand]
+	preparationTarget := allocationMachine(m, []string{l.Device})
+	if demand == nil || demand.State != "queued" || demand.Pause != nil ||
+		!executionTargetMatches(demand.Spec, preparationTarget) || q.deviceAdmissionBlocked(preparationTarget) ||
+		q.productionAdmissionHold(demand, preparationTarget) != nil || !q.before(demand, next, preparationTarget) {
+		return false
+	}
+	reply.EnvironmentPlan = plan
+	return true
+}
+
 // Registry bytes are fetched by their frozen digest, then reparsed and verified.
 // All subprocesses and downloads share the existing preparation launch fence.
 func (w Worker) prepareRegisteredExtension(ctx context.Context, plan EnvironmentRecipe) (err error) {

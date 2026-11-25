@@ -496,7 +496,7 @@ func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, prog
 			best, target = j, candidate
 		}
 	}
-	if best != nil {
+	if best != nil && !q.offerExtensionPreparationBeforeAssignment(m, target, best, reply) {
 		q.recordAdmissionSelection(best, target)
 		out := q.assign(best, target, scan)
 		reply.Attempts = append(reply.Attempts, attemptOffer(&out))

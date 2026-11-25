@@ -2035,15 +2035,8 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 					boundStop(&reply.PreparationStopAt, *l.StopAt)
 				}
 			}
-			if m.Devices == nil {
-				reply.EnvironmentPlan = q.environmentPlan(&m)
-			} else {
-				for _, target := range q.machineTargets(&m) {
-					if plans := q.environmentPlan(target); len(plans) > 0 {
-						reply.EnvironmentPlan = plans
-						break
-					}
-				}
+			if len(reply.EnvironmentPlan) == 0 {
+				reply.EnvironmentPlan = q.checkinEnvironmentPlan(&m)
 			}
 			for _, target := range q.machineTargets(&m) {
 				reply.ExtensionQualificationPlan = append(reply.ExtensionQualificationPlan, q.extensionQualificationPlan(target)...)
@@ -2127,7 +2120,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			q.skipAdmissionSelection(&m, predicateSelectionNotReached)
 			scan := q.placementScan()
 			j := q.plannedPick(&m, scan)
-			if j != nil {
+			if j != nil && !q.offerExtensionPreparationBeforeAssignment(&m, &m, j, &reply) {
 				q.recordAdmissionSelection(j, &m)
 				out := q.assign(j, &m, scan)
 				reply.Attempts = append(reply.Attempts, attemptOffer(&out))

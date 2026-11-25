@@ -33,6 +33,57 @@ func prepareExtensionTestWorker(t *testing.T, q *Queue, e Extension) Worker {
 	c := &EnvironmentCache{Root: t.TempDir(), Limit: 4 << 20}
 	return Worker{StateDir: newTestStateRoot(t), ExtensionRoot: t.TempDir(), Machine: m, Clock: RealClock{}, EnvironmentLimit: 4 << 20, environmentCache: c, Client: Client{URL: server, Token: "test"}, extensionFingerprint: m.ExtensionFingerprint}
 }
+
+func TestExtensionPreparationGetsFirstIdleCheckin(t *testing.T) {
+	for _, priority := range []string{"experiment", "production"} {
+		t.Run(priority, func(t *testing.T) {
+			q, clock := fixture(t)
+			e := compositionExtension(t, false)
+			w := prepareExtensionTestWorker(t, q, e)
+			m := w.Machine
+			m.Devices = m3Machine().Devices
+			batch := spec("experiment")
+			batch.Needs.Platform = Platform{Required: []string{"fake"}}
+			holder := submit(t, q, batch)
+			running := assignedJob(machineCheck(t, q, m))
+			if running == nil || running.ID != holder.ID {
+				t.Fatal("missing accelerator holder", running)
+			}
+			demand := submit(t, q, Spec{Name: "cold extension", Project: batch.Project, Class: "experiment", Extension: extensionKey(e)})
+			reply := machineCheck(t, q, m, running)
+			if len(reply.EnvironmentPlan) != 0 {
+				t.Fatal("extension preparation overlapped exact accelerator custody", reply.EnvironmentPlan)
+			}
+			held, err := q.jobSnapshot(demand.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if held.Hold == nil || held.Hold.Kind != "native_qualification" ||
+				!strings.Contains(held.Hold.Reason, "accelerator attempt "+ShortID(running.ID)+"/1") {
+				t.Fatalf("native qualification hold did not identify the accelerator holder: %+v", held.Hold)
+			}
+			clock.Advance(time.Second)
+			batch.Priority = priority
+			next := submit(t, q, batch)
+			finish(t, q, running, true)
+			reply = machineCheck(t, q, m)
+			if priority == "production" {
+				if got := assignedJob(reply); got == nil || got.ID != next.ID {
+					t.Fatal("preparation delayed higher-tier accelerator work", got)
+				}
+				return
+			}
+			if len(reply.EnvironmentPlan) != 1 || reply.EnvironmentPlan[0].Launch.Demand != demand.ID || assignedJob(reply) != nil {
+				got := storedTestJob(t, q, demand.ID)
+				t.Fatalf("idle check-in did not give the older extension preparation a turn: offers=%d next=%s demand=%s (%s)", len(reply.EnvironmentPlan), storedTestJob(t, q, next.ID).State, got.State, got.Reason)
+			}
+			if err := q.AuthorizeLaunch(*reply.EnvironmentPlan[0].Launch); err != nil {
+				t.Fatalf("preparation offer could not start: %v", err)
+			}
+		})
+	}
+}
+
 func TestExtensionAutomaticPrepareTwoJobsOneBuildAndPlacement(t *testing.T) {
 	e := compositionExtension(t, true)
 	v := &e.Variants[0]
