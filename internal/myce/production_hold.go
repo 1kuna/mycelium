@@ -286,6 +286,19 @@ func (q *Queue) placementDemandPolicy(j *Job, m *Machine) bool {
 	if !q.admissionHold(j, m, q.variantParityHold(j, m), predicateVariantParity) {
 		return false
 	}
+	if j.State == "queued" {
+		host, now := hostID(m), q.clock.Now()
+		if !q.admissionHold(j, m, j.MemoryPressureRetries[host].hold(host, now), predicateMemoryPressureRetry) {
+			return false
+		}
+		if w := j.LaunchCapacityWait[host]; now.Before(w.RetryAt) {
+			q.admissionHold(j, m, w.hold(host), predicateLaunchCapacity)
+			return false
+		}
+		if !q.admissionPass(j, m, !launchCapacityReleasePending(j), predicateReleasePending) {
+			return false
+		}
+	}
 	if j.State == "queued" && !q.admissionHold(j, m, q.stagingStorageHostHold(j, m), predicateStagingStorageFull) {
 		return false
 	}

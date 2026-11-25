@@ -199,7 +199,6 @@ func (q *Queue) ordinaryRoomPlan(j *Job, m *Machine, batch bool) (*placementPlan
 func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool, yieldPlans ...map[string]*ScarceHostYield) *placementPlan {
 	if batch {
 	}
-	m = q.launchCapacityProjection(j, m)
 	p := &placementPlan{machine: m, preparations: true}
 	if len(yieldPlans) > 0 {
 		p.yields = yieldPlans[0]

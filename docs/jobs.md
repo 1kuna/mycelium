@@ -1080,12 +1080,29 @@ uses one RAM pool. New work on a discrete card gets exclusive access to the
 card until it has comparable device evidence.
 
 The worker's launch check uses the typical estimate. A physical shortfall
-reports `memory_wait` and requeues the same job. An admission refusal keeps
-its issued attempt identifier and refunds its start count. Relative start
-windows pause during memory waits. The Linux slice ceiling, card capacity and
-explicit limits such as `advanced.memory_limit_gb` provide containment.
-Lower-priority work can be stopped and requeued during a shortage. Work that
-cannot resume starts from scratch.
+reports `memory_wait` with the net room from the failed comparison and requeues
+the same job. An admission refusal keeps its issued attempt identifier and
+refunds its start count. Relative start windows pause during memory waits.
+Repeated launch refusals delay another offer to the same host by 1, 2, 4, 8,
+then at most 15 minutes. This spaces out repeated helper startups after observed
+refusals about 26 seconds apart. A transient refusal can delay a same-host
+retry by up to the current backoff even after room returns. Exact release and
+ordinary admission still apply, and an eligible different host can take the
+job once cleanup is confirmed. When the worker reports that main started, or
+the attempt succeeds, the refusal backoff resets.
+
+The Linux slice ceiling, card capacity and explicit limits such as
+`advanced.memory_limit_gb` provide containment. Lower-priority work can be
+stopped and requeued during a host memory shortage. Work that cannot resume
+starts from scratch. Two queue-issued host memory-pressure stops for the same
+job on one host within 10 minutes produce a scoped `memory_pressure_retry`
+hold. Status shows its expiry and the free memory, reserve and forecasts
+recorded when the queue ordered the last stop. The 10-minute window covers
+the observed 5–7-minute cycle. The 15-minute cool-off skips at least two such
+cycles and can delay recovered work on that host. Other eligible hosts can
+take the job under the ordinary release and placement rules. Wait for expiry,
+or run `myce resume JOB_ID` after addressing memory pressure. Keep the job ID
+and its submission key.
 
 ### Measured job envelopes
 

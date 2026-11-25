@@ -2,24 +2,26 @@ package myce
 
 import (
 	"fmt"
-	"slices"
+	"time"
 )
 
-// LaunchCapacityWait remembers the evidence behind a refused offer. It is
-// admission policy only; Copies/HostReleases remain the exact custody authority.
-// No timer clears it: an unchanged heartbeat is not new capacity.
+// LaunchCapacityWait tracks retries on one physical host. Copies and host
+// releases still own the refused attempt until exact cleanup is confirmed.
 type LaunchCapacityWait struct {
 	Machine   string           `json:"machine"`
 	Session   string           `json:"session"`
 	Attempt   int              `json:"attempt"`
-	Evidence  string           `json:"evidence"`
 	Admission *AdmissionDetail `json:"admission,omitempty"`
-	// Required surplus above the candidate's charge in the queue's physical
-	// RAM ledger. It can be signed because queue room can already be short.
-	LiveGrowthSurplusGB *float64 `json:"live_growth_surplus_gb,omitempty"`
+	Delay     time.Duration    `json:"delay,omitempty"`
+	RetryAt   time.Time        `json:"retry_at,omitempty,omitzero"`
 }
 
 const launchCapacityWaitReason = "waiting for launch capacity"
+
+// Start above the observed 26-second refusal cycle, then space repeated
+// failures further apart. Cap the added latency after room returns.
+const launchRetryInitial = time.Minute
+const launchRetryMax = 15 * time.Minute
 
 func launchCapacityRefusal(r Result) bool {
 	e := safeExecutionEvidence(r.ExecutionEvidence, r.Attempt)
@@ -32,56 +34,26 @@ func launchCapacityRefusal(r Result) bool {
 		(c.Class == "resource_limit" || c.Class == "io_error" && e != nil && e.Main == executionNotStarted)
 }
 
-// Only capacity values and exact competing custody identities participate.
-// Exclude this job: releasing its refused helper cannot by itself prove that
-// repeating the same admission will succeed. Timestamps/contact are not room.
-func (q *Queue) launchCapacityEvidence(j *Job, m *Machine) string {
-	if m == nil {
-		return ""
-	}
-	parts := []string{fmt.Sprintf("demand/%g/%g/%d", j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Needs.cores()), fmt.Sprintf("%s/%s/%t/%g/%t/%g/%g/%g/%d/%d/%g", m.ID, m.Session,
-		m.HostMemoryMeasured, m.HostAvailableMemoryGB, m.HostMemoryError != "", m.HostMemoryBudgetGB,
-		m.MemoryUsedGB, m.TotalMemoryGB, m.CPUBudgetCores, m.CPUReserveCores, m.ReservedMemoryGB)}
-	if m.CapabilityProfile != nil {
-		parts = append(parts, fmt.Sprint(m.CapabilityProfile.LogicalCPUs))
-	}
-	for _, o := range q.hostObligations(hostID(m)) {
-		if o.Result.ID == j.ID {
-			continue
-		}
-		part := obligationKey(o)
-		if other := q.s.Jobs[o.Result.ID]; other != nil && other.Machine == o.Result.Machine && other.Session == o.Result.Session && other.Attempt == o.Result.Attempt {
-			part += fmt.Sprintf("/%g/%d", q.hostJobCharge(other), other.Spec.Needs.cores())
-		}
-		parts = append(parts, part)
-	}
-	slices.Sort(parts)
-	return identityHash(parts)
-}
-
 func (q *Queue) recordLaunchCapacityWait(j *Job, r Result) {
 	if j != nil && q.s.Jobs[j.ID] == j {
 		q.touchJob(j.ID)
 	}
-	m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
-	if m != nil && j.Spec.Needs.cpuOnly() {
-		m = cpuMachineView(m)
+	host := q.executionHost(j.Machine)
+	if host == "" {
+		host = j.Machine
 	}
+	prior := j.LaunchCapacityWait[host]
+	if prior.Machine == j.Machine && prior.Session == j.Session && prior.Attempt == j.Attempt {
+		return // Multiple receipts for the same refusal count once.
+	}
+	delay := min(launchRetryMax, max(launchRetryInitial, 2*prior.Delay))
 	if j.LaunchCapacityWait == nil {
 		j.LaunchCapacityWait = map[string]LaunchCapacityWait{}
 	}
-	if m != nil {
-		key := targetKey(m)
-		wait := LaunchCapacityWait{Machine: j.Machine, Session: j.Session, Attempt: j.Attempt,
-			Admission: safeAdmissionDetail(r.ExecutionCause.Admission)}
-
-		if prior := j.LaunchCapacityWait[key]; prior.Session == wait.Session && prior.Attempt == wait.Attempt {
-			return // A repeated result must not move the baseline to a newer reading.
-		}
-		if !q.unreported[m.ID] {
-			wait.Evidence = q.launchCapacityEvidence(j, m)
-		}
-		j.LaunchCapacityWait[key] = wait
+	j.LaunchCapacityWait[host] = LaunchCapacityWait{
+		Machine: j.Machine, Session: j.Session, Attempt: j.Attempt,
+		Admission: safeAdmissionDetail(r.ExecutionCause.Admission),
+		Delay:     delay, RetryAt: q.clock.Now().Add(delay),
 	}
 }
 
@@ -110,6 +82,10 @@ func (q *Queue) requeueLaunchCapacity(j *Job) {
 }
 
 func (q *Queue) launchCapacityBlocked(j *Job, m *Machine) bool {
+	return q.clock.Now().Before(j.LaunchCapacityWait[hostID(m)].RetryAt) || launchCapacityReleasePending(j)
+}
+
+func launchCapacityReleasePending(j *Job) bool {
 	if len(j.LaunchCapacityWait) == 0 {
 		return false
 	}
@@ -120,40 +96,37 @@ func (q *Queue) launchCapacityBlocked(j *Job, m *Machine) bool {
 			return true
 		}
 	}
-	h, ok := j.LaunchCapacityWait[targetKey(m)]
-	if !ok {
-		return false
-	}
-	if h.Evidence == "" {
-		// Refused before the first post-restart report. Only a committed
-		// pass after that report records the baseline; views stay blocked.
-		if !q.unreported[m.ID] && q.records != nil && q.records.updating {
-			q.touchJob(j.ID)
-			h.Evidence = q.launchCapacityEvidence(j, m)
-			j.LaunchCapacityWait[targetKey(m)] = h
-		}
-		return true
-	}
-	return h.Evidence == q.launchCapacityEvidence(j, m)
+	return false
 }
 
-// The pending launch-capacity wait. A refusal whose launching attempt carried
-// measured helper charge beyond its reservation is its own kind.
-func launchCapacityHold(j *Job) *Hold {
-	detail := "waiting for launch capacity or exact release; unchanged capacity evidence is not re-offered"
-	for _, w := range j.LaunchCapacityWait {
-		if w.Attempt != j.Attempt || w.Admission == nil {
-			continue
-		}
-		if d := w.Admission; d.Subcheck == memoryWaitReason {
-			available := "unknown"
-			if d.Available != nil {
-				available = fmt.Sprintf("%.3f GiB", *d.Available)
-			}
-			return newHold(memoryWaitReason, fmt.Sprintf("needs %.3f GiB, available %s, keep %.3f GiB, outstanding reservations %.3f GiB", d.Required, available, d.KeepGB, d.HeldGB))
+func (w LaunchCapacityWait) hold(host string) *Hold {
+	kind, detail := "launch_capacity", "worker refused launch capacity"
+	if d := w.Admission; d != nil {
+		if d.Subcheck == memoryWaitReason {
+			kind = memoryWaitReason
+			detail = fmt.Sprintf("last launch needed %.3f GiB, available %s", d.Required, d.poolRoomText())
+		} else {
+			detail = (RuntimeCause{Operation: "launch", Class: "resource_limit", Admission: d}).String()
 		}
 	}
-	return newHold("launch_capacity", detail)
+	h := newHold(kind, detail)
+	h.Scope, h.Expires = host, &w.RetryAt
+	h.Clears = "the retry time passes or another eligible host takes the job, after exact release"
+	return h
+}
+
+func (q *Queue) launchCapacityHold(j *Job) *Hold {
+	if launchCapacityReleasePending(j) {
+		return newHold("launch_capacity", "waiting for exact release of the refused attempt")
+	}
+	now := q.clock.Now()
+	var hold *Hold
+	for host, w := range j.LaunchCapacityWait {
+		if now.Before(w.RetryAt) && (hold == nil || w.RetryAt.Before(*hold.Expires) || w.RetryAt.Equal(*hold.Expires) && host < hold.Scope) {
+			hold = w.hold(host)
+		}
+	}
+	return hold
 }
 
 func (q *Queue) launchCapacityPending(j *Job) bool {
@@ -176,6 +149,7 @@ func (q *Queue) queuedCapacityStatus(j *Job, scans ...*placementScan) (waiting, 
 		return false, false
 	}
 	scan := q.placementScan(scans...)
+	now := q.clock.Now()
 	for _, m := range scan.machines {
 		drained := q.s.HostMaintenance[hostID(m)].Mode == "drained"
 		if !q.jobAllowsMachine(j, m.ID) || q.s.HostMaintenance[hostID(m)].Mode == "disabled" || !drained && (m.Gone || m.Leaving) {
@@ -192,7 +166,7 @@ func (q *Queue) queuedCapacityStatus(j *Job, scans ...*placementScan) (waiting, 
 			if !fitsResources(c, &room, room.TotalMemoryGB) {
 				continue
 			}
-			if drained || !hostFits(m, c.Spec.Needs.MemoryGB, c.Spec.Needs.HostMemoryGB) || !cpuFits(c, m) || !q.batchSlotFree(m, c) || m.FreeMemoryGB < c.Spec.Needs.MemoryGB || !q.poolCustodyAllows(c, m) {
+			if drained || memoryRetryActive(j, hostID(m), now) || !hostFits(m, c.Spec.Needs.MemoryGB, c.Spec.Needs.HostMemoryGB) || !cpuFits(c, m) || !q.batchSlotFree(m, c) || m.FreeMemoryGB < c.Spec.Needs.MemoryGB || !q.poolCustodyAllows(c, m) {
 				waiting = true
 			} else if pooledMemory(c) && !q.hostBackfillAllows(c, m, q.hostBackfillFences(scan)[hostID(m)]) {
 				waiting = true
@@ -202,30 +176,4 @@ func (q *Queue) queuedCapacityStatus(j *Job, scans ...*placementScan) (waiting, 
 		}
 	}
 	return waiting && !ready, ready
-}
-
-// Feed the worker's measured deficit into ordinary release planning only.
-// This neither discounts reservations nor authorizes admission. The existing
-// planner chooses lower tiers; same-tier work remains protected. Exact releases
-// and a changed capacity snapshot are still required by dispatch.
-func (q *Queue) launchCapacityProjection(j *Job, m *Machine) *Machine {
-	h, ok := j.LaunchCapacityWait[targetKey(m)]
-	if !ok || h.Evidence != q.launchCapacityEvidence(j, m) || h.Admission == nil {
-		return m
-	}
-	d := h.Admission
-	if d.Unavailable || d.Available == nil || d.Required+d.HeldGB+d.KeepGB <= *d.Available {
-		return m
-	}
-	copy := *m
-	deficit := d.Required + d.HeldGB + d.KeepGB - *d.Available
-	switch d.Subcheck {
-	case memoryWaitReason, "live_host_ram", "live_host_growth", "aggregate_host_allowance", "configured_host_allowance":
-		copy.FreeHostMemoryGB = min(copy.FreeHostMemoryGB, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)-deficit)
-	case "aggregate_cpu_allowance":
-		copy.EffectiveCPUCores -= max(0, copy.FreeCPUCores-j.Spec.Needs.cores()+int(deficit))
-	default:
-		return m
-	}
-	return &copy
 }

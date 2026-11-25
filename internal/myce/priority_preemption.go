@@ -91,7 +91,7 @@ func (q *Queue) preemptionPlacementAllows(j *Job, m *Machine) bool {
 	if owner == nil || owner.Gone || owner.Session != p.Session {
 		return true
 	}
-	if q.preemptionTargetLostDisk(j) {
+	if q.preemptionTargetLostDisk(j) || memoryRetryActive(j, hostID(owner), q.clock.Now()) {
 		return true
 	}
 	return m.ID == p.Machine && m.Session == p.Session && m.Device == p.Device
@@ -100,10 +100,11 @@ func (q *Queue) preemptionPlacementAllows(j *Job, m *Machine) bool {
 // PriorityPreemption is planned intent, not proof of delivery or release. D5's
 // member facts still decide whether the command completed or was interrupted.
 type PriorityPreemption struct {
-	Cause  string        `json:"cause"`
-	Demand string        `json:"demand"`
-	Victim string        `json:"victim"`
-	Policy PriorityMatch `json:"policy"`
+	Cause        string                `json:"cause"`
+	Demand       string                `json:"demand"`
+	Victim       string                `json:"victim"`
+	Policy       PriorityMatch         `json:"policy"`
+	PoolPressure *PoolPressureDecision `json:"pool_pressure,omitempty"`
 }
 
 func (q *Queue) preemptionGrace() time.Duration {

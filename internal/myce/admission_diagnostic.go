@@ -40,6 +40,15 @@ type HostGrowthContributor struct {
 	SampleFresh      bool     `json:"sample_fresh"`
 }
 
+// poolRoomText renders the same signed comparison as the pooled worker gate.
+func (d AdmissionDetail) poolRoomText() string {
+	if d.Available == nil {
+		return "unavailable"
+	}
+	return fmt.Sprintf("%.3f GiB net room after %.3f GiB reserve and %.3f GiB pending growth (%.3f GiB before deductions)",
+		*d.Available-d.KeepGB-d.HeldGB, d.KeepGB, d.HeldGB, *d.Available)
+}
+
 type admissionError struct{ detail AdmissionDetail }
 
 func (e *admissionError) Error() string {
@@ -48,7 +57,9 @@ func (e *admissionError) Error() string {
 		check = "host RAM"
 	}
 	available := "unavailable"
-	if e.detail.Available != nil {
+	if check == memoryWaitReason {
+		available = e.detail.poolRoomText()
+	} else if e.detail.Available != nil {
 		available = fmt.Sprintf("%g %s", *e.detail.Available, e.detail.Unit)
 	}
 	return fmt.Sprintf("%s: %s need %g %s, available %s", errWorkerMemory, check, e.detail.Required, e.detail.Unit, available)

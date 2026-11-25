@@ -180,8 +180,13 @@ uses the declared NAS source even when an ordinary shared-input cache holds a co
   registrations, qualification can still proceed for other digests. Use the
   job's own status for its exact digest and hold.
 - CPU work blocked by live RAM can report `memory_wait` with the current
-  room and the attempts that hold RAM. A `memory_wait` or occupied-card
-  `capacity` hold clears as room or custody becomes available.
+  room and the attempts that hold RAM. When a worker refuses launch, the hold
+  can show the last net room and the expiration of a same-host backoff.
+  Mycelium retries automatically when the backoff and ordinary admission
+  allow. For a host-scoped `memory_pressure_retry`, status shows the pressure
+  comparison and retry time. Keep the same job ID and key. Wait for expiry or
+  run `myce resume JOB_ID` after addressing memory pressure. Either wait
+  permits another eligible host after exact release.
   A unified-memory GPU can run one attempt per work family when measured
   overlap lowers that family's throughput. Other families can use remaining
   room under the ordinary memory and tier rules. Keep queued peers on their

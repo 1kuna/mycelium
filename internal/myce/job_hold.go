@@ -190,10 +190,9 @@ func (q *Queue) jobHold(j *Job, resolving bool) (blocker *Hold) {
 	if key := j.Spec.Environment.Key(); key != "" {
 		reason = strings.ReplaceAll(reason, key, "required software")
 	}
-	b := newHold(wait.Kind, reason)
-	if wait.Kind == ephemeralIsolationHold {
-		b.Reason = wait.Reason
-	}
+	projected := *wait
+	projected.Detail = reason
+	b := &projected
 	if specificWaitKind(wait.Kind) {
 		return b
 	}

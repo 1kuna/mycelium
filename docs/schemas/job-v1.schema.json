@@ -3872,6 +3872,16 @@
           "$ref": "#/$defs/SizeHint",
           "x-contract": "diagnostic"
         },
+        "memory_pressure_retries": {
+          "additionalProperties": {
+            "$ref": "#/$defs/MemoryPressureRetry"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
         "model_environment_key": {
           "type": "string",
           "x-contract": "diagnostic"
@@ -4569,13 +4579,14 @@
         "attempt": {
           "type": "integer"
         },
-        "evidence": {
-          "type": "string"
-        },
-        "live_growth_surplus_gb": {
-          "type": "number"
+        "delay": {
+          "type": "integer"
         },
         "machine": {
+          "type": "string"
+        },
+        "retry_at": {
+          "format": "date-time",
           "type": "string"
         },
         "session": {
@@ -4585,8 +4596,7 @@
       "required": [
         "machine",
         "session",
-        "attempt",
-        "evidence"
+        "attempt"
       ],
       "type": "object"
     },
@@ -4943,6 +4953,25 @@
         "available_floor_gb",
         "swap_budget_gb",
         "host_oom_delta"
+      ],
+      "type": "object"
+    },
+    "MemoryPressureRetry": {
+      "properties": {
+        "decision": {
+          "$ref": "#/$defs/PoolPressureDecision"
+        },
+        "last_stop_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "retry_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "last_stop_at"
       ],
       "type": "object"
     },
@@ -5649,6 +5678,41 @@
       },
       "type": "object"
     },
+    "PoolPressureDecision": {
+      "properties": {
+        "check": {
+          "type": "string"
+        },
+        "free_gb": {
+          "type": "number"
+        },
+        "keep_gb": {
+          "type": "number"
+        },
+        "next_sample_gb": {
+          "type": "number"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "os_pressure": {
+          "type": "number"
+        },
+        "stop_horizon_gb": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "check",
+        "observed_at",
+        "free_gb",
+        "keep_gb",
+        "next_sample_gb",
+        "stop_horizon_gb"
+      ],
+      "type": "object"
+    },
     "PreemptionPlacement": {
       "properties": {
         "device": {
@@ -5733,6 +5797,9 @@
         },
         "policy": {
           "$ref": "#/$defs/PriorityMatch"
+        },
+        "pool_pressure": {
+          "$ref": "#/$defs/PoolPressureDecision"
         },
         "victim": {
           "type": "string"

@@ -213,6 +213,9 @@ func (c RuntimeCause) String() string {
 			available = fmt.Sprintf("%g", *d.Available)
 		}
 		text += fmt.Sprintf("; %s required=%g available=%s unit=%s envelope_source=%q host_gb=%g device_gb=%g", d.Subcheck, d.Required, available, d.Unit, d.EnvelopeSource, d.EnvelopeHostGB, d.EnvelopeDeviceGB)
+		if d.Subcheck == memoryWaitReason && d.Available != nil {
+			text += "; " + d.poolRoomText()
+		}
 	}
 	return text
 }

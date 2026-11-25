@@ -470,9 +470,10 @@ type Job struct {
 	// A started-attempt loss renews from StartWindow and clears this override.
 	StartCapacityBudget *time.Duration `json:"start_capacity_budget,omitempty"`
 
-	LaunchCapacityWait map[string]LaunchCapacityWait `json:"launch_capacity_wait,omitempty"`
-	ExecutionEvidence  *ExecutionEvidence            `json:"execution_evidence,omitempty"`
-	HealthRecovery     *AlertRecovery                `json:"health_recovery,omitempty"`
+	LaunchCapacityWait    map[string]LaunchCapacityWait  `json:"launch_capacity_wait,omitempty"`
+	MemoryPressureRetries map[string]MemoryPressureRetry `json:"memory_pressure_retries,omitempty"`
+	ExecutionEvidence     *ExecutionEvidence             `json:"execution_evidence,omitempty"`
+	HealthRecovery        *AlertRecovery                 `json:"health_recovery,omitempty"`
 
 	CPUObservation          *SharedCPUObservation  `json:"cpu_observation,omitempty"`
 	ResourceAttempts        []AttemptResourceFacts `json:"resource_attempts,omitempty"`

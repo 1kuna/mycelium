@@ -2630,6 +2630,7 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 		if strings.HasPrefix(j.Reason, "finalization pending:") {
 			j.Reason = ""
 		}
+		j.LaunchCapacityWait = nil // Main may finish before the first running check-in.
 		q.recordAttemptLearning(j, r)
 		q.recordEntryCoverageSuccess(j, r.Machine)
 		j.State = "succeeded"
@@ -3278,6 +3279,13 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 	retainInputsStagedAt(j, report.InputsStagedAt)
 	retainStagingTimings(j, report.StagingTimings)
 	retainLaunchTimings(j, report.LaunchTimings)
+	if report.Started && !j.ReleaseConfirmed {
+		// This exact worker report proves main passed its gate. The queue's
+		// Started authorization alone precedes the final native member check.
+		if len(j.LaunchCapacityWait) != 0 && !q.launchCapacityPending(j) {
+			j.LaunchCapacityWait = nil
+		}
+	}
 	if report.Started && j.State == "running" && !j.ReleaseConfirmed {
 		j.PreemptionPlacement = nil
 	}

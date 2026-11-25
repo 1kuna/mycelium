@@ -85,6 +85,7 @@ func (q *Queue) FencedResume(ctx context.Context, id string, request FencedResum
 			// Seal the generation without restarting a runnable job's start window.
 			q.touchJob(j.ID)
 			j.PauseRevision++
+			j.MemoryPressureRetries = nil
 		default:
 			return &HTTPError{Status: 409, Code: "job_pause_conflict", Message: "fenced resume requires queued work or a direct hold; parent-owned children resume with their parent"}
 		}

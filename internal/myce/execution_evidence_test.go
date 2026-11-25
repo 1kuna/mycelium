@@ -129,7 +129,7 @@ func TestExecutionEvidenceDisabledHost(t *testing.T) {
 func TestExecutionEvidenceMemoryRefusal(t *testing.T) {
 	for _, phase := range []string{"before_helpers", "after_helper", "after_environment"} {
 		t.Run(phase, func(t *testing.T) {
-			q, _ := fixture(t)
+			q, clock := fixture(t)
 			markers := t.TempDir()
 			helper, main, preparation := filepath.Join(markers, "helper"), filepath.Join(markers, "main"), filepath.Join(markers, "preparation")
 			s := spec("experiment")
@@ -247,11 +247,11 @@ func TestExecutionEvidenceMemoryRefusal(t *testing.T) {
 			if got.StartedAt != nil || !reflect.DeepEqual(got.ExecutionEvidence, e) || len(got.AttemptHistory) != 1 || !reflect.DeepEqual(got.AttemptHistory[0].ExecutionEvidence, e) {
 				t.Fatalf("queue lost evidence: %+v", got)
 			}
-			// Unchanged capacity must wait; a changed measurement enables retry.
+			// The recorded retry time governs when the queue can re-offer.
 			if next := check(t, q, m, nil).Job; next != nil {
-				t.Fatal("unchanged capacity re-offered", next)
+				t.Fatal("capacity re-offered during backoff", next)
 			}
-			m.HostAvailableMemoryGB += 1
+			clock.Advance(time.Minute)
 			// Retrying must discard current evidence; history retains the exact old attempt.
 			next := check(t, q, m, nil).Job
 			if next == nil || next.ExecutionEvidence != nil || !reflect.DeepEqual(next.AttemptHistory[0].ExecutionEvidence, e) {

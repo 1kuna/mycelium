@@ -183,10 +183,9 @@ type batchCPUKey struct {
 // same/higher-tier command. If its residual cores cannot fit the demand, memory
 // sizing and the complete release planner cannot produce an eligible candidate.
 // No release or placement is authorized here; all successful cases still use
-// the existing planner. Unknown ledgers and capacity-refusal projections fall
-// through to that planner without this shortcut.
+// the existing planner. Unknown ledgers fall through without this shortcut.
 func (q *Queue) batchCPUCeilingFits(j *Job, m *Machine, scans ...*placementScan) bool {
-	if !m.cpuLedger || len(j.LaunchCapacityWait) > 0 {
+	if !m.cpuLedger {
 		return true
 	}
 	key := batchCPUKey{hostID(m), q.priorityMatch(j.Spec).Index}

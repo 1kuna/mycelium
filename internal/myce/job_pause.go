@@ -85,11 +85,17 @@ func (q *Queue) changeJobPause(id string, request *PauseJobRequest, revision uin
 				q.maintainHostObligation(HostObligation{Result: resultIdentity(j)}, &deadline)
 			}
 		} else {
-			if j.State != "paused" || j.Pause == nil || j.Pause.Parent != "" || j.PauseRevision != revision {
+			if j.PauseRevision != revision || !directJobPause(j) && !(j.State == "queued" && q.memoryPressureWait(j) != nil) {
 				return &HTTPError{Status: 409, Code: "job_pause_revision_conflict", Message: "resume requires the current pause revision; parent-owned children resume with their parent"}
 			}
-			q.resumeJob(j)
-			clearStagingStorageHolds(j)
+			if directJobPause(j) {
+				q.resumeJob(j)
+				clearStagingStorageHolds(j)
+			} else {
+				q.touchJob(j.ID)
+				j.PauseRevision++
+				j.MemoryPressureRetries = nil
+			}
 		}
 		q.settleMaintenance()
 		copy := cloneJob(j)
@@ -122,6 +128,7 @@ func (q *Queue) pauseJob(j *Job, pause JobPause) {
 func (q *Queue) resumeJob(j *Job) {
 	q.touchJob(j.ID)
 	j.State, j.Pause, j.Reason = "queued", nil, ""
+	j.MemoryPressureRetries = nil
 	j.PauseRevision++
 	if !absoluteStartBy(j) {
 		// Clear any pre-pause cutoff or saved capacity budget. Dependency

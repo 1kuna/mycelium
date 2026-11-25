@@ -59,8 +59,12 @@ func TestLaunchCapacityLateLegacyRefusal(t *testing.T) {
 	if err := q.Complete(release); err != nil {
 		t.Fatal(err)
 	}
+	if next := check(t, q, m, nil).Job; next != nil {
+		t.Fatal("exact release bypassed retry time", next)
+	}
+	clock.Advance(time.Minute - time.Second)
 	if next := check(t, q, m, nil).Job; next == nil || next.ID != j.ID || next.Attempt != 2 {
-		t.Fatal("exact release did not permit capacity retry", next)
+		t.Fatal("exact release and elapsed backoff did not permit capacity retry", next)
 	}
 }
 
@@ -285,9 +289,13 @@ func TestLaunchCapacityKnownRefusalRestart(t *testing.T) {
 			if got.Losses != 0 || got.InfrastructureRetries != 0 || len(got.Copies) == 0 || !got.Copies[0].ReleaseConfirmed || got.Copies[0].Recoverable {
 				t.Fatal("known refusal restart spent budget or lost exact fence", got.Losses, got.InfrastructureRetries, got.Copies)
 			}
-			next := reply.Job
+			if reply.Job != nil {
+				t.Fatal("clean restart bypassed physical-host backoff", reply.Job)
+			}
+			clock.Advance(time.Minute - time.Second)
+			next := check(t, q, m, nil).Job
 			if next == nil || next.ID != j.ID || next.Attempt != 2 {
-				t.Fatal("clean restart did not resume capacity demand", next)
+				t.Fatal("clean restart did not resume capacity demand after backoff", next)
 			}
 			if tier == "production" && (next.StartWindow != offer.StartWindow || !next.Spec.StartBy.Equal(clock.Now().Add(time.Minute))) {
 				t.Fatal("fresh session did not restore relative startup budget")

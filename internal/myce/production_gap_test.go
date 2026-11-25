@@ -112,12 +112,21 @@ func TestLaunchCapacityPreemptionKeepsRoomUntilCommandStart(t *testing.T) {
 			q, clock := fixture(t)
 			m := cpuMachine("worker", "host", "fake", 8, 32)
 			m.Devices = []MachineDevice{}
-			low := submit(t, q, cpuSpec(1, 4))
+			// Twelve total requested GiB cannot fit this 11 GiB of observed room.
+			// That ordinary queue-side shortfall earns the preemption claim.
+			m.HostAvailableMemoryGB = 11
+			low := submit(t, q, cpuSpec(1, 8))
 			victim := assignedJob(machineCheck(t, q, m))
 			p := cpuSpec(1, 4)
 			p.Priority = "production"
 			demand := submit(t, q, p)
-			offer := assignedJob(machineCheck(t, q, m, victim))
+			machineCheck(t, q, m, victim)
+			if got := job(t, q, low.ID); got.State != "stopping" {
+				t.Fatal("ordinary RAM shortfall did not preempt", got.State)
+			}
+			finishInterrupted(t, q, victim)
+			m.HostAvailableMemoryGB = 32 // Spare room can fit the victim once the claim ends.
+			offer := assignedJob(machineCheck(t, q, m))
 			if offer == nil || offer.ID != demand.ID {
 				t.Fatal("missing production offer", offer)
 			}
@@ -127,11 +136,7 @@ func TestLaunchCapacityPreemptionKeepsRoomUntilCommandStart(t *testing.T) {
 			if err := q.Complete(capacityResult(offer, false)); err != nil {
 				t.Fatal(err)
 			}
-			if got := job(t, q, low.ID); got.State != "stopping" {
-				t.Fatal("deficit did not preempt", got.State)
-			}
-			finishInterrupted(t, q, victim)
-			// The exact release changes the failed comparison's custody evidence.
+			clock.Advance(time.Minute)
 			offer = assignedJob(machineCheck(t, q, m))
 			if offer == nil || offer.ID != demand.ID || offer.Attempt != 2 {
 				t.Fatal("missing production retry", offer)
@@ -169,7 +174,7 @@ func TestLaunchCapacityPreemptionKeepsRoomUntilCommandStart(t *testing.T) {
 				if err := q.Complete(r); err != nil {
 					t.Fatal(err)
 				}
-				m.HostAvailableMemoryGB++
+				clock.Advance(2 * time.Minute)
 				offer = assignedJob(machineCheck(t, q, m))
 				if offer == nil || offer.ID != demand.ID || offer.Attempt != 3 {
 					t.Fatal("lost production claim after second refusal", offer)
@@ -198,7 +203,7 @@ func TestLaunchCapacityPreemptionKeepsRoomUntilCommandStart(t *testing.T) {
 			switch boundary {
 			case "command-start", "restart", "refused-again":
 				if next := assignedJob(pull(true)); next == nil || next.ID != low.ID {
-					t.Fatal("worker command start did not return spare room", next)
+					t.Fatal("worker command start did not return spare room", next, job(t, q, low.ID).Reason)
 				}
 				if err := q.Complete(result(offer, true)); err != nil {
 					t.Fatal(err)
@@ -224,7 +229,7 @@ func TestLaunchCapacityPreemptionKeepsRoomUntilCommandStart(t *testing.T) {
 					t.Fatal(err)
 				}
 				if next := assignedJob(pull(false)); next == nil || next.ID != low.ID {
-					t.Fatal("cancelled demand held spare room", next)
+					t.Fatal("cancelled demand held spare room", next, job(t, q, low.ID).Reason)
 				}
 			}
 		})

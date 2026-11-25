@@ -277,11 +277,10 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 					if got.State != "queued" || last.Reason != launchCapacityWaitReason || got.Losses != 0 || !got.ReleaseConfirmed {
 						t.Fatalf("capacity refusal outcome: %s, %s, losses %d, released %t", got.State, last.Reason, got.Losses, got.ReleaseConfirmed)
 					}
-					clock.Advance(time.Second)
-					w.Machine.HostAvailableMemoryGB += 0.125
+					clock.Advance(min(15*time.Minute, time.Minute<<uint(attempt-1)))
 					assigned = check(t, q, w.Machine, nil).Job
 					if assigned == nil {
-						t.Fatal("check not reassigned after new capacity evidence")
+						t.Fatal("check not reassigned after launch backoff")
 					}
 				}
 				if err := q.update(func() error {

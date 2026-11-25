@@ -38,6 +38,6 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 		if victim == nil || pending || !short {
 			continue
 		}
-		q.stopForPoolPressure(victim, "device/"+d.ID)
+		q.stopForPoolPressure(victim, "device/"+d.ID, nil)
 	}
 }

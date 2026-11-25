@@ -87,13 +87,17 @@ func TestWorkerStartHandoffCapacity(t *testing.T) {
 	}
 	m.HostAvailableMemoryGB = refusedAvailableGB
 	if next := check(t, q, m, nil).Job; next != nil {
-		t.Fatal("unchanged capacity reoffered", next)
+		t.Fatal("unchanged capacity bypassed backoff", next)
 	}
 	m.HostAvailableMemoryGB++
 	if next := check(t, q, m, nil).Job; next != nil {
-		t.Fatal("insufficient recovery reoffered", next)
+		t.Fatal("partial recovery bypassed backoff", next)
 	}
 	m.HostAvailableMemoryGB += requiredGB - refusedAvailableGB
+	if next := check(t, q, m, nil).Job; next != nil {
+		t.Fatal("full recovery bypassed backoff", next)
+	}
+	clock.Advance(time.Minute - time.Second)
 	if next := check(t, q, m, nil).Job; next == nil || next.ID != a.ID || next.Attempt != 2 {
 		t.Fatal("sufficient recovery did not retry same logical job", next)
 	}

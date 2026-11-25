@@ -137,7 +137,7 @@ func (q *Queue) findPendingProductionGap(key productionGapKey) string {
 		if p := d.PreemptionPlacement; p != nil && (d.State == "running" || d.State == "stopping") && !d.ReleaseConfirmed && q.executionHost(p.Machine) == host {
 			return fmt.Sprintf("host %s: production attempt %s/%d preparing after preemption; placing elsewhere", host, d.ID, d.Attempt)
 		}
-		if d.State != "queued" {
+		if d.State != "queued" || memoryRetryActive(d, host, q.clock.Now()) && !launchCapacityReleasePending(d) {
 			continue
 		}
 		if d.FanOut != nil && d.Spec.FanOut != nil && d.FanOut.Next >= len(d.Spec.FanOut.Pieces) {
@@ -203,7 +203,7 @@ func (q *Queue) productionAdmissionHold(j *Job, m *Machine) *Hold {
 	}
 	soonest, id := setup, ""
 	for _, demand := range q.liveJobs() {
-		if demand.State != "queued" || demand.Spec.Priority != "production" || cancelled(demand) || expired(demand.Spec.GiveUpAt, q.clock.Now()) || q.comparePriority(j.Spec, demand.Spec) <= 0 || !q.jobAllowsMachine(demand, m.ID) || !q.reservationAllows(demand, m) {
+		if demand.State != "queued" || demand.Spec.Priority != "production" || cancelled(demand) || expired(demand.Spec.GiveUpAt, q.clock.Now()) || q.comparePriority(j.Spec, demand.Spec) <= 0 || !q.jobAllowsMachine(demand, m.ID) || !q.reservationAllows(demand, m) || memoryRetryActive(demand, host, q.clock.Now()) {
 			continue
 		}
 		// Forecast only a qualified recipe that can actually run on this host.
