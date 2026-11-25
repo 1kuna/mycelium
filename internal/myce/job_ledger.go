@@ -73,7 +73,13 @@ func (q *Queue) appendJobLedger(j *Job, e JobLedgerEntry) {
 	}
 	j.LedgerEntries = append(j.LedgerEntries, e)
 	// Replace, never mutate: snapshots/undo may borrow this immutable metadata.
-	j.Ledger = &JobLedgerInfo{Complete: j.Ledger.Complete, HighWater: e.Sequence}
+	complete := j.Ledger.Complete
+	if e.Kind == "custody_released" && e.CustodyStart == nil {
+		// A released reservation without a birth receipt may have forked a
+		// supervisor that never reached a combined member gate.
+		complete = false
+	}
+	j.Ledger = &JobLedgerInfo{Complete: complete, HighWater: e.Sequence}
 }
 
 // ledgerShowsLaunch reports any start, process or custody evidence for one

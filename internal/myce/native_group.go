@@ -289,7 +289,8 @@ func (g *nativeGroup) recordInfrastructureLocked(kind, member, port string, caus
 	return cause
 }
 
-func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory *memoryAttempt, env map[string]string, mainEnvironment string, releases ...func()) (*process, error) {
+func (w Worker) startNativeGroup(s *workerStore, j Job, reservation nativeLaunchCustody, logFlags int, memory *memoryAttempt, env map[string]string, mainEnvironment string, releases ...func()) (*process, error) {
+	identity := reservation.ProcessID
 	logName := identity + ".log"
 	if j.Spec.ephemeral() {
 		logName = ephemeralLogName(j)
@@ -297,7 +298,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 			return nil, err
 		}
 	}
-	output, err := openCommandOutput(s.dir, logName, j.Spec.Logs, os.O_EXCL)
+	output, err := openCommandOutput(s.dir, logName, j.Spec.Logs, logFlags)
 	if err != nil {
 		return nil, err
 	}
@@ -320,6 +321,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 	// directives must not cancel a running group before stop authorization).
 	ctx, cancel := context.WithCancel(context.Background())
 	g := &nativeGroup{p: p, worker: w, dir: s.dir, identity: identity, session: s.state.Session, ctx: ctx, cancel: cancel, memory: memory, custody: workerState{Identity: identity, Accelerator: !j.Spec.Needs.cpuOnly(), StopGrace: acceleratorStopGrace(w.AcceleratorStopGrace), Groups: map[int]map[int]string{}}}
+	g.custody.CustodyID = reservation.CustodyID
 	p.native = g
 	// Preparation cancellation runs before process control takes p.mu. Once
 	// registered, g.ctx must be cancelled by stopLocked under that mutex, after
@@ -547,26 +549,30 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 		}
 	}
 	if err == nil {
-		g.custody.CustodyID = ID()
+		if s == nil {
+			g.custody.CustodyID = ID()
+		}
 		err = g.saveLocked()
 	}
 	if err == nil {
 		err = g.handshakeLocked(func() error {
 			if g.worker.compactNativeLaunch {
 				c := nativeLaunchCustody{ProcessID: g.identity, CustodyID: g.custody.CustodyID, Phase: "reserved"}
+				if s != nil {
+					return g.worker.reserveInitialNativeLaunch(s, g.p.job, launch, c)
+				}
 				return g.worker.authorizeLaunchWithCustody(g.worker.launchContext(), launch, &c)
 			}
 			return g.worker.reportNativeCustody(g.p.job, g.session, g.identity, g.custody.CustodyID, "reserved")
 		})
-		if err != nil && g.worker.compactNativeLaunch {
-			if s != nil {
-				err = s.startFailure(g.p.job, launchRefused, err)
-			} else {
-				err = g.recordInfrastructureLocked(launchRefused, "control", "", err)
-			}
+		if err != nil && g.worker.compactNativeLaunch && s == nil {
+			err = g.recordInfrastructureLocked(launchRefused, "control", "", err)
 		}
 	}
 	if err == nil {
+		if s != nil {
+			s.nativeLaunchRetry = nil
+		}
 		err = cmd.Start()
 		if err != nil {
 			if s != nil {

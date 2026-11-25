@@ -789,7 +789,18 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		return nil, err
 	}
 	timing.enter(launchCommandSetup)
-	identity := ID()
+	group := len(j.Spec.Run.Sidecars) > 0 || j.Spec.Run.MemoryGB > 0
+	reservation := nativeLaunchCustody{ProcessID: ID(), Phase: "reserved"}
+	reservation.CustodyID = reservation.ProcessID
+	if group {
+		reservation.CustodyID = ID()
+	}
+	logFlags := os.O_EXCL
+	if retry := s.nativeLaunchRetry; retry != nil && retry.key == jobKey(j) {
+		reservation = retry.custody
+		logFlags = os.O_APPEND // The reserved identity already owns this log.
+	}
+	identity := reservation.ProcessID
 	memoryAttempt, err := w.executionCeilings().createAttempt("attempt-"+identity, ceilingBytes, w.MemorySwapMaxBytes, pooledMemory(&j))
 	if err != nil {
 		return nil, fmt.Errorf("memory ceiling setup: %w", err)
@@ -924,8 +935,8 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if os.Getenv(processSessionVariable) != "" {
 		env[processSessionVariable] = "1"
 	}
-	if len(j.Spec.Run.Sidecars) > 0 || j.Spec.Run.MemoryGB > 0 {
-		p, e := w.startNativeGroup(s, j, identity, memoryAttempt, env, environmentPath, extensionRelease, release)
+	if group {
+		p, e := w.startNativeGroup(s, j, reservation, logFlags, memoryAttempt, env, environmentPath, extensionRelease, release)
 		if e == nil {
 			environmentStarted, extensionStarted, sharedStarted, started = true, true, true, true
 		}
@@ -956,7 +967,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 			return nil, err
 		}
 	}
-	output, err := openCommandOutput(s.dir, logName, j.Spec.Logs, os.O_EXCL)
+	output, err := openCommandOutput(s.dir, logName, j.Spec.Logs, logFlags)
 	if err != nil {
 		return nil, err
 	}
@@ -1017,14 +1028,18 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		return nil, s.startFailure(j, launchRefused, err)
 	}
 	if w.compactNativeLaunch {
-		err = w.authorizeLaunchWithCustody(w.launchContext(), launch, &nativeLaunchCustody{ProcessID: identity, CustodyID: identity, Phase: "reserved"})
+		err = w.reserveInitialNativeLaunch(s, j, launch, reservation)
 	} else {
-		err = w.reportNativeCustody(j, s.state.Session, identity, identity, "reserved")
+		err = w.reportNativeCustody(j, s.state.Session, identity, reservation.CustodyID, "reserved")
+		if err != nil {
+			err = s.startFailure(j, launchRefused, err)
+		}
 	}
 	if err != nil {
 		output.Close()
-		return nil, s.startFailure(j, launchRefused, err)
+		return nil, err
 	}
+	s.nativeLaunchRetry = nil
 	if err = cmd.Start(); err != nil {
 		output.Close()
 		return nil, s.startFailure(j, launchFailed, err)

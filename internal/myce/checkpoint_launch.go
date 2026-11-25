@@ -8,6 +8,11 @@ import (
 	"path/filepath"
 )
 
+func retryableAttemptStart(err error) bool {
+	return !errors.Is(err, errWorkerReleasePending) &&
+		(errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerUnavailable))
+}
+
 // A preparation observation can expire while its uncancellable filesystem
 // writer still runs. Join that owner before repeating preflight or discovery:
 // probing during our own bulk copy can refuse the attempt and abandon the copy.
@@ -58,7 +63,7 @@ func (w Worker) startAssignedAttempt(ctx context.Context, s *workerStore, j Job)
 	timing := s.launchRecorder(w.Clock)
 	timing.enter(launchBinding)
 	defer func() {
-		if errors.Is(startErr, errWorkerCheckpoint) || errors.Is(startErr, errWorkerUnavailable) {
+		if retryableAttemptStart(startErr) {
 			timing.enter(launchRetry)
 		} else if startErr != nil {
 			timing.finish("")

@@ -693,12 +693,13 @@ and restart reconciliation reuse the existing exact copy-release authority to
 settle every outstanding generation; diagnostics never authorize release.
 
 `complete` describes historical coverage, independently of `has_more`.
-Jobs created with ledger support have complete coverage. Older retained jobs,
-and native attempts reported without custody receipts by an older worker,
-report `complete=false`: earlier native generations cannot be reconstructed
-from the bounded diagnostic arrays. An incomplete ledger must not be treated
-as proof of all historical execution. Native custody generations describe
-native supervisors.
+Jobs created with ledger support start with complete coverage. Older retained
+jobs and native attempts reported without custody receipts by an older worker
+report `complete=false`. Releasing a native reservation without a supervisor
+birth receipt also marks coverage incomplete. The queue cannot tell whether
+that supervisor forked and failed before reaching its first payload gate.
+An incomplete ledger cannot prove all historical execution. Native custody
+generations describe native supervisors.
 
 Ledger retention follows the [job record](retention.md#job-records) and keyed
 replay answer. A keyed job can retain its ledger after ordinary job GET returns

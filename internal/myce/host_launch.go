@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"slices"
@@ -34,6 +35,26 @@ type HostLaunch struct {
 type workerLaunchRequest struct {
 	HostLaunch
 	Custody *nativeLaunchCustody `json:"custody,omitempty"`
+}
+
+type nativeLaunchRetry struct {
+	key     attemptKey
+	custody nativeLaunchCustody
+}
+
+// A local availability check can fail after the queue commits the reservation.
+// Only the live launch owner knows this supervisor has not forked. Its next
+// try sends the same generation through the full launch fence again.
+func (w Worker) reserveInitialNativeLaunch(s *workerStore, j Job, l HostLaunch, c nativeLaunchCustody) error {
+	err := w.authorizeLaunchWithCustody(w.launchContext(), l, &c)
+	if errors.Is(err, errWorkerUnavailable) {
+		s.nativeLaunchRetry = &nativeLaunchRetry{key: jobKey(j), custody: c}
+		return err
+	}
+	if err != nil {
+		return s.recordStartFailure(j, launchRefused, err, w.Clock.Now(), true)
+	}
+	return nil
 }
 
 func launchAttempt(l *HostLaunch) string {

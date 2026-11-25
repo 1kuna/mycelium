@@ -669,7 +669,7 @@ func (w Worker) runCustodian(stop context.Context) error {
 		stopHeartbeat := w.keepCustodianPreparationLive(dir, id)
 		p, err = w.startAssignedAttempt(prepareCtx, s, *req.State.Job)
 		stopHeartbeat()
-		if err != nil && !errors.Is(err, errWorkerCheckpoint) && !errors.Is(err, errWorkerUnavailable) {
+		if err != nil && !retryableAttemptStart(err) {
 			r := startFailureOutcome(Result{Machine: w.Machine.ID, Session: req.State.Session, Execution: Execution{ID: req.State.Job.ID, Attempt: req.State.Job.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}, err)
 			if cause := safeRuntimeCause(r.ExecutionCause); cause != nil {
 				log.Printf("event=attempt_start_failed job=%s attempt=%d cause=%s", r.ID, r.Attempt, cause.String())
