@@ -349,7 +349,7 @@ func (q *Queue) nextProjection(sets []*candidateSet, excluded map[string]bool, s
 	var best *Job
 	var selected *candidateSet
 	for _, set := range sets {
-		winner := set.pick(excluded)
+		winner := set.pick(excluded, immediate)
 		if winner == nil {
 			continue
 		}

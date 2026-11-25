@@ -259,6 +259,7 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 	}
 	if q.memoryEvidencePending != nil {
 		q.memoryEvidencePending.writes = nil
+		q.memoryEvidencePending.gpuSharingWrites = nil
 		q.memoryEvidence = q.memoryEvidencePending
 	}
 	if q.persisted == nil {

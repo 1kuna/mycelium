@@ -492,6 +492,9 @@ type Job struct {
 	// Set only on read-only planner copies, never the durable job. Plain work's
 	// recipe and input identity is independent of the target or learned memory.
 	planningMemoryIdentity string
+	// Queue-owned comparison in progress. A restart discards unfinished
+	// measurements and keeps completed observations in the evidence store.
+	gpuSharingRun *gpuSharingRun
 	// Set only on status and job-reply copies: the scheduler's wait for this
 	// queued job, as the projection computed it, so status never recomputes it.
 	wait *Hold

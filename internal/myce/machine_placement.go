@@ -280,7 +280,7 @@ func (q *Queue) batchSlotFree(m *Machine, demand *Job) bool {
 		return true
 	}
 	_, ok := q.deviceCoTenants(m, demand, true)
-	return ok && q.cardSettled(m) && !m.Gone && !m.Leaving && !q.unreported[m.ID]
+	return ok && q.cardSettled(m) && !m.Gone && !m.Leaving && !q.unreported[m.ID] && !q.gpuSharingBlocked(demand, m)
 }
 
 // Tier isolation covers both batch and engine custody. An engine demand may

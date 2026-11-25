@@ -19,6 +19,7 @@ type DevConfig struct {
 	SharedPressureSource            func(context.Context) (SharedHostPressure, error)
 	OutputDeliveryRoot              string
 	Devices                         int
+	FakeUnifiedMemory               bool
 	ProductionInfrastructureRetries *int
 	FileStore                       string
 	FileStoreLimit                  int64
@@ -82,6 +83,9 @@ func startDev(c DevConfig, configureQueue func(*Queue)) (*Dev, error) {
 	}
 	if c.Devices < 1 || c.Devices > 1 && (c.Workers != 1 || c.GPU != "fake") {
 		return nil, errors.New("multiple fake GPUs require one fake machine worker")
+	}
+	if c.FakeUnifiedMemory && (c.Workers != 1 || c.GPU != "fake") {
+		return nil, errors.New("fake unified memory requires one fake machine worker")
 	}
 	clock := &devClock{}
 	if c.HostID == "" {
@@ -198,12 +202,16 @@ func startDev(c DevConfig, configureQueue func(*Queue)) (*Dev, error) {
 		if c.NASCheckpoints {
 			w.CheckpointRoot = c.Checkpoints
 		}
-		if c.Devices > 1 {
+		if c.Devices > 1 || c.FakeUnifiedMemory {
 			w.Machine.ID, w.Machine.Device = c.HostID, ""
 			devices := []MachineDevice{}
 			for index := 0; index < c.Devices; index++ {
 				id := fmt.Sprint(index)
-				devices = append(devices, MachineDevice{ID: id, Platform: "fake", Identity: "fake-" + id, Fingerprint: "fake", Selector: id, MemoryMode: "fixed", TotalMemoryGB: c.MemoryGB, BudgetGB: c.MemoryGB, FreeMemoryGB: c.MemoryGB})
+				device := MachineDevice{ID: id, Platform: "fake", Identity: "fake-" + id, Fingerprint: "fake", Selector: id, MemoryMode: "fixed", TotalMemoryGB: c.MemoryGB, BudgetGB: c.MemoryGB, FreeMemoryGB: c.MemoryGB}
+				if c.FakeUnifiedMemory {
+					device.MemoryMode, device.UnifiedMemory = "unified", true
+				}
+				devices = append(devices, device)
 			}
 			w.Machine.Devices = devices
 			w.InventoryProbe = func(context.Context) ([]MachineDevice, error) { return append([]MachineDevice(nil), devices...), nil }

@@ -547,13 +547,7 @@ func (q *Queue) recordPoolEvidence(j *Job, r Result) {
 	if len(points) == 0 {
 		return
 	}
-	evidence := q.memoryEvidence
-	if !q.simulation {
-		if q.memoryEvidencePending == nil {
-			q.memoryEvidencePending = q.memoryEvidence.stage()
-		}
-		evidence = q.memoryEvidencePending
-	}
+	evidence := q.stagedMemoryEvidence()
 	for _, point := range points {
 		if pooledMemory(j) {
 			pools := memoryPools(j)
@@ -570,6 +564,16 @@ func (q *Queue) recordPoolEvidence(j *Job, r Result) {
 		}
 		evidence.observe(point)
 	}
+}
+
+func (q *Queue) stagedMemoryEvidence() *memoryEvidence {
+	if q.simulation {
+		return q.memoryEvidence
+	}
+	if q.memoryEvidencePending == nil {
+		q.memoryEvidencePending = q.memoryEvidence.stage()
+	}
+	return q.memoryEvidencePending
 }
 
 func pooledSampleLimited(p *AttemptMemoryPeak) bool {

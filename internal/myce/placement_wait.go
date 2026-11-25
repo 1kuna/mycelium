@@ -213,9 +213,14 @@ func (q *Queue) cardWaitingReason(j *Job, m *Machine) string {
 		return ""
 	}
 	holders := map[string]string{}
+	restriction := q.gpuSharingRestriction(j, m)
+	var sharingBlockers []string
 	for _, holder := range q.liveJobs() {
 		if holder.ID != j.ID && batchOnTarget(holder, m) && batchReservesCapacity(holder) {
 			holders[holder.ID] = holder.ID + " (" + q.priorityMatch(holder.Spec).Tier + ")"
+			if restriction.conflicts(holder, m) {
+				sharingBlockers = append(sharingBlockers, holders[holder.ID])
+			}
 		}
 	}
 	for _, release := range q.s.HostReleases {
@@ -237,6 +242,10 @@ func (q *Queue) cardWaitingReason(j *Job, m *Machine) string {
 	device := strings.Join(targetDevices(m), ",")
 	if device == "" {
 		return reservationWaitReason(m, true, 0) + "; waiting for GPU batch slot held by " + strings.Join(owners, ", ")
+	}
+	if len(sharingBlockers) > 0 {
+		slices.Sort(sharingBlockers)
+		return reservationWaitReason(m, true, 0) + fmt.Sprintf("; measured same-family throughput is lower when sharing device %s; waiting for release from %s", device, strings.Join(sharingBlockers, ", "))
 	}
 	if n, shared := q.deviceCoTenants(m, j, true); shared && n > 0 && q.cardSettled(m) {
 		return reservationWaitReason(m, false, n) + "; held by " + strings.Join(owners, ", ")
