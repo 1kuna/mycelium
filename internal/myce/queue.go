@@ -659,6 +659,8 @@ func (q *Queue) BeginShutdown() {
 }
 
 func (q *Queue) Close() error {
+	// Fence even no-op control requests, which can skip the SQLite writer.
+	q.BeginShutdown()
 	err := errors.Join(q.closeCheckpointShards(), q.closeIdleHistory())
 	if q.stopping.Load() {
 		log.Printf("event=queue_shutdown phase=storage_wait")
