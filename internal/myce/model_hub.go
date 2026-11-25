@@ -261,6 +261,9 @@ func modelHubStatusError(code int, file bool) error {
 }
 
 func modelHubHostFault(class string, cause error) error {
+	if class == "storage_full" {
+		return modelSnapshotDiskFault(cause)
+	}
 	if class == "network" {
 		class = "connection_refused"
 	}
@@ -426,7 +429,7 @@ func (h *modelHub) download(ctx context.Context, raw, target string, offset int6
 }
 
 func diskClass(err error) string {
-	if errors.Is(err, syscall.ENOSPC) {
+	if errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) {
 		return "storage_full"
 	}
 	var netErr net.Error

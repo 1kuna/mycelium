@@ -541,6 +541,8 @@ type Job struct {
 	SubmissionReused       bool             `json:"submission_reused,omitempty"`
 	LastHealthAlertAttempt int              `json:"last_health_alert_attempt,omitempty"`
 	AttemptHistory         []AttemptOutcome `json:"attempt_history,omitempty"`
+	// Resume grants a new staging try without discarding earlier outcomes.
+	StagingStorageRetryAfter int `json:"staging_storage_retry_after,omitempty"`
 	// Read-only observations; never physical-release evidence for another attempt.
 	Cancellation      *Cancellation      `json:"cancellation,omitempty"`
 	CancellationScope *CancellationScope `json:"cancellation_scope,omitempty"`

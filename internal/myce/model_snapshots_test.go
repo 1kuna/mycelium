@@ -507,6 +507,17 @@ func TestModelSnapshotBudgetExceedsFileCache(t *testing.T) {
 	modelRoot := t.TempDir()
 	tinyModel(t, modelRoot)
 	w := snapshotWorker(t, modelRoot, &fakeClock{now: time.Unix(1000, 0)})
+	small := snapshotWorker(t, modelRoot, w.Clock)
+	small.modelSnapshots.cache.Limit = 16
+	_, _, err := small.acquireModelSnapshots(context.Background(), snapshotJob("org/tiny"))
+	var fault *runtimeError
+	if !errors.As(err, &fault) || fault.diagnostic.Class != "storage_full" {
+		t.Fatalf("snapshot cache limit did not produce a storage refusal: %v", err)
+	}
+	d := safeStagingCause(fault.diagnostic.Staging)
+	if d == nil || d.Capacity != "model_snapshot_cache" || d.RequiredBytes <= 16 || d.AvailableBytes > 16 || d.LimitBytes != 16 {
+		t.Fatalf("snapshot cache refusal lost measured operands: %+v", d)
+	}
 	paths, releases, err := w.acquireModelSnapshots(context.Background(), snapshotJob("org/tiny"))
 	if err != nil {
 		t.Fatal("snapshot larger than the 16-byte file cache was refused:", err)

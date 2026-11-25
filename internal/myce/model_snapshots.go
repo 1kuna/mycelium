@@ -397,8 +397,7 @@ func (w Worker) acquireHeldSnapshot(ctx context.Context, j Job, id string, m Mod
 
 // acquireResolvedSnapshot admits and copies (or reuses) one resolved snapshot.
 // The size limit is policy and fails the job; a disk shortage is this host's,
-// so it requeues the job without a predicate and the queue, which has now
-// learned the size, places it on a host with room.
+// so it reports a host-local refusal with the staging evidence.
 func (w Worker) acquireResolvedSnapshot(ctx context.Context, j Job, input SharedInput, root string) (string, func(), error) {
 	need := input.bytes()
 	if limit := j.ModelLimits.MaxBytes; limit > 0 && need > limit {
@@ -419,8 +418,11 @@ func (w Worker) acquireResolvedSnapshot(ctx context.Context, j Job, input Shared
 			return "", nil, err
 		}
 		var capacity *stagingCapacityError
-		if errors.As(err, &capacity) || strings.HasPrefix(err.Error(), "disk_headroom") || errors.Is(err, syscall.ENOSPC) {
+		if errors.As(err, &capacity) || errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) {
 			return "", nil, modelSnapshotDiskFault(err)
+		}
+		if strings.HasPrefix(err.Error(), "disk_headroom") {
+			return "", nil, modelHubHostFault("io_error", err)
 		}
 		return "", nil, modelSnapshotError("model_snapshot_mismatch", "io_error", err)
 	}
@@ -431,7 +433,12 @@ func modelSnapshotDiskFault(cause error) error {
 	if cause == nil {
 		cause = errors.New("model snapshot cache lacks room above the free-space floor")
 	}
-	return &runtimeError{diagnostic: RuntimeCause{Operation: "input_staging", Class: "storage_full"}, cause: cause}
+	wrapped := withStagingCause("", FileRef{}, "model_snapshot", cause).(*stagingError)
+	detail := wrapped.detail
+	if detail.Capacity == "shared_input_cache" {
+		detail.Capacity = "model_snapshot_cache"
+	}
+	return &runtimeError{diagnostic: RuntimeCause{Operation: "input_staging", Class: "storage_full", Staging: &detail}, cause: cause}
 }
 
 // nativeInputPaths keeps model data separate from executable shared runtimes.

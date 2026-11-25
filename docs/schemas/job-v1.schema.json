@@ -4093,6 +4093,10 @@
           "description": "Observation privacy policy: projected is true; omitted lists stripped paths relative to spec, regardless of submitted presence. Empty placeholders do not retain submitted values. Absence of spec.files is not evidence that no files were submitted.",
           "x-contract": "stable"
         },
+        "staging_storage_retry_after": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
         "staging_timings": {
           "$ref": "#/$defs/StagingTimings",
           "x-contract": "diagnostic"

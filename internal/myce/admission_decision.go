@@ -341,6 +341,7 @@ const (
 	predicateWorkerMemoryContract AdmissionPredicate = "worker_memory_contract"
 	predicateSharedHostProfile    AdmissionPredicate = "shared_host_profile"
 	predicateStagingHostRetry     AdmissionPredicate = "staging_host_retry"
+	predicateStagingStorageFull   AdmissionPredicate = stagingStorageHold
 	predicateStartupRelease       AdmissionPredicate = "startup_release"
 	predicateStorageRoot          AdmissionPredicate = "storage_root"
 	predicateTools                AdmissionPredicate = "tools"

@@ -47,6 +47,9 @@ func jobFinding(j *Job, rawReason string) *JobFinding {
 	case "failed":
 		return failedJobFinding(j, rawReason)
 	case "queued", "running", "stopping", "paused":
+		if j.Hold != nil && j.Hold.Kind == stagingStorageHold {
+			return &JobFinding{stagingStorageHold, findingOwnerMycelium, j.Hold.Reason + ".", j.Hold.Next + "."}
+		}
 		if c := j.ExecutionCause; c != nil && c.Operation == "launch" && c.Predicate == "preparation_cancelled" {
 			return &JobFinding{"launch_interrupted", findingOwnerMycelium,
 				"Mycelium cancelled preparation before your command started; the job requeued without charging a command failure or infrastructure loss.",

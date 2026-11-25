@@ -80,6 +80,7 @@ func (q *Queue) FencedResume(ctx context.Context, id string, request FencedResum
 		switch {
 		case directJobPause(j):
 			q.resumeJob(j)
+			clearStagingStorageHolds(j)
 		case j.State == "queued":
 			// Seal the generation without restarting a runnable job's start window.
 			q.touchJob(j.ID)

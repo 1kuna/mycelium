@@ -286,6 +286,9 @@ func (q *Queue) placementDemandPolicy(j *Job, m *Machine) bool {
 	if !q.admissionHold(j, m, q.variantParityHold(j, m), predicateVariantParity) {
 		return false
 	}
+	if j.State == "queued" && !q.admissionHold(j, m, q.stagingStorageHostHold(j, m), predicateStagingStorageFull) {
+		return false
+	}
 	if (j.StartedAt == nil || j.State == "queued") && (!q.admissionHold(j, m, reasonHold("shared_host_backoff", q.sharedHostBackoffReason(j, m)), predicateSharedHostBackoff) || !q.admissionHold(j, m, reasonHold("storage_root", q.storageRootReason(j, m)), predicateStorageRoot) || !q.admissionHold(j, m, reasonHold(stagingHostRetryHold, q.stagingHostRetryReason(j, m)), predicateStagingHostRetry)) {
 		return false
 	}
@@ -310,6 +313,9 @@ func (q *Queue) placementDemandPolicy(j *Job, m *Machine) bool {
 // Production and disk fences that hold this job.
 func (q *Queue) holdWait(j *Job, scans ...*placementScan) *Hold {
 	scan := q.placementScan(scans...)
+	if h := q.stagingStorageWait(j, scan.machines); h != nil {
+		return h
+	}
 	for _, m := range scan.machines {
 		if q.jobAllowsMachine(j, m.ID) && fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
 			if h := q.productionAdmissionHold(j, m); h != nil {
