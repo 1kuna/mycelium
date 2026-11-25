@@ -165,6 +165,9 @@ durability is required. Status comes from the running worker.
   actions with the job ID, attempt and typed reason. Keep full history reads
   out of loops.
   For `staging_storage_full`, ask the worker owner to restore staging space.
+  For staging operation `model_snapshot` with capacity `disk_free_floor`,
+  `required_bytes` is the write size, `available_bytes` is measured free disk
+  space (zero if omitted), and `limit_bytes` is the configured disk floor.
   After repair, pause and resume the same job to retry on the affected host.
   If `myce host status HOST` reports some unreadable local extension
   registrations, qualification can still proceed for other digests. Use the

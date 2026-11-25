@@ -46,7 +46,9 @@ type modelSnapshotRecord struct {
 	Input    SharedInput   `json:"input"`
 }
 
-const modelSnapshotRecordName = "snapshot.json"
+const legacyModelSnapshotRecordName = "snapshot.json"
+
+func modelSnapshotRecordName(id string) string { return "snapshot-" + id + ".json" }
 
 // snapshotIdentity is the declaration's cache identity, independent of which
 // source (local hub or model hub) supplied the bytes.
@@ -72,18 +74,44 @@ func (x *modelSnapshotIndex) load(c *SharedInputCache) {
 		if !d.IsDir() || (FileRef{SHA256: d.Name()}).validate() != nil {
 			continue
 		}
-		var r modelSnapshotRecord
-		b, err := os.ReadFile(filepath.Join(c.cache.Root, d.Name(), modelSnapshotRecordName))
-		if err != nil || json.Unmarshal(b, &r) != nil || r.Input.key() != d.Name() {
+		dir := filepath.Join(c.cache.Root, d.Name())
+		ready := filepath.Join(dir, "ready.json")
+		if _, err := os.Stat(ready); err != nil {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(c.cache.Root, d.Name(), "ready.json")); err != nil {
-			continue
+		files, _ := os.ReadDir(dir)
+		for _, file := range files {
+			name := file.Name()
+			legacy := name == legacyModelSnapshotRecordName
+			if file.IsDir() || !(legacy || strings.HasPrefix(name, "snapshot-") && strings.HasSuffix(name, ".json")) {
+				continue
+			}
+			if legacy {
+				// The old single record could overwrite the declaration
+				// that built this entry. Recover that declaration from
+				// the ready record, where it still accompanies the bytes.
+				var entry sharedEntry
+				b, err := os.ReadFile(ready)
+				if err == nil && json.Unmarshal(b, &entry) == nil && entry.Recovery != nil && entry.Recovery.Model != nil {
+					x.loadRecord(c, d.Name(), modelSnapshotRecord{Snapshot: *entry.Recovery.Model, Input: entry.Recovery.Input})
+				}
+			}
+			var r modelSnapshotRecord
+			b, err := os.ReadFile(filepath.Join(dir, name))
+			if err == nil && json.Unmarshal(b, &r) == nil && (legacy || name == modelSnapshotRecordName(snapshotIdentity(r.Snapshot))) {
+				x.loadRecord(c, d.Name(), r)
+			}
 		}
-		id := snapshotIdentity(r.Snapshot)
-		x.entries[id], x.sizes[id] = r.Input, snapshotBytes(r.Input)
-		c.seedReady(d.Name())
 	}
+}
+
+func (x *modelSnapshotIndex) loadRecord(c *SharedInputCache, key string, r modelSnapshotRecord) {
+	if r.Input.key() != key || !r.Snapshot.matchesFiles(r.Input.Manifest) {
+		return
+	}
+	id := snapshotIdentity(r.Snapshot)
+	x.entries[id], x.sizes[id] = r.Input, snapshotBytes(r.Input)
+	c.seedReady(key)
 }
 
 func (x *modelSnapshotIndex) lookup(id string) (SharedInput, bool) {
@@ -116,7 +144,7 @@ func (x *modelSnapshotIndex) record(root string, m ModelSnapshot, s SharedInput)
 	id := snapshotIdentity(m)
 	stored := SharedInput{NAS: s.NAS, Manifest: s.Manifest}
 	if b, err := json.Marshal(modelSnapshotRecord{Snapshot: m, Input: stored}); err == nil {
-		_ = writeFileAtomic(filepath.Join(root, stored.key(), modelSnapshotRecordName), b)
+		_ = writeFileAtomic(filepath.Join(root, stored.key(), modelSnapshotRecordName(id)), b)
 	}
 	x.mu.Lock()
 	defer x.mu.Unlock()
@@ -307,14 +335,14 @@ func (w Worker) resolveHubSnapshot(ctx context.Context, hub *modelHub, m ModelSn
 	if info.SHA != m.Revision {
 		return SharedInput{}, modelSnapshotError("model_snapshot_revision", "not_found", nil)
 	}
-	allowed := map[string]bool{}
+	missing := map[string]bool{}
 	for _, f := range m.Files {
-		allowed[f] = true
+		missing[f] = true
 	}
 	input := SharedInput{NAS: "snapshots/" + m.Revision, Manifest: FileManifest{}, sources: map[string]string{}, hub: true}
 	large := map[string]bool{}
 	for _, f := range info.Siblings {
-		if len(allowed) > 0 && !allowed[f.Name] {
+		if len(m.Files) > 0 && !missing[f.Name] {
 			continue
 		}
 		if !safeRelative(f.Name) {
@@ -340,9 +368,9 @@ func (w Worker) resolveHubSnapshot(ctx context.Context, hub *modelHub, m ModelSn
 		default:
 			return SharedInput{}, modelSnapshotError("model_snapshot_mismatch", "invalid_response", nil)
 		}
-		delete(allowed, f.Name)
+		delete(missing, f.Name)
 	}
-	if len(allowed) > 0 && len(m.Files) > 0 || len(input.Manifest) == 0 {
+	if len(missing) > 0 || len(input.Manifest) == 0 {
 		return SharedInput{}, modelSnapshotError("model_snapshot_mismatch", "not_found", nil)
 	}
 	input.fetch = func(ctx context.Context, name, target string, ref FileRef) error {

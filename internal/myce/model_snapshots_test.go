@@ -171,7 +171,7 @@ func TestModelSnapshotsPhysicalLimits(t *testing.T) {
 	}{
 		{"derived floor fits", ModelLimits{}, diskFreeFloor(total) + uint64(len(tinyWeights)+len(tinyConfig)), true},
 		{"derived floor refuses", ModelLimits{}, diskFreeFloor(total), false},
-		{"explicit floor refuses", ModelLimits{FreeFloorBytes: 2 << 30}, 2 << 30, false},
+		{"explicit floor refuses", ModelLimits{FreeFloorBytes: 2 << 30}, (2 << 30) + 1, false},
 		{"size limit refuses", ModelLimits{MaxBytes: 1}, total, false},
 	} {
 		// The size limit is policy and fails the job; a disk shortage is this
@@ -196,6 +196,14 @@ func TestModelSnapshotsPhysicalLimits(t *testing.T) {
 				}
 			} else if err == nil || policy != strings.Contains(runtimeDiagnostic(err).String(), "model_snapshot_too_large") || runtimeDiagnostic(err).Class != "storage_full" || stagingRetryable(err) == policy {
 				t.Fatalf("physical protection ignored or misclassified: %v", err)
+			}
+			if tc.limits.FreeFloorBytes > 0 {
+				d := safeStagingCause(runtimeDiagnostic(err).Staging)
+				if d == nil || d.Operation != "model_snapshot" || d.Capacity != "disk_free_floor" ||
+					d.RequiredBytes != int64(len(tinyWeights)+len(tinyConfig)) || d.AvailableBytes != int64(tc.free) ||
+					d.LimitBytes != tc.limits.FreeFloorBytes {
+					t.Fatalf("explicit free floor lost measured capacity: %+v", d)
+				}
 			}
 		})
 	}
