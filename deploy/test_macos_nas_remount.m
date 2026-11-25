@@ -1,11 +1,15 @@
 // Replace OS calls with fixtures. No SMB or mount syscall runs in these tests.
+#include <time.h>
 #include <unistd.h>
+time_t fixtureTime(time_t *result);
 static int fixtureFsync(int fd);
 #define main remountMain
 #define getmntinfo fixtureMountInventory
 #define NetFSMountURLSync fixtureNetFSMount
 #define fsync fixtureFsync
+#define time fixtureTime
 #include "macos-nas-remount.m"
+#undef time
 #undef fsync
 #undef main
 
@@ -18,7 +22,10 @@ static int mountCalls;
 static int mountStatus;
 static BOOL publishMount;
 static BOOL holdPresentAtCall;
-static BOOL failSync;
+static int syncCalls;
+static int failSyncAt;
+static time_t now;
+static char stateIdentity[64];
 static const char *expectedURL = "smb://operator@nas.example.test/disposable";
 static const char *expectedSource = "//operator@nas.example.test/disposable";
 static const char *mountedSource;
@@ -29,10 +36,25 @@ static NSString *stateDirectory;
 static NSString *hold;
 static NSString *localFile;
 static NSString *movedPoint;
-static const char *args[5];
-static const char *check[5];
+static const char *args[6];
+static NSString *refusal;
+static NSString *retryState;
 static void (*beforeMount)(void);
 static void (*duringMount)(void);
+
+static int runRemount(void) {
+    return remountMain(6, args);
+}
+
+static int runCheck(void) {
+    const char *check[] = {args[0], "--check", args[1], args[2], args[3], args[4], args[5]};
+    return remountMain(7, check);
+}
+
+time_t fixtureTime(time_t *result) {
+    assert(result == NULL);
+    return now;
+}
 
 static void setEntry(int index, const char *type, const char *path, const char *source) {
     strlcpy(inventory[index].f_fstypename, type, sizeof(inventory[index].f_fstypename));
@@ -57,7 +79,7 @@ int fixtureMountInventory(struct statfs **mounts, int flags) {
 }
 
 static int fixtureFsync(int fd) {
-    if (failSync) {
+    if (++syncCalls == failSyncAt) {
         errno = EIO;
         return -1;
     }
@@ -101,17 +123,24 @@ static void resetFixture(void) {
     localFile = [point stringByAppendingPathComponent:@"local-data"];
     stateDirectory = [root stringByAppendingPathComponent:@"state"];
     hold = [stateDirectory stringByAppendingPathComponent:@"auth-hold"];
+    refusal = [stateDirectory stringByAppendingPathComponent:@"refused-mount"];
+    retryState = [stateDirectory stringByAppendingPathComponent:@"network-retry"];
     assert(mkdir(point.fileSystemRepresentation, 0700) == 0);
     assert(mkdir(stateDirectory.fileSystemRepresentation, 0700) == 0);
+    struct stat state;
+    assert(stat(stateDirectory.fileSystemRepresentation, &state) == 0);
+    int length = snprintf(stateIdentity, sizeof(stateIdentity), "%u:%llu",
+                          (unsigned int)state.st_dev, (unsigned long long)state.st_ino);
+    assert(length > 0 && (size_t)length < sizeof(stateIdentity));
     const char *remountArgs[] = {"remount", expectedURL, point.fileSystemRepresentation,
-                                 expectedSource, hold.fileSystemRepresentation};
-    const char *checkArgs[] = {"remount", "--check", remountArgs[1], remountArgs[2], remountArgs[3]};
+                                 expectedSource, stateDirectory.fileSystemRepresentation, stateIdentity};
     memcpy(args, remountArgs, sizeof(args));
-    memcpy(check, checkArgs, sizeof(check));
     entries = 1;
     setEntry(0, "apfs", "/", "/dev/fixture");
     inventoryCalls = mountCalls = mountStatus = 0;
-    publishMount = holdPresentAtCall = failSync = NO;
+    publishMount = holdPresentAtCall = NO;
+    syncCalls = failSyncAt = 0;
+    now = 10000;
     mountedSource = mountedPath = NULL;
     beforeMount = duringMount = NULL;
 }
@@ -127,6 +156,8 @@ static void assertNoHold(void) {
 
 static void cleanFixture(void) {
     assert(unlink(hold.fileSystemRepresentation) == 0 || errno == ENOENT);
+    assert(unlink(refusal.fileSystemRepresentation) == 0 || errno == ENOENT);
+    assert(unlink(retryState.fileSystemRepresentation) == 0 || errno == ENOENT);
     assert(rmdir(stateDirectory.fileSystemRepresentation) == 0 || errno == ENOENT);
     assert(rmdir(point.fileSystemRepresentation) == 0 || errno == ENOENT);
     assert(rmdir(root.fileSystemRepresentation) == 0);
@@ -149,31 +180,31 @@ static void restoreTarget(void) {
 
 static void inventoryAndCredentialOptions(void) {
     entries = 0;
-    assert(remountMain(5, args) == EX_OSERR);
+    assert(runRemount() == EX_OSERR);
     entries = 1;
-    assert(remountMain(5, check) == EX_UNAVAILABLE);
+    assert(runCheck() == EX_UNAVAILABLE);
 
     entries = 2;
     setEntry(1, "smbfs", args[2], "//operator@nas.example.test/other");
-    assert(remountMain(5, args) == EX_CONFIG);
+    assert(runRemount() == EX_CONFIG);
     setEntry(1, "smbfs", "/elsewhere", expectedSource);
-    assert(remountMain(5, args) == EX_CONFIG);
+    assert(runRemount() == EX_CONFIG);
     setEntry(1, "smbfs", args[2], expectedSource);
-    assert(remountMain(5, args) == EX_OK);
+    assert(runRemount() == EX_OK);
     assert(mountCalls == 0);
 
     entries = 1;
     addLocalFile();
-    assert(remountMain(5, args) == EX_CONFIG);
+    assert(runRemount() == EX_CONFIG);
     assert(unlink(localFile.fileSystemRepresentation) == 0);
     args[1] = "smb://operator:fixture-password@nas.example.test/disposable";
-    assert(remountMain(5, args) == EX_USAGE);
+    assert(runRemount() == EX_USAGE);
     assert(mountCalls == 0);
     args[1] = expectedURL;
 
     publishMount = YES;
-    assert(remountMain(5, args) == EX_OK);
-    assert(remountMain(5, check) == EX_OK);
+    assert(runRemount() == EX_OK);
+    assert(runCheck() == EX_OK);
     assert(mountCalls == 1);
     assertNoHold();
 }
@@ -185,55 +216,96 @@ static void rejectsMismatchedSourceURL(void) {
                                    "smb://other@nas.example.test/disposable",
                                    "smb://operator@nas.example.test:1445/disposable"};
     for (size_t i = 0; i < sizeof(differentURLs) / sizeof(differentURLs[0]); i++) {
-        check[2] = args[1] = differentURLs[i];
+        args[1] = differentURLs[i];
         mountedSource = differentURLs[i] + strlen("smb:");
-        assert(remountMain(5, args) == EX_CONFIG);
-        assert(remountMain(5, check) == EX_CONFIG);
+        assert(runRemount() == EX_CONFIG);
+        assert(runCheck() == EX_CONFIG);
         assert(mountCalls == 0);
     }
 
     args[1] = "smb://operator@nas.example.test/escaped%20share";
     args[3] = mountedSource = "//operator@nas.example.test/escaped%20share";
-    assert(remountMain(5, args) == EX_OK);
+    assert(runRemount() == EX_OK);
     assert(mountCalls == 1);
 }
 
-static void missingOrUnsyncedStatePreventsAuthentication(void) {
-    mountStatus = EAUTH;
+static void missingStatePreventsAuthentication(void) {
     assert(rmdir(stateDirectory.fileSystemRepresentation) == 0);
-    assert(remountMain(5, args) == EX_CANTCREAT);
-    assert(remountMain(5, args) == EX_CANTCREAT);
-    assert(mountCalls == 0);
-
-    assert(mkdir(stateDirectory.fileSystemRepresentation, 0700) == 0);
-    failSync = YES;
-    assert(remountMain(5, args) == EX_CANTCREAT);
-    failSync = NO;
-    assert(remountMain(5, args) == EX_NOPERM);
+    assert(runRemount() == 80);
+    assert(runCheck() == 80);
     assert(mountCalls == 0);
 }
 
-static void holdsNonTransientResultsAndRetriesNetworkTimeout(void) {
-    mountStatus = ETIMEDOUT;
-    assert(remountMain(5, args) == EX_TEMPFAIL);
-    assert(holdPresentAtCall);
+static void assertSyncFailurePreventsAuthentication(int failedSync) {
+    publishMount = YES;
+    failSyncAt = failedSync;
+    assert(runRemount() == EX_CANTCREAT);
+    assert(mountCalls == 0);
     assertNoHold();
+    assert(runRemount() == EX_OK);
+    assert(holdPresentAtCall && mountCalls == 1);
+}
+
+static void firstSyncFailurePreventsAuthentication(void) {
+    assertSyncFailurePreventsAuthentication(1);
+}
+
+static void directorySyncFailurePreventsAuthentication(void) {
+    assertSyncFailurePreventsAuthentication(2);
+}
+
+static void holdsDisconnectsAndBoundsOperatorRetries(void) {
+    mountStatus = ENOTCONN;
+    assert(runRemount() == EX_NOPERM);
+    assert(holdPresentAtCall);
+    assert(runRemount() == EX_NOPERM && mountCalls == 1);
+    clearHold();
+    now += 119;
+    assert(runRemount() == EX_TEMPFAIL && mountCalls == 1);
+
+    now++;
+    mountStatus = EPIPE;
+    assert(runRemount() == EX_NOPERM && mountCalls == 2);
+    assert(runRemount() == EX_NOPERM && mountCalls == 2);
+    clearHold();
+    now += 779;
+    mountStatus = 0;
+    publishMount = YES;
+    assert(runRemount() == EX_TEMPFAIL && mountCalls == 2);
+    now++;
+    assert(runRemount() == EX_OK && mountCalls == 3);
+    assertNoHold();
+}
+
+static void holdsUncertainTimeout(void) {
+    mountStatus = ETIMEDOUT;
+    assert(runRemount() == EX_NOPERM);
+    assert(holdPresentAtCall);
+    assert(runCheck() == EX_NOPERM);
+    now += 900;
+    assert(runRemount() == EX_NOPERM && mountCalls == 1);
+    clearHold();
+    now -= 900;
+    assert(runRemount() == EX_TEMPFAIL && mountCalls == 1);
+}
+
+static void holdsNonTransientResults(void) {
     const int nonTransient[] = {EAUTH, EIO};
     for (size_t i = 0; i < sizeof(nonTransient) / sizeof(nonTransient[0]); i++) {
         mountStatus = nonTransient[i];
-        assert(remountMain(5, args) == EX_NOPERM);
+        assert(runRemount() == EX_NOPERM);
         assert(holdPresentAtCall);
-        assert(remountMain(5, args) == EX_NOPERM);
-        assert(mountCalls == (int)i + 2);
+        assert(runRemount() == EX_NOPERM);
+        assert(mountCalls == (int)i + 1);
         clearHold();
     }
 }
 
 static void holdsUnsupportedAuthentication(void) {
     mountStatus = ENETFSNOAUTHMECHSUPP;
-    assert(remountMain(5, args) == EX_NOPERM);
+    assert(runRemount() == EX_NOPERM);
     assert(holdPresentAtCall);
-    assert(remountMain(5, args) == EX_NOPERM);
+    assert(runRemount() == EX_NOPERM);
     assert(mountCalls == 1);
 }
 
@@ -242,12 +314,33 @@ static void moveAttemptState(void) {
     assert(mkdir(stateDirectory.fileSystemRepresentation, 0700) == 0);
 }
 
-static void rejectsReplacedAttemptStateBeforeNetFS(void) {
-    beforeMount = moveAttemptState;
-    assert(remountMain(5, args) == EX_CANTCREAT);
-    assert(mountCalls == 0);
+static void restoreAttemptState(void) {
     assert(rmdir(stateDirectory.fileSystemRepresentation) == 0);
     assert(rename(movedPoint.fileSystemRepresentation, stateDirectory.fileSystemRepresentation) == 0);
+}
+
+static void rejectsReplacedAttemptStateBeforeNetFS(void) {
+    beforeMount = moveAttemptState;
+    assert(runRemount() == 80);
+    assert(mountCalls == 0);
+    assert(runCheck() == 80);
+    restoreAttemptState();
+    assertNoHold();
+}
+
+static void rejectsReplacedAttemptStateAfterNetFS(void) {
+    mountStatus = EAUTH;
+    duringMount = moveAttemptState;
+    int first = runRemount();
+    duringMount = NULL;
+    int following = runRemount();
+    assert(mountCalls == 1);
+    assert(first == 80 && following == 80);
+    entries = 2;
+    setEntry(1, "smbfs", args[2], expectedSource);
+    assert(runCheck() == 80);
+    restoreAttemptState();
+    assert(runCheck() == EX_NOPERM);
     clearHold();
 }
 
@@ -256,66 +349,91 @@ static void rejectsAncestorSymlink(void) {
     assert(symlink(root.fileSystemRepresentation, alias.fileSystemRepresentation) == 0);
     NSString *aliasedPoint = [alias stringByAppendingPathComponent:@"target"];
     args[2] = aliasedPoint.fileSystemRepresentation;
-    assert(remountMain(5, args) == EX_CONFIG);
+    assert(runRemount() == EX_CONFIG);
     assert(mountCalls == 0);
     assert(unlink(alias.fileSystemRepresentation) == 0);
 }
 
-static void rejectsTargetChangesBeforeNetFS(void) {
+static void retriesAfterTargetChangesBeforeNetFS(void) {
     publishMount = YES;
     beforeMount = addLocalFile;
-    assert(remountMain(5, args) == EX_CONFIG);
+    assert(runRemount() == EX_CONFIG);
     assert(mountCalls == 0);
     assert(unlink(localFile.fileSystemRepresentation) == 0);
-    clearHold();
+    assert(runRemount() == EX_OK && mountCalls == 1);
+    assertNoHold();
 
+    entries = 1;
     inventoryCalls = 0;
     beforeMount = replaceTarget;
-    assert(remountMain(5, args) == EX_CONFIG);
-    assert(mountCalls == 0);
+    assert(runRemount() == EX_CONFIG && mountCalls == 1);
     restoreTarget();
+    assertNoHold();
+}
+
+static void loseInventory(void) {
+    entries = 0;
+}
+
+static void retriesAfterSecondInventoryReadFails(void) {
+    beforeMount = loseInventory;
+    assert(runRemount() == EX_OSERR);
+    assert(mountCalls == 0);
+    entries = 1;
+    publishMount = YES;
+    assert(runRemount() == EX_OK && mountCalls == 1);
+    assertNoHold();
+}
+
+static void assertPersistentRefusal(void) {
+    int calls = mountCalls;
+    assert(runCheck() == 79);
+    assert(runRemount() == 79 && mountCalls == calls);
+    assertNoHold();
+    assert(unlink(refusal.fileSystemRepresentation) == 0);
 }
 
 static void rejectsChangesDuringNetFSAndUnexpectedMount(void) {
     publishMount = YES;
     duringMount = addLocalFile;
-    assert(remountMain(5, args) == EX_CONFIG);
+    assert(runRemount() == EX_CONFIG);
     assert(unlink(localFile.fileSystemRepresentation) == 0);
-    clearHold();
+    assertPersistentRefusal(); // The exact mount is visible but was refused.
+    assert(runCheck() == EX_OK);
 
     entries = 1;
     duringMount = replaceTarget;
-    assert(remountMain(5, args) == EX_CONFIG);
+    assert(runRemount() == EX_CONFIG);
     restoreTarget();
-    clearHold();
+    assertPersistentRefusal();
 
     entries = 1;
     duringMount = NULL;
     mountedSource = "//operator@nas.example.test/other";
-    assert(remountMain(5, args) == EX_CONFIG);
-    clearHold();
+    assert(runRemount() == EX_CONFIG);
+    assertPersistentRefusal();
 
     entries = 1;
     mountedSource = NULL;
     mountedPath = "/elsewhere";
-    assert(remountMain(5, args) == EX_CONFIG);
-    clearHold();
+    assert(runRemount() == EX_CONFIG);
+    assertPersistentRefusal();
 
     entries = 1;
     publishMount = NO;
-    assert(remountMain(5, args) == EX_CONFIG); // NetFS OK alone proves nothing.
-    assert(remountMain(5, args) == EX_NOPERM);
+    assert(runRemount() == EX_CONFIG); // NetFS OK alone proves nothing.
+    assertPersistentRefusal();
     assert(mountCalls == 5);
 }
 
 static void installCheckRequiresSurvivingEmptyTarget(void) {
     assert(rmdir(point.fileSystemRepresentation) == 0);
-    assert(remountMain(5, check) == EX_CONFIG);
+    assert(runCheck() == EX_CONFIG);
     assert(mkdir(point.fileSystemRepresentation, 0700) == 0);
     addLocalFile();
-    assert(remountMain(5, check) == EX_CONFIG);
+    assert(runCheck() == EX_CONFIG);
     assert(unlink(localFile.fileSystemRepresentation) == 0);
-    assert(remountMain(5, check) == EX_UNAVAILABLE);
+    assert(runCheck() == EX_UNAVAILABLE);
     assert(mountCalls == 0);
     assertNoHold();
 }
@@ -325,12 +443,18 @@ int main(int argc, const char *argv[]) {
         const struct { const char *name; void (*test)(void); } fixtures[] = {
             {"inventoryAndCredentialOptions", inventoryAndCredentialOptions},
             {"rejectsMismatchedSourceURL", rejectsMismatchedSourceURL},
-            {"missingOrUnsyncedStatePreventsAuthentication", missingOrUnsyncedStatePreventsAuthentication},
-            {"holdsNonTransientResultsAndRetriesNetworkTimeout", holdsNonTransientResultsAndRetriesNetworkTimeout},
+            {"missingStatePreventsAuthentication", missingStatePreventsAuthentication},
+            {"firstSyncFailurePreventsAuthentication", firstSyncFailurePreventsAuthentication},
+            {"directorySyncFailurePreventsAuthentication", directorySyncFailurePreventsAuthentication},
+            {"holdsDisconnectsAndBoundsOperatorRetries", holdsDisconnectsAndBoundsOperatorRetries},
+            {"holdsUncertainTimeout", holdsUncertainTimeout},
+            {"holdsNonTransientResults", holdsNonTransientResults},
             {"holdsUnsupportedAuthentication", holdsUnsupportedAuthentication},
             {"rejectsReplacedAttemptStateBeforeNetFS", rejectsReplacedAttemptStateBeforeNetFS},
+            {"rejectsReplacedAttemptStateAfterNetFS", rejectsReplacedAttemptStateAfterNetFS},
             {"rejectsAncestorSymlink", rejectsAncestorSymlink},
-            {"rejectsTargetChangesBeforeNetFS", rejectsTargetChangesBeforeNetFS},
+            {"retriesAfterTargetChangesBeforeNetFS", retriesAfterTargetChangesBeforeNetFS},
+            {"retriesAfterSecondInventoryReadFails", retriesAfterSecondInventoryReadFails},
             {"rejectsChangesDuringNetFSAndUnexpectedMount", rejectsChangesDuringNetFSAndUnexpectedMount},
             {"installCheckRequiresSurvivingEmptyTarget", installCheckRequiresSurvivingEmptyTarget},
         };

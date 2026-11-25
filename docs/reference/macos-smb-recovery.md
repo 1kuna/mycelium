@@ -7,6 +7,13 @@ NetAuth suppress its authentication dialog. Qualify reuse of the existing
 saved login from the actual GUI launchd domain before deploying. This path
 requires a logged-in session with its credential store available.
 
+Use this helper on a dedicated fleet Mac with a dedicated mount directory.
+The underlying directory is empty and owned by the console user. The console
+user configures the target and no other process writes into it or its
+ancestors. NetFS mounts by pathname, so the handoff cannot be atomic. A
+local process deliberately racing directory replacement during the call is
+outside the supported configuration.
+
 ## Install the LaunchAgent
 
 1. Start with an authorized idle test share and the worker's usual console
@@ -32,17 +39,19 @@ requires a logged-in session with its credential store available.
    domain="gui/$(id -u)"
    umask 077
    install -d -m 0700 "$recovery_dir"
+   recovery_dir=$(cd -P "$recovery_dir" && pwd -P)
+   state_identity=$(/usr/bin/stat -f '%Ud:%Ui' "$recovery_dir")
    mkdir -p "$HOME/Library/LaunchAgents"
    helper="$recovery_dir/remount"
-   auth_hold="$recovery_dir/auth-hold"
    xcrun clang -fobjc-arc -Wall -Wextra -Werror \
      -framework Foundation -framework NetFS deploy/macos-nas-remount.m -o "$helper"
-   "$helper" --check "$smb_url" "$mountpoint" "$smb_source"
+   "$helper" --check "$smb_url" "$mountpoint" "$smb_source" "$recovery_dir" "$state_identity"
    ```
 
    Use a dedicated, canonical mount path with no symlinks, including in its
    ancestors. The underlying target must be an empty local directory owned
-   by the console user. Unload the agent before moving or replacing the
+   by the console user. The plist pins the recovery directory's device and
+   inode. Follow the stop procedure below before moving or replacing the
    target, its ancestors or the recovery directory. When initial creation
    under `/Volumes` is needed, an authorized administrator can use
    `sudo install -d -m 0700 -o "$(id -un)" "$mountpoint"` after verifying
@@ -56,13 +65,15 @@ requires a logged-in session with its credential store available.
    and correct the setup before enabling the timer.
 
    ```sh
-   "$helper" "$smb_url" "$mountpoint" "$smb_source" "$auth_hold"
+   "$helper" "$smb_url" "$mountpoint" "$smb_source" "$recovery_dir" "$state_identity"
    ```
 
 4. Verify the plist and label are unused in this GUI domain. Create the
    LaunchAgent and load it as the console user. A healthy tick reads cached
-   mount inventory. The minute interval permits a retry after network
-   return, with at most one outstanding NetAuth call under launchd.
+   mount inventory. The minute interval retries a recovery that stopped
+   before NetFS. Launchd runs at most one helper instance at a time. Run
+   the mounting form by hand only while the agent is unloaded and all
+   previous mount requests have ended.
 
    ```sh
    plutil -create xml1 "$plist"
@@ -72,7 +83,8 @@ requires a logged-in session with its credential store available.
    plutil -insert ProgramArguments.1 -string "$smb_url" "$plist"
    plutil -insert ProgramArguments.2 -string "$mountpoint" "$plist"
    plutil -insert ProgramArguments.3 -string "$smb_source" "$plist"
-   plutil -insert ProgramArguments.4 -string "$auth_hold" "$plist"
+   plutil -insert ProgramArguments.4 -string "$recovery_dir" "$plist"
+   plutil -insert ProgramArguments.5 -string "$state_identity" "$plist"
    plutil -insert LimitLoadToSessionType -string Aqua "$plist"
    plutil -insert RunAtLoad -bool YES "$plist"
    plutil -insert StartInterval -integer 60 "$plist"
@@ -84,30 +96,69 @@ requires a logged-in session with its credential store available.
 
 | Code | Meaning |
 | --- | --- |
-| 0 | The cached mount table has the exact SMB source at the configured path. |
+| 0 | Cached inventory has the exact SMB source at the configured path, and neither hold record is present. |
 | 64 | Invalid arguments, URL or path syntax. |
 | 69 | `--check` found the share absent and verified the empty, canonical, user-owned local target. |
 | 71 | The cached mount table could not be read before attempting recovery. |
-| 73 | The helper could not open, persist or clear its local attempt state. |
-| 75 | NetFS returned a known transient network error, inventory still showed the share absent, and the next tick may retry. |
-| 77 | A hold is present or NetFS returned a non-retryable result, including an authentication error or an unknown result. |
-| 78 | The URL differs from the recorded source, the target is unsafe, or mount inventory conflicts with the expected result. |
+| 73 | The helper could not read, persist or clear its attempt state. |
+| 75 | The persistent network retry budget defers a NetFS call. |
+| 77 | An authentication attempt is held after an interrupted, authentication-like or otherwise uncertain NetFS outcome. |
+| 78 | A URL, target or inventory check refused recovery. A refusal after NetFS records a persistent hold. |
+| 79 | A prior NetFS attempt left a refused mount that needs operator inspection. |
+| 80 | The recovery directory is missing or fails its pinned identity, local-path, ownership or mode check. |
 
-`--check` never invokes NetFS or writes attempt state. When the exact mount
-is already present, the helper reads cached inventory without SMB I/O.
+`--check` uses the same recovery-directory identity and holds as the timer.
+It reads cached inventory without SMB I/O and does not call NetFS or write
+state. Exit 69 checks the target. The timer also checks the retry budget
+before invoking NetFS.
 
-The helper creates and syncs `auth-hold` in the canonical, local mode-0700
-recovery directory before calling NetFS. It clears the hold after verifying
-the exact mount or after a known transient network error. An interrupted
-attempt, a non-retryable result, or an unexpected mount or target change
-keeps the hold. The helper leaves any mount it finds in place.
+The helper creates and syncs `auth-hold` in the pinned local mode-0700
+directory before calling NetFS. It clears the marker after a verified
+mount or when it can prove it stopped before NetFS. An interrupted or
+uncertain attempt keeps the hold. A refusal after NetFS changes the hold
+to `refused-mount`. Later ticks and checks return 79 even if an exact mount
+appears in the inventory. The helper leaves any mount it finds in place.
 
-To clear a hold, unload the agent with `launchctl bootout "$domain/$label"`.
-Investigate the failure in the GUI session, confirm no manual helper run
-is active, and verify the expected source, target and private recovery
-directory. Remove only the hold with `rm "$auth_hold"`, then reload with
-`launchctl bootstrap "$domain" "$plist"` when ready to retry. For exit 73,
-repair attempt-state storage and check for a remaining hold before retrying.
+After a transport failure, the helper persists a budget of two failures
+per 15-minute window, with at least two minutes from the recorded failure
+to the next eligible attempt. The window starts at the first recorded
+failure. The budget limits repeated logins against the server's account
+lockout policy even if the operator clears a hold. Timeout counts toward
+the limit and keeps the hold because the authentication outcome is
+uncertain. The helper also holds `ENOTCONN` and `EPIPE`. Apple's SMB client
+can return both after session setup, and NetFS's return code gives no
+authentication phase. A network drop that reaches NetFS can therefore
+require operator re-arming. [Apple SMB client session retry][apple-session]
+and [mount code][apple-mount] show the relevant paths.
+
+[apple-session]: https://github.com/apple-oss-distributions/SMBClient/blob/99da2d9a4bbe17cde3cee382ad3edc16e25f5535/lib/smb/ctx.c#L3129-L3147
+[apple-mount]: https://github.com/apple-oss-distributions/SMBClient/blob/99da2d9a4bbe17cde3cee382ad3edc16e25f5535/lib/smb/ctx.c#L3326-L3340
+
+### Clear a hold or roll back
+
+1. Unload with `launchctl bootout "$domain/$label"`. Use
+   `launchctl print "$domain/$label"` to confirm the service is absent.
+   Check the process list for the configured helper and any manual run.
+   Confirm any outstanding NetFS request reached a terminal outcome using
+   the helper and macOS NetAuth/SMB logs. If an interrupted run leaves the
+   request state uncertain, leave the agent unloaded and the state intact
+   until the operator can establish that no mount request is in flight.
+2. Check cached mount inventory and inspect any refused mount before
+   clearing state or re-arming. Verify the exact source and path, and
+   inspect the underlying target once any conflicting mount has been
+   safely resolved. Verify the recovery directory still matches the
+   device and inode in the plist. For exit 73, repair the local state
+   storage and inspect the remaining records. For exit 80, recover the
+   original directory and its records where possible. Before pinning a
+   replacement during a deliberate reinstall, investigate the old hold
+   and mount outcome under the same stop procedure.
+3. To re-arm, remove the inspected `auth-hold` or `refused-mount` from
+   the verified directory. Preserve `network-retry` so the budget survives
+   re-arming. Run `--check` with the plist's arguments and continue when it
+   returns 0 or 69. Then run `launchctl bootstrap "$domain" "$plist"`.
+   For rollback, remove the unloaded plist from `~/Library/LaunchAgents`
+   and retain the recovery state for inspection. Leave any restored mount
+   under OS control.
 
 ## Qualify recovery
 
@@ -121,15 +172,17 @@ repair attempt-state storage and check for a remaining hold before retrying.
 2. Repeat with the screen locked and with the network restored late in the
    authorized test window. Collect the helper's fixed outcome messages with
    `log show --last 10m --predicate 'eventMessage BEGINSWITH "Mycelium NAS remount"'`.
-   Investigate a still-listed, stalled volume through the OS or storage
-   owner. Leaving it mounted lets the OS reconnect it and preserves active
+   Correlate each numeric NetFS outcome and the logged budget usage with
+   server-side SMB session setup and failed-login counts. A single NetFS
+   call can try more than one login internally. If the test produces a
+   hold, verify subsequent ticks make no calls and follow the stop
+   procedure before re-arming. Investigate a still-listed, stalled volume
+   through the OS or storage owner. Leaving it mounted lets the OS reconnect it and preserves active
    handles.
 3. Repeat for the configured worker mount on one drained Mac at a time.
    Require recovery at the original path, fresh successful worker probes and
    a representative NAS-dependent job before returning the worker to normal
-   service. For rollback, run `launchctl bootout "$domain/$label"` and remove
-   that plist from `~/Library/LaunchAgents`. This leaves any restored mount
-   under the OS.
+   service. Use the stop procedure above for rollback.
 
 For local fixture verification, build and run
 [`deploy/test_macos_nas_remount.m`](../../deploy/test_macos_nas_remount.m)
