@@ -27,6 +27,10 @@ type admissionWaitBuilder struct {
 	next    time.Time
 	done    chan struct{}
 	latest  uint64
+	// The single builder owns these. Fairness resets on restart and when a
+	// job starts a new wait episode, independently of evidence publication.
+	lastEvaluated map[string]admissionWaitEvaluation
+	build         uint64
 	// synchronous makes the committing caller publish its own capture before
 	// returning, with no cooldown. Production keeps it false.
 	synchronous bool
@@ -68,7 +72,7 @@ func (q *Queue) enqueueAdmissionWait(c *admissionWaitCapture) {
 // runAdmissionWait performs one claimed build and records its cooldown.
 func (q *Queue) runAdmissionWait(b *admissionWaitBuilder, c *admissionWaitCapture) {
 	started := holdNow(c.clock)
-	q.finishAdmissionWait(c)
+	q.finishAdmissionWait(b, c)
 	elapsed := max(0, holdNow(c.clock).Sub(started))
 	b.mu.Lock()
 	// Rate decisions use the injected queue Clock; cost measurement uses
@@ -191,7 +195,7 @@ func mergeAdmissionWaitCaptures(old, next *admissionWaitCapture) *admissionWaitC
 // Publish only distinct transitions, fenced against each job's lifecycle.
 // Telemetry may advance during a build: its snapshot timestamp describes that
 // bounded lag. Never apply an old observation to a newer attempt or wait episode.
-func (q *Queue) finishAdmissionWait(c *admissionWaitCapture) {
+func (q *Queue) finishAdmissionWait(b *admissionWaitBuilder, c *admissionWaitCapture) {
 	if c.index == nil || q.stopping.Load() {
 		return
 	}
@@ -265,7 +269,8 @@ func (q *Queue) finishAdmissionWait(c *admissionWaitCapture) {
 			refresh(sample.at.Add(sample.freshFor()))
 		}
 	}
-	source.buildAdmissionWaits(source.placementScan(), c.service)
+	b.build++
+	b.lastEvaluated = source.buildAdmissionWaits(source.placementScan(), c.service, b.lastEvaluated, b.build)
 	changes := map[string]*AdmissionWaitEvidence{}
 	for id, j := range jobs {
 		if j.State != "queued" || j.AdmissionWait == nil {
@@ -275,9 +280,9 @@ func (q *Queue) finishAdmissionWait(c *admissionWaitCapture) {
 		// coalesced capture can be older than a preceding builder's commit.
 		old := previous[id]
 		next := j.AdmissionWait
-		if old == nil || old.Latest == nil || next.Latest == nil || old.CaptureGaps != next.CaptureGaps ||
+		if old == nil || old.CaptureGaps != next.CaptureGaps ||
 			old.BudgetUnknown != next.BudgetUnknown || old.Dropped != next.Dropped ||
-			old.DeferredAt != nil || !sameAdmissionWait(old.Latest, next.Latest) {
+			(old.DeferredAt == nil) != (next.DeferredAt == nil) || old.Latest != next.Latest {
 			changes[id] = next
 		}
 	}
@@ -329,11 +334,29 @@ func (q *Queue) loadAdmissionWaitReferences(ctx context.Context, g *readGenerati
 	return nil
 }
 
+type admissionWaitEpisode struct {
+	queued        time.Time
+	attempt       int
+	pauseRevision uint64
+	fanOut        bool
+	nextPiece     int
+}
+
+func waitEpisode(j *Job) admissionWaitEpisode {
+	e := admissionWaitEpisode{queued: j.Queued.UTC(), attempt: j.Attempt, pauseRevision: j.PauseRevision, fanOut: j.FanOut != nil}
+	if j.FanOut != nil {
+		e.nextPiece = j.FanOut.Next
+	}
+	return e
+}
+
+type admissionWaitEvaluation struct {
+	episode admissionWaitEpisode
+	build   uint64
+}
+
 func sameAdmissionWaitEpisode(a, b *Job) bool {
-	return a.State == "queued" && b.State == "queued" && a.Attempt == b.Attempt &&
-		a.PauseRevision == b.PauseRevision && a.Queued.Equal(b.Queued) &&
-		((a.FanOut == nil && b.FanOut == nil) ||
-			(a.FanOut != nil && b.FanOut != nil && a.FanOut.Next == b.FanOut.Next))
+	return a.State == "queued" && b.State == "queued" && waitEpisode(a) == waitEpisode(b)
 }
 
 func (q *Queue) commitAdmissionWait(c *admissionWaitCapture, changes map[string]*AdmissionWaitEvidence) error {
@@ -385,7 +408,7 @@ func (q *Queue) commitAdmissionWait(c *admissionWaitCapture, changes map[string]
 			}
 			q.admissionWaitLast.Store(&last)
 		}
-	}, false)
+	}, true)
 }
 
 // Diagnostic observations only. These values never authorize admission, stops,
@@ -650,11 +673,12 @@ func (q *Queue) waitHolder(o HostObligation, demand *Job, now time.Time) Admissi
 
 // Runs on a private committed generation, never under the live writer mutex.
 // No status/read path records evidence, and no OS, network or storage I/O runs.
-func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration) {
+func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration, last map[string]admissionWaitEvaluation, build uint64) map[string]admissionWaitEvaluation {
 	defer q.memoizeExtensionQualifications(scan.machines)()
 	now := q.clock.Now()
 	started := holdNow(q.holdClock)
 	waiting := []*Job{}
+	evaluations := make(map[string]admissionWaitEvaluation, len(last))
 	history := uint64(0)
 	for _, j := range q.liveJobs() {
 		if j.Spec.Priority != "production" && j.AdmissionWait == nil && (q.admissionTrace == nil || len(q.admissionTrace.jobs[j.ID]) == 0) {
@@ -669,20 +693,20 @@ func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration) 
 			continue
 		}
 		waiting = append(waiting, j)
+		episode := waitEpisode(j)
+		evaluation := last[j.ID]
+		if evaluation.episode != episode {
+			evaluation = admissionWaitEvaluation{episode: episode}
+		}
+		evaluations[j.ID] = evaluation
 		if j.AdmissionWait != nil {
 			history = addDiskBytes(history, j.AdmissionWait.HistoryBytes)
 		}
 	}
-	// Oldest evidence first, so pressure deferral cannot starve a fixed tail.
+	// Oldest evaluation first, even when the previously evaluated job kept
+	// its existing snapshot. A build sequence breaks ties across clock ticks.
 	slices.SortFunc(waiting, func(a, b *Job) int {
-		at, bt := time.Time{}, time.Time{}
-		if a.AdmissionWait != nil && a.AdmissionWait.Latest != nil {
-			at = a.AdmissionWait.Latest.At
-		}
-		if b.AdmissionWait != nil && b.AdmissionWait.Latest != nil {
-			bt = b.AdmissionWait.Latest.At
-		}
-		if c := at.Compare(bt); c != 0 {
+		if c := cmp.Compare(evaluations[a.ID].build, evaluations[b.ID].build); c != 0 {
 			return c
 		}
 		return cmp.Compare(a.ID, b.ID)
@@ -833,8 +857,17 @@ func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration) 
 			}
 		}
 		q.attachAdmissionDecisions(j, snapshot, scan)
+		evaluation := evaluations[j.ID]
+		evaluation.build = build
+		evaluations[j.ID] = evaluation
+		// Clearing a coverage gap leaves the semantic endpoint intact when
+		// the blockers are unchanged. Its time still belongs to its values.
+		if old := j.AdmissionWait; old != nil && old.Latest != nil && sameAdmissionWait(old.Latest, snapshot) {
+			snapshot = old.Latest
+		}
 		q.touchJob(j.ID).AdmissionWait = retainAdmissionWait(j.AdmissionWait, snapshot, budget, unknown)
 	}
+	return evaluations
 }
 
 // First and latest are semantic endpoints, not a sample-count tuning knob.
@@ -851,7 +884,7 @@ func retainAdmissionWait(old *AdmissionWaitEvidence, next *AdmissionWaitSnapshot
 	out.Dropped, out.CaptureGaps = old.Dropped, old.CaptureGaps
 	out.Transitions = slices.Clone(old.Transitions)
 	out.HistoryBytes = old.HistoryBytes
-	if old.Latest != nil && (old.First == nil || !old.Latest.At.Equal(old.First.At)) && !sameAdmissionWait(old.Latest, next) {
+	if old.Latest != nil && old.Latest != next && (old.First == nil || !old.Latest.At.Equal(old.First.At)) && !sameAdmissionWait(old.Latest, next) {
 		data, _ := json.Marshal(old.Latest)
 		if len(out.Transitions) == 0 {
 			out.HistoryBytes = 2

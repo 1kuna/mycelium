@@ -177,6 +177,10 @@ func (q *Queue) commitPersistenceRoot(next *queuePersistenceUpdate) {
 // Immutable history stays in SQLite but is not rewritten by each heartbeat.
 // Encode only journaled decisions; SQLite sees only changed logical records.
 func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (*queuePersistenceUpdate, error) {
+	return q.persistStateChanges(tx, measured, false)
+}
+
+func (q *Queue) persistStateChanges(tx *sql.Tx, measured *queuePersistenceTiming, observationOnly bool) (*queuePersistenceUpdate, error) {
 	if q.persistencePageBytes <= 0 {
 		return nil, fmt.Errorf("queue persistence page size is not initialized")
 	}
@@ -231,35 +235,39 @@ func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (*que
 			return nil, err
 		}
 	}
-	started := holdNow(q.holdClock)
-	base, err := q.encodeStateRoot(q.persistentBase())
-	if err != nil {
-		return nil, err
-	}
-	update.stateSize = base.size()
-	if update.stateSize > q.persistencePageBytes {
-		update.stateFields, err = base.split(q.persistencePageBytes)
+	if observationOnly {
+		update.stateSize, update.stateFields = q.persistedStateSize, q.persistedStateFields
+	} else {
+		started := holdNow(q.holdClock)
+		base, err := q.encodeStateRoot(q.persistentBase())
 		if err != nil {
 			return nil, err
 		}
-	}
-	stateData := update.stateFields[""]
-	if len(update.stateFields) <= 1 {
-		stateData = base.assemble()
-	}
-	measured.Marshal += holdNow(q.holdClock).Sub(started)
-	// Only the small SQLite root belongs in the record journal. Keep its
-	// detached fields and logical size in the same pending commit instead.
-	next["state"] = stateData
-	if len(update.stateFields) > 1 || len(q.persistedStateFields) > 1 {
-		err = q.writeFields("state", q.persisted["state"], stateData, measured, exec, update.stateFields)
-	} else if bytes.Equal(stateData, q.persisted["state"]) {
-		next["state"] = q.persisted["state"]
-	} else {
-		err = putCompact("state", stateData)
-	}
-	if err != nil {
-		return nil, err
+		update.stateSize = base.size()
+		if update.stateSize > q.persistencePageBytes {
+			update.stateFields, err = base.split(q.persistencePageBytes)
+			if err != nil {
+				return nil, err
+			}
+		}
+		stateData := update.stateFields[""]
+		if len(update.stateFields) <= 1 {
+			stateData = base.assemble()
+		}
+		measured.Marshal += holdNow(q.holdClock).Sub(started)
+		// Only the small SQLite root belongs in the record journal. Keep its
+		// detached fields and logical size in the same pending commit instead.
+		next["state"] = stateData
+		if len(update.stateFields) > 1 || len(q.persistedStateFields) > 1 {
+			err = q.writeFields("state", q.persisted["state"], stateData, measured, exec, update.stateFields)
+		} else if bytes.Equal(stateData, q.persisted["state"]) {
+			next["state"] = q.persisted["state"]
+		} else {
+			err = putCompact("state", stateData)
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	machines := q.s.Machines
 	if q.persisted != nil {
@@ -584,14 +592,16 @@ func (q *Queue) writeFields(key string, old, data []byte, measured *queuePersist
 	}
 	// A one-piece old encoding lived in the ordinary logical row, so none of
 	// these field rows exists yet. Publish the root along with its large fields.
+	cold := q.coldRecords[key]
+	if len(before) <= 1 && len(cold.fields) == 0 {
+		if _, err := exec("DELETE FROM queue_state WHERE key=?", key); err != nil {
+			return err
+		}
+	}
 	if len(before) == 1 {
 		before = nil
 	}
-	if _, err := exec("DELETE FROM queue_state WHERE key=?", key); err != nil {
-		return err
-	}
 	prefix := fieldPrefix(key)
-	cold := q.coldRecords[key]
 	for field, value := range next {
 		if bytes.Equal(before[field], value) || cold.fieldMatches(field, value) {
 			continue
@@ -741,6 +751,9 @@ func (q *Queue) marshalPersistenceValue(key string, value any) ([]byte, error) {
 		copy := *j
 		copy.Reason = "recomputing admission diagnostics"
 		value = &copy
+	}
+	if j, ok := value.(*Job); ok && j != nil && j.State == "queued" && j.AdmissionWait != nil && strings.HasPrefix(key, "jobs/") {
+		return marshalWaitingJobRecord(j)
 	}
 	data, err := json.Marshal(value)
 	if j, ok := value.(*Job); ok && err == nil && q.slimJobRecords && strings.HasPrefix(key, "jobs/") && !mutableJob(j) {

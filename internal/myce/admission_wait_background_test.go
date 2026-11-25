@@ -2,6 +2,7 @@ package myce
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 	"syscall"
 	"testing"
@@ -154,6 +155,46 @@ func TestAdmissionWaitBackgroundFencesResumeAndRetry(t *testing.T) {
 	}
 	if got := admissionWaitAPI(t, q, demand.ID); got.CaptureGaps <= after.CaptureGaps {
 		t.Fatal("old attempt accepted")
+	}
+}
+
+func TestAdmissionWaitBackgroundRotatesUnchangedEvaluation(t *testing.T) {
+	q, clock := fixture(t)
+	s := cpuSpec(1, 1)
+	s.Priority = "production"
+	ids := []string{submit(t, q, s).ID, submit(t, q, s).ID}
+	slices.Sort(ids)
+	oldest, next := ids[0], ids[1]
+	before := admissionWaitAPI(t, q, oldest).Latest
+	if before.Predicate != "no_qualified_target" || admissionWaitAPI(t, q, next).Latest.Predicate != before.Predicate {
+		t.Fatal("fixture lacks two equivalent job explanations")
+	}
+	producer := submit(t, q, cpuSpec(1, 1))
+	if err := q.update(func() error {
+		q.touchJob(next).Spec.After = &PieceDependency{Job: producer.ID}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	build := func() {
+		q.mu.Lock()
+		capture := q.freezeAdmissionWait()
+		q.mu.Unlock()
+		capture.clock = coldProbeAdvancingClock{&fakeClock{now: clock.Now()}}
+		capture.service = 2 * time.Nanosecond // One diagnostic evaluation fits.
+		q.enqueueAdmissionWait(capture)
+	}
+	build()
+	if got := admissionWaitAPI(t, q, next); got.DeferredAt == nil || got.Latest.Predicate != before.Predicate {
+		t.Fatal("limited build should have deferred the second job")
+	}
+	if got := admissionWaitAPI(t, q, oldest); got.DeferredAt != nil || !got.Latest.At.Equal(before.At) {
+		t.Fatal("unchanged evaluation moved the semantic endpoint or missed its turn")
+	}
+	build() // Queue time is identical. The previous evaluation still yields.
+	if got := admissionWaitAPI(t, q, next); got.DeferredAt != nil || got.Latest.Predicate != "dependency" {
+		t.Fatal("unchanged oldest reason starved an updated wait reason")
 	}
 }
 

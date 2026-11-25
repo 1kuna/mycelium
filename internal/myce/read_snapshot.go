@@ -241,7 +241,7 @@ func readJobLedgerSpan(data []byte, jobDepth int) (int, int) {
 	return 0, 0
 }
 func (r *readRecord) decode(key string) (any, error) {
-	if r.data == nil && r.decoded.Load() {
+	if r.decoded.Load() {
 		return r.value, r.err
 	}
 	r.once.Do(func() {
@@ -292,6 +292,10 @@ func (r *readRecord) decode(key string) (any, error) {
 // Only successful commits publish. Rollback neither advances the root nor
 // discards a reader's lazy decoded records. Snapshot readers use no SQLite I/O.
 func (q *Queue) publishReadRecords(next map[string][]byte) {
+	q.publishReadRecordChanges(next, false)
+}
+
+func (q *Queue) publishReadRecordChanges(next map[string][]byte, observationOnly bool) {
 	if q.records != nil && (len(q.records.reasons) > 0 || len(q.records.staleness) > 0) {
 		next = maps.Clone(next)
 		for id := range q.records.reasons {
@@ -378,6 +382,15 @@ func (q *Queue) publishReadRecords(next map[string][]byte) {
 		var record *readRecord
 		if len(data) > 0 {
 			record = &readRecord{data: data, mutable: mutable}
+			// The admission-wait transaction changes only immutable evidence.
+			// Reuse the current decoded job so the builder and warmer do not
+			// expand all of its unchanged fields and snapshots on every gap.
+			if id, ok := strings.CutPrefix(key, "jobs/"); ok && observationOnly && mutable && old != nil && old.decoded.Load() && old.err == nil {
+				job := *old.value.(*Job)
+				job.AdmissionWait = q.s.Jobs[id].AdmissionWait
+				record.value = &job
+				record.decoded.Store(true)
+			}
 		}
 		q.readRoot = readPut(q.readRoot, key, record)
 	}

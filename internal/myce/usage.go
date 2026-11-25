@@ -207,7 +207,7 @@ func maxTime(a, b time.Time) time.Time {
 	}
 	return b
 }
-func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
+func (q *Queue) persistUsage(timing *queueUpdateTiming, observationOnly bool) error {
 	measured := queuePersistenceTiming{}
 	defer func() {
 		if timing != nil {
@@ -247,7 +247,7 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 		return e
 	}
 	measured.SQL += holdNow(q.holdClock).Sub(started)
-	next, e := q.persistState(tx, &measured)
+	next, e := q.persistStateChanges(tx, &measured, observationOnly)
 	if e != nil {
 		return e
 	}
@@ -265,7 +265,9 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 	if q.persisted == nil {
 		q.persisted = map[string][]byte{}
 	}
-	q.commitHistories()
+	if !observationOnly {
+		q.commitHistories()
+	}
 	q.commitPersistenceRoot(next)
 	changedJobs := false
 	for key, value := range next.records {
@@ -301,7 +303,7 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 	if q.readRoot == nil {
 		q.publishReadRecords(q.persisted)
 	} else {
-		q.publishReadRecords(next.records)
+		q.publishReadRecordChanges(next.records, observationOnly)
 	}
 	return nil
 }
