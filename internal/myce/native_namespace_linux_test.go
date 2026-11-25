@@ -1,18 +1,71 @@
 package myce
 
 import (
+	"bufio"
+	"context"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // Run inside the real confinement boundary without TestMain's host setup.
 func init() {
+	if len(os.Args) > 1 && os.Args[1] == "_native-namespace-listener" {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		fmt.Println(server.Listener.Addr().(*net.TCPAddr).Port)
+		_, err := io.Copy(io.Discard, os.Stdin)
+		server.Close()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "_native-namespace-identity" {
+		var caps [2]unix.CapUserData
+		header := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
+		if err := unix.Capget(&header, &caps[0]); err != nil || caps != [2]unix.CapUserData{} {
+			fmt.Fprintln(os.Stderr, "payload has unexpected capabilities:", caps, err)
+			os.Exit(1)
+		}
+		if value, err := unix.PrctlRetInt(unix.PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0); err != nil || value != 1 {
+			fmt.Fprintln(os.Stderr, "payload lacks no_new_privs:", value, err)
+			os.Exit(1)
+		}
+		if _, exists := os.LookupEnv("MYCE_TOKEN"); exists {
+			fmt.Fprintln(os.Stderr, "payload received a fleet token")
+			os.Exit(1)
+		}
+		fmt.Println(os.Getuid(), os.Getgid())
+		for _, name := range []string{"user", "mnt", "pid", "ipc", "net"} {
+			link, err := os.Readlink("/proc/self/ns/" + name)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			fmt.Println(link)
+		}
+		if _, err := os.Stat("cwd-marker"); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "_native-namespace-lifecycle-child" {
 		signal.Ignore(syscall.SIGTERM)
 		if err := os.WriteFile("child-ready", nil, 0600); err != nil {
@@ -23,6 +76,97 @@ func init() {
 			time.Sleep(time.Hour)
 		}
 	}
+}
+
+func TestNativeNamespaceLinuxSharedGroup(t *testing.T) {
+	if support := nativeLinuxDetection(); support.mode != "namespace" {
+		t.Skipf("real namespaces unavailable: mode=%s reason=%s", support.mode, support.reason)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	spool, work := t.TempDir(), t.TempDir()
+	dir := filepath.Join(work, "member workdir")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cwd-marker"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, gate, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	defer gate.Close()
+	anchor := exec.CommandContext(ctx, executable, "_native-namespace-listener")
+	anchor.Stdin, anchor.Stderr = reader, os.Stderr
+	anchor.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	stdout, err := anchor.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := Worker{}
+	n, err := w.prepareNativeGroupIsolation(anchor, spool, work, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n.close()
+	if err := anchor.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		gate.Close()
+		if err := anchor.Wait(); err != nil {
+			t.Error("namespace anchor exit:", err)
+		}
+	}()
+	if err := n.activate(ctx, gate); err != nil {
+		t.Fatal(err)
+	}
+	port, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{fmt.Sprint(os.Getuid(), " ", os.Getgid())}
+	for _, name := range []string{"user", "mnt", "pid", "ipc", "net"} {
+		link, err := os.Readlink(fmt.Sprintf("/proc/%d/ns/%s", n.pid, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		host, err := os.Readlink("/proc/self/ns/" + name)
+		if err != nil || link == host {
+			t.Fatalf("anchor lacks a private %s namespace: %v", name, err)
+		}
+		want = append(want, link)
+	}
+	for _, name := range []string{"sidecar", "main"} {
+		t.Run(name, func(t *testing.T) {
+			cmd := exec.CommandContext(ctx, "/bin/sh", "-c", `read gate || exit 125; exec "$@" < /dev/null`, "myce-member-"+name, executable, "_native-namespace-identity")
+			cmd.Dir = dir
+			cmd.Stdin = strings.NewReader("start\nexec\n")
+			if err := n.isolate(w, cmd, spool, work, map[string]string{"MYCE_TOKEN": "fixture"}, nil, false, name == "main"); err != nil {
+				t.Fatal(err)
+			}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("member launch: %v\n%s", err, out)
+			}
+			if got := strings.TrimSpace(string(out)); got != strings.Join(want, "\n") {
+				t.Fatalf("member identity or namespaces differ from the anchor: %q", got)
+			}
+			t.Log("member shares the anchor's user, mount, PID, IPC and network namespaces with no payload capabilities")
+		})
+	}
+	t.Run("readiness", func(t *testing.T) {
+		handled, ready, err := n.probe(ctx, strings.TrimSpace(port), anchor.Process.Pid, "/ready", false)
+		if !handled || !ready || err != nil {
+			t.Fatalf("readiness probe failed in the shared network namespace: handled=%t ready=%t err=%v", handled, ready, err)
+		}
+	})
 }
 
 func TestNativeNamespaceLinuxCheckpointGraceAndCleanup(t *testing.T) {

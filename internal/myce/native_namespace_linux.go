@@ -233,20 +233,91 @@ func (n *nativeNamespace) isolate(w Worker, cmd *exec.Cmd, spool, work string, e
 	if err != nil {
 		return err
 	}
+	enter := n.joinArgs(args[0], cmd.Dir)
 	if main {
 		// Keep the joined child on the existing launch pipe until its host
 		// identity and pidfd are in worker custody. FD 3/4 stay untouched.
 		args = nativeNamespaceMemberArgs(args)
 		cmd.Args[2] = `read gate || exit 125; exec "$@"`
 	}
-	// nsenter must fork after setns(CLONE_NEWPID), its default behavior. Do not
-	// use --no-fork: that would execute the payload outside the PID namespace.
-	enter := []string{n.support.nsenter, "--target", strconv.Itoa(n.pid), "--user", "--mount", "--pid", "--ipc", "--net", "--root", "--wdns", cmd.Dir, "--preserve-credentials", "--"}
 	if err := nativeWrapPayload(cmd, append(enter, args...)); err != nil {
 		return err
 	}
 	cmd.Env = environmentList(jobBaseEnvironment())
 	return nil
+}
+
+func (n *nativeNamespace) joinArgs(executable, dir string) []string {
+	return []string{executable, "_native-exec", "namespace-join", n.support.nsenter, strconv.Itoa(n.pid), dir}
+}
+
+func nativeNamespaceJoin(args []string) error {
+	if len(args) < 4 {
+		return errors.New("native namespace join requires a launcher, anchor, directory and command")
+	}
+	enter, dir := args[0], args[2]
+	pid, err := strconv.Atoi(args[1])
+	if err != nil || pid <= 0 {
+		return errors.New("native namespace join requires a valid anchor PID")
+	}
+	// Resolve every namespace and root from the same proc directory, even
+	// across the exec that enters the owning user namespace.
+	target, err := unix.Open(fmt.Sprintf("/proc/%d", pid), unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("open native namespace anchor: %w", err)
+	}
+	defer unix.Close(target)
+	shared := "ns/net"
+	if dir != "" {
+		shared = "ns/ipc"
+	}
+	fd, err := unix.Openat(target, shared, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("open native namespace %s: %w", shared, err)
+	}
+	defer unix.Close(fd)
+	owner, err := unix.IoctlRetInt(fd, unix.NS_GET_USERNS)
+	if err != nil {
+		return fmt.Errorf("get native namespace owner: %w", err)
+	}
+	defer unix.Close(owner)
+	var ownerStat, userStat unix.Stat_t
+	if err := unix.Fstat(owner, &ownerStat); err != nil {
+		return err
+	}
+	if err := unix.Fstatat(target, "ns/user", &userStat, 0); err != nil {
+		return err
+	}
+	// Keep the launch receipt FDs 3/4 reserved. The existing payload helper
+	// closes descriptors above them before the authored command executes.
+	targetFD, err := unix.FcntlInt(uintptr(target), unix.F_DUPFD, 5)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(targetFD)
+	proc := fmt.Sprintf("/proc/self/fd/%d", targetFD)
+	join := []string{enter, "--preserve-credentials", "--user=" + proc + "/ns/user", "--net=" + proc + "/ns/net"}
+	if dir != "" {
+		// nsenter's PID entry must fork so that the payload becomes a member.
+		// util-linux versions with an optional --wdns argument require '='.
+		join = append(join,
+			"--mount="+proc+"/ns/mnt", "--pid="+proc+"/ns/pid",
+			"--ipc="+proc+"/ns/ipc", "--root="+proc+"/root", "--wdns="+dir)
+	}
+	join = append(join, "--")
+	join = append(join, args[3:]...)
+	if ownerStat.Dev != userStat.Dev || ownerStat.Ino != userStat.Ino {
+		// Bubblewrap's private devpts setup can put the anchor in a nested
+		// user namespace. Enter the owner first so nsenter can join the shared
+		// namespaces before switching to the anchor's final user namespace.
+		ownerFD, err := unix.FcntlInt(uintptr(owner), unix.F_DUPFD, 5)
+		if err != nil {
+			return err
+		}
+		defer unix.Close(ownerFD)
+		join = append([]string{enter, fmt.Sprintf("--user=/proc/self/fd/%d", ownerFD), "--preserve-credentials", "--"}, join...)
+	}
+	return unix.Exec(enter, join, os.Environ())
 }
 
 func nativeNamespaceMemberArgs(args []string) []string {
@@ -363,13 +434,13 @@ func (n *nativeNamespace) probe(ctx context.Context, port string, group int, pat
 	if listener {
 		mode = "listener"
 	}
-	args := []string{"--target", strconv.Itoa(n.pid), "--user", "--net", "--preserve-credentials", "--", executable, "_native-exec", mode, port, strconv.Itoa(group)}
+	args := append(n.joinArgs(executable, ""), executable, "_native-exec", mode, port, strconv.Itoa(group))
 	if !listener {
 		args = append(args, path)
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, n.support.nsenter, args...)
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Env = environmentList(jobBaseEnvironment())
 	out, err := cmd.Output()
 	if strings.TrimSpace(string(out)) == "foreign" {
