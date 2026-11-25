@@ -2,15 +2,16 @@
 
 An operator-owned LaunchAgent can restore a user-owned SMB volume after it
 disappears from the mount table. The helper asks macOS NetAuth to mount the
-exact share at the original path using a passwordless URL and requests that
-NetAuth suppress its authentication dialog. Qualify reuse of the existing
-saved login from the actual GUI launchd domain before deploying. This path
-requires a logged-in session with its credential store available.
+configured share using a passwordless URL and requests that NetAuth suppress
+its authentication dialog. It verifies the exact path and source before
+reporting recovery. Qualify reuse of the existing saved login from the actual
+GUI launchd domain before deploying. This path requires a logged-in session
+with its credential store available.
 
-Use this helper on a dedicated fleet Mac with a dedicated mount directory.
-The underlying directory is empty and owned by the console user. The console
-user configures the target and no other process writes into it or its
-ancestors. NetFS mounts by pathname, so the handoff cannot be atomic. A
+Use this helper on a dedicated fleet Mac with a dedicated mount path. Any
+existing underlying directory must be empty and owned by the console user.
+The console user configures the target and no other process writes into it
+or its ancestors. NetFS mounts by pathname, so the handoff cannot be atomic. A
 local process deliberately racing directory replacement during the call is
 outside the supported configuration.
 
@@ -48,21 +49,20 @@ outside the supported configuration.
    "$helper" --check "$smb_url" "$mountpoint" "$smb_source" "$recovery_dir" "$state_identity"
    ```
 
-   Use a dedicated, canonical mount path with no symlinks, including in its
-   ancestors. The underlying target must be an empty local directory owned
-   by the console user. The plist pins the recovery directory's device and
-   inode. Follow the stop procedure below before moving or replacing the
-   target, its ancestors or the recovery directory. When initial creation
-   under `/Volumes` is needed, an authorized administrator can use
-   `sudo install -d -m 0700 -o "$(id -un)" "$mountpoint"` after verifying
-   no mount or local data occupies that path.
-3. With the timer still unloaded, prove that an idle, non-forced unmount
-   leaves the empty, user-owned directory. If the volume is already absent
-   and `--check` returns 69, an authorized one-shot run using the recorded
-   inputs can establish the mount for this check. Confirm `--check` returns 0
-   before running `/sbin/umount "$mountpoint"` and 69 immediately after. If
-   the unmount fails or the directory disappears or fails validation, stop
-   and correct the setup before enabling the timer.
+   Use the share's default macOS mount path directly under `/Volumes`, with
+   no symlinks in the path. If macOS removes the directory on unmount, the
+   helper passes a null mount path to NetFS to use its system-chosen mountpoint.
+   Leave an absent target for NetFS to create. If an empty, console-user-owned
+   local target survives, the helper requests that directory explicitly. The
+   plist pins the recovery directory's device and inode. Follow the stop
+   procedure below before moving or replacing the target, its ancestors or
+   the recovery directory.
+3. With the timer still unloaded, confirm `--check` returns 0 or 69. If the
+   volume is absent, check the NAS lockout policy and account headroom, then use
+   the recorded inputs for a supervised one-shot recovery. Correlate it with
+   NAS login counts as described below. Require `--check` to return 0 after the
+   one-shot before enabling the timer. If a safety check refuses recovery,
+   stop and inspect the cause before continuing.
 
    ```sh
    "$helper" "$smb_url" "$mountpoint" "$smb_source" "$recovery_dir" "$state_identity"
@@ -98,13 +98,13 @@ outside the supported configuration.
 | --- | --- |
 | 0 | Cached inventory has the exact SMB source at the configured path, and neither hold record is present. |
 | 64 | Invalid arguments, URL or path syntax. |
-| 69 | `--check` found the share absent and verified the empty, canonical, user-owned local target. |
+| 69 | `--check` found the share absent and the target eligible for recovery. The target is either absent directly under local `/Volumes` or an empty, canonical, user-owned local directory. |
 | 71 | The cached mount table could not be read before attempting recovery. |
 | 73 | The helper could not read, persist or clear its attempt state. |
 | 75 | A transport failure was recorded, or the persistent network retry budget defers a NetFS call. A later tick retries automatically. |
 | 77 | An authentication attempt is held after an interrupted, authentication-like or unknown NetFS outcome. |
-| 78 | A URL, target or inventory check refused recovery. A refusal after NetFS records a persistent hold. |
-| 79 | A prior NetFS attempt left a refused mount that needs operator inspection. |
+| 78 | A URL, target or inventory check refused recovery before NetFS. |
+| 79 | This or a prior NetFS attempt recorded a mount refusal that needs operator inspection. |
 | 80 | The recovery directory is missing or fails its pinned identity, local-path, ownership or mode check. |
 
 `--check` uses the same recovery-directory identity and holds as the timer.
@@ -115,9 +115,13 @@ before invoking NetFS.
 The helper creates and syncs `auth-hold` in the pinned local mode-0700
 directory before calling NetFS. It clears the marker after a verified
 mount or when it can prove it stopped before NetFS. An interrupted or
-uncertain attempt keeps the hold. A refusal after NetFS changes the hold
-to `refused-mount`. Later ticks and checks return 79 even if an exact mount
-appears in the inventory. The helper leaves any mount it finds in place.
+uncertain attempt keeps the hold. To accept a successful call, the helper
+requires the single path returned by NetFS and the cached kernel inventory
+to agree on the configured path, and the inventory to show the exact SMB
+source there. If NetFS chooses a suffixed path or the inventory shows the
+wrong source, the helper changes the hold to `refused-mount` and returns 79.
+Later ticks and checks return 79 even if an exact mount appears in the
+inventory. The helper leaves any mount it finds in place.
 
 After a transport failure (`ENETDOWN`, `ENETUNREACH`, `EHOSTDOWN`,
 `EHOSTUNREACH`, `ECONNREFUSED`, `ENOTCONN`, `ENETRESET`, `ECONNABORTED`,
@@ -181,12 +185,14 @@ can lengthen the retry wait.
 ## Qualify recovery
 
 1. With the disposable share idle, use `/sbin/umount "$mountpoint"` without
-   force or observe a natural disappearance. Confirm that the empty
-   underlying directory survives and the helper's `--check` returns 69
-   while the share is absent. Observe the agent restore the original mount
-   and the check return 0 without operator action or a prompt. Verify a
-   bounded read of a known file as the worker account. A successful NetFS
-   call alone establishes neither the mount identity nor share health.
+   force or observe a natural disappearance. Confirm the SMB mount disappears
+   and record whether macOS removed the underlying directory. If you can run
+   the helper's `--check` while the share is absent, expect 69 with either a
+   missing or an eligible empty directory. Observe the agent restore the exact
+   source and path and the check return 0 without operator action or a prompt.
+   Verify a bounded read of a known file as the worker account. To qualify
+   recreation of the mountpoint, observe a recovery that starts with the
+   target absent.
 2. Repeat with the screen locked and with the network restored late in the
    authorized test window. Collect the helper's fixed outcome messages with
    `log show --last 10m --predicate 'eventMessage BEGINSWITH "Mycelium NAS remount"'`.
