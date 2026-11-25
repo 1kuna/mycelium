@@ -72,6 +72,38 @@ func assertNativeCheckFinding(t *testing.T, text, checkID string) {
 }
 
 func TestExtensionFirstDemandQualification(t *testing.T) {
+	t.Run("unreadable registration does not hide a prepared variant", func(t *testing.T) {
+		q, w, e, demand, prepare, _ := qualificationFixture(t)
+		// A previous release could install a resident variant of this extension.
+		old := Extension{Name: e.Name, Version: "0"}
+		dir := extensionFolder(w.ExtensionRoot, old)
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		description := fmt.Sprintf("name: %s\nversion: '0'\nresident: true\n", e.Name)
+		if err := os.WriteFile(filepath.Join(dir, "extension.yaml"), []byte(description), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LocalExtensions(w.ExtensionRoot); err == nil || !strings.Contains(err.Error(), "job_resident_retired") {
+			t.Fatalf("strict library read did not identify the retired registration: %v", err)
+		}
+		w.Machine.EnvironmentReports = []EnvironmentReport{{Key: prepare.Key, Attempt: prepare.Launch.Attempt, State: "ready"}}
+		w.Machine.ExtensionReports = LocalExtensionReports(w.ExtensionRoot, "fake", w.extensionFingerprint, &w.Machine)
+		q.clock.(*fakeClock).Advance(time.Second)
+		reply := check(t, q, w.Machine, nil)
+		if len(reply.EnvironmentPlan) != 0 {
+			t.Fatal("completed setup was offered again while the unrelated registration was unreadable", reply.EnvironmentPlan)
+		}
+		for _, plan := range reply.ExtensionQualificationPlan {
+			if plan.Report.Digest == e.Digest && plan.Report.Work == demand.Spec.workType() {
+				reconcileQualification(t, w, plan)
+				qualificationJob(t, q, plan.Report.CheckID)
+				return
+			}
+		}
+		t.Fatal("prepared variant did not dispatch an exact native check", reply.ExtensionQualificationPlan)
+	})
+
 	t.Run("cold adoption accepted comparison and warm evidence", func(t *testing.T) {
 		q, w, e, demand, prepare, plans := qualificationFixture(t)
 		for _, plan := range plans {

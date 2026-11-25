@@ -164,6 +164,9 @@ durability is required. Status comes from the running worker.
   capacity versus coverage, memory, storage and device evidence. Route owner
   actions with the job ID, attempt and typed reason. Keep full history reads
   out of loops.
+  If `myce host status HOST` reports some unreadable local extension
+  registrations, qualification can still proceed for other digests. Use the
+  job's own status for its exact digest and hold.
 - CPU work blocked by live RAM can report `memory_wait` with the current
   room and the attempts that hold RAM. A `memory_wait` or occupied-card
   `capacity` hold clears as room or custody becomes available.

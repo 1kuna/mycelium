@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -23,13 +24,16 @@ const (
 	extensionDriverChangedReason      = "hardware/driver fingerprint changed; setup and check required"
 	extensionContentChangedReason     = "extension fingerprint (digest) changed; setup and check required"
 	extensionFingerprintMissingReason = "hardware/driver fingerprint unavailable; setup and check required"
+	extensionLibraryUnreadableReason  = "extension library unreadable"
+	extensionLibraryPartialReason     = "some local extension registrations are unreadable"
 )
 
 // Keep only fixed report diagnostics in public status; arbitrary check output
 // can contain private command details.
 func extensionReportDiagnostic(reason string) string {
 	switch reason {
-	case extensionUncheckedReason, extensionDriverChangedReason, extensionContentChangedReason, extensionFingerprintMissingReason:
+	case extensionUncheckedReason, extensionDriverChangedReason, extensionContentChangedReason, extensionFingerprintMissingReason,
+		extensionLibraryUnreadableReason, extensionLibraryPartialReason:
 		return reason
 	default:
 		return diagnostic(reason, "setup and check required")
@@ -116,7 +120,14 @@ func InstallExtension(root string, e Extension) error {
 	return nil
 }
 func LocalExtensions(root string) ([]Extension, error) {
+	return readLocalExtensions(root, false)
+}
+
+// Worker reports keep evidence for independently validated registrations even
+// when a different version in the local cache fails to load.
+func readLocalExtensions(root string, keepValid bool) ([]Extension, error) {
 	out := []Extension{}
+	var firstErr error
 	names, err := os.ReadDir(filepath.Join(root, "library"))
 	if os.IsNotExist(err) {
 		return out, nil
@@ -130,23 +141,31 @@ func LocalExtensions(root string) ([]Extension, error) {
 		}
 		versions, err := os.ReadDir(filepath.Join(root, "library", n.Name()))
 		if err != nil {
-			return nil, err
+			if !keepValid {
+				return nil, err
+			}
+			firstErr = cmp.Or(firstErr, err)
+			continue
 		}
 		for _, v := range versions {
 			if !v.IsDir() || strings.HasPrefix(v.Name(), ".") {
 				continue
 			}
 			e, err := ReadExtension(filepath.Join(root, "library", n.Name(), v.Name()))
-			if err != nil {
-				return nil, err
+			if err == nil && (e.Name != n.Name() || e.Version != v.Name()) {
+				err = errors.New("extension folder identity mismatch")
 			}
-			if e.Name != n.Name() || e.Version != v.Name() {
-				return nil, errors.New("extension folder identity mismatch")
+			if err != nil {
+				if !keepValid {
+					return nil, err
+				}
+				firstErr = cmp.Or(firstErr, err)
+				continue
 			}
 			out = append(out, e)
 		}
 	}
-	return out, nil
+	return out, firstErr
 }
 
 // Fingerprints are only hashes. Rejoining after a hardware/driver/OS change
@@ -287,11 +306,15 @@ func extensionWorks(e Extension) []string {
 	return out
 }
 func LocalExtensionReports(root, platform, fingerprint string, machines ...*Machine) []ExtensionReport {
-	extensions, err := LocalExtensions(root)
-	if err != nil {
-		return []ExtensionReport{{Platform: platform, Reason: "extension library unreadable"}}
-	}
+	extensions, err := readLocalExtensions(root, true)
 	out := []ExtensionReport{}
+	if err != nil {
+		reason := extensionLibraryPartialReason
+		if len(extensions) == 0 {
+			reason = extensionLibraryUnreadableReason
+		}
+		out = append(out, ExtensionReport{Platform: platform, Reason: reason})
+	}
 	for _, e := range extensions {
 		if len(e.Variants) == 0 && !slices.Contains(e.platforms(), platform) {
 			continue
