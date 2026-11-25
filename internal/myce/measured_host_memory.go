@@ -1,5 +1,47 @@
 package myce
 
+import "errors"
+
+type HostBudgetSuggestion struct {
+	HostMemoryDerivation
+	SuggestedGB   float64 `json:"suggested_gb"`
+	Worker        string  `json:"worker"`
+	QueueOverhead string  `json:"queue_overhead,omitempty"`
+	DryRun        bool    `json:"dry_run"`
+}
+
+// MeasuredBudgetSuggestion previews the lowest allowance the queue would
+// send to any fresh worker, before worker acknowledgement and live RAM limits.
+func (s HostMaintenanceStatus) MeasuredBudgetSuggestion() (HostBudgetSuggestion, error) {
+	if s.Policy.MemoryBudget == nil || s.Policy.MemoryBudget.GiB <= 0 {
+		return HostBudgetSuggestion{}, errors.New("measured memory mode requires a positive authored fallback")
+	}
+	policy := *s.Policy.MemoryBudget
+	policy.Measured = true
+	var suggestion HostBudgetSuggestion
+	for _, worker := range s.Workers {
+		if !worker.Fresh {
+			continue
+		}
+		budget, d := deriveMeasuredHostMemoryBudget(&worker.Machine, policy, s.Policy.role(), s.ExternalMemory)
+		if !suggestion.DryRun || budget.GiB < suggestion.SuggestedGB {
+			suggestion = HostBudgetSuggestion{
+				HostMemoryDerivation: *d,
+				SuggestedGB:          budget.GiB,
+				Worker:               worker.Machine.ID,
+				DryRun:               true,
+			}
+		}
+	}
+	if !suggestion.DryRun {
+		return suggestion, errors.New("no fresh worker reports")
+	}
+	if suggestion.Source == "quiescent_v1" {
+		suggestion.QueueOverhead = "included_in_idle_baseline"
+	}
+	return suggestion, nil
+}
+
 func modelReportsQuiescent(reports []ModelReport) bool {
 	for _, r := range reports {
 		// Failed is published only after successful cleanup. Failed unloads
@@ -33,8 +75,12 @@ func (q *Queue) measuredHostMemoryBudget(m *Machine, policy HostMemoryBudget) (H
 	if !policy.Measured {
 		return policy, nil
 	}
-	d := &HostMemoryDerivation{Source: "authored_fallback", FallbackGB: policy.GiB, AllowanceGB: policy.GiB, Reason: "no qualified quiescent memory history"}
-	h := q.externalMemoryStatus(hostID(m))
+	host := hostID(m)
+	return deriveMeasuredHostMemoryBudget(m, policy, q.s.HostMaintenance[host].role(), q.externalMemoryStatus(host))
+}
+
+func deriveMeasuredHostMemoryBudget(m *Machine, policy HostMemoryBudget, role string, h *ExternalMemoryHistory) (HostMemoryBudget, *HostMemoryDerivation) {
+	d := &HostMemoryDerivation{Source: "authored_fallback", FallbackGB: policy.GiB, AllowanceGB: policy.GiB, Reason: "no qualified quiescent memory history", Role: role}
 	o := m.MemoryObservation
 	if h == nil || h.Quiescent == nil || h.Quiescent.Week.Samples == 0 || !validHostMemoryObservation(o) || o.BaselineVersion != 1 {
 		return policy, d
@@ -50,8 +96,6 @@ func (q *Queue) measuredHostMemoryBudget(m *Machine, policy HostMemoryBudget) (H
 	// reserve floor, plus observed idle peak-to-typical variation for new bursts.
 	// The baseline includes idle Mycelium overhead; nothing is subtracted via RSS.
 	d.ReserveGB = o.ReserveGB
-	policyRole := q.s.HostMaintenance[hostID(m)]
-	d.Role = policyRole.role()
 	if d.Role != hostRoleInteractive && !ownerGated(m) {
 		// MY-45: capacity is live availability minus one measured margin. The
 		// idle footprint (OS, services, drivers and the idle worker, all in the

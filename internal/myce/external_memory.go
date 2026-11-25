@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"errors"
 	"fmt"
 	"maps"
 	"math"
@@ -238,34 +237,6 @@ func (q *Queue) externalMemoryStatus(host string) *ExternalMemoryHistory {
 		h.Quiescent = &ExternalMemoryHistory{Day: idle.window(now, 24*time.Hour), Week: idle.window(now, 7*24*time.Hour)}
 	}
 	return h
-}
-
-type HostBudgetSuggestion struct {
-	TotalGB         float64              `json:"total_gb"`
-	ExternalMaxGB   float64              `json:"external_max_gb"`
-	HeadroomGB      float64              `json:"headroom_gb"`
-	QueueOverheadGB float64              `json:"queue_overhead_gb"`
-	SuggestedGB     float64              `json:"suggested_gb"`
-	History         ExternalMemoryWindow `json:"history_7d"`
-	DryRun          bool                 `json:"dry_run"`
-}
-
-// SuggestHostBudget never changes policy. The max is exact among valid samples;
-// it cannot bound future peaks or memory missed by the heartbeat interval.
-func SuggestHostBudget(total, headroom, queue float64, h *ExternalMemoryHistory) (HostBudgetSuggestion, error) {
-	if total <= 0 || !validMemoryValue(total) || !validMemoryValue(headroom) || !validMemoryValue(queue) {
-		return HostBudgetSuggestion{}, errors.New("total must be positive; headroom and queue overhead must be finite and nonnegative")
-	}
-	if h == nil || h.Week.Samples == 0 {
-		return HostBudgetSuggestion{}, errors.New("no measured external memory history")
-	}
-	w := h.Week
-	// Keep authored headroom; observed variability, not a universal quarter,
-	// accounts for the difference between typical and peak external use.
-	if w.Samples > 1 && w.P50GB > 0 {
-		headroom = max(headroom, w.MaxGB-w.P50GB)
-	}
-	return HostBudgetSuggestion{TotalGB: total, ExternalMaxGB: w.MaxGB, HeadroomGB: headroom, QueueOverheadGB: queue, SuggestedGB: max(0, total-w.MaxGB-headroom-queue), History: w, DryRun: true}, nil
 }
 
 // The public longest query window supplies the coverage horizon. The number
