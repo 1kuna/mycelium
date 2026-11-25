@@ -661,7 +661,13 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 }
 
 func (g *nativeGroup) cleanupProcesses(writer *os.File, retry bool) error {
-	defer g.namespace.close()
+	// stopLocked can check the pinned anchor under p.mu (via memberFailure), so
+	// closing it must hold the same lock to avoid reading a closed or reused fd.
+	defer func() {
+		g.p.mu.Lock()
+		g.namespace.close()
+		g.p.mu.Unlock()
+	}()
 	g.p.mu.Lock()
 	graceful := !g.p.job.Spec.Needs.cpuOnly() && !g.p.userCancel
 	g.p.mu.Unlock()
