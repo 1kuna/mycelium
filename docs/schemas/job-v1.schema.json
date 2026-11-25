@@ -3661,6 +3661,16 @@
           "$ref": "#/$defs/ExecutionEvidence",
           "x-contract": "diagnostic"
         },
+        "execution_release": {
+          "description": "Single-job read of aggregate execution and stage custody. Pending means custody remains, confirmed means an attempted scope has cleared, and not_applicable means there is no pending custody or recorded attempt.",
+          "enum": [
+            "pending",
+            "confirmed",
+            "not_applicable"
+          ],
+          "type": "string",
+          "x-contract": "stable"
+        },
         "extension": {
           "$ref": "#/$defs/ExtensionSelection",
           "x-contract": "diagnostic"

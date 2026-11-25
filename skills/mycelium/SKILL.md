@@ -184,12 +184,20 @@ For automated pause/resume, require `fenced_job_control` in the serving queue's
 `queue_capabilities`. `paused_start_window_frozen` is a separate capability.
 Use the [fenced routes](https://github.com/1kuna/mycelium/blob/main/docs/jobs.md#fenced-job-control)
 with exact job IDs and increasing per-job `control_generation` values. Pause
-also takes `project`, `reason` and `if_attempt`. Resume takes `if_revision` from
-the current `pause_revision` (zero when absent) and can seal an already runnable
-job against a delayed pause. After a lost reply, read exact job GET for `control`,
-`pause_revision` and job state. Retry the same body or reconcile against the
+also takes `project`, `reason` and `if_attempt`. To protect a hold that can
+change between GET and Pause, require `fenced_job_control_if_revision` and send
+`if_revision` from the same GET as the attempt. Resume requires `if_revision`
+and can seal an already runnable job against a delayed pause. For both routes,
+use the current `pause_revision` (zero when absent). A revision conflict means
+read again before deciding whether to issue another control. After a lost
+reply, read exact job GET for `control`, `pause_revision` and job state. Retry the same body or reconcile against the
 current receipt before issuing a new intent. Use the fenced keyed cancel route
 to exclude further controls and launches, then observe exact-attempt release.
+
+To gate on release without cancelling, read `execution_release` from exact job
+GET. Wait on `pending`. Both `confirmed` and `not_applicable` mean no host
+custody remains at that snapshot. A missing field or an expired record gives
+no release evidence.
 
 Before relying on a frozen start window for a batch pause, check that the live
 queue's `queue_capabilities` list contains `paused_start_window_frozen`. Read it

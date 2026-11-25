@@ -2,11 +2,13 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -160,6 +162,109 @@ func TestFencedJobControlOrdering(t *testing.T) {
 	}
 }
 
+func TestFencedJobControlPauseRevision(t *testing.T) {
+	for _, transport := range []string{"queue", "http"} {
+		t.Run(transport, func(t *testing.T) {
+			q, clock := fixture(t)
+			h := newFencedControlTest(t, q, transport == "http")
+			j := submit(t, q, spec("experiment"))
+			firstRead := h.read(t, j.ID)
+			pause := FencedPauseRequest{
+				Project: j.Spec.Project, Reason: "batch hold", IfAttempt: &firstRead.Attempt,
+				IfRevision: &firstRead.PauseRevision, ControlGeneration: 9,
+			}
+			until := clock.Now().Add(time.Hour)
+			foreign := pauseForTest(t, q, j.ID, &until)
+
+			_, err := h.pause(j.ID, pause)
+			pauseError(t, err, "job_pause_revision_conflict")
+			current := h.read(t, j.ID)
+			if current.Control != nil || current.PauseRevision != foreign.PauseRevision ||
+				current.Pause == nil || current.Pause.Reason != foreign.Pause.Reason ||
+				current.Pause.Until == nil || !current.Pause.Until.Equal(until) {
+				t.Fatal("stale pause changed the intervening hold", current)
+			}
+
+			pause.IfRevision = &current.PauseRevision
+			accepted, err := h.pause(j.ID, pause)
+			assertFencedControl(t, accepted, err, "paused", "pause", 9, 2)
+			replayed, err := h.pause(j.ID, pause)
+			assertFencedControl(t, replayed, err, "paused", "pause", 9, 2)
+			changed := pause
+			changed.IfRevision = &accepted.PauseRevision
+			_, err = h.pause(j.ID, changed)
+			pauseError(t, err, "job_control_generation_conflict")
+
+			resume := FencedResumeRequest{IfRevision: &accepted.PauseRevision, ControlGeneration: 9}
+			resumed, err := h.resume(j.ID, resume)
+			assertFencedControl(t, resumed, err, "queued", "resume", 9, 3)
+			changed.ControlGeneration = 10
+			_, err = h.pause(j.ID, changed)
+			pauseError(t, err, "job_pause_revision_conflict")
+			assertFencedControl(t, h.read(t, j.ID), nil, "queued", "resume", 9, 3)
+		})
+	}
+}
+
+func TestFencedJobControlExecutionRelease(t *testing.T) {
+	q, _ := fixture(t)
+	h := newFencedControlTest(t, q, true)
+	j := submit(t, q, spec("experiment"))
+	if got := h.read(t, j.ID); got.ExecutionRelease != "not_applicable" {
+		t.Fatal("unattempted job release =", got.ExecutionRelease)
+	}
+	worker := machine("release-worker", "fake")
+	attempt := check(t, q, worker, nil).Job
+	if attempt == nil || attempt.ID != j.ID {
+		t.Fatal("missing assignment", attempt)
+	}
+	if got := h.read(t, j.ID); got.ExecutionRelease != "pending" {
+		t.Fatal("assigned job release =", got.ExecutionRelease)
+	}
+	// Model a previously released copy with an independent stage obligation.
+	// The fixture changes custody only, so the exact GET cache must invalidate
+	// even when the durable job and copies stay byte-for-byte the same.
+	if err := q.update(func() error {
+		stored := q.touchJob(j.ID)
+		q.confirmCopyRelease(result(attempt, false), true)
+		q.resumeJob(stored)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	paused := pauseForTest(t, q, j.ID, nil)
+	assertRelease := func(want string) {
+		t.Helper()
+		got := h.read(t, j.ID)
+		if got.State != "paused" || got.PauseRevision != paused.PauseRevision ||
+			len(got.Copies) != 1 || !got.Copies[0].ReleaseConfirmed ||
+			got.Cancellation != nil || got.ExecutionRelease != want {
+			t.Fatalf("paused release = %q, want %q (state %s, copies %+v)", got.ExecutionRelease, want, got.State, got.Copies)
+		}
+	}
+	assertRelease("confirmed")
+
+	stage := HostRelease{Job: j.ID, Host: worker.ID, Machine: worker.ID, Session: worker.Session, Preparation: true}
+	if err := q.update(func() error {
+		q.s.HostReleases = map[string]HostRelease{releaseKey(stage): stage}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertRelease("pending")
+
+	release := Result{Execution: Execution{ID: j.ID}, Machine: stage.Machine, Session: "wrong-session", ReleaseOnly: true}
+	if err := q.Complete(release); err != nil {
+		t.Fatal(err)
+	}
+	assertRelease("pending")
+	release.Session = stage.Session
+	if err := q.Complete(release); err != nil {
+		t.Fatal(err)
+	}
+	assertRelease("confirmed")
+}
+
 func TestFencedJobControlLostReplyAndReopen(t *testing.T) {
 	for _, transport := range []string{"queue", "http"} {
 		t.Run(transport, func(t *testing.T) {
@@ -167,7 +272,7 @@ func TestFencedJobControlLostReplyAndReopen(t *testing.T) {
 			h := newFencedControlTest(t, q, transport == "http")
 			j := submit(t, q, spec("experiment"))
 			old := h.read(t, j.ID) // Exact GET must invalidate even without a clock tick.
-			pause := FencedPauseRequest{Project: j.Spec.Project, Reason: "review", IfAttempt: &old.Attempt, ControlGeneration: 7}
+			pause := FencedPauseRequest{Project: j.Spec.Project, Reason: "review", IfAttempt: &old.Attempt, IfRevision: &old.PauseRevision, ControlGeneration: 7}
 			if transport == "http" {
 				dropFencedPauseReply(t, q, j.ID, pause)
 			} else {
@@ -367,7 +472,7 @@ func TestFencedJobControlHTTPCapabilityAndValidation(t *testing.T) {
 	if err := h.client.Call(ctx, "GET", "/api/status", nil, &status); err != nil {
 		t.Fatal(err)
 	}
-	for _, capability := range []string{"fenced_job_control", "paused_start_window_frozen"} {
+	for _, capability := range []string{"fenced_job_control", "fenced_job_control_if_revision", "paused_start_window_frozen"} {
 		if !slices.Contains(status.QueueCapabilities, capability) {
 			t.Fatal("missing queue capability", capability, status.QueueCapabilities)
 		}
@@ -379,4 +484,37 @@ func TestFencedJobControlHTTPCapabilityAndValidation(t *testing.T) {
 	submissionError(t, err, 400, "job_resume_invalid")
 	_, err = h.pause(j.ID[:8], FencedPauseRequest{Project: j.Spec.Project, Reason: "prefix", IfAttempt: &j.Attempt, ControlGeneration: 1})
 	submissionError(t, err, 404, "job_unknown")
+}
+
+func TestFencedJobControlConflictWireSchema(t *testing.T) {
+	q, _ := fixture(t)
+	s := spec("experiment")
+	s.SubmissionKey = "schema-conflicts"
+	j := submit(t, q, s)
+	h := newFencedControlTest(t, q, false)
+	pause := FencedPauseRequest{Project: j.Spec.Project, Reason: "hold", IfAttempt: &j.Attempt, ControlGeneration: 1}
+	if _, err := h.pause(j.ID, pause); err != nil {
+		t.Fatal(err)
+	}
+	pause.Reason = "different hold"
+	handler := API{Queue: q, Token: "test"}.Handler()
+	schema := compileWireSchema(t, "error-v1.schema.json")
+	assertConflict := func(code string) {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPost, "/api/jobs/"+j.ID+"/control/pause", strings.NewReader(string(wireJSON(t, pause))))
+		r.Header.Set("Authorization", "Bearer test")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		var reply map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &reply); err != nil {
+			t.Fatal(err)
+		}
+		if w.Code != http.StatusConflict || reply["code"] != code {
+			t.Fatalf("expected 409 %s, got %d %v", code, w.Code, reply)
+		}
+		validateWireValue(t, schema, reply)
+	}
+	assertConflict("job_control_generation_conflict")
+	h.cancel(t, j)
+	assertConflict("job_control_cancelled")
 }

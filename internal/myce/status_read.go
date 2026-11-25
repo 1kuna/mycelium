@@ -129,6 +129,26 @@ func (q *Queue) invalidateCallSnapshots(old map[string]*ModelCall) {
 	}
 }
 
+// Host obligations can arrive and clear without changing a job or copy.
+func (q *Queue) invalidateReleaseSnapshots(old map[string]HostRelease) {
+	changed := false
+	for key, release := range old {
+		if _, retained := q.s.HostReleases[key]; !retained {
+			q.invalidateJobSnapshot(release.Job)
+			changed = true
+		}
+	}
+	for key, release := range q.s.HostReleases {
+		if _, retained := old[key]; !retained {
+			q.invalidateJobSnapshot(release.Job)
+			changed = true
+		}
+	}
+	if changed {
+		q.invalidateDependentSnapshots()
+	}
+}
+
 // q.mu is held. Both calls and batch jobs contribute to project caps and
 // pending receipts; unchanged transactions leave their cached views intact.
 func (q *Queue) invalidateDependentSnapshots() {
@@ -510,6 +530,11 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 			fullCancellation = fullCancellation || original.FanOut != nil
 		}
 	}
+	if selected != nil && q.calls[id] == nil {
+		if _, captured := cancellations[id]; !captured {
+			cancellations[id] = cancellationInputs(selected)
+		}
+	}
 	if fullCancellation {
 		for key, j := range q.s.Jobs {
 			cancellations[key] = cancellationInputs(j)
@@ -630,8 +655,20 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 		if options != nil && options.stream {
 			continue // Project cancellation into the private row, never borrowed history.
 		}
-		if original := custody.s.Jobs[key]; original != nil && (original.CancelledAt != nil || original.FanOut != nil) && (v.observationSelection == nil || v.observationSelection.ids[key]) {
-			custody.projectCancellation(job, original)
+		if original := custody.s.Jobs[key]; original != nil && (v.observationSelection == nil || v.observationSelection.ids[key]) {
+			if original.CancelledAt != nil || original.FanOut != nil {
+				custody.projectCancellation(job, original)
+			}
+			if key == id {
+				if original.FanOut != nil {
+					job.ExecutionRelease = custody.observedRelease(original)
+				} else {
+					// A standalone job or stage reports its own copies and
+					// host obligations, even if this capture includes other jobs.
+					own := Queue{s: state{HostReleases: cancellationReleases}}
+					job.ExecutionRelease = own.observedRelease(original)
+				}
+			}
 		}
 	}
 	for key, m := range detached.State.Machines {
@@ -863,7 +900,7 @@ func (q *Queue) statusSnapshotOptions(options *statusOptions, contexts ...contex
 
 // The serving queue owns this list. Client projections only forward it.
 func queueCapabilities() []string {
-	return []string{"paused_start_window_frozen", "fenced_job_control"}
+	return []string{"paused_start_window_frozen", "fenced_job_control", "fenced_job_control_if_revision"}
 }
 
 func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...context.Context) (Snapshot, error) {

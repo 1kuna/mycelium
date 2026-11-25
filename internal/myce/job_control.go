@@ -14,10 +14,11 @@ type JobControl struct {
 }
 
 type FencedPauseRequest struct {
-	Project           string `json:"project"`
-	Reason            string `json:"reason"`
-	IfAttempt         *int   `json:"if_attempt"`
-	ControlGeneration uint64 `json:"control_generation"`
+	Project           string  `json:"project"`
+	Reason            string  `json:"reason"`
+	IfAttempt         *int    `json:"if_attempt"`
+	IfRevision        *uint64 `json:"if_revision,omitempty"`
+	ControlGeneration uint64  `json:"control_generation"`
 }
 
 type FencedResumeRequest struct {
@@ -38,10 +39,14 @@ func (q *Queue) FencedPause(ctx context.Context, id string, request FencedPauseR
 		}
 		generation := request.ControlGeneration
 		if c := j.Control; c != nil && generation <= c.Generation {
-			if generation == c.Generation && c.Action == "pause" && c.Revision == j.PauseRevision && directJobPause(j) && j.Pause.Reason == request.Reason {
+			if generation == c.Generation && c.Action == "pause" && c.Revision == j.PauseRevision && directJobPause(j) && j.Pause.Reason == request.Reason &&
+				(request.IfRevision == nil || *request.IfRevision == c.Revision-1) {
 				return nil
 			}
 			return jobControlGenerationConflict()
+		}
+		if request.IfRevision != nil && *request.IfRevision != j.PauseRevision {
+			return &HTTPError{Status: 409, Code: "job_pause_revision_conflict", Message: "fenced pause requires the current pause revision"}
 		}
 		if j.State != "queued" && !directJobPause(j) {
 			return &HTTPError{Status: 409, Code: "job_pause_conflict", Message: "fenced pause requires queued work or a direct hold"}
