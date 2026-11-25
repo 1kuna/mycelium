@@ -729,6 +729,11 @@ func TestWorkerNativeLaunchControlTrips(t *testing.T) {
 							http.Error(rw, "unknown field", http.StatusBadRequest)
 							return
 						}
+						if pairing.oldQueue && r.URL.Path == "/api/workers/started" && fields["launch_timings"] != nil {
+							t.Error("compatibility path sent timing fields to a queue that did not advertise support")
+							http.Error(rw, "unknown field", http.StatusBadRequest)
+							return
+						}
 						r.Body = io.NopCloser(bytes.NewReader(body))
 					}
 				}
@@ -750,6 +755,9 @@ func TestWorkerNativeLaunchControlTrips(t *testing.T) {
 			}
 			defer store.close()
 			store.state.Session = a.Session
+			now := clock.Now()
+			a.LaunchTimings = &LaunchTimings{AssignmentReceivedAt: now, ObservedAt: now, CurrentPhase: launchDispatch}
+			store.state.Job = a
 			p, err := startAfterFixtureInputs(t, w, store, *a)
 			if err != nil {
 				t.Fatal(err)
