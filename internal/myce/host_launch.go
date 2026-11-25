@@ -31,6 +31,11 @@ type HostLaunch struct {
 	Started      bool                `json:"started,omitempty"`
 }
 
+type workerLaunchRequest struct {
+	HostLaunch
+	Custody *nativeLaunchCustody `json:"custody,omitempty"`
+}
+
 func launchAttempt(l *HostLaunch) string {
 	if l == nil {
 		return ""
@@ -117,6 +122,14 @@ func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
 }
 
 func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error {
+	return q.authorizeLaunchWithCustody(ctx, workerLaunchRequest{HostLaunch: l})
+}
+
+func (q *Queue) authorizeLaunchWithCustody(ctx context.Context, request workerLaunchRequest) error {
+	l := request.HostLaunch
+	if request.Custody != nil && (l.Kind != "batch" || !request.Custody.valid()) {
+		return invalidNativeCustody()
+	}
 	timing := newQueueUpdateTiming()
 	var rejected error
 	var batch *Job
@@ -189,6 +202,9 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 				predicate := q.startPlacementRejection(j)
 				if predicate == "" {
 					q.clearStartRefusal(j)
+					if request.Custody != nil {
+						return q.recordNativeLaunchCustody(j, *request.Custody)
+					}
 					break
 				}
 				m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
@@ -312,23 +328,29 @@ func (w Worker) authorizeLaunch(l HostLaunch) error {
 }
 
 func (w Worker) authorizeLaunchContext(ctx context.Context, l HostLaunch) error {
+	return w.authorizeLaunchWithCustody(ctx, l, nil)
+}
+
+func (w Worker) authorizeLaunchWithCustody(ctx context.Context, l HostLaunch, custody *nativeLaunchCustody) error {
 	defer w.launchTiming.within(launchAuthorization)()
 	w.launchCtx = ctx
 	if err := w.checkAvailability(); err != nil {
 		return err
 	}
 	var reply struct {
-		OK        bool   `json:"ok"`
-		StartGate string `json:"start_gate"`
+		OK           bool   `json:"ok"`
+		StartGate    string `json:"start_gate"`
+		NativeLaunch string `json:"native_launch_protocol"`
 	}
-	if _, err := w.controlHandshake("/api/workers/launch", l, &reply); err != nil {
+	request := workerLaunchRequest{HostLaunch: l, Custody: custody}
+	if _, err := w.controlHandshake("/api/workers/launch", request, &reply); err != nil {
 		err = fmt.Errorf("%w: %w", errWorkerStartAuthorization, err)
 		if l.Kind == "batch" {
 			err = &launchRPCError{err}
 		}
 		return err
 	}
-	if !reply.OK || reply.StartGate != startGateProtocol {
+	if !reply.OK || reply.StartGate != startGateProtocol || custody != nil && reply.NativeLaunch != nativeLaunchProtocol {
 		if l.Kind == "batch" {
 			return &launchRPCError{errWorkerStartAuthorization}
 		}

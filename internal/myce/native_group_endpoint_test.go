@@ -83,6 +83,7 @@ func TestNativeGroupEarlierConsumerEndpoint(t *testing.T) {
 		}
 	}()
 	worker := Worker{Clock: clock, StateDir: stateDir, Machine: m, Client: nativeFixtureClient(handler), HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
+	worker.compactNativeLaunch = reply.NativeLaunchProtocol == nativeLaunchProtocol
 	worker.MemorySource = func(context.Context) (float64, error) { return m.FreeMemoryGB, nil }
 	worker.nativeListenerProbe = func(port string, _ int) error {
 		if stolen != nil && port == strconv.Itoa(stolen.Addr().(*net.TCPAddr).Port) {
@@ -114,10 +115,13 @@ func TestNativeGroupEarlierConsumerEndpoint(t *testing.T) {
 		if err != nil || !ledger.Complete {
 			t.Fatal("native ledger incomplete", ledger, err)
 		}
-		reserved, released := map[string]bool{}, map[string]bool{}
+		reserved, started, released := map[string]bool{}, map[string]bool{}, map[string]bool{}
 		for _, entry := range ledger.Entries {
-			if entry.Kind == "custody_started" && (entry.SupervisorPID == 0 || entry.SupervisorBirth == "" || entry.ProcessID == "") {
-				t.Fatal("kernel custody identity missing", entry)
+			if entry.Kind == "custody_started" {
+				if entry.SupervisorPID == 0 || entry.SupervisorBirth == "" || entry.ProcessID == "" {
+					t.Fatal("kernel custody identity missing", entry)
+				}
+				started[entry.CustodyID] = true
 			}
 			if entry.Kind == "custody_reserved" {
 				reserved[entry.CustodyID] = true
@@ -126,7 +130,7 @@ func TestNativeGroupEarlierConsumerEndpoint(t *testing.T) {
 				released[entry.CustodyID] = true
 			}
 		}
-		if len(reserved) != 2 || len(released) != 2 {
+		if len(reserved) != 2 || len(started) != 2 || len(released) != 2 {
 			t.Fatal("replacement native custody missing", ledger)
 		}
 

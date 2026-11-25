@@ -1409,6 +1409,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 					// Retry next successful check-in; no filesystem paths or errors in logs.
 					log.Printf("enrollment receipt unavailable; will retry")
 				}
+				w.compactNativeLaunch = reply.NativeLaunchProtocol == nativeLaunchProtocol
 				w.fleet.noteReply(reply)
 				w.inspectNASPaths(reply.NASPathChecks, root.state.CheckpointRoot)
 				if reply.CheckpointExpiryProtocol == checkpointExpiryProtocol {

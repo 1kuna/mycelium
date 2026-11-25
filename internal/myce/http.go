@@ -465,11 +465,11 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		})
 	})
 	mux.HandleFunc("POST /api/workers/launch", func(w http.ResponseWriter, r *http.Request) {
-		var l HostLaunch
+		var l workerLaunchRequest
 		if !decode(w, r, &l) {
 			return
 		}
-		respondOperation(w, map[string]any{"ok": true, "start_gate": startGateProtocol}, a.Queue.authorizeLaunchContext(r.Context(), l), "worker_launch_invalid")
+		respondOperation(w, map[string]any{"ok": true, "start_gate": startGateProtocol, "native_launch_protocol": nativeLaunchProtocol}, a.Queue.authorizeLaunchWithCustody(r.Context(), l), "worker_launch_invalid")
 	})
 	mux.HandleFunc("POST /api/workers/native-custody", func(w http.ResponseWriter, r *http.Request) {
 		var c NativeCustodyReport
@@ -479,12 +479,12 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		respondOperation(w, map[string]any{"ok": true, "start_gate": startGateProtocol}, a.Queue.NativeCustody(c, r.Context()), "native_custody_invalid")
 	})
 	mux.HandleFunc("POST /api/workers/started", func(w http.ResponseWriter, r *http.Request) {
-		var c Result
+		var c workerStartedRequest
 		if !decode(w, r, &c) {
 			return
 		}
-		remaining, err := a.Queue.startedWithWallTime(c, r.Context())
-		respondOperation(w, map[string]any{"ok": true, "start_gate": startGateProtocol, "wall_time_remaining_seconds": remaining}, err, "worker_start_invalid")
+		remaining, err := a.Queue.startedWithCustody(r.Context(), c)
+		respondOperation(w, map[string]any{"ok": true, "start_gate": startGateProtocol, "wall_time_remaining_seconds": remaining, "native_launch_protocol": nativeLaunchProtocol}, err, "worker_start_invalid")
 	})
 	mux.HandleFunc("POST /api/workers/yield-stop", func(w http.ResponseWriter, r *http.Request) {
 		var c Result

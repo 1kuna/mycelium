@@ -817,6 +817,7 @@ type Checkin struct {
 	Running                  *Execution               `json:"running,omitempty"`
 }
 type Reply struct {
+	NativeLaunchProtocol       string                       `json:"native_launch_protocol,omitempty"`
 	DeviceRecoveryProtocol     string                       `json:"device_recovery_protocol,omitempty"`
 	DeviceHealthProtocol       string                       `json:"device_health_protocol,omitempty"`
 	DeviceTelemetryProtocol    string                       `json:"device_telemetry_protocol,omitempty"`

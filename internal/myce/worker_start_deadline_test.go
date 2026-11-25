@@ -136,6 +136,7 @@ func TestWorkerStartHandoffQueueWait(t *testing.T) {
 				handler.ServeHTTP(rw, r)
 			})
 			w := Worker{control: &processControl{clock: clock}, StateDir: newTestStateRoot(t), Machine: m, Clock: clock, Client: Client{URL: "http://queue.invalid", Token: "test", HTTP: &http.Client{Transport: handlerTestTransport(server)}}}
+			w.compactNativeLaunch = true
 			w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
 			w.MemorySource = func(context.Context) (float64, error) { return 8, nil }
 			if !virtual {
@@ -676,4 +677,104 @@ func (c handshakeControlClock) Now() time.Time {
 	default:
 	}
 	return c.Clock.Now()
+}
+
+// Charge the same serialized queue wait at every real control RPC. The
+// predecessor fixture strips the check-in feature and rejects the additive
+// request body, as the strict predecessor decoder would.
+func TestWorkerNativeLaunchControlTrips(t *testing.T) {
+	for _, pairing := range []struct {
+		name                string
+		oldWorker, oldQueue bool
+		trips               int
+	}{
+		{name: "current", trips: 2},
+		{name: "old-worker", oldWorker: true, trips: 4},
+		{name: "old-queue", oldQueue: true, trips: 4},
+	} {
+		t.Run(pairing.name, func(t *testing.T) {
+			q, clock := fixture(t)
+			m := machine("worker", "fake")
+			s := spec("production")
+			s.Resumable = false
+			s.Run.Command = []string{"/bin/sh", "-c", "printf x >> executions"}
+			submit(t, q, s)
+			const wait = 3 * time.Second
+			var trips atomic.Int32
+			api := (API{Queue: q, Token: "test"}).Handler()
+			server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/workers/checkin":
+					if pairing.oldQueue {
+						record := httptest.NewRecorder()
+						api.ServeHTTP(record, r)
+						var reply Reply
+						if record.Code != http.StatusOK || json.Unmarshal(record.Body.Bytes(), &reply) != nil {
+							t.Error("predecessor check-in fixture failed", record.Code)
+							rw.WriteHeader(record.Code)
+							return
+						}
+						reply.NativeLaunchProtocol = ""
+						_ = json.NewEncoder(rw).Encode(reply)
+						return
+					}
+				case "/api/workers/launch", "/api/workers/native-custody", "/api/workers/started":
+					trips.Add(1)
+					clock.Advance(wait)
+					if pairing.oldQueue || pairing.oldWorker {
+						body, err := io.ReadAll(r.Body)
+						var fields map[string]json.RawMessage
+						if err != nil || json.Unmarshal(body, &fields) != nil || fields["custody"] != nil {
+							t.Error("compatibility path sent combined custody")
+							http.Error(rw, "unknown field", http.StatusBadRequest)
+							return
+						}
+						r.Body = io.NopCloser(bytes.NewReader(body))
+					}
+				}
+				api.ServeHTTP(rw, r)
+			}))
+			defer server.Close()
+			w := recoveryWorker(t)
+			w.Clock, w.Machine, w.Client = clock, m, Client{URL: server.URL, Token: "test"}
+			w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
+			reply, err := w.checkin(t.Context(), Checkin{Machine: m})
+			if err != nil || len(reply.Attempts) != 1 || reply.Attempts[0].Job == nil {
+				t.Fatalf("check-in did not assign a job: %+v, %v", reply, err)
+			}
+			w.compactNativeLaunch = !pairing.oldWorker && reply.NativeLaunchProtocol == nativeLaunchProtocol
+			a := reply.Attempts[0].Job
+			store, err := w.openStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.close()
+			store.state.Session = a.Session
+			p, err := startAfterFixtureInputs(t, w, store, *a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { p.stop(clock.Now(), 0, true) }()
+			select {
+			case f := <-p.done:
+				if f.err != nil || !f.result.Success || q.Complete(f.result) != nil {
+					t.Fatalf("payload failed: %+v", f)
+				}
+			case <-time.After(testWaitTimeout):
+				t.Fatal("payload did not finish")
+			}
+			marker, err := os.ReadFile(filepath.Join(p.job.Spec.Run.Workdir, "executions"))
+			if err != nil || string(marker) != "x" {
+				t.Fatalf("expected one execution: %q, %v", marker, err)
+			}
+			if got := int(trips.Load()); got != pairing.trips {
+				t.Fatalf("got %d launch RPCs, want %d", got, pairing.trips)
+			}
+			got := job(t, q, a.ID)
+			if !got.Ledger.Complete || got.StartedAt == nil || got.State != "succeeded" {
+				t.Fatal("missing accepted result with durable custody", got)
+			}
+			t.Logf("%d control requests, %s serialized wait at %s per request", pairing.trips, time.Duration(pairing.trips)*wait, wait)
+		})
+	}
 }
