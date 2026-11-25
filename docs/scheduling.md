@@ -66,12 +66,15 @@ allowance. Workers must report the current protocol and a capability profile; un
 ### Unified host RAM admission and pressure
 
 The queue checks its host ledger and the worker's physical reading with the
-worker's pending growth and allowance. The worker repeats the same comparison
-at launch with current inputs. Native helpers receive no credit against the full
-launch requirement. If room falls between the first native member and a later
-member's refusal, subsequent offers on that route budget for the portion of
-the loss supported by measured growth in the attempt's cgroup. Reclaim and
-release still require their own evidence. For a refusal with a RAM sample
+worker's pending growth and allowance, plus the charge of any assignment the
+worker had not reported with that reading. The worker repeats the same comparison
+at launch with current inputs. When the worker's reading is short, the shortfall
+enters ordinary release planning, which can stop lower-tier work. Native helpers
+receive no credit against the full launch requirement. If room falls between the
+first native member and a later member's refusal, subsequent offers on that route
+budget for the portion of the loss supported by measured growth in the attempt's
+cgroup. That startup loss delays the re-offer but never stops other work. For a
+refusal with a RAM sample
 identity, the same route needs exact release and a worker RAM probe sampled
 after the refusal that fits the full launch demand.
 
