@@ -387,10 +387,21 @@ func TestProductionStartGateStorageFailureDoesNotExecute(t *testing.T) {
 	}
 	defer store.close()
 	store.state.Session = a.Session
-	p, e := startAfterFixtureInputs(t, w, store, *a)
+	// The queue reports a failed commit as retryable. This fixture holds
+	// SQLite read-only, so end the launch owner's wait after observing that
+	// refusal and check that it never authorized execution.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	retries := 0
+	w.Client.Pause = func(ctx context.Context, _ time.Duration) error {
+		retries++
+		cancel()
+		return ctx.Err()
+	}
+	p, e := startAfterFixtureInputsContext(t, ctx, w, store, *a)
 	// The durable custody gate precedes supervisor creation and Started.
-	if p != nil || !errors.Is(e, errWorkerStartAuthorization) {
-		t.Fatalf("storage refusal did not refuse before execution: process=%v err=%v", p, e)
+	if p != nil || !errors.Is(e, errWorkerStartAuthorization) || !errors.Is(e, context.Canceled) || retries != 1 {
+		t.Fatalf("storage refusal did not prevent execution through cancellation: process=%v err=%v retries=%d", p, e, retries)
 	}
 
 	if _, e = os.Stat(filepath.Join(w.StateDir, "job-files", a.ID, "1", "ran")); !os.IsNotExist(e) {
