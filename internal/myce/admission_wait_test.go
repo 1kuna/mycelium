@@ -397,6 +397,34 @@ func TestAdmissionWaitRetainsPhysicalMemoryAccounting(t *testing.T) {
 	if got := admissionWaitAPI(t, q, waiting.ID).First; !reflect.DeepEqual(got, first) {
 		t.Fatal("later comparison or restart rewrote first accounting")
 	}
+
+	// The holder's durable release can outlive the job's live-index entry.
+	// The exact retained job still supplies the holder's priority tier.
+	const retained = "retained-release"
+	if err := q.update(func() error {
+		at := clock.Now()
+		q.putJob(retained, &Job{ID: retained, Spec: cpuSpec(1, 1), State: "failed", Attempt: 1,
+			Machine: m.ID, Session: m.Session, Queued: at, FinishedAt: &at, ReleaseConfirmed: true})
+		release := HostRelease{Host: m.HostID, Job: retained, Machine: m.ID, Session: m.Session,
+			Attempt: 1, CPUOnly: true, CPUCores: 1, HostChargeGB: 1}
+		if q.s.HostReleases == nil {
+			q.s.HostReleases = map[string]HostRelease{}
+		}
+		q.s.HostReleases[releaseKey(release)] = release
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	newWait := submit(t, q, s)
+	latest := admissionWaitAPI(t, q, newWait.ID).Latest
+	for _, target := range latest.Targets {
+		for _, holder := range target.Holders {
+			if holder.Job == retained && holder.Kind == "release" && holder.Tier != nil && holder.Tier.Tier == "experiment" {
+				return
+			}
+		}
+	}
+	t.Fatalf("wait omitted the retained release's priority tier: %+v", latest)
 }
 
 // Test queues publish evidence synchronously (admission_wait_mode_test.go), so

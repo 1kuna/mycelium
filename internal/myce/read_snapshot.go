@@ -22,6 +22,7 @@ type readNode struct {
 	record       *readRecord
 	left, right  *readNode
 	height, live int
+	warmed       atomic.Bool // The record and both immutable branches have been decoded.
 }
 type readRecord struct {
 	data      []byte              // The persistence journal already owns immutable encodings.
@@ -441,6 +442,18 @@ type readWarmer struct {
 	idle                      sync.WaitGroup // tests: wait for a warm pass to finish
 }
 
+func warmReadNode(n *readNode) {
+	if n == nil || n.warmed.Load() {
+		return
+	}
+	warmReadNode(n.left)
+	if !n.record.decoded.Load() {
+		_, _ = n.record.decode(n.key)
+	}
+	warmReadNode(n.right)
+	n.warmed.Store(true)
+}
+
 func (w *readWarmer) enable(published *atomic.Pointer[publishedReadIndex]) {
 	w.enabled.Store(true)
 	w.start(published)
@@ -460,11 +473,7 @@ func (w *readWarmer) start(published *atomic.Pointer[publishedReadIndex]) {
 		for {
 			w.pending.Store(false)
 			if index := published.Load(); index != nil {
-				readWalk(index.root, false, func(key string, r *readRecord) {
-					if !r.decoded.Load() {
-						_, _ = r.decode(key)
-					}
-				})
+				warmReadNode(index.root)
 			}
 			w.running.Store(false)
 			if !w.pending.Load() || !w.running.CompareAndSwap(false, true) {
@@ -736,14 +745,11 @@ func (g *readGeneration) liveInputs(ctx context.Context) (state, error) {
 				s.Submissions[name] = value.(*submissionRecord)
 			}
 		})
-		readWalk(g.root, false, func(key string, record *readRecord) {
+		loadCatalog := func(key string, record *readRecord) {
 			if g.liveErr != nil {
 				return
 			}
 			group, name, _ := strings.Cut(key, "/")
-			if group != "work_observations" && group != "extensions" && group != "storage_observations" {
-				return
-			}
 			value, err := record.decode(key)
 			if err != nil {
 				g.liveErr = err
@@ -757,7 +763,10 @@ func (g *readGeneration) liveInputs(ctx context.Context) (state, error) {
 			case "storage_observations":
 				s.StorageObservations[name] = *value.(*StorageObservation)
 			}
-		})
+		}
+		for _, prefix := range liveReadCatalogs {
+			readWalkPrefix(g.root, prefix, loadCatalog)
+		}
 		resolveReadSubmissionJobs(s)
 	})
 	if g.liveErr != nil {
@@ -765,6 +774,8 @@ func (g *readGeneration) liveInputs(ctx context.Context) (state, error) {
 	}
 	return g.nativeCheckInputs(ctx, g.liveState)
 }
+
+var liveReadCatalogs = [...]string{"extensions/", "work_observations/", "storage_observations/"}
 
 // Fetch terminal unqualified checks referenced by current inventory for diagnostics
 // and no-execution proof. Decode only those immutable answers, outside q.mu.
@@ -1172,6 +1183,12 @@ func (g *readGeneration) chargeDecode(ctx context.Context, live bool, selected s
 	if selected != "" {
 		charge("state", readGet(g.root, "state"))
 		charge("jobs/"+selected, readGet(g.root, "jobs/"+selected))
+	} else if live {
+		charge("state", readGet(g.root, "state"))
+		readWalk(g.root, true, charge)
+		for _, prefix := range liveReadCatalogs {
+			readWalkPrefix(g.root, prefix, charge)
+		}
 	} else {
 		readWalk(g.root, false, charge)
 	}

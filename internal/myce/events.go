@@ -26,31 +26,39 @@ type WorkerEvent struct {
 	Kill         bool    `json:"kill"`
 }
 
+func workerStopEventJob(j *Job) bool {
+	return j.StopAt != nil && (j.State == "stopping" || terminal(j.State) && !j.ReleaseConfirmed)
+}
+
 func (a API) workerEvent(w http.ResponseWriter, r *http.Request) {
-	defer a.Queue.trackWorkerPoll(r.Context(), r.PathValue("id"), r.URL.Query().Get("session"))()
+	q := a.Queue
+	machine := r.PathValue("id")
+	query := r.URL.Query()
+	session, after := query.Get("session"), query.Get("after")
+	defer q.trackWorkerPoll(r.Context(), machine, session)()
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
 	for {
-		requestUnlock1 := requestLock(r.Context(), &a.Queue.mu)
-		wake := a.Queue.wake
+		requestUnlock1 := requestLock(r.Context(), &q.mu)
+		wake := q.wake
 		var event WorkerEvent
-		now := a.Queue.clock.Now()
+		now := q.clock.Now()
 		entries := map[attemptKey]WorkerEvent{}
-		add := func(id string, attempt int, session string, deadline time.Time) {
-			if session != r.URL.Query().Get("session") {
+		add := func(id string, attempt int, ownerSession string, deadline time.Time) {
+			if ownerSession != session {
 				return
 			}
 			e := WorkerEvent{Session: session, StopAt: &deadline, Cursor: fmt.Sprintf("%s:%s:%d:%s:%t", session, id, attempt, deadline.Format(time.RFC3339Nano), !now.Before(deadline)), Execution: Execution{ID: id, Attempt: attempt}, GraceSeconds: max(0, deadline.Sub(now).Seconds()), Kill: !now.Before(deadline)}
-			if j := a.Queue.s.Jobs[id]; j != nil {
+			if j := q.s.Jobs[id]; j != nil {
 				e.UserCancel = cancelled(j)
 				for _, copy := range j.Copies {
-					if copy.Machine == r.PathValue("id") && copy.Session == session && copy.Attempt == attempt {
+					if copy.Machine == machine && copy.Session == session && copy.Attempt == attempt {
 						e.PriorityStop = copy.PriorityStop
 					}
 				}
 			}
 			if scarceYieldStop(e.PriorityStop) && !e.UserCancel {
-				j := a.Queue.s.Jobs[id]
+				j := q.s.Jobs[id]
 				if j != nil && yieldMatches(j) && !j.ScarceHostYield.Authorized {
 					return
 				}
@@ -63,13 +71,17 @@ func (a API) workerEvent(w http.ResponseWriter, r *http.Request) {
 			}
 			entries[eventKey(e)] = e
 		}
-		for _, j := range a.Queue.s.Jobs {
-			if j.Machine == r.PathValue("id") && (j.State == "stopping" || terminal(j.State) && !j.ReleaseConfirmed) && j.StopAt != nil {
+		jobs := q.s.Jobs
+		if q.records != nil && !q.simulation && q.records.jobCount == len(jobs) {
+			jobs = q.records.stopEvents
+		}
+		for _, j := range jobs {
+			if j.Machine == machine && workerStopEventJob(j) {
 				add(j.ID, j.Attempt, j.Session, *j.StopAt)
 			}
 		}
-		for _, hold := range a.Queue.s.HostReleases {
-			if hold.Machine == r.PathValue("id") && !hold.Until.IsZero() {
+		for _, hold := range q.s.HostReleases {
+			if hold.Machine == machine && !hold.Until.IsZero() {
 				add(hold.Job, hold.Attempt, hold.Session, hold.Until)
 			}
 		}
@@ -89,7 +101,7 @@ func (a API) workerEvent(w http.ResponseWriter, r *http.Request) {
 			event.Events = events
 		}
 		requestUnlock1()
-		if event.Cursor != "" && event.Cursor != r.URL.Query().Get("after") {
+		if event.Cursor != "" && event.Cursor != after {
 			respond(w, event, nil)
 			return
 		}
@@ -97,7 +109,7 @@ func (a API) workerEvent(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-timer.C:
-			respond(w, WorkerEvent{Cursor: r.URL.Query().Get("after")}, nil)
+			respond(w, WorkerEvent{Cursor: after}, nil)
 			return
 		case <-wake:
 		}

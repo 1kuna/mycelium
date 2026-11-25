@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -197,18 +198,24 @@ func (q *Queue) finishAdmissionWait(c *admissionWaitCapture) {
 	if sameAdmissionWaitInputs(q.admissionWaitLast.Load(), c) {
 		return
 	}
-	source, err := c.index.capture.observationQueue(context.Background(), "", c.index.capture.source.clock.Now())
+	ctx := context.Background()
+	capture := c.index.capture
+	source, err := capture.detachedQueue(ctx, capture.source.clock.Now(), nil, func(g *readGeneration) (state, *queueRecords, error) {
+		s, err := g.liveInputs(ctx)
+		return s, nil, err
+	})
 	if err != nil {
 		return
 	}
 	jobs := make(map[string]*Job, len(source.s.Jobs))
+	previous := make(map[string]*AdmissionWaitEvidence)
 	latest := q.publishedReads.Load()
 	for id, j := range source.s.Jobs {
 		copy := *j
 		// The pending snapshot may predate the preceding builder's evidence
 		// commit. Carry its semantic endpoints and real decisions forward,
 		// without taking any newer scheduling inputs from the live queue.
-		if latest != nil {
+		if latest != nil && latest != c.index && j.State == "queued" {
 			if record := readGet(latest.root, "jobs/"+id); record != nil {
 				if value, err := record.decode("jobs/" + id); err == nil {
 					current := value.(*Job)
@@ -218,9 +225,18 @@ func (q *Queue) finishAdmissionWait(c *admissionWaitCapture) {
 				}
 			}
 		}
+		if j.State == "queued" && copy.AdmissionWait != nil {
+			previous[id] = copy.AdmissionWait
+		}
 		jobs[id] = &copy
 	}
-	source.s.Jobs, source.records = jobs, nil
+	// Planning iterates only current work. Exact pointers from a release or
+	// preparation may still refer to a settled demand or execution.
+	source.observationLive = jobs
+	source.s.Jobs = jobs
+	if err := source.loadAdmissionWaitReferences(ctx, capture.generation); err != nil {
+		return
+	}
 	source.evidenceBytes, source.holdClock = c.bytes, c.clock
 	source.admissionWaitDecisions = c.decisions
 	source.hostMemoryLedgers = c.ledgers
@@ -255,12 +271,9 @@ func (q *Queue) finishAdmissionWait(c *admissionWaitCapture) {
 		if j.State != "queued" || j.AdmissionWait == nil {
 			continue
 		}
-		original := readGet(c.index.root, "jobs/"+id)
-		if original == nil {
-			continue
-		}
-		value, _ := original.decode("jobs/" + id)
-		old := value.(*Job).AdmissionWait
+		// Compare against the evidence this build actually started from. A
+		// coalesced capture can be older than a preceding builder's commit.
+		old := previous[id]
 		next := j.AdmissionWait
 		if old == nil || old.Latest == nil || next.Latest == nil || old.CaptureGaps != next.CaptureGaps ||
 			old.BudgetUnknown != next.BudgetUnknown || old.Dropped != next.Dropped ||
@@ -277,6 +290,43 @@ func (q *Queue) finishAdmissionWait(c *admissionWaitCapture) {
 	if err := q.commitAdmissionWait(c, changes); err != nil {
 		log.Print("event=admission_wait_capture_failed phase=persistence")
 	}
+}
+
+func (q *Queue) loadAdmissionWaitReferences(ctx context.Context, g *readGeneration) error {
+	var retained map[string]*Job
+	load := func(id string) error {
+		if id == "" || q.s.Jobs[id] != nil || retained[id] != nil {
+			return nil
+		}
+		job, err := g.job(ctx, id)
+		if job != nil {
+			if retained == nil {
+				retained = map[string]*Job{}
+			}
+			retained[id] = job
+		}
+		return err
+	}
+	for _, r := range q.s.HostReleases {
+		if err := load(r.Job); err != nil {
+			return err
+		}
+	}
+	for _, r := range q.s.Reservations {
+		if err := load(r.Job); err != nil {
+			return err
+		}
+	}
+	for _, p := range q.s.PreparationPlans {
+		if err := load(p.Demand); err != nil {
+			return err
+		}
+	}
+	if len(retained) > 0 {
+		q.s.Jobs = maps.Clone(q.s.Jobs)
+		maps.Copy(q.s.Jobs, retained)
+	}
+	return nil
 }
 
 func sameAdmissionWaitEpisode(a, b *Job) bool {

@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"time"
 )
 
 var errExtensionUnavailable = errors.New("extension qualification unavailable")
@@ -307,6 +308,35 @@ func extensionWorks(e Extension) []string {
 }
 func LocalExtensionReports(root, platform, fingerprint string, machines ...*Machine) []ExtensionReport {
 	extensions, err := readLocalExtensions(root, true)
+	return localExtensionReports(root, platform, fingerprint, extensions, err, machines...)
+}
+
+func collectWorkerExtensionReports(root string, now time.Time, retention time.Duration, m *Machine) {
+	extensions, err := readLocalExtensions(root, true)
+	if err == nil {
+		removed := pruneUnusedExtensions(root, now, retention, extensions)
+		if len(removed) > 0 {
+			extensions = slices.DeleteFunc(extensions, func(e Extension) bool { return slices.Contains(removed, extensionKey(e)) })
+		}
+	}
+	cpu := *m
+	cpu.GPU, cpu.Device = "cpu", ""
+	cpu.ExtensionFingerprint = m.CPUExtensionFingerprint
+	m.ExtensionReports = localExtensionReports(root, "cpu", cpu.ExtensionFingerprint, extensions, err, &cpu)
+	for i := range m.Devices {
+		d := &m.Devices[i]
+		target := d.machine(*m)
+		d.ExtensionReports = localExtensionReports(root, target.GPU, target.ExtensionFingerprint, extensions, err, &target)
+	}
+	for _, d := range m.Devices {
+		if d.ID == m.Device {
+			m.ExtensionReports = append(m.ExtensionReports, d.ExtensionReports...)
+			m.ExtensionFingerprint = d.ExtensionFingerprint
+		}
+	}
+}
+
+func localExtensionReports(root, platform, fingerprint string, extensions []Extension, err error, machines ...*Machine) []ExtensionReport {
 	out := []ExtensionReport{}
 	if err != nil {
 		reason := extensionLibraryPartialReason
