@@ -38,14 +38,21 @@ func extensionLastUse(root string, e Extension) time.Time {
 }
 
 // Remove registrations unused for the window. A registration whose use lock is
-// held by a preparation or running attempt stays.
-func pruneUnusedExtensions(root string, now time.Time, window time.Duration) (removed []string) {
+// held by a preparation or running attempt stays. A heartbeat can reuse the
+// complete, validated library it just loaded for its reports.
+func pruneUnusedExtensions(root string, now time.Time, window time.Duration, loaded ...[]Extension) (removed []string) {
 	if root == "" || window <= 0 {
 		return nil
 	}
-	extensions, err := LocalExtensions(root)
-	if err != nil {
-		return nil
+	var extensions []Extension
+	if len(loaded) > 0 {
+		extensions = loaded[0]
+	} else {
+		var err error
+		extensions, err = LocalExtensions(root)
+		if err != nil {
+			return nil
+		}
 	}
 	for _, e := range extensions {
 		last := extensionLastUse(root, e)
@@ -63,13 +70,13 @@ func pruneUnusedExtensions(root string, now time.Time, window time.Duration) (re
 		if !ok {
 			continue
 		}
-		err := os.RemoveAll(extensionFolder(root, e))
-		if err == nil {
-			err = os.RemoveAll(cache)
+		libraryErr := os.RemoveAll(extensionFolder(root, e))
+		if libraryErr == nil {
+			removed = append(removed, extensionKey(e))
+			_ = os.RemoveAll(cache)
 		}
 		release()
-		if err == nil {
-			removed = append(removed, extensionKey(e))
+		if libraryErr == nil {
 			_ = os.Remove(filepath.Join(root, "library", e.Name))
 			_ = os.Remove(filepath.Join(root, "cache", e.Name))
 		}

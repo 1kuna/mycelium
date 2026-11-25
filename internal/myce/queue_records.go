@@ -26,6 +26,7 @@ type queueRecords struct {
 	catalogCounts             [4]int
 	machineCount              int
 	removed                   map[string]*Job
+	stopEvents                map[string]*Job // Includes legacy terminal stop receipts.
 	references                map[string]bool
 	referenceAdds             map[string]bool
 	live                      map[string]*Job
@@ -126,6 +127,14 @@ func (q *Queue) indexJob(id string, j *Job) {
 	}
 	q.indexCheckpointExpiry(id, j)
 	q.indexDependency(id, j)
+	if j != nil && workerStopEventJob(j) {
+		if q.records.stopEvents == nil {
+			q.records.stopEvents = make(map[string]*Job)
+		}
+		q.records.stopEvents[id] = j
+	} else {
+		delete(q.records.stopEvents, id)
+	}
 	if j == nil {
 		delete(q.records.statusHistory, id)
 		delete(q.records.live, id)

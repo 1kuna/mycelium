@@ -50,6 +50,22 @@ func TestUnusedExtensionRegistrationExpires(t *testing.T) {
 	if seen["1"] || !seen["2"] || !seen["3"] {
 		t.Fatalf("reported versions %v; want 2 (recently used) and 3 (in use), not 1", seen)
 	}
+	// The heartbeat uses the scan it just pruned. A retired registration must
+	// disappear from the selected device and all other devices in that reply.
+	retired := install("4")
+	old := clock.Now().Add(-DefaultExtensionRetention)
+	touchExtensionUse(root, retired, old)
+	m := Machine{Device: "0", Devices: []MachineDevice{{ID: "0", Platform: "fake"}, {ID: "1", Platform: "fake"}}}
+	collectWorkerExtensionReports(root, clock.Now(), DefaultExtensionRetention, &m)
+	for i, reports := range [][]ExtensionReport{m.ExtensionReports, m.Devices[0].ExtensionReports, m.Devices[1].ExtensionReports} {
+		seen := map[string]bool{}
+		for _, r := range reports {
+			seen[r.Version] = true
+		}
+		if seen["4"] || !seen["2"] || !seen["3"] {
+			t.Fatalf("heartbeat view %d reported versions %v; want only 2 and 3", i, seen)
+		}
+	}
 }
 
 // A registration installed before use markers existed has an unknown last use.

@@ -83,6 +83,25 @@ func TestWorkerEventCarriesPriorityStop(t *testing.T) {
 	if event.ID != j.ID || event.Attempt != 1 || event.Session != m.Session || event.UserCancel || event.PriorityStop == nil || event.PriorityStop.Demand != "deadline-model" || event.PriorityStop.Victim != j.ID {
 		t.Fatalf("event lost exact priority stop: %+v", event)
 	}
+	// Older terminal records can still carry a stop deadline after every copy
+	// reports release. Keep those receipts available to the stop poll.
+	const legacySession = "legacy-session"
+	if err := q.update(func() error {
+		at := q.clock.Now()
+		q.putJob("legacy-stop", &Job{ID: "legacy-stop", Spec: spec("experiment"), State: "failed", Attempt: 1,
+			Machine: m.ID, Session: legacySession, Queued: at, StopAt: &at, Copies: []Copy{{Attempt: 1, ReleaseConfirmed: true}}})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
+	defer cancel()
+	if err := client.Call(ctx, "GET", "/api/workers/"+m.ID+"/events?session="+legacySession, nil, &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.ID != "legacy-stop" || event.Session != legacySession || !event.Kill {
+		t.Fatalf("legacy terminal stop receipt lost: %+v", event)
+	}
 }
 
 type observedEventClock struct {

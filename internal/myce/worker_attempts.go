@@ -1292,21 +1292,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.CapabilityProfile = &profile
 			}
 			if w.ExtensionRoot != "" {
-				pruneUnusedExtensions(w.ExtensionRoot, w.Clock.Now(), w.ExtensionRetention)
-				cpu := m
-				cpu.GPU, cpu.Device = "cpu", ""
-				cpu.ExtensionFingerprint = m.CPUExtensionFingerprint
-				m.ExtensionReports = LocalExtensionReports(w.ExtensionRoot, "cpu", cpu.ExtensionFingerprint, &cpu)
-				for i := range m.Devices {
-					target := m.Devices[i].machine(m)
-					m.Devices[i].ExtensionReports = LocalExtensionReports(w.ExtensionRoot, target.GPU, target.ExtensionFingerprint, &target)
-				}
-				for _, d := range m.Devices {
-					if d.ID == m.Device {
-						m.ExtensionReports = append(m.ExtensionReports, d.ExtensionReports...)
-						m.ExtensionFingerprint = d.ExtensionFingerprint
-					}
-				}
+				collectWorkerExtensionReports(w.ExtensionRoot, w.Clock.Now(), w.ExtensionRetention, &m)
 				w.Machine.ExtensionReports = m.ExtensionReports
 				w.Machine.Devices = slices.Clone(m.Devices)
 			}
