@@ -24,7 +24,7 @@ One shared queue for production, research and future projects. The approved exte
 - **Dedicated machines** offer their GPUs whenever available. **Shared machines** can drain or disable queue admission when another owner needs them; that owner controls its own work and checks release before reopening Mycelium.
 - **Machines that come and go:** running `myce join` adds a machine; stopping the worker removes it. Daily-use participation can wait for owner inactivity, safe heat and external power.
 - All machines are on one local network. Workers use a configured queue address or authenticated joining; discovery finds addresses but does not establish trust. A privately provisioned join credential keeps strangers out.
-- Single Go binary, as in v1. There is no peer network, no leader election and no replicated state. If the queue service restarts, queued and running batch jobs survive in its database file, and workers wait and reconnect. Model calls that were in flight are not replayed and fail; callers must retry them.
+- Single Go binary, as in v1. Until the [shared-queue cutover](design-queue-beyond-one-host.md) (MY-40), there is no peer network, no leader election and no replicated state. If the queue service restarts, queued and running batch jobs survive in its database file, and workers wait and reconnect. Model calls that were in flight are not replayed and fail; callers must retry them.
 
 One mycelium is the cluster; a hypha is one machine, with its CPU, RAM and
 accelerators as components (MY-06).
@@ -34,7 +34,7 @@ accelerators as components (MY-06).
 1. **CPU and GPU compute.** CPU commands and accelerator workloads share the queue. Applications retain file watching, submission and publication.
 2. **The queue owns GPU work.** Apps submit commands or model calls instead of keeping their own GPU processes between jobs. An idle model unloads after its [configured idle interval](services.md#scheduling-draining-and-recovery), or when higher-priority work needs the memory.
 3. **Progress can move.** NAS checkpoints or verified file-store checkpoint generations allow a resumable job to continue on another compatible machine. Outputs must be safe to repeat; attempt-specific results reject stale executions.
-4. **One local network, one queue.** No peer network, leases, leader election or replicated registry.
+4. **One local network, one queue authority.** No peer network or replicated registry. The approved [shared-queue design](design-queue-beyond-one-host.md) (MY-40) moves that authority to a NAS database with a renewable coordinator turn, so any machine can coordinate.
 5. **One machine is one hypha.** A worker owns the machine and selects its components; CPU/RAM capacity is shared once.
 6. **Plain commands.** Software must exist or be built on the worker. Native processes, environments and sidecars are the one runtime; managed Docker containment was retired on 2026-11-12 under [MY-49](DECISIONS.md#my-49), and a request that still asks for it is refused at submission.
 
