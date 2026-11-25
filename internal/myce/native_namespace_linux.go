@@ -88,6 +88,7 @@ func nativeNamespaceMonitorFile(args []string) error {
 type nativeNamespace struct {
 	support                  nativeLinuxSupport
 	pid                      int
+	anchor                   *os.File
 	infoReader, infoWriter   *os.File
 	readyReader, readyWriter *os.File
 }
@@ -143,6 +144,14 @@ func (n *nativeNamespace) close() {
 	if n == nil {
 		return
 	}
+	n.closeHandshake()
+	if n.anchor != nil {
+		n.anchor.Close()
+		n.anchor = nil
+	}
+}
+
+func (n *nativeNamespace) closeHandshake() {
 	if n.infoReader != nil {
 		n.infoReader.Close()
 		n.infoReader = nil
@@ -161,11 +170,11 @@ func (n *nativeNamespace) close() {
 	}
 }
 
-func (n *nativeNamespace) activate(ctx context.Context, gate *os.File) error {
+func (n *nativeNamespace) activate(ctx context.Context, gate *os.File, group int) error {
 	if n == nil || n.support.mode != "namespace" {
 		return nil
 	}
-	defer n.close()
+	defer n.closeHandshake()
 	n.infoWriter.Close()
 	n.infoWriter = nil
 	n.readyWriter.Close()
@@ -204,19 +213,64 @@ func (n *nativeNamespace) activate(ctx context.Context, gate *os.File) error {
 		if r.err != nil {
 			return fmt.Errorf("native namespace anchor handshake: %w", r.err)
 		}
-		if r.pid <= 0 {
-			return errors.New("native namespace anchor returned no child PID")
+		anchor, err := pinNativeNamespaceAnchor(r.pid, group)
+		if err != nil {
+			return err
 		}
 		n.pid = r.pid
+		n.anchor = anchor
 		return nil
 	case <-ctx.Done():
 		return fmt.Errorf("native namespace anchor handshake: %w", ctx.Err())
 	}
 }
 
+func pinNativeNamespaceAnchor(pid, group int) (*os.File, error) {
+	if pid <= 0 || group <= 0 {
+		return nil, fmt.Errorf("%w: missing anchor PID or process group", errNativeNamespaceAnchor)
+	}
+	fd, err := unix.Open(fmt.Sprintf("/proc/%d", pid), unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("%w: open anchor: %v", errNativeNamespaceAnchor, err)
+	}
+	anchor := os.NewFile(uintptr(fd), "native-namespace-anchor")
+	if pgid, err := unix.Getpgid(pid); err != nil || pgid != group {
+		anchor.Close()
+		return nil, fmt.Errorf("%w: anchor process group could not be verified", errNativeNamespaceAnchor)
+	}
+	// If the numeric lookup raced PID reuse, this proc directory still refers
+	// to the original process. Its network namespace is unavailable on exit.
+	if err := checkNativeNamespaceAnchor(fd); err != nil {
+		anchor.Close()
+		return nil, err
+	}
+	return anchor, nil
+}
+
+func checkNativeNamespaceAnchor(fd int) error {
+	var stat unix.Stat_t
+	if err := unix.Fstatat(fd, "ns/net", &stat, 0); err != nil {
+		return fmt.Errorf("%w: inspect anchor: %v", errNativeNamespaceAnchor, err)
+	}
+	return nil
+}
+
+func (n *nativeNamespace) checkAnchor() error {
+	if n == nil || n.support.mode != "namespace" {
+		return nil
+	}
+	if n.anchor == nil {
+		return errNativeNamespaceAnchor
+	}
+	return checkNativeNamespaceAnchor(int(n.anchor.Fd()))
+}
+
 func (n *nativeNamespace) isolate(w Worker, cmd *exec.Cmd, spool, work string, env map[string]string, ports []string, network, main bool) error {
-	if n == nil || n.pid == 0 {
+	if n == nil || n.support.mode != "namespace" {
 		return w.isolateNativeCommand(cmd, spool, work, env, ports, network)
+	}
+	if err := n.checkAnchor(); err != nil {
+		return err
 	}
 	if network {
 		return errors.New("native_network_unavailable: Linux outbound transport is not qualified")
@@ -233,20 +287,92 @@ func (n *nativeNamespace) isolate(w Worker, cmd *exec.Cmd, spool, work string, e
 	if err != nil {
 		return err
 	}
+	enter := n.joinArgs(cmd, args[0], cmd.Dir)
 	if main {
 		// Keep the joined child on the existing launch pipe until its host
 		// identity and pidfd are in worker custody. FD 3/4 stay untouched.
 		args = nativeNamespaceMemberArgs(args)
 		cmd.Args[2] = `read gate || exit 125; exec "$@"`
 	}
-	// nsenter must fork after setns(CLONE_NEWPID), its default behavior. Do not
-	// use --no-fork: that would execute the payload outside the PID namespace.
-	enter := []string{n.support.nsenter, "--target", strconv.Itoa(n.pid), "--user", "--mount", "--pid", "--ipc", "--net", "--root", "--wdns", cmd.Dir, "--preserve-credentials", "--"}
 	if err := nativeWrapPayload(cmd, append(enter, args...)); err != nil {
 		return err
 	}
 	cmd.Env = environmentList(jobBaseEnvironment())
 	return nil
+}
+
+func (n *nativeNamespace) joinArgs(cmd *exec.Cmd, executable, dir string) []string {
+	// Keep launch receipt FDs 3/4 reserved. The exec gate preserves the
+	// anchor descriptor, and the payload helper closes it before authored code.
+	for len(cmd.ExtraFiles) < 2 {
+		cmd.ExtraFiles = append(cmd.ExtraFiles, nil)
+	}
+	fd := 3 + len(cmd.ExtraFiles)
+	cmd.ExtraFiles = append(cmd.ExtraFiles, n.anchor)
+	return []string{executable, "_native-exec", "namespace-join", n.support.nsenter, strconv.Itoa(fd), dir}
+}
+
+func nativeNamespaceJoin(args []string) error {
+	if len(args) < 4 {
+		return errors.New("native namespace join requires a launcher, anchor, directory and command")
+	}
+	enter, dir := args[0], args[2]
+	target, err := strconv.Atoi(args[1])
+	if err != nil || target < 5 {
+		return fmt.Errorf("%w: missing anchor descriptor", errNativeNamespaceAnchor)
+	}
+	// Use only the inherited activation-time proc directory, even across
+	// the exec that enters the owning user namespace.
+	if err := checkNativeNamespaceAnchor(target); err != nil {
+		return err
+	}
+	shared := "ns/net"
+	if dir != "" {
+		shared = "ns/ipc"
+	}
+	fd, err := unix.Openat(target, shared, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("%w: open %s: %v", errNativeNamespaceAnchor, shared, err)
+	}
+	defer unix.Close(fd)
+	owner, err := unix.IoctlRetInt(fd, unix.NS_GET_USERNS)
+	if err != nil {
+		return fmt.Errorf("get native namespace owner: %w", err)
+	}
+	defer unix.Close(owner)
+	var ownerStat, userStat unix.Stat_t
+	if err := unix.Fstat(owner, &ownerStat); err != nil {
+		return err
+	}
+	if err := unix.Fstatat(target, "ns/user", &userStat, 0); err != nil {
+		return fmt.Errorf("%w: inspect anchor user namespace: %v", errNativeNamespaceAnchor, err)
+	}
+	if err := checkNativeNamespaceAnchor(target); err != nil {
+		return err
+	}
+	proc := fmt.Sprintf("/proc/self/fd/%d", target)
+	join := []string{enter, "--preserve-credentials", "--user=" + proc + "/ns/user", "--net=" + proc + "/ns/net"}
+	if dir != "" {
+		// nsenter's PID entry must fork so that the payload becomes a member.
+		// util-linux versions with an optional --wdns argument require '='.
+		join = append(join,
+			"--mount="+proc+"/ns/mnt", "--pid="+proc+"/ns/pid",
+			"--ipc="+proc+"/ns/ipc", "--root="+proc+"/root", "--wdns="+dir)
+	}
+	join = append(join, "--")
+	join = append(join, args[3:]...)
+	if ownerStat.Dev != userStat.Dev || ownerStat.Ino != userStat.Ino {
+		// Bubblewrap's private devpts setup can put the anchor in a nested
+		// user namespace. Enter the owner first so nsenter can join the shared
+		// namespaces before switching to the anchor's final user namespace.
+		ownerFD, err := unix.FcntlInt(uintptr(owner), unix.F_DUPFD, 5)
+		if err != nil {
+			return err
+		}
+		defer unix.Close(ownerFD)
+		join = append([]string{enter, fmt.Sprintf("--user=/proc/self/fd/%d", ownerFD), "--preserve-credentials", "--"}, join...)
+	}
+	return unix.Exec(enter, join, os.Environ())
 }
 
 func nativeNamespaceMemberArgs(args []string) []string {
@@ -259,6 +385,9 @@ func (g *nativeGroup) releaseMember(m *nativeMember, gate *os.File) error {
 	if err := g.ctx.Err(); err != nil {
 		return err
 	}
+	if err := g.namespace.checkAnchor(); err != nil {
+		return err
+	}
 	if _, err := gate.WriteString("start\n"); err != nil {
 		return err
 	}
@@ -267,7 +396,7 @@ func (g *nativeGroup) releaseMember(m *nativeMember, gate *os.File) error {
 	}
 	pid, birth, target, err := nativeNamespaceChildTarget(g.ctx, m.PID, m.Birth)
 	if err != nil {
-		return fmt.Errorf("native namespace member handshake: %w", err)
+		return errors.Join(fmt.Errorf("native namespace member handshake: %w", err), g.namespace.checkAnchor())
 	}
 	m.signalTarget = target
 	m.PayloadPID, m.PayloadBirth = pid, birth
@@ -276,6 +405,9 @@ func (g *nativeGroup) releaseMember(m *nativeMember, gate *os.File) error {
 		return err
 	}
 	if err := g.ctx.Err(); err != nil {
+		return err
+	}
+	if err := g.namespace.checkAnchor(); err != nil {
 		return err
 	}
 	_, err = gate.WriteString("exec\n")
@@ -352,8 +484,11 @@ func nativeNamespaceChildTarget(ctx context.Context, parent int, parentBirth str
 }
 
 func (n *nativeNamespace) probe(ctx context.Context, port string, group int, path string, listener bool) (bool, bool, error) {
-	if n == nil || n.pid == 0 {
+	if n == nil || n.support.mode != "namespace" {
 		return false, false, nil
+	}
+	if err := n.checkAnchor(); err != nil {
+		return true, false, err
 	}
 	executable, err := os.Executable()
 	if err != nil {
@@ -363,15 +498,19 @@ func (n *nativeNamespace) probe(ctx context.Context, port string, group int, pat
 	if listener {
 		mode = "listener"
 	}
-	args := []string{"--target", strconv.Itoa(n.pid), "--user", "--net", "--preserve-credentials", "--", executable, "_native-exec", mode, port, strconv.Itoa(group)}
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, executable)
+	args := append(n.joinArgs(cmd, executable, ""), executable, "_native-exec", mode, port, strconv.Itoa(group))
 	if !listener {
 		args = append(args, path)
 	}
-	ctx, cancel := context.WithTimeout(ctx, time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, n.support.nsenter, args...)
+	cmd.Args = args
 	cmd.Env = environmentList(jobBaseEnvironment())
 	out, err := cmd.Output()
+	if anchorErr := n.checkAnchor(); anchorErr != nil {
+		return true, false, anchorErr
+	}
 	if strings.TrimSpace(string(out)) == "foreign" {
 		return true, false, errNativeForeignListener
 	}

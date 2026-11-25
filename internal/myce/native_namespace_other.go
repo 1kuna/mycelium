@@ -16,8 +16,9 @@ func NativeExec([]string) error { return errors.New("native exec helper requires
 func (w Worker) prepareNativeGroupIsolation(*exec.Cmd, string, string, map[string]string, bool) (*nativeNamespace, error) {
 	return nil, nil
 }
-func (*nativeNamespace) close()                                   {}
-func (*nativeNamespace) activate(context.Context, *os.File) error { return nil }
+func (*nativeNamespace) close()                                        {}
+func (*nativeNamespace) activate(context.Context, *os.File, int) error { return nil }
+func (*nativeNamespace) checkAnchor() error                            { return nil }
 func (*nativeNamespace) isolate(w Worker, cmd *exec.Cmd, spool, work string, env map[string]string, ports []string, network, main bool) error {
 	return w.isolateNativeCommand(cmd, spool, work, env, ports, network)
 }

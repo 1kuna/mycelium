@@ -30,6 +30,9 @@ func NativeExec(args []string) error {
 	if len(args) > 0 && args[0] == "namespace-anchor" {
 		return nativeNamespaceExec(args[1:], os.Environ())
 	}
+	if len(args) > 0 && args[0] == "namespace-join" {
+		return nativeNamespaceJoin(args[1:])
+	}
 	if len(args) > 0 && (args[0] == "probe" || args[0] == "listener") {
 		return nativeNamespaceProbe(args)
 	}

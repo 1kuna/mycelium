@@ -528,7 +528,12 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 		writer.Close()
 		return nil, err
 	}
-	defer g.namespace.close()
+	published := false
+	defer func() {
+		if !published {
+			g.namespace.close()
+		}
+	}()
 	if s != nil {
 		s.state.PID = 0
 		s.state.LaunchPending = true
@@ -621,7 +626,7 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 		return abort(err)
 	}
 	done := g.worker.launchTiming.within(launchSandbox)
-	err = g.namespace.activate(g.ctx, writer)
+	err = g.namespace.activate(g.ctx, writer, cmd.Process.Pid)
 	done()
 	if err != nil {
 		return abort(err)
@@ -651,10 +656,18 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 	if err = g.saveLocked(); err != nil {
 		return abort(err)
 	}
+	published = true
 	return writer, nil
 }
 
 func (g *nativeGroup) cleanupProcesses(writer *os.File, retry bool) error {
+	// stopLocked can check the pinned anchor under p.mu (via memberFailure), so
+	// closing it must hold the same lock to avoid reading a closed or reused fd.
+	defer func() {
+		g.p.mu.Lock()
+		g.namespace.close()
+		g.p.mu.Unlock()
+	}()
 	g.p.mu.Lock()
 	graceful := !g.p.job.Spec.Needs.cpuOnly() && !g.p.userCancel
 	g.p.mu.Unlock()
@@ -964,7 +977,11 @@ func (g *nativeGroup) memberFailure(except ...*nativeMember) error {
 		}
 		select {
 		case <-m.done:
-			return fmt.Errorf("native sidecar %s exited before main: %v", m.Name, m.err)
+			err := fmt.Errorf("native sidecar %s exited before main: %v", m.Name, m.err)
+			if anchorErr := g.namespace.checkAnchor(); anchorErr != nil && g.ctx.Err() == nil {
+				return errors.Join(err, anchorErr)
+			}
+			return err
 		default:
 		}
 	}
@@ -1208,6 +1225,9 @@ func (g *nativeGroup) waitReady(member *nativeMember, port string, readiness Nat
 			return &runtimeError{diagnostic: RuntimeCause{Operation: "readiness", Class: "timeout"}, cause: errors.Join(errors.New("native sidecar HTTP readiness timeout"), ownershipErr)}
 		}
 		if handled, ready, err := g.namespace.probe(g.ctx, port, g.supervisor.Process.Pid, readiness.Path, false); handled {
+			if errors.Is(err, errNativeNamespaceAnchor) {
+				return err
+			}
 			if errors.Is(err, errNativeForeignListener) {
 				return g.recordInfrastructure(foreignPort, member.Name, port, errNativePortCollision)
 			}
