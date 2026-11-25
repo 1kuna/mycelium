@@ -228,8 +228,10 @@ Inspect the parent's `fan_out.results` for accepted keys. Fetch them as
 `KEY/OUTPUT_NAME` with `myce result PARENT --out DIR`, including partial
 results. When `next()` returns `None`, main exits. This also happens at a
 planned stop, when the next attempt resumes at the first unsettled key.
-`success()` or `failure()` returns `False` when a stop left that item
-unsettled; it runs again later. `checkpoint()` returns `False` when a save
+`success()` or `failure()` returns `False` when a stop or an unreachable
+queue left that item unsettled; it runs again later. `success()` also
+returns `False` when the queue rejected the outputs and recorded the item
+as failed; `next()` continues. `checkpoint()` returns `False` when a save
 was not published; keep working.
 Use repeatable item work and, for resumable submissions, publish complete
 file-store generations from the active item's checkpoint directory. A

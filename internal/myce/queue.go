@@ -2632,6 +2632,10 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 		q.requeue(j, cpuIsolationUnavailable+": "+rejectionMessages[cpuIsolationUnavailable], false)
 	} else if !r.Success && j.StartedAt == nil && j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == "resource_limit" {
 		q.requeue(j, "waiting for memory after prelaunch admission changed", false)
+	} else if r.Interrupted && !oomFailure && j.Spec.warmPieces() && warmSettleInterruption(j.ExecutionCause) {
+		// The worker kept the item unsettled after the queue could not accept
+		// it. Requeue the tail under the infrastructure retry budget.
+		q.retry(j, "requeued: "+j.ExecutionCause.String())
 	} else if r.Interrupted && !oomFailure && checkpointStorageInterruption(j.ExecutionCause) {
 		q.requeue(j, "requeued: storage infrastructure interrupted command: "+j.ExecutionCause.String(), false)
 	} else if r.Interrupted && r.PoliteStop {

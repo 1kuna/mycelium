@@ -91,15 +91,18 @@ class WarmPieces:
     def success(self) -> bool:
         """Wait for verification and durable acceptance of declared outputs.
 
-        Returns False when a stop left the item unsettled. The queue reruns it
-        later, and next() then returns None so main can exit.
+        Returns False when the outputs were not accepted. If the queue
+        rejected them, the item is recorded as failed and next() continues.
+        If a stop or an unreachable queue left the item unsettled, the queue
+        reruns it later, and next() then returns None so main can exit.
         """
         return self._settle(b"S")
 
     def failure(self) -> bool:
         """Settle an application error and allow the remaining items to run.
 
-        Returns False when a stop left the item unsettled, as for success().
+        Returns False when a stop or an unreachable queue left the item
+        unsettled, as for success().
         """
         return self._settle(b"F")
 
@@ -111,4 +114,4 @@ class WarmPieces:
         if response.get("end"):
             self._ended = True
             return False
-        return True
+        return not response.get("failed", False)

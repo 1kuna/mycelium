@@ -234,16 +234,16 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 				return tus.HTTPResponse{}, tus.FileInfoChanges{}, errors.New("invalid file upload identity")
 			}
 			if err := s.recordUpload(ref.SHA256, e.Upload.MetaData["purpose"], true, ctx); err != nil {
-				return tus.HTTPResponse{}, tus.FileInfoChanges{}, uploadFailure(ctx, "upload_creation_commit", err)
+				return tus.HTTPResponse{}, tus.FileInfoChanges{}, uploadCallbackError(ctx, uploadFailure(ctx, "upload_creation_commit", err))
 			}
 			if err := ctx.Err(); err != nil {
-				return tus.HTTPResponse{}, tus.FileInfoChanges{}, err
+				return tus.HTTPResponse{}, tus.FileInfoChanges{}, uploadCallbackError(ctx, err)
 			}
 			return tus.HTTPResponse{}, tus.FileInfoChanges{ID: ref.SHA256}, nil
 		},
 		PreFinishResponseCallback: func(e tus.HookEvent) (tus.HTTPResponse, error) {
 			ctx := creationContext(e.Context)
-			return tus.HTTPResponse{}, s.finishUpload(ctx, e.Upload)
+			return tus.HTTPResponse{}, uploadCallbackError(ctx, s.finishUpload(ctx, e.Upload))
 		},
 	})
 	if err != nil {

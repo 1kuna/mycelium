@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -64,6 +65,9 @@ type nativeGroup struct {
 	memberMemory           map[string]*memoryAttempt
 	custody                workerState
 	supervisor             *exec.Cmd
+	// warmUnsettled records that the helper loop ended because the queue
+	// could not accept an item, rather than at completion or a stop.
+	warmUnsettled atomic.Bool
 }
 
 // Only this attempt's payload leaves are shared for metrics. The aggregate
@@ -469,6 +473,12 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, reservation nativeLaunch
 		p.mu.Lock()
 		r = classifyAttemptOutcome(r, attemptCause{PriorityStop: p.priorityStop, memberOutcome: facts, OutOfMemory: r.OutOfMemory || oom != nil && strings.Contains(oom.Error(), "exceeded its ")})
 		p.mu.Unlock()
+		if r.Success && g.warmUnsettled.Load() {
+			// Main exited cleanly at the worker's end of work. Report the
+			// interruption so the queue requeues the unsettled tail.
+			r.Success, r.Interrupted, r.ExecutionCause = false, true, warmSettleCause()
+			r.Error = r.ExecutionCause.String()
+		}
 		r.StoragePeak = w.storageObserver.finish()
 		if r.Success {
 			if e := w.publishExtensionFiles(j, attemptStorageRoot(j, g.dir)); e != nil {

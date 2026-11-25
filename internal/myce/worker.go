@@ -106,7 +106,8 @@ type Worker struct {
 	memoryCeilings          *memoryCeilings
 	sharedExecutionCeilings *memoryCeilings
 	sharedCPUDev            bool
-	devEnvironmentSizing    bool // Dev session: size the environment cache from need (#1540).
+	devEnvironmentSizing    bool          // Dev session: size the environment cache from need (#1540).
+	warmSettleBound         time.Duration // Tests shorten the settle retry bound; zero uses the default.
 	SharedPressureSource    func(context.Context) (SharedHostPressure, error)
 	processMemory           *processMemoryProbe                   // Without cgroups only.
 	cudaMemoryQuery         func(context.Context) ([]byte, error) // Nil queries the driver; tests inject readings.

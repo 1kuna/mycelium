@@ -344,7 +344,8 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 	classes[diskLimitExceeded] = true
 	classes[rssLimitExceeded] = true
 	classes["input_unavailable"], classes["invalid_input"] = true, true
-	classes["control_unreachable"] = c.Operation == "start_authorization" || c.Operation == "start_handoff"
+	classes["control_unreachable"] = c.Operation == "start_authorization" || c.Operation == "start_handoff" || c.Operation == "warm_settle"
+	operations["warm_settle"] = true
 	operations["start_authorization"] = true
 	operations["start_handoff"] = true
 	operations["input_staging"] = true

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -27,7 +28,26 @@ const (
 	// rather than the worker's injected clock.
 	warmFrameTimeout = 5 * time.Second
 	warmReplyLimit   = 4 << 20
+	// A settle keeps retrying transient publication and report errors for
+	// nearly three times the measured 11-second production p95 queue mutex
+	// wait, the same bound as a hinted upload response. Past it the item stays
+	// unsettled and the parent requeues, costing one model load rather than
+	// holding the reservation while the queue cannot accept the item.
+	warmSettleBound = maxHintedUploadResponseWindow
 )
+
+// errWarmSettleUnavailable ends the helper loop with the item unsettled. The
+// attempt then reports an interruption, so the parent requeues its tail.
+var errWarmSettleUnavailable = errors.New("warm item settle unavailable")
+
+// warmSettleCause is the interruption reported for errWarmSettleUnavailable.
+func warmSettleCause() *RuntimeCause {
+	return &RuntimeCause{Operation: "warm_settle", Class: "control_unreachable"}
+}
+
+func warmSettleInterruption(c *RuntimeCause) bool {
+	return c != nil && c.Operation == "warm_settle" && c.Class == "control_unreachable"
+}
 
 type warmPieceItem struct {
 	Key           string            `json:"key"`
@@ -46,6 +66,9 @@ type warmHelperReply struct {
 	// Pending answers a checkpoint the worker could not publish. Main keeps
 	// running; a later checkpoint or the final save can still publish.
 	Pending bool `json:"pending,omitempty"`
+	// Failed answers a success whose outputs the queue rejected. The item
+	// is settled as failed and main continues with the next item.
+	Failed bool `json:"failed,omitempty"`
 }
 
 func newWarmPieceChannel() (*net.UnixConn, *os.File, error) {
@@ -72,9 +95,15 @@ func newWarmPieceChannel() (*net.UnixConn, *os.File, error) {
 	return conn.(*net.UnixConn), child, nil
 }
 
-func (g *nativeGroup) warmCall(ctx context.Context, req warmPieceRequest) (warmPieceReply, error) {
+// The worker, never main, supplies the attempt identity on every request.
+func (g *nativeGroup) warmIdentity(req warmPieceRequest) warmPieceRequest {
 	req.Execution = Execution{ID: g.p.job.ID, Attempt: g.p.job.Attempt}
 	req.Machine, req.Session = g.worker.Machine.ID, g.session
+	return req
+}
+
+func (g *nativeGroup) warmCall(ctx context.Context, req warmPieceRequest) (warmPieceReply, error) {
+	req = g.warmIdentity(req)
 	var reply warmPieceReply
 	err := g.worker.Client.RetryTransient(ctx, func(ctx context.Context, c Client) error {
 		reply = warmPieceReply{}
@@ -162,16 +191,21 @@ func (g *nativeGroup) serveWarmPieces(ctx context.Context, conn *net.UnixConn, j
 			if delivery == nil {
 				return nil
 			}
-			err = g.settleWarmItem(ctx, j, *delivery, *item, op == 'S')
+			response.Failed, err = g.settleWarmItem(ctx, j, *delivery, *item, op == 'S')
 			if err == nil {
 				g.retireWarmItem(j, *delivery, *item)
 				delivery, item = nil, nil
-			} else if errors.Is(err, ErrStale) || stale(err) {
-				// A stop or queue fence decides this item. Keep its files and
-				// checkpoint marker for the final save and attempt retention,
-				// and let main exit cleanly instead of failing the attempt.
+			} else if ctx.Err() == nil {
+				// A stop, queue fence or unavailable queue leaves this item
+				// unsettled. Keep its files and checkpoint marker for the final
+				// save and attempt retention, and let main exit cleanly instead
+				// of failing the attempt. Unavailability marks the attempt so the
+				// queue requeues the tail; a stop or fence already decides it.
+				if errors.Is(err, errWarmSettleUnavailable) {
+					g.warmUnsettled.Store(true)
+				}
 				delivery, item, fenced, err = nil, nil, true, nil
-				response.End = true
+				response.Failed, response.End = false, true
 			}
 		default:
 			return nil
@@ -269,7 +303,75 @@ func (g *nativeGroup) publishWarmCheckpoint(ctx context.Context, j Job, dir stri
 	return true
 }
 
-func (g *nativeGroup) settleWarmItem(ctx context.Context, j Job, d WarmPieceDelivery, item warmPieceItem, success bool) error {
+// warmItemRejected marks a deterministic refusal of this item's outputs.
+type warmItemRejected struct{ error }
+
+func (e warmItemRejected) Unwrap() error { return e.error }
+
+// Output publication is content-addressed and resumes from its confirmation
+// journal, and the queue accepts an identical receipt again, so every
+// transient error in a settle is safe to replay.
+func warmSettleTransient(err error) bool {
+	var rejected warmItemRejected
+	if errors.As(err, &rejected) {
+		return false // Publication judged the outputs themselves invalid.
+	}
+	if retryTransient(err) {
+		return true
+	}
+	var api *HTTPError
+	if !errors.As(err, &api) {
+		return false
+	}
+	switch api.Code {
+	case "file_upload_interrupted", "file_upload_unavailable", "status_unavailable":
+		return api.Status == http.StatusRequestTimeout || api.Status >= 500
+	case "file_upload_offset_mismatch", "file_upload_conflict":
+		return true // A replay rechecks the accepted offset and published blob.
+	}
+	return false
+}
+
+// warmFenced reports the queue's attempt or delivery fence, which a stop,
+// loss or replacement decides. Upload-protocol conflicts are not fences.
+func warmFenced(err error) bool {
+	var api *HTTPError
+	return errors.Is(err, ErrStale) || errors.As(err, &api) && api.Status == http.StatusConflict && (api.Code == "" || api.Code == "request_stale")
+}
+
+// retryWarmSettle paces replays on the client's clock and returns
+// errWarmSettleUnavailable once transient errors outlast warmSettleBound.
+// Each operation makes one pass, so nested client retries cannot extend it.
+func (g *nativeGroup) retryWarmSettle(ctx context.Context, operation func(context.Context) error) error {
+	c := g.worker.Client
+	bound := warmSettleBound
+	if g.worker.warmSettleBound > 0 {
+		bound = g.worker.warmSettleBound
+	}
+	deadline := c.clock().Now().Add(bound)
+	pace := ClientPace{}
+	for {
+		started := c.clock().Now()
+		err := operation(ctx)
+		if err == nil || ctx.Err() != nil || !warmSettleTransient(err) {
+			return err
+		}
+		now := c.clock().Now()
+		if !now.Before(deadline) {
+			return fmt.Errorf("%w: %w", errWarmSettleUnavailable, err)
+		}
+		pace.Observe(now.Sub(started), false)
+		if err := c.pause(ctx, min(pace.Delay(now, time.Time{}, err, c.Jitter), deadline.Sub(now))); err != nil {
+			return err
+		}
+	}
+}
+
+// settleWarmItem returns nil once the queue holds the item's receipt. failed
+// reports a success whose outputs were rejected and settled as a failure. Any
+// other error leaves the item unsettled: a stop or fence (stale), exhausted
+// transient errors or a refused failure report (errWarmSettleUnavailable).
+func (g *nativeGroup) settleWarmItem(ctx context.Context, j Job, d WarmPieceDelivery, item warmPieceItem, success bool) (failed bool, err error) {
 	req := warmPieceRequest{Op: "failure", Key: d.Key, Sequence: d.Sequence}
 	g.p.mu.Lock()
 	// A report that reached this gate before stop delivery can still win
@@ -277,22 +379,44 @@ func (g *nativeGroup) settleWarmItem(ctx context.Context, j Job, d WarmPieceDeli
 	req.BeforeStop = !g.p.stopped && !g.p.killed && !g.p.userCancel
 	g.p.mu.Unlock()
 	if !req.BeforeStop {
-		return ErrStale
+		return false, ErrStale
+	}
+	w := g.worker
+	w.Client = w.Client.WithoutRetries()
+	report := func(ctx context.Context) error {
+		return w.Client.Call(ctx, "POST", "/api/workers/warm-piece", g.warmIdentity(req), &warmPieceReply{})
 	}
 	if success {
 		j.Spec.Run.Workdir = item.OutputDir
 		j.Spec.Files = nil // This delivery directory contains only its own outputs.
-		step, name := "", ""
 		uploadCtx := withFileStoreAttempt(ctx, j)
 		publication := filepath.Join(attemptPublicationRoot(j, g.dir), "warm-"+strconv.Itoa(d.Sequence))
-		refs, _, err := g.worker.publishOutputFilesAt(uploadCtx, j, g.dir, publication, &step, &name)
-		if err != nil {
-			return fmt.Errorf("warm item output publication: %w", err)
+		err = g.retryWarmSettle(ctx, func(context.Context) error {
+			step, name := "", ""
+			refs, terminal, err := w.publishOutputFilesAt(uploadCtx, j, g.dir, publication, &step, &name)
+			if terminal {
+				return warmItemRejected{err}
+			}
+			req.Op, req.OutputRefs = "success", refs
+			return err
+		})
+		if err == nil {
+			err = g.retryWarmSettle(ctx, report)
 		}
-		req.Op, req.OutputRefs = "success", refs
+		if err == nil || ctx.Err() != nil || warmFenced(err) || errors.Is(err, errWarmSettleUnavailable) {
+			return false, err
+		}
+		// The queue or publication refused these outputs. Settle the item as
+		// failed so main continues and the parent reports the failed key.
+		failed, req.Op, req.OutputRefs = true, "failure", nil
 	}
-	_, err := g.warmCall(ctx, req)
-	return err
+	err = g.retryWarmSettle(ctx, report)
+	if err != nil && ctx.Err() == nil && !warmFenced(err) && !errors.Is(err, errWarmSettleUnavailable) {
+		// A refused failure report cannot settle the item. Leave it for the
+		// requeued attempt rather than failing every other item with it.
+		err = fmt.Errorf("%w: %w", errWarmSettleUnavailable, err)
+	}
+	return failed, err
 }
 
 func (g *nativeGroup) retireWarmItem(j Job, delivery WarmPieceDelivery, item warmPieceItem) {

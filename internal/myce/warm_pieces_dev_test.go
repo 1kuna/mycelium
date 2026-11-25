@@ -2,7 +2,9 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -299,11 +301,47 @@ func (tr *warmLossTransport) RoundTrip(req *http.Request) (*http.Response, error
 	return clientTransport.RoundTrip(req)
 }
 
-func TestWarmPiecesDevWorkerLoss(t *testing.T) {
-	d, ctx := startWarmDev(t, 2)
-	c := d.Client()
-	// Occupy the replacement until the warm job starts on the worker whose
-	// transport this test can cut. No mocked launch or result is involved.
+// startWarmFixtureWorker runs a second dev worker whose transport the test
+// controls. configure can adjust the worker before it starts.
+func startWarmFixtureWorker(t *testing.T, d *Dev, transport http.RoundTripper, configure func(*Worker)) Machine {
+	t.Helper()
+	other := cpuMachine("fixture-worker", "fixture-host", "cpu", 2, 8)
+	other.Devices = []MachineDevice{}
+	other.CapabilityProfile.OS, other.CapabilityProfile.Arch = runtime.GOOS, runtime.GOARCH
+	other.CPUBudgetCores = 2
+	workerClient := d.Client()
+	workerClient.HTTP = &http.Client{Transport: transport}
+	w := Worker{EnvironmentLimit: 1 << 30, sharedCPUDev: true, devEnvironmentSizing: true, CPUIsolationProbe: func(context.Context) error { return nil },
+		Machine: other, StateDir: t.TempDir(), Client: workerClient, ModelConfig: d.Queue.models, Clock: d.Queue.clock, Interval: defaultWorkerInterval,
+		HostMemorySource: func(context.Context) (float64, error) { return 8, nil },
+	}
+	if workerDevProcessMemory != nil {
+		w.processMemory = workerDevProcessMemory()
+	}
+	if configure != nil {
+		configure(&w)
+	}
+	workerCtx, stopWorker := context.WithCancel(context.Background())
+	workerDone := make(chan error, 1)
+	go func() { workerDone <- w.Run(workerCtx) }()
+	t.Cleanup(func() {
+		stopWorker()
+		select {
+		case err := <-workerDone:
+			if err != nil {
+				t.Error(err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Error("fixture worker did not finish cleanup")
+		}
+	})
+	return other
+}
+
+// warmBlockDevWorker occupies the dev worker so the warm parent runs on the
+// fixture worker. No mocked launch or result is involved.
+func warmBlockDevWorker(t *testing.T, ctx context.Context, c Client) string {
+	t.Helper()
 	block := cpuSpec(2, .25)
 	block.Run.Command = []string{"sh", "-c", "while :; do sleep 1; done"}
 	block.AllowedMachines = []string{"fake-1"}
@@ -315,35 +353,18 @@ func TestWarmPiecesDevWorkerLoss(t *testing.T) {
 		j, err := c.GetJob(ctx, busy.ID)
 		return err == nil && j.StartedAt != nil
 	})
-	other := cpuMachine("fixture-worker", "fixture-host", "cpu", 2, 8)
-	other.Devices = []MachineDevice{}
-	other.CapabilityProfile.OS, other.CapabilityProfile.Arch = runtime.GOOS, runtime.GOARCH
-	other.CPUBudgetCores = 2
-	workerClient := c
+	return busy.ID
+}
+
+func TestWarmPiecesDevWorkerLoss(t *testing.T) {
+	d, ctx := startWarmDev(t, 2)
+	c := d.Client()
+	// Occupy the replacement until the warm job starts on the worker whose
+	// transport this test can cut.
+	busy := warmBlockDevWorker(t, ctx, c)
 	link := &warmLossTransport{}
-	workerClient.HTTP = &http.Client{Transport: link}
-	w := Worker{EnvironmentLimit: 1 << 30, sharedCPUDev: true, devEnvironmentSizing: true, CPUIsolationProbe: func(context.Context) error { return nil },
-		Machine: other, StateDir: t.TempDir(), Client: workerClient, ModelConfig: d.Queue.models, Clock: d.Queue.clock, Interval: defaultWorkerInterval,
-		HostMemorySource: func(context.Context) (float64, error) { return 8, nil },
-	}
-	if workerDevProcessMemory != nil {
-		w.processMemory = workerDevProcessMemory()
-	}
-	workerCtx, stopWorker := context.WithCancel(context.Background())
-	workerDone := make(chan error, 1)
-	go func() { workerDone <- w.Run(workerCtx) }()
-	t.Cleanup(func() {
-		link.disconnected.Store(false)
-		stopWorker()
-		select {
-		case err := <-workerDone:
-			if err != nil {
-				t.Error(err)
-			}
-		case <-time.After(10 * time.Second):
-			t.Error("fixture worker did not finish cleanup")
-		}
-	})
+	other := startWarmFixtureWorker(t, d, link, nil)
+	t.Cleanup(func() { link.disconnected.Store(false) }) // Runs before the worker stops.
 	s := warmDevSpec(t, ctx, c, "loss")
 	j, err := c.Submit(ctx, s)
 	if err != nil {
@@ -360,10 +381,10 @@ func TestWarmPiecesDevWorkerLoss(t *testing.T) {
 	probeWait(t, ctx, func() bool {
 		return strings.Contains(warmDevLogs(t, ctx, c, j.ID), "checkpoint-accepted")
 	})
-	if _, err := c.Cancel(ctx, busy.ID); err != nil {
+	if _, err := c.Cancel(ctx, busy); err != nil {
 		t.Fatal(err)
 	}
-	if got := awaitTerminal(t, ctx, c, busy.ID); got.State != "cancelled" {
+	if got := awaitTerminal(t, ctx, c, busy); got.State != "cancelled" {
 		t.Fatal(got.State)
 	}
 	if err := d.Queue.SetLossTimeouts(4*time.Second, 4*time.Second, 4*time.Second); err != nil {
@@ -385,6 +406,60 @@ func TestWarmPiecesDevWorkerLoss(t *testing.T) {
 	if strings.Count(logs, "item:a") != 1 {
 		t.Fatalf("settled item was not run exactly once: %s", logs)
 	}
+}
+
+// warmSettleTransport refuses every first-attempt output upload with the
+// queue's retryable storage envelope, as a queue that cannot accept items.
+type warmSettleTransport struct{ refused atomic.Int32 }
+
+func (tr *warmSettleTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var attempt fileStoreAttempt
+	if req.Method == http.MethodPost && strings.HasPrefix(req.URL.Path, "/api/files/uploads/") &&
+		json.Unmarshal([]byte(req.Header.Get("X-Myce-File-Attempt")), &attempt) == nil && attempt.Attempt == 1 {
+		if req.Body != nil {
+			req.Body.Close()
+		}
+		tr.refused.Add(1)
+		header := http.Header{"Content-Type": {"application/json"}, "X-Myce-Error-Code": {"file_upload_unavailable"}}
+		body := `{"code":"file_upload_unavailable","error":"upload storage unavailable"}`
+		return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: header, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	}
+	return clientTransport.RoundTrip(req)
+}
+
+// A queue that stays unable to accept an item ends the warm loop cleanly. The
+// worker reports the interruption and the next attempt settles every item.
+func TestWarmPiecesDevSettleUnavailableRequeues(t *testing.T) {
+	d, ctx := startWarmDev(t, 2)
+	c := d.Client()
+	busy := warmBlockDevWorker(t, ctx, c)
+	t.Cleanup(func() {
+		// Dev shutdown waits for its worker; end the blocker first.
+		if _, err := c.Cancel(context.Background(), busy); err != nil {
+			t.Error(err)
+		}
+	})
+	link := &warmSettleTransport{}
+	// Real pacing retries about once a second; a short bound ends the loop
+	// after a few refusals instead of the production default.
+	other := startWarmFixtureWorker(t, d, link, func(w *Worker) { w.warmSettleBound = 2 * time.Second })
+	j, err := c.Submit(ctx, warmDevSpec(t, ctx, c, "settle"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := awaitTerminal(t, ctx, c, j.ID)
+	if final.State != "succeeded" || final.Attempt != 2 || final.Losses != 0 || final.Machine != other.ID {
+		t.Fatalf("settle recovery state %s, attempt %d, losses %d, machine %s, reason %s", final.State, final.Attempt, final.Losses, final.Machine, final.Reason)
+	}
+	for _, key := range []string{"a", "b", "c"} {
+		if final.FanOut.Results[key].Execution.Attempt != 2 {
+			t.Fatalf("item %s settled by attempt %d", key, final.FanOut.Results[key].Execution.Attempt)
+		}
+	}
+	if link.refused.Load() < 2 {
+		t.Fatalf("first attempt did not retry its upload: %d refusals", link.refused.Load())
+	}
+	warmDevCheckOutput(t, ctx, c, j.ID, "a", "a:3:arg-a:False")
 }
 
 func TestWarmPiecesDevChildWithChannel(t *testing.T) {

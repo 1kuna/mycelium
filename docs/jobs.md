@@ -1473,9 +1473,12 @@ model, then calls `next()` until it returns `None` at completion or a
 planned stop. Main exits when it receives `None`. Each item supplies
 its key, arguments, absolute input paths and an output directory. Write
 each declared output in that directory and call `success()` to verify and
-accept it, or call `failure()` to record an item error and continue. Either
-call returns `False` when a stop left the item unsettled. The queue
-reruns that item later, and the next `next()` returns `None`. The
+accept it, or call `failure()` to record an item error and continue. The
+worker retries a transient upload or report error. Either call returns
+`False` when a stop, or a queue that stayed unreachable, left the item
+unsettled. The queue reruns that item later, and the next `next()` returns
+`None`. `success()` also returns `False` when the queue rejected the
+outputs. That item is recorded as failed and `next()` continues. The
 worker gives the helper descriptor to main. Main may deliberately pass
 it to a descendant acting for the same job. Keep one caller at a time
 on the stream. Sidecars receive no helper descriptor.

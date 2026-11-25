@@ -28,14 +28,14 @@ func assertUploadError(t *testing.T, w *httptest.ResponseRecorder, status int, c
 }
 
 func TestUploadErrorsEnvelope(t *testing.T) {
-	for _, name := range []string{"identity", "id", "missing", "version", "method", "content_type", "offset", "offset_mismatch", "size", "unindexed", "metadata", "integrity", "capacity", "claim", "attempt", "cancel", "freshness", "durability", "purpose", "creation_callback", "publication_callback"} {
+	for _, name := range []string{"identity", "id", "missing", "version", "method", "content_type", "offset", "offset_mismatch", "size", "unindexed", "metadata", "integrity", "capacity", "claim", "attempt", "cancel", "freshness", "durability", "purpose", "creation_callback", "publication_callback", "purpose_interrupted", "purpose_stopping"} {
 		t.Run(name, func(t *testing.T) {
 			_, s := creationStore(t, 8)
 			ref := creationRef("data")
 			ctx := context.Background()
 			r := creationRequest(ctx, ref)
 			status, code := 400, "file_upload_invalid"
-			if name == "content_type" || strings.HasPrefix(name, "offset") || name == "size" || name == "metadata" || name == "integrity" || name == "publication_callback" {
+			if name == "content_type" || strings.HasPrefix(name, "offset") || name == "size" || name == "metadata" || name == "integrity" || strings.HasPrefix(name, "publication") || strings.HasPrefix(name, "purpose_") {
 				w := httptest.NewRecorder()
 				s.serveUpload(w, r)
 				if w.Code != 201 {
@@ -126,6 +126,19 @@ func TestUploadErrorsEnvelope(t *testing.T) {
 			case "publication_callback":
 				s.publishUpload = func(string, ...context.Context) error { return fail() }
 				status, code = 500, "file_upload_unavailable"
+			case "purpose_interrupted":
+				// PR #2104 quick gate: the purpose commit waited on the queue
+				// mutex until the request ended. That is not a server error.
+				interrupted, cancel := context.WithCancel(ctx)
+				r = r.WithContext(interrupted)
+				s.recordUpload = func(string, string, bool, ...context.Context) error {
+					cancel()
+					return interrupted.Err()
+				}
+				status, code = 408, "file_upload_interrupted"
+			case "purpose_stopping":
+				s.recordUpload = func(string, string, bool, ...context.Context) error { return queueStopping() }
+				status, code = 503, "queue_stopping"
 			}
 			w := httptest.NewRecorder()
 			s.serveUpload(w, r)

@@ -51,6 +51,16 @@ class WarmPiecesTests(unittest.TestCase):
                 worker.thread.join(5)
                 self.assertEqual(worker.operations, [b"N", settle[:1].upper().encode()])
 
+    def test_rejected_outputs_fail_item_and_continue(self):
+        second = dict(self.item, key="b")
+        worker, pieces = self.open([{"item": self.item}, {"failed": True}, {"item": second}])
+        pieces.next()
+        self.assertFalse(pieces.success())
+        self.assertEqual(pieces.next().key, "b")
+        pieces.__exit__()
+        worker.thread.join(5)
+        self.assertEqual(worker.operations, [b"N", b"S", b"N"])
+
     def test_pending_checkpoint_keeps_item_active(self):
         worker, pieces = self.open([{"item": self.item}, {"pending": True}, {}, {}])
         pieces.next()
