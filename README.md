@@ -91,10 +91,9 @@ lists supported scope and deferred work.
 
 ## Learn more
 
-- [Start here](docs/START-HERE.md): submit work and follow a job
-- [Reusable project work](docs/adapter.md): one instruction file per project
-- [Jobs](docs/jobs.md) and [files and checkpoints](docs/files.md)
-- [Operations](docs/operations.md): install, add machines, upgrade, recover
+- [Start here](docs/START-HERE.md) to submit and follow a job. Its
+  [docs index](docs/START-HERE.md#where-to-go-next) links to adapters, files,
+  checkpoints and operations.
 - [Design](docs/design-proposal.md) and [decisions](docs/DECISIONS.md)
 - [Agent skill](skills/mycelium/SKILL.md): how a project's agents use Mycelium;
   `myce skill install` installs the copy matching your `myce` release

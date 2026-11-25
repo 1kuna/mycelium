@@ -1074,8 +1074,9 @@ models:                                    # optional
 
 Custom restrictions and limits can be set with `myce policy get --yaml`, then
 `myce policy set FILE --if-revision N`. They are deployment settings stored in
-the queue database. See the [execution gate audit](execution-gates.md) for the
-remaining safety boundaries and consumer quality contracts.
+the queue database. See [deployment policy](operations.md#change-live-project-policy)
+and [production eligibility](scheduling.md#owner-priority-policy) for the
+controls that affect placement.
 
 ## Complete from queue storage, deliver to NAS later (#349)
 

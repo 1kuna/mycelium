@@ -46,7 +46,8 @@ routes:
   start at boot and recover on their own. This route needs a shared network
   drive (NAS) mounted on every machine. The README's
   [setup prompt](../README.md#set-it-up-on-your-computers) has your coding agent
-  follow [operations](operations.md) steps 0 to 7 for you.
+  follow [operations](operations.md) steps 0 to 7. Use
+  [`myce invite`](operations.md#4-add-each-other-machine) to join more machines.
 
 ### Try it in terminals
 
@@ -212,15 +213,10 @@ work and must survive their own restarts, see
 | Model calls, model servers and helper processes | [Services](services.md) |
 | Priority, fairness and placement | [Scheduling](scheduling.md) |
 | Install as services, add machines, upgrade, recover | [Operations](operations.md) |
+| Checkpoint expiry and storage-local purge | [Checkpoint retention](files.md#resumable-jobs) and [purge runbook](operations.md#shared-checkpoint-purge) |
 | What status fields mean | [Status](status.md) |
 | What a job can and can't reach on a machine | [Native isolation](native-isolation.md) |
 | Building and testing Mycelium itself | [Development](development.md) |
-
-Once Mycelium is installed as services, add a machine by running `myce invite`
-on any machine already in the cluster and pasting the one line it prints on the
-new machine. That line downloads a signed `myce` release your hub has approved;
-without one, copy an invitation file instead. [Operations](operations.md#4-add-each-other-machine)
-covers both.
 
 For Python, install `./clients/python` into your project's Python 3.10+
 environment. The optional `[yaml,openai]` extras add YAML job files and
