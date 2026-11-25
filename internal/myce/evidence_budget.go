@@ -316,6 +316,7 @@ func (q *Queue) maintainEvidence(ctx context.Context) error {
 				e.Transitions = nil
 				e.HistoryBytes = 0
 				e.HistoryBudgetBytes = 0
+				shareAdmissionWaitEndpoints(&job)
 			}
 			replacement, _ = json.Marshal(job)
 			if len(replacement) < len(data) {

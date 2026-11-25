@@ -2,7 +2,9 @@ package myce
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"reflect"
 	"slices"
 	"strconv"
 )
@@ -31,6 +33,74 @@ const (
 	minSharedJobValueBytes = 16
 	jobRecordRefBytes      = 12
 )
+
+// Job JSON owns separate copies of the endpoints even when both were encoded
+// as the same reference. Restore sharing after decoding so coverage-only
+// commits leave the persisted reference table intact.
+func shareAdmissionWaitEndpoints(j *Job) {
+	if j == nil || j.AdmissionWait == nil {
+		return
+	}
+	w := j.AdmissionWait
+	if w.First != nil && w.Latest != nil && w.First.At.Equal(w.Latest.At) && reflect.DeepEqual(w.First, w.Latest) {
+		w.Latest = w.First
+	}
+}
+
+// Keep the large admission snapshots in the existing $refs field so that
+// the SQLite field splitter can leave them untouched on gap-only writes.
+// Older readers expand exactly the same admission_wait JSON.
+func marshalWaitingJobRecord(j *Job) ([]byte, error) {
+	type waitBody struct {
+		*AdmissionWaitEvidence
+		First       json.RawMessage `json:"first,omitempty"`
+		Latest      json.RawMessage `json:"latest,omitempty"`
+		Transitions json.RawMessage `json:"transitions,omitempty"`
+	}
+	wait := j.AdmissionWait
+	body := waitBody{AdmissionWaitEvidence: wait}
+	var refs []any
+	reference := func(value any) json.RawMessage {
+		token := strconv.AppendInt(append(json.RawMessage(nil), jobRecordRefToken...), int64(len(refs)), 10)
+		refs = append(refs, value)
+		return append(token, '}')
+	}
+	if wait.First != nil {
+		body.First = reference(wait.First)
+	}
+	if wait.Latest != nil {
+		body.Latest = body.First
+		if wait.Latest != wait.First {
+			body.Latest = reference(wait.Latest)
+		}
+	}
+	if len(wait.Transitions) > 0 {
+		body.Transitions = reference(wait.Transitions)
+	}
+	if len(refs) == 0 {
+		return json.Marshal(j)
+	}
+	data, err := json.Marshal(struct {
+		Refs []any `json:"$refs"`
+		*Job
+		Wait waitBody `json:"admission_wait"`
+	}{refs, j, body})
+	if err != nil {
+		return nil, err
+	}
+	// A user-supplied value may already contain a reference-shaped object.
+	// Honor the same ambiguity guard as slimJobRecord.
+	count := 0
+	for _, token := range []json.RawMessage{body.First, body.Latest, body.Transitions} {
+		if token != nil {
+			count++
+		}
+	}
+	if bytes.Count(data[len(jobRecordRefsPrefix):], jobRecordRefMarker) != count {
+		return json.Marshal(j)
+	}
+	return data, nil
+}
 
 type jsonValueSpan struct {
 	start, end, last int // last: index of the final descendant in pre-order.

@@ -678,17 +678,17 @@ func (q *Queue) updateUploadRequest(ctx context.Context, fn func() error, timing
 }
 
 func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *queueUpdateTiming, cancelWait bool, committed func()) error {
-	return q.updateTransactionMode(ctx, fn, timing, cancelWait, committed, true)
+	return q.updateTransactionMode(ctx, fn, timing, cancelWait, committed, false)
 }
 
-func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timing *queueUpdateTiming, cancelWait bool, committed func(), captureWait bool) error {
+func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timing *queueUpdateTiming, cancelWait bool, committed func(), observationOnly bool) error {
 	if q.stopping.Load() {
 		return queueStopping()
 	}
 	var waitCapture *admissionWaitCapture
 	var idle idleCapture
 	available := true
-	if !q.simulation {
+	if !q.simulation && !observationOnly {
 		if q.checkpointProbe != nil {
 			available = q.checkpointProbe()
 		} else {
@@ -711,7 +711,9 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	}
 	hold := newQueueHoldPhases(q.updateHolds.startClock(q.holdClock), q.holdClock)
 	q.activeHold = &hold
-	q.nasAvailable = available
+	if !observationOnly {
+		q.nasAvailable = available
+	}
 	defer func() {
 		duration := hold.finish()
 		if q.observePersistenceHold != nil {
@@ -786,7 +788,9 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	oldEnvironmentRevision := q.environmentRevision
 	hold.next(holdUsage)
 	q.usageWrites = nil
-	q.accountUsage(q.clock.Now())
+	if !observationOnly {
+		q.accountUsage(q.clock.Now())
+	}
 	hold.next(holdBody)
 	err = fn()
 	tail := q.startBodyPhase("transaction_tail")
@@ -795,24 +799,26 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	if err == nil && q.stopping.Load() {
 		err = queueStopping()
 	}
-	if err == nil {
+	// Admission evidence changes no accounting, scheduling or custody inputs.
+	// Regular queue turns already own this maintenance and its durable writes.
+	if err == nil && !observationOnly {
 		q.settleMaintenance()
 		q.refreshEfficiency()
-	}
-	if err == nil {
 		q.detectHealth()
 	}
 	if err == nil {
 		q.closeChangedAdmissionWaits()
-		q.maintainSubmissions()
-		q.releaseFileUploadMarkers()
+		if !observationOnly {
+			q.maintainSubmissions()
+			q.releaseFileUploadMarkers()
+		}
 		tail.finish()
 		hold.next(holdPersist)
 		if audit != nil {
 			err = audit()
 		}
 		if err == nil {
-			err = q.persistUsage(timing)
+			err = q.persistUsage(timing, observationOnly)
 		}
 	}
 	if err != nil {
@@ -849,11 +855,11 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 		// retained history for callers that may mutate records directly.
 		q.publishReadRuntime()
 		q.commitRecords()
-		if captureWait && q.idleHistory.db != nil {
+		if !observationOnly && q.idleHistory.db != nil {
 			q.idleRevision++
 			idle = idleCapture{index: q.publishedReads.Load(), trace: q.admissionTrace, revision: q.idleRevision}
 		}
-		if captureWait && q.admissionWaitPending {
+		if !observationOnly && q.admissionWaitPending {
 			waitCapture = q.freezeAdmissionWait()
 		}
 		if committed != nil {

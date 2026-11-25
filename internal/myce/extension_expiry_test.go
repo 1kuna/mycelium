@@ -2,7 +2,10 @@ package myce
 
 import (
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -64,6 +67,62 @@ func TestUnusedExtensionRegistrationExpires(t *testing.T) {
 		}
 		if seen["4"] || !seen["2"] || !seen["3"] {
 			t.Fatalf("heartbeat view %d reported versions %v; want only 2 and 3", i, seen)
+		}
+	}
+	// Model a quarantine between target reports from a shared library scan.
+	// An already-written device receipt can survive the registration rename.
+	if err := writeExtensionReports(root, used, "fake", []ExtensionReport{
+		{Name: used.Name, Version: used.Version, Digest: used.Digest, Work: "kind:sample", Device: "1", Platform: "fake", Fingerprint: "fixture", Qualified: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	scanned, err := readLocalExtensions(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := m.Devices[1].machine(m)
+	qualified := func(r ExtensionReport) bool { return r.Version == used.Version && r.Qualified }
+	if reports := localExtensionReports(root, "fake", "fixture", scanned, nil, &target); !slices.ContainsFunc(reports, qualified) {
+		t.Fatalf("missing the live device receipt before quarantine: %+v", reports)
+	}
+	m.ExtensionReports = localExtensionReports(root, "fake", "fixture", scanned, nil, &target)
+	from := extensionFolder(root, used)
+	if err := os.Rename(from, filepath.Join(root, "quarantine")); err != nil {
+		t.Fatal(err)
+	}
+	m.Devices[1].ExtensionReports = localExtensionReports(root, "fake", "fixture", scanned, nil, &target)
+	if !slices.ContainsFunc(m.Devices[1].ExtensionReports, qualified) {
+		t.Fatal("fixture did not retain the later device's qualification receipt")
+	}
+	removeVanishedExtensionReports(root, &m, scanned, os.Lstat)
+	for _, reports := range [][]ExtensionReport{m.ExtensionReports, m.Devices[1].ExtensionReports} {
+		if slices.ContainsFunc(reports, func(r ExtensionReport) bool { return r.Version == used.Version }) ||
+			!slices.ContainsFunc(reports, func(r ExtensionReport) bool { return r.Version == busy.Version }) {
+			t.Fatalf("quarantined registration reported or healthy registration missing: %+v", reports)
+		}
+	}
+}
+
+func TestExtensionHeartbeatKeepsReportsOnTransientStatError(t *testing.T) {
+	root := t.TempDir()
+	installed := Extension{Name: "sample", Version: "1"}
+	missing := Extension{Name: "sample", Version: "2"}
+	report := func(e Extension) ExtensionReport {
+		return ExtensionReport{Name: e.Name, Version: e.Version, Qualified: true}
+	}
+	m := Machine{
+		ExtensionReports: []ExtensionReport{report(installed), report(missing)},
+		Devices:          []MachineDevice{{ExtensionReports: []ExtensionReport{report(installed), report(missing)}}},
+	}
+	removeVanishedExtensionReports(root, &m, []Extension{installed, missing}, func(path string) (os.FileInfo, error) {
+		if path == filepath.Join(extensionFolder(root, installed), "extension.yaml") {
+			return nil, &os.PathError{Op: "lstat", Path: path, Err: syscall.EIO}
+		}
+		return os.Lstat(path)
+	})
+	for _, reports := range [][]ExtensionReport{m.ExtensionReports, m.Devices[0].ExtensionReports} {
+		if len(reports) != 1 || reports[0].Version != installed.Version || !reports[0].Qualified {
+			t.Fatalf("heartbeat should retain the scanned report on I/O error and omit the missing version: %+v", reports)
 		}
 	}
 }
