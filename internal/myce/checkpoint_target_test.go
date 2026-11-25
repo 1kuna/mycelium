@@ -205,7 +205,9 @@ func TestInterruptedPortableResumePreservesCheckpointFloor(t *testing.T) {
 		t.Fatalf("prepared checkpoint generation = %d, want 7 (error: %v)", got, err)
 	}
 
-	// A previous worker can leave an already prepared copy below the floor.
+	// A previous worker can leave an already prepared copy below the floor,
+	// and the source that met the floor can disappear before a later retry.
+	writeSave(t, filepath.Join(third.Checkpoint, "attempt-1"), "6")
 	writeSave(t, dest, "6")
 	if _, err := prepareCheckpoint(*third); err == nil || !strings.Contains(err.Error(), "below accepted generation 7") {
 		t.Fatal("worker reused a prepared checkpoint below the accepted floor", err)

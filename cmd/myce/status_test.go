@@ -216,6 +216,29 @@ func TestStatusUsabilityStructuredFieldsAndInternalLabel(t *testing.T) {
 // Default status for one job has one reason line: its binding reason and next action.
 // Evidence, the isolation note and variant rows once
 // filled a dozen lines and 700 characters per read (gap 3); --history keeps them.
+func TestStatusJobShowsMissingCheckpointFloor(t *testing.T) {
+	job := myce.Job{ID: "checkpoint-job", State: "paused", Pause: &myce.JobPause{
+		CheckpointFloor: &myce.CheckpointFloorMissing{Required: 7, Observed: 6},
+	}}
+	job.Hold = myce.JobHold(&job)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(job)
+	}))
+	defer server.Close()
+	args := []string{"status", "--queue", server.URL, "--token", "test-only"}
+	out := captureJoiningOutput(t, func() error { return run(append(args, job.ID)) })
+	for _, want := range []string{"generation 6 is below accepted generation 7", "myce resume checkpoint-job", "new submission key"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status missing %q: %s", want, out)
+		}
+	}
+	out = captureJoiningOutput(t, func() error { return run(append(args, "--json", job.ID)) })
+	var got myce.Job
+	if err := json.Unmarshal([]byte(out), &got); err != nil || got.Hold == nil || got.Hold.Kind != "checkpoint_floor_missing" {
+		t.Fatalf("JSON status missing checkpoint_floor_missing: %v %s", err, out)
+	}
+}
+
 func TestStatusJobShowsOneReasonLine(t *testing.T) {
 	class := "experiment"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

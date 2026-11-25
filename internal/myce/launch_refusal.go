@@ -28,9 +28,9 @@ var launchRefusalMessages = map[string]string{
 var errAssignmentWithdrawn = errors.New("assignment withdrawn before command started")
 
 // Previous queues strictly decode completion before processing it. On that
-// refusal, omit the new boundary from the wire copy and keep exact release
-// custody, positive prelaunch proof, and the worker's durable diagnostic.
-func withoutLaunchRefusal(in any) (any, bool) {
+// refusal, omit newer evidence from the wire copy and keep exact release
+// custody and the worker's durable diagnostic.
+func legacyCompletionInput(in any) (any, bool) {
 	result, ok := in.(Result)
 	if pointer, isPointer := in.(*Result); isPointer && pointer != nil {
 		result, ok = *pointer, true
@@ -47,8 +47,9 @@ func withoutLaunchRefusal(in any) (any, bool) {
 		return &copy
 	}
 	execution, cleanup := strip(result.ExecutionCause), strip(result.CleanupCause)
-	changed := execution != result.ExecutionCause || cleanup != result.CleanupCause
+	changed := execution != result.ExecutionCause || cleanup != result.CleanupCause || result.CheckpointFloorMissing != nil
 	result.ExecutionCause, result.CleanupCause = execution, cleanup
+	result.CheckpointFloorMissing = nil
 	return result, changed
 }
 

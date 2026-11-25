@@ -72,6 +72,37 @@ func TestLaunchRefusalCompletionWireCompatibility(t *testing.T) {
 	}
 }
 
+func TestMissingCheckpointFloorCompletionWireCompatibility(t *testing.T) {
+	result := Result{
+		Machine: "worker", Session: "session", Execution: Execution{ID: "job", Attempt: 3}, Interrupted: true,
+		CheckpointFloorMissing: &CheckpointFloorMissing{Required: 7, Observed: 6},
+		ExecutionCause: &RuntimeCause{Operation: "launch", Class: launchRefused,
+			Predicate: checkpointFloorMissingHold, PrelaunchRefused: true},
+	}
+	calls := make(chan bool, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The previous queue's strict decoder rejects the newer evidence.
+		var previous struct {
+			Result
+			CheckpointFloorMissing struct{} `json:"checkpoint_floor_missing"`
+		}
+		accepted := decode(w, r, &previous)
+		calls <- accepted
+		if accepted && (previous.Execution != result.Execution || previous.Machine != result.Machine ||
+			previous.Session != result.Session || previous.ReleasePending || !previous.Interrupted) {
+			t.Error("previous queue lost exact refusal and release identity")
+		}
+	}))
+	defer server.Close()
+	client := Client{URL: server.URL}
+	if err := client.Call(t.Context(), http.MethodPost, "/api/workers/complete", &result, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 2 || <-calls || !<-calls || result.CheckpointFloorMissing == nil {
+		t.Fatal("expected one sender-side downgrade preserving the durable result")
+	}
+}
+
 // #379: run the real native preparation path, never start a payload, then
 // acknowledge all three exact refusals and reopen the durable queue.
 func TestAttemptHistoryLaunchRefusal(t *testing.T) {

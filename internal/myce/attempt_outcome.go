@@ -167,6 +167,7 @@ type launchMemoryCeilingError struct {
 }
 
 func startFailureOutcome(owner Result, err error) Result {
+	errors.As(err, &owner.CheckpointFloorMissing)
 	var observed *executionEvidenceError
 	if errors.As(err, &observed) {
 		owner.ExecutionEvidence = safeExecutionEvidence(observed.evidence, owner.Attempt)
@@ -406,6 +407,7 @@ var launchPredicateMessages = map[string]string{
 	"command_start":                         "command could not start; check executable and managed environment",
 	execArgumentLimit:                       "exec argument/environment size limit exceeded; read managed inputs from MYCE_BINDINGS_FILE and move large command arguments or authored environment values into files before submitting with a new key",
 	"launch_authorization":                  "queue launch authorization or assignment was refused; refresh job and host status",
+	checkpointFloorMissingHold:              "required NAS checkpoint generation is missing",
 }
 
 func launchFailurePredicate(kind string, cause error) string {
@@ -414,6 +416,10 @@ func launchFailurePredicate(kind string, cause error) string {
 	}
 	if kind == launchFailed && errors.Is(cause, syscall.E2BIG) {
 		return execArgumentLimit
+	}
+	var floor *CheckpointFloorMissing
+	if kind == launchRefused && errors.As(cause, &floor) {
+		return checkpointFloorMissingHold
 	}
 	var rejection *rejectionError
 	if errors.As(cause, &rejection) && launchPredicateMessages[rejection.code] != "" {

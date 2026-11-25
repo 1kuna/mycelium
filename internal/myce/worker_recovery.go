@@ -922,13 +922,6 @@ func prepareCheckpointCopy(j Job, copyFile func(io.Writer, io.Reader) (int64, er
 	return prepareCheckpointCopySync(j, copyFile, syncWorkerDir)
 }
 
-func requireCheckpointFloor(j Job, generation int64) error {
-	if origin := j.CheckpointTarget; origin != nil && origin.Generation > 0 && generation < origin.Generation {
-		return fmt.Errorf("checkpoint generation %d is below accepted generation %d", generation, origin.Generation)
-	}
-	return nil
-}
-
 func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64, error), syncDir func(string) error) (string, error) {
 	// A relative path would resolve against the process working directory.
 	if !filepath.IsAbs(j.Checkpoint) {
@@ -941,15 +934,17 @@ func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64
 		return "", err
 	}
 	dest := attemptCheckpoint(j)
+	prepared := int64(-1)
 	if _, err := os.Stat(dest); err == nil {
 		progress, err := checkpointProgress(dest)
 		if err != nil {
 			return dest, err
 		}
-		if progress >= 0 {
+		if progress >= 0 && !belowCheckpointFloor(&j, progress) {
 			// A prepared retry must not overwrite its own durable saves.
-			return dest, requireCheckpointFloor(j, progress)
+			return dest, nil
 		}
+		prepared = progress
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
@@ -982,8 +977,8 @@ func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64
 			source = dir
 		}
 	}
-	if err := requireCheckpointFloor(j, newest); err != nil {
-		return "", err
+	if observed := max(newest, prepared); belowCheckpointFloor(&j, observed) {
+		return "", &CheckpointFloorMissing{Required: checkpointResumeFloor(&j), Observed: observed}
 	}
 	// Publish the whole copy together: a manifest must not outrank missing payloads.
 	staging, err := os.MkdirTemp(j.Checkpoint, ".myce-prepare-*.tmp")
@@ -1076,6 +1071,20 @@ func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64
 		}
 		if len(directories) == 0 {
 			err = syncDir(staging)
+		}
+	}
+	if err == nil {
+		if prepared >= 0 {
+			// The attempt has a stale prepared copy. Preserve it under an
+			// ignored name after the replacement has been fully staged.
+			var retired string
+			retired, err = os.MkdirTemp(j.Checkpoint, ".myce-stale-*.tmp")
+			if err == nil {
+				err = renameStoragePath(context.Background(), dest, filepath.Join(retired, "checkpoint"))
+			}
+			if err == nil {
+				err = syncDir(retired)
+			}
 		}
 	}
 	if err == nil {

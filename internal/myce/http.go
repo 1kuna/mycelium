@@ -784,7 +784,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 		wireIn, faultFields := faultWireInput(prepared, c.faultWire != nil && c.faultWire.Load())
 		err := c.callWatched(ctx, method, path, wireIn, out)
 		if method == http.MethodPost && path == "/api/workers/complete" && requestDecodeRefused(err) {
-			if legacy, changed := withoutLaunchRefusal(wireIn); changed {
+			if legacy, changed := legacyCompletionInput(wireIn); changed {
 				wireIn = legacy
 				err = c.callWatched(ctx, method, path, wireIn, out)
 			}

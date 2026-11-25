@@ -474,7 +474,10 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			diagnostics.FileTransferError = inputTransferRecoveringReason
 		}
 		canRelease := record.readyToRelease(s.state.Result, p != nil)
-		if needsCheckpoint(&a.job) {
+		floorRefusal := s.state.Result != nil && s.state.Result.CheckpointFloorMissing != nil
+		if floorRefusal {
+			report.Progress = -1 // A declined launch has no running checkpoint writer.
+		} else if needsCheckpoint(&a.job) {
 			var err error
 			report.Progress, err = s.checkpointReport(w, a.job, recoveryProgress, canRelease)
 			if !errors.Is(err, errCheckpointIOPending) {
@@ -540,7 +543,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					publicationPace = ClientPace{}
 				})
 			}
-			if err == nil && (!stopWithoutPublication || !resultReady) && (a.job.storedFileResults() || resultReady && scarceYieldStop(s.state.Result.PriorityStop)) {
+			if err == nil && !floorRefusal && (!stopWithoutPublication || !resultReady) && (a.job.storedFileResults() || resultReady && scarceYieldStop(s.state.Result.PriorityStop)) {
 				w.storageObserver = s.storageObserver
 				if resultReady {
 					if canRelease && !releaseSent {
