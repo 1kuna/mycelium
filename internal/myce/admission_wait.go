@@ -413,7 +413,11 @@ func (q *Queue) commitAdmissionWait(c *admissionWaitCapture, changes map[string]
 			// A full sample includes retained history from the build's input.
 			// Retention may have pruned it since the builder took that input.
 			if j.AdmissionWait != nil && j.AdmissionWait.Dropped > change.droppedBefore {
+				// Keep the pruned history, but record that this evaluation
+				// went unpublished so its loss is visible and the next build
+				// re-evaluates the job.
 				complete = false
+				q.touchJob(id).AdmissionWait = deferAdmissionWait(j.AdmissionWait, q.clock.Now())
 				continue
 			}
 			q.touchJob(id).AdmissionWait = change.evidence

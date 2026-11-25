@@ -246,7 +246,12 @@ func TestAdmissionWaitGapCommitKeepsPrunedHistory(t *testing.T) {
 	if err := q.commitAdmissionWait(capture, map[string]admissionWaitUpdate{j.ID: {droppedBefore: evidence.Dropped, evidence: fresh}}); err != nil {
 		t.Fatal(err)
 	}
-	if got := admissionWaitAPI(t, q, j.ID); !reflect.DeepEqual(got, pruned) {
+	got := admissionWaitAPI(t, q, j.ID)
+	if got.DeferredAt == nil || got.CaptureGaps != pruned.CaptureGaps+1 {
+		t.Fatalf("skipped stale sample must record a capture gap: gaps=%d deferred=%v", got.CaptureGaps, got.DeferredAt)
+	}
+	got.CaptureGaps, got.DeferredAt = pruned.CaptureGaps, pruned.DeferredAt
+	if !reflect.DeepEqual(got, pruned) {
 		t.Fatal("stale evaluated sample replaced retained evidence")
 	}
 }
