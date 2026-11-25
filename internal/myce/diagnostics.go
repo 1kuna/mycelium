@@ -222,6 +222,8 @@ type runtimeError struct {
 	cause      error
 }
 
+var errNativeNamespaceAnchor = errors.New("native_namespace_anchor_unavailable")
+
 func (e *runtimeError) Error() string { return e.diagnostic.String() }
 func (e *runtimeError) Unwrap() error { return e.cause }
 func runtimeErrorFor(operation string, err error) error {
@@ -258,6 +260,9 @@ func runtimeErrorFor(operation string, err error) error {
 	switch {
 	case errors.Is(err, errWorkerControlUnreachable):
 		c.Class = "control_unreachable"
+	case errors.Is(err, errNativeNamespaceAnchor):
+		c.Operation = "launch"
+		c.Class = errNativeNamespaceAnchor.Error()
 	case (c.Operation == "start_authorization" || c.Operation == "start_handoff") && errors.As(err, &response) && response.Status == 409 && response.Code == "request_stale":
 		c.Class = "admission_changed"
 	case errors.As(err, &rejection) && rejection.code == cpuIsolationUnavailable:
@@ -334,6 +339,7 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 		classes["http_error"] = true
 	}
 	classes["host_unavailable"] = c.Operation == "launch"
+	classes[errNativeNamespaceAnchor.Error()] = c.Operation == "launch"
 	classes[machoLibraryMissing] = true
 	classes[diskLimitExceeded] = true
 	classes[rssLimitExceeded] = true

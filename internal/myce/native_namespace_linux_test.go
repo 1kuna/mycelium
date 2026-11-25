@@ -3,6 +3,7 @@ package myce
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -124,7 +125,7 @@ func TestNativeNamespaceLinuxSharedGroup(t *testing.T) {
 			t.Error("namespace anchor exit:", err)
 		}
 	}()
-	if err := n.activate(ctx, gate); err != nil {
+	if err := n.activate(ctx, gate, anchor.Process.Pid); err != nil {
 		t.Fatal(err)
 	}
 	port, err := bufio.NewReader(stdout).ReadString('\n')
@@ -167,6 +168,94 @@ func TestNativeNamespaceLinuxSharedGroup(t *testing.T) {
 			t.Fatalf("readiness probe failed in the shared network namespace: handled=%t ready=%t err=%v", handled, ready, err)
 		}
 	})
+}
+
+func TestNativeNamespaceLinuxRejectsReplacedAnchor(t *testing.T) {
+	child := exec.CommandContext(t.Context(), "/bin/sleep", "30")
+	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = child.Process.Kill()
+		_ = child.Wait()
+	})
+	group := child.Process.Pid
+	replacement := os.Getpid()
+	if foreign, err := pinNativeNamespaceAnchor(replacement, group); !errors.Is(err, errNativeNamespaceAnchor) {
+		if foreign != nil {
+			foreign.Close()
+		}
+		t.Fatalf("activation accepted a PID from another group: %v", err)
+	}
+	anchor, err := pinNativeNamespaceAnchor(group, group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := &nativeNamespace{
+		support: nativeLinuxSupport{mode: "namespace", nsenter: "/bin/true"},
+		pid:     replacement, // Simulate the numeric target resolving to a different live task.
+		anchor:  anchor,
+	}
+	defer n.close()
+	spool, work := t.TempDir(), t.TempDir()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	newMember := func() *exec.Cmd {
+		cmd := exec.CommandContext(t.Context(), "/bin/sh", "-c", `read gate || exit 125; exec "$@"`, "myce-member-test", "/bin/true")
+		cmd.Dir = work
+		cmd.Stdin = strings.NewReader("start\nexec\n")
+		return cmd
+	}
+	// Prepare both launchers while the original anchor is alive. Both then
+	// cross exec with the stale proc descriptor, after the original is reaped.
+	var joins []*exec.Cmd
+	for _, main := range []bool{false, true} {
+		cmd := newMember()
+		if err := n.isolate(Worker{}, cmd, spool, work, nil, nil, false, main); err != nil {
+			t.Fatal(err)
+		}
+		joins = append(joins, cmd)
+	}
+	probe := exec.CommandContext(t.Context(), executable)
+	probe.Args = append(n.joinArgs(probe, executable, ""), "/bin/true")
+	joins = append(joins, probe)
+	// The same join helper can traverse the live proc directory without
+	// requiring permission to enter a namespace during this fixture.
+	live := exec.CommandContext(t.Context(), executable)
+	live.Args = append(n.joinArgs(live, executable, ""), "/bin/true")
+	live.Env = environmentList(jobBaseEnvironment())
+	if out, err := live.CombinedOutput(); err != nil {
+		t.Fatalf("join helper rejected the live anchor descriptor: %v\n%s", err, out)
+	}
+	if err := child.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Wait(); err == nil {
+		t.Fatal("expected killed anchor to exit with an error")
+	}
+	for _, cmd := range joins {
+		cmd.Env = environmentList(jobBaseEnvironment())
+		out, err := cmd.CombinedOutput()
+		if err == nil || !strings.Contains(string(out), errNativeNamespaceAnchor.Error()) {
+			t.Fatalf("join did not report a typed anchor refusal: %v\n%s", err, out)
+		}
+	}
+	if err := n.isolate(Worker{}, newMember(), spool, work, nil, nil, false, false); !errors.Is(err, errNativeNamespaceAnchor) {
+		t.Fatalf("member preparation did not refuse a dead anchor: %v", err)
+	}
+	for _, listener := range []bool{false, true} {
+		handled, ready, err := n.probe(t.Context(), "1", group, "/ready", listener)
+		if !handled || ready || !errors.Is(err, errNativeNamespaceAnchor) {
+			t.Fatalf("probe did not refuse a dead anchor: handled=%t ready=%t err=%v", handled, ready, err)
+		}
+		diagnostic := safeRuntimeCause(runtimeDiagnostic(err))
+		if diagnostic == nil || diagnostic.Operation != "launch" || diagnostic.Class != errNativeNamespaceAnchor.Error() {
+			t.Fatalf("anchor refusal did not survive runtime diagnostic validation: %+v", diagnostic)
+		}
+	}
 }
 
 func TestNativeNamespaceLinuxCheckpointGraceAndCleanup(t *testing.T) {

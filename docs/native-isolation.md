@@ -437,6 +437,9 @@ network namespace per member would prevent the declared helpers communicating.
 Bubblewrap can nest the anchor's user namespace when setting up private devpts.
 The trusted launcher enters the namespace owner first so it can join the shared
 namespaces before adopting the anchor's final user namespace.
+Activation verifies the anchor belongs to the attempt's process group and retains
+its procfs directory descriptor. Member and readiness launchers use that descriptor
+for entry. An unavailable anchor refuses entry with `native_namespace_anchor_unavailable`.
 
 Only a namespace creation **policy refusal** selects Landlock/seccomp fallback.
 Missing tools, insufficient ABI, failed confinement probe, timeout or other
