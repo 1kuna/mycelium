@@ -754,7 +754,10 @@ func (a API) registerFiles(mux *requestMux) {
 		}
 		respondOperation(w, map[string]bool{"ok": true}, a.Queue.PreflightFileStore(r.Context(), files), "job_spec_invalid")
 	})
-	mux.HandleFunc("/api/files/uploads/", a.Queue.files.serveUpload)
+	mux.HandleFunc("/api/files/uploads/", func(w http.ResponseWriter, r *http.Request) {
+		a.Queue.reportUploadQueueService(w, r)
+		a.Queue.files.serveUpload(w, r)
+	})
 	mux.HandleFunc("GET /api/files/blobs/{hash}", func(w http.ResponseWriter, r *http.Request) { a.Queue.files.serveBlob(w, r, false) })
 	mux.HandleFunc("GET /api/files/blobs/{hash}/metadata", func(w http.ResponseWriter, r *http.Request) { a.Queue.files.serveBlob(w, r, true) })
 	mux.HandleFunc("POST /api/files/checkpoint", a.checkpointHandler)
@@ -809,7 +812,12 @@ type fileTransferConn struct {
 	readProgress, writeProgress transferProgress
 	reading, writing            *atomic.Bool
 	awaiting                    *atomic.Bool
+	queueService                time.Duration // Protected by deadlineMu, scoped to response headers.
 	deadlineMu                  sync.Mutex
+}
+
+func (c *fileTransferConn) responseWindow() time.Duration {
+	return max(c.idle, c.timing.window(), growDuration(growDuration(c.queueService)))
 }
 
 func (c *fileTransferConn) deadline(read bool, bytes int) error {
@@ -821,7 +829,7 @@ func (c *fileTransferConn) deadline(read bool, bytes int) error {
 			if c.reading == nil || c.reading.Load() {
 				idle = max(c.readProgress.window(bytes), c.timing.window())
 			} else if c.awaiting != nil && c.awaiting.Load() {
-				idle = c.timing.window()
+				idle = c.responseWindow()
 			}
 		} else if c.writing == nil || c.writing.Load() {
 			idle = max(c.writeProgress.window(bytes), c.timing.window())
@@ -850,11 +858,26 @@ func (c *fileTransferConn) awaitResponse() {
 	c.awaiting.Store(true)
 	c.deadlineMu.Lock()
 	defer c.deadlineMu.Unlock()
+	c.armResponseDeadline()
+}
+
+func (c *fileTransferConn) noteQueueService(service time.Duration) {
+	c.deadlineMu.Lock()
+	defer c.deadlineMu.Unlock()
+	c.queueService = max(c.queueService, service)
+	// The peer can send its hint before we finish transmitting the body.
+	// WroteRequest will use the saved hint when it arms the deadline.
+	if c.awaiting.Load() {
+		c.armResponseDeadline()
+	}
+}
+
+func (c *fileTransferConn) armResponseDeadline() {
 	clock := c.clock
 	if clock == nil {
 		clock = RealClock{}
 	}
-	c.SetReadDeadline(clock.Now().Add(max(c.idle, c.timing.window())))
+	c.SetReadDeadline(clock.Now().Add(c.responseWindow()))
 }
 
 func (c *fileTransferConn) Read(p []byte) (int, error) {
@@ -871,7 +894,16 @@ func (c *fileTransferConn) Read(p []byte) (int, error) {
 		now := clock.Now()
 		c.readProgress.record(now, now.Sub(started), n, waited)
 	}
-	return n, fileTransferTimeout(err, max(c.idle, c.readProgress.window(len(p)), c.timing.window()))
+	if err != nil {
+		window := max(c.idle, c.readProgress.window(len(p)), c.timing.window())
+		if c.awaiting != nil && c.awaiting.Load() && c.reading != nil && !c.reading.Load() {
+			c.deadlineMu.Lock()
+			window = c.responseWindow()
+			c.deadlineMu.Unlock()
+		}
+		return n, fileTransferTimeout(err, window)
+	}
+	return n, nil
 }
 func (c *fileTransferConn) Write(p []byte) (int, error) {
 	total := 0
@@ -988,7 +1020,20 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 	var verificationReads uint64
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
 		Got1xxResponse: func(code int, header textproto.MIMEHeader) error {
-			if code != http.StatusProcessing || header.Get("X-Myce-Verification-Reads") == "" {
+			if code != http.StatusProcessing {
+				return nil
+			}
+			if raw := header.Get(uploadQueueServiceHeader); raw != "" {
+				service, err := time.ParseDuration(raw)
+				if err != nil || service <= 0 {
+					return errors.New("invalid upload queue service duration")
+				}
+				if conn := progressConn.Load(); conn != nil && conn.timing != nil && conn.idle == 0 {
+					conn.noteQueueService(service)
+				}
+				return nil
+			}
+			if header.Get("X-Myce-Verification-Reads") == "" {
 				return nil
 			}
 			reads, err := strconv.ParseUint(header.Get("X-Myce-Verification-Reads"), 10, 64)
@@ -1023,6 +1068,9 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 		// Four actual-read reports fit inside the learned idle window. This
 		// keeps full-blob verification distinct from a stalled network peer.
 		req.Header.Set("X-Myce-Upload-Progress", (max(c.transferIdle, c.uploadTiming.window()) / 4).String())
+		if c.transferIdle == 0 {
+			req.Header.Set(uploadQueueServiceHeader, "1")
+		}
 	}
 	hc := c.HTTP
 	if hc == nil {

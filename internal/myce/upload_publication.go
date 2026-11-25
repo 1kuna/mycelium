@@ -16,6 +16,35 @@ import (
 )
 
 type uploadDiagnosticKey struct{}
+
+const uploadQueueServiceHeader = "X-Myce-Upload-Queue-Service"
+
+// Before the upload can block on custody or accounting, give this connection
+// the queue's own service measurement. Verification 102s still represent only
+// actual reads. The hint is scoped to this response and the owner can cancel.
+func (q *Queue) reportUploadQueueService(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get(uploadQueueServiceHeader) != "1" || r.Method != http.MethodPost && r.Method != http.MethodPatch {
+		return
+	}
+	period, err := time.ParseDuration(r.Header.Get("X-Myce-Upload-Progress"))
+	if err != nil || period <= 0 {
+		return
+	}
+	// Each check-in takes a turn through the same mutex. Long polls and
+	// unrelated transfers can wait by design, and do not estimate that turn.
+	service := q.requestLatencies.routeP99("POST /api/workers/checkin")
+	if p := q.mu.pressure.Load(); p != nil && q.mu.waiting.Load() > 0 {
+		_, wait, _ := p.measurement()
+		service = max(service, wait)
+	}
+	if service <= period {
+		return // Already covered by the client's current response window.
+	}
+	w.Header().Set(uploadQueueServiceHeader, service.String())
+	w.WriteHeader(http.StatusProcessing)
+	w.Header().Del(uploadQueueServiceHeader)
+}
+
 type uploadDiagnostic struct {
 	hash, operation, failure string
 	length, accepted         int64

@@ -121,6 +121,30 @@ func (l *requestLatencies) record(route string, duration time.Duration) bool {
 	return v.telemetry.admit(duration)
 }
 
+func latencyPercentile(total uint64, counts *[64]uint64, maxima *[64]time.Duration, p float64) time.Duration {
+	if total == 0 {
+		return 0
+	}
+	target := uint64(math.Ceil(p * float64(total)))
+	var count uint64
+	for i, n := range counts {
+		count += n
+		if count >= target {
+			return maxima[i]
+		}
+	}
+	return 0
+}
+
+func (l *requestLatencies) routeP99(route string) time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if v := l.routes[route]; v != nil {
+		return latencyPercentile(v.count, &v.counts, &v.maxima, .99)
+	}
+	return 0
+}
+
 // p99 aggregates every completed route except one (the liveness probe itself),
 // using the same exact per-bin maxima as snapshot.
 func (l *requestLatencies) p99(exclude string) time.Duration {
@@ -139,15 +163,7 @@ func (l *requestLatencies) p99(exclude string) time.Duration {
 		}
 		total += v.count
 	}
-	target := uint64(math.Ceil(.99 * float64(total)))
-	var count uint64
-	for i, n := range counts {
-		count += n
-		if total > 0 && count >= target {
-			return maxima[i]
-		}
-	}
-	return 0
+	return latencyPercentile(total, &counts, &maxima, .99)
 }
 
 func (l *requestLatencies) snapshot() []RequestLatency {
@@ -160,15 +176,7 @@ func (l *requestLatencies) snapshot() []RequestLatency {
 	out := make([]RequestLatency, 0, len(copies))
 	for route, v := range copies {
 		percentile := func(p float64) float64 {
-			target := uint64(math.Ceil(p * float64(v.count)))
-			var count uint64
-			for i, n := range v.counts {
-				count += n
-				if count >= target {
-					return float64(v.maxima[i]) / float64(time.Millisecond)
-				}
-			}
-			return 0
+			return holdMS(latencyPercentile(v.count, &v.counts, &v.maxima, p))
 		}
 		out = append(out, RequestLatency{Route: route, Count: v.count, Samples: int(min(v.count, uint64(math.MaxInt))), P50MS: percentile(.5), P95MS: percentile(.95), P99MS: percentile(.99)})
 	}
