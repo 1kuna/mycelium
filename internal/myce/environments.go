@@ -500,6 +500,24 @@ func (q *Queue) environmentPreparationAvailable(m *Machine) bool {
 	return q.preparationAvailable(m, true)
 }
 
+// Accelerator setup is exclusive across the worker, including custody awaiting
+// exact release after a stop or loss.
+func (q *Queue) acceleratorPreparationHolder(m *Machine) (string, int) {
+	if m.GPU != "cpu" {
+		for _, j := range q.liveJobs() {
+			if j.Machine == m.ID && batchReservesCapacity(j) && !j.Spec.Needs.cpuOnly() {
+				return j.ID, j.Attempt
+			}
+		}
+		for _, r := range q.s.HostReleases {
+			if r.Machine == m.ID && !r.CPUOnly {
+				return r.Job, r.Attempt
+			}
+		}
+	}
+	return "", 0
+}
+
 // A plain environment build installs packages with one core and disk; it never
 // touches the device, so deviceExclusive=false lets it run beside device work.
 // Extension setup may use the device and keeps the exclusion.
@@ -507,13 +525,8 @@ func (q *Queue) preparationAvailable(m *Machine, deviceExclusive bool) bool {
 	if !q.hostLaunchAllowed(m, m.Session) || !m.EnvironmentBuilder || q.preparationStopping(m) || q.s.HostMaintenance[hostID(m)].SharedHost != nil {
 		return false
 	}
-	for _, j := range q.liveJobs() {
-		if deviceExclusive && j.Machine == m.ID && batchReservesCapacity(j) && !j.Spec.Needs.cpuOnly() && m.GPU != "cpu" {
-			return false
-		}
-	}
-	for _, r := range q.s.HostReleases {
-		if deviceExclusive && r.Machine == m.ID && !r.CPUOnly && m.GPU != "cpu" {
+	if deviceExclusive {
+		if job, _ := q.acceleratorPreparationHolder(m); job != "" {
 			return false
 		}
 	}
@@ -528,6 +541,15 @@ func (q *Queue) preparationAvailable(m *Machine, deviceExclusive bool) bool {
 		}
 	}
 	return cpuAllocationFits(m, 1)
+}
+
+func (q *Queue) checkinEnvironmentPlan(m *Machine) []EnvironmentRecipe {
+	for _, target := range q.machineTargets(m) {
+		if plan := q.environmentPlan(target); len(plan) > 0 {
+			return plan
+		}
+	}
+	return nil
 }
 
 func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {

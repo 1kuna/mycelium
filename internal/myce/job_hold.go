@@ -459,6 +459,13 @@ func (q *Queue) nativeCheckProgress(e Extension, work string, m *Machine, resolv
 	next := "wait; nothing to do"
 	if releasedWithoutVerdict {
 		next = "wait for the automatic retry"
+	} else if job, attempt := q.acceleratorPreparationHolder(m); job != "" && attempt > 0 {
+		probe := &Job{Spec: Spec{ExtensionCheck: &ExtensionCheckRequest{Work: work}}, Extensions: []Extension{e}}
+		if !environmentReady(probe, m) {
+			reason = fmt.Sprintf("native qualification on %s needs extension preparation; accelerator attempt %s/%d still holds the worker; no check has been submitted", host, ShortID(job), attempt)
+			source = "worker preparation exclusion and accelerator custody"
+			next = "wait for the accelerator attempt to release"
+		}
 	}
 	return progress(reason, source, next), false, false
 }
