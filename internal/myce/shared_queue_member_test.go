@@ -20,7 +20,10 @@ import (
 	"time"
 )
 
-const proofToken = "disposable-shared-queue-test"
+const (
+	proofToken       = "disposable-shared-queue-test"
+	proofMemberLease = 2400 * time.Millisecond
+)
 
 func proofClock() *devClock {
 	return &devClock{base: &fakeClock{now: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)}}
@@ -46,7 +49,7 @@ func TestSharedQueueProofProcess(t *testing.T) {
 	err = ServeSharedQueueProof(ctx, l, SharedQueueProofConfig{
 		Database: path, Postgres: os.Getenv("MYCE_SHARED_PROOF_POSTGRES"),
 		FileStore: filepath.Join(dir, "files"), Checkpoints: filepath.Join(dir, "checkpoints"), Token: proofToken, Clock: proofClock(),
-		interval: 100 * time.Millisecond, lease: 2400 * time.Millisecond,
+		interval: 100 * time.Millisecond, lease: proofMemberLease,
 		peerTransport: proofRoundTrip(func(r *http.Request) (*http.Response, error) {
 			if _, err := os.Stat(path + ".isolate-peer"); err == nil {
 				return nil, errors.New("proof peer link partition")

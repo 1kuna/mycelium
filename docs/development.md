@@ -89,8 +89,9 @@ process kill and suspension, loss of PostgreSQL, both kinds of network
 partition, and a returning member catching up and starting work alone.
 The commit-reply loss test discards the response to an actual PostgreSQL
 commit and verifies the original operation and row sequence after restart.
-When the required PostgreSQL tools or an unprivileged account are unavailable,
-the tests report a skip.
+A direct Go test reports a skip when the PostgreSQL tools or an unprivileged
+account are unavailable. Quick and full gates fail when selected tests cannot
+start the fixture.
 
 For a manual run, set `MYCE_SHARED_QUEUE_PG_DSN` for a dedicated local database.
 Start each queue with `myce queue --shared-queue-proof`, an explicit loopback
@@ -106,6 +107,21 @@ the current coordinator. During an outage an authenticated
 the retained job's lifecycle fields, with `last_known: true`. An absent job in that
 response has unknown current status. Normal job and wait endpoints require
 authority.
+
+Worker check-ins and stop polls issue proposals. A worker accepts a proposal
+only after recording its receipt under the issuing handover. Launch and
+Started commit under the proposed handover and check exact custody in the
+same decision. An old verification response carries no authority. A receipt
+for an already committed decision remains evidence of that decision.
+
+Coordinator startup and renewal are independent of file-store setup and
+retained-bundle verification. An unavailable backing holds work that needs
+it. Published-blob collection commits a cancellable intent before sealing
+an unlink claim. Publishing a keeper cancels a pending intent. Once sealed,
+the digest stays reserved until the unlink actor reports that it finished,
+including after handover. A crash with an unreported unlink holds only
+that digest. Recovery for ambiguous unlink and interrupted uploads remains
+cutover work.
 
 PostgreSQL stores an ordered versioned row log. Each replica commits the cursor
 with the applied rows. The proof starts from sequence zero or an already bound

@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -42,8 +41,9 @@ type sharedQueueMember struct {
 	sequence  int64 // Member loop only.
 	timeout   time.Duration
 
-	mu     sync.Mutex // Protects local handler admission, never held for I/O.
-	leader *sharedQueueLeader
+	fileSetup sync.Mutex // One outstanding setup even if the mount hangs across turns.
+	mu        sync.Mutex // Protects local handler admission, never held for I/O.
+	leader    *sharedQueueLeader
 }
 
 type sharedQueueLeader struct {
@@ -169,7 +169,7 @@ func (m *sharedQueueMember) bindReplica(ctx context.Context) error {
 func (m *sharedQueueMember) run(ctx context.Context) {
 	tick := time.NewTicker(m.cfg.interval)
 	defer tick.Stop()
-	defer m.retire(true)
+	defer m.retire()
 	for {
 		m.step(ctx)
 		select {
@@ -192,7 +192,7 @@ func (m *sharedQueueMember) step(ctx context.Context) {
 			return
 		}
 		leader.writer.disabled.Store(true)
-		m.retire(false)
+		m.retire()
 		return
 	}
 	t, err := m.current(ctx)
@@ -206,7 +206,7 @@ func (m *sharedQueueMember) step(ctx context.Context) {
 		return
 	}
 	if err := m.promote(ctx, t); err != nil {
-		log.Printf("shared queue promotion failed: %v", err)
+		log.Print("shared queue promotion failed")
 		m.release(t)
 	}
 }
@@ -226,6 +226,9 @@ func (m *sharedQueueMember) pull(ctx context.Context, head int64) error {
 		})
 		cancel()
 		if err != nil {
+			// A fenced writer may have finished applying its last committed
+			// SQLite transaction after the old turn was retired.
+			m.readCursor()
 			return err
 		}
 	}
@@ -255,6 +258,7 @@ func (m *sharedQueueMember) promote(ctx context.Context, turn sharedQueueTurn) e
 	m.mu.Lock()
 	m.leader = l
 	m.mu.Unlock()
+	go m.prepareStorage(tickCtx, q)
 	go func() {
 		defer close(l.tickDone)
 		tick := time.NewTicker(time.Second)
@@ -271,13 +275,77 @@ func (m *sharedQueueMember) promote(ctx context.Context, turn sharedQueueTurn) e
 	return nil
 }
 
+func (m *sharedQueueMember) prepareStorage(ctx context.Context, q *Queue) {
+	retry := time.NewTicker(m.cfg.interval)
+	defer retry.Stop()
+	for ctx.Err() == nil {
+		if m.fileSetup.TryLock() {
+			store := m.prepareStorageOnce(ctx, q)
+			m.fileSetup.Unlock()
+			if store != nil {
+				m.watchStorage(ctx, q, store)
+				return
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-retry.C:
+		}
+	}
+}
+
+func (m *sharedQueueMember) prepareStorageOnce(ctx context.Context, q *Queue) *FileStore {
+	q.mu.RLock()
+	controlFiles := q.controlStorageFiles()
+	q.mu.RUnlock()
+	store, err := q.prepareFileStore(m.cfg.FileStore, 100<<30, 0, controlFiles)
+	if err != nil || ctx.Err() != nil {
+		return nil
+	}
+	q.mu.RLock()
+	refs, err := q.frozenBundleFiles()
+	q.mu.RUnlock()
+	if err != nil || verifyFrozenBundleFiles(ctx, store, refs) != nil {
+		return nil
+	}
+	q.fileLifecycle.Lock()
+	defer q.fileLifecycle.Unlock()
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if ctx.Err() != nil || q.stopping.Load() {
+		return nil
+	}
+	q.files = store
+	q.republishReads()
+	return store
+}
+
+// Health sampling stays independent of both turn renewal and bulk
+// maintenance. A stuck reclaim or delivery cannot hide a backing-store fault.
+func (m *sharedQueueMember) watchStorage(ctx context.Context, q *Queue, store *FileStore) {
+	tick := time.NewTicker(m.cfg.interval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			available, _ := q.healthStoreProbe.runProgress(store.root, func(progress func()) (bool, error) {
+				return checkpointAvailable(store.root, "queue-files", progress), nil
+			})
+			q.sharedWriter.storageFault.Store(!available)
+		}
+	}
+}
+
 func (m *sharedQueueMember) readCursor() {
 	// On failure, a lower in-memory cursor can only cause replay to fail
 	// closed. No successor is installed until it agrees with SQLite.
 	_ = m.replica.QueryRow("SELECT sequence FROM myce_shared_cursor WHERE id=1").Scan(&m.sequence)
 }
 
-func (m *sharedQueueMember) retire(planned bool) {
+func (m *sharedQueueMember) retire() {
 	m.mu.Lock()
 	l := m.leader
 	m.leader = nil
@@ -287,12 +355,16 @@ func (m *sharedQueueMember) retire(planned bool) {
 	}
 	l.queue.BeginShutdown()
 	l.stopTick()
-	<-l.tickDone
-	l.requests.Wait()
-	_ = l.queue.Close()
-	if planned || l.writer.disabled.Load() {
-		m.release(l.writer.turn)
-	}
+	l.writer.disabled.Store(true)
+	// Drop authority before waiting for old file handlers or maintenance.
+	// A kernel-blocked mount must not prevent a new turn on this member.
+	m.release(l.writer.turn)
+	go func() {
+		<-l.tickDone
+		l.requests.Wait()
+		_ = l.queue.Close()
+	}()
+
 	m.readCursor()
 }
 
@@ -313,19 +385,35 @@ func (m *sharedQueueMember) release(turn sharedQueueTurn) {
 }
 
 const (
-	sharedTurnPath     = "/api/shared-queue/turn"
-	sharedReplicaPath  = "/api/shared-queue/status"
-	sharedTurnHeader   = "X-Myce-Shared-Turn"
-	sharedVerifyHeader = "X-Myce-Shared-Turn-Protocol"
-	sharedProxyHeader  = "X-Myce-Shared-Forward"
+	sharedTurnPath        = "/api/shared-queue/turn"
+	sharedReplicaPath     = "/api/shared-queue/status"
+	sharedTurnHeader      = "X-Myce-Shared-Turn"
+	sharedVerifyHeader    = "X-Myce-Shared-Turn-Protocol"
+	sharedReceiptHeader   = "X-Myce-Shared-Control-Receipt"
+	sharedControlProtocol = "2"
+	sharedProxyHeader     = "X-Myce-Shared-Forward"
 )
 
-func sharedWorkerControl(path string) bool {
+type sharedControlReceipt struct {
+	ID       string `json:"receipt"`
+	Handover string `json:"handover"`
+}
+
+type sharedControlHandoverKey struct{}
+
+// A check-in or event poll proposes directives. Launch, start and yield
+// authorize an effect only in the second request, with the proposed turn.
+func sharedWorkerControl(path string) (proposal, mutation bool) {
+	path, _, _ = strings.Cut(path, "?")
 	switch path {
-	case "/api/workers/checkin", "/api/workers/launch", "/api/workers/started", "/api/workers/yield-stop":
-		return true
+	case "/api/workers/checkin":
+		return true, false
+	case "/api/workers/launch", "/api/workers/started", "/api/workers/yield-stop":
+		return false, true
 	}
-	return false
+	id, found := strings.CutPrefix(path, "/api/workers/")
+	worker, events := strings.CutSuffix(id, "/events")
+	return found && events && worker != "", false
 }
 
 func (m *sharedQueueMember) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -348,8 +436,20 @@ func (m *sharedQueueMember) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, queueStopping())
 		return
 	}
-	if sharedWorkerControl(r.URL.Path) && r.Header.Get(sharedVerifyHeader) != "1" {
+	proposal, mutation := sharedWorkerControl(r.URL.Path)
+	confirm := r.Method == http.MethodPost && r.URL.Path == sharedTurnPath
+	if (proposal || mutation || confirm) && r.Header.Get(sharedVerifyHeader) != sharedControlProtocol {
 		respond(w, nil, &HTTPError{Status: http.StatusUpgradeRequired, Code: "worker_protocol_mismatch"})
+		return
+	}
+	number := strconv.FormatInt(turn.number, 10)
+	want := r.Header.Get(sharedTurnHeader)
+	if want != "" && want != number && mutation {
+		respond(w, nil, ErrStale)
+		return
+	}
+	if want != "" && want != number || confirm && want == "" {
+		respond(w, nil, queueStopping())
 		return
 	}
 	if turn.owner != m.owner {
@@ -375,15 +475,45 @@ func (m *sharedQueueMember) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer l.requests.Done()
 	if r.Method == http.MethodGet && r.URL.Path == sharedTurnPath {
-		if r.URL.Query().Get("handover") != strconv.FormatInt(turn.number, 10) {
+		// The retired verification protocol can never authorize an effect.
+		respond(w, nil, queueStopping())
+		return
+	}
+	if confirm {
+		receipt := r.Header.Get(sharedReceiptHeader)
+		if len(receipt) != 32 {
 			respond(w, nil, queueStopping())
 			return
 		}
+		call, cancel := context.WithTimeout(r.Context(), m.timeout)
+		err := m.authority.acceptControl(call, turn, receipt)
+		cancel()
+		if err != nil {
+			respond(w, nil, queueStopping())
+			return
+		}
+		respond(w, sharedControlReceipt{ID: receipt, Handover: number}, nil)
+		return
+	}
+	if proposal || mutation {
+		w.Header().Set(sharedTurnHeader, number)
+	}
+	if mutation && want == "" {
+		// This reply carries no authorization, even if delayed past a handover.
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if sharedWorkerControl(r.URL.Path) {
-		w.Header().Set(sharedTurnHeader, strconv.FormatInt(turn.number, 10))
+	if proposal {
+		w.Header().Set(sharedReceiptHeader, ID())
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/files/") && r.URL.Path != "/api/files/config" {
+		l.queue.mu.RLock()
+		ready := l.queue.files != nil && !l.writer.storageFault.Load()
+		l.queue.mu.RUnlock()
+		if !ready {
+			respond(w, nil, queueStopping())
+			return
+		}
 	}
 	l.api.ServeHTTP(w, r)
 }
@@ -446,17 +576,4 @@ func (m *sharedQueueMember) serveReplica(w http.ResponseWriter, r *http.Request)
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	respond(w, out, nil)
-}
-
-func (c Client) verifySharedTurn(ctx context.Context, response *http.Response) error {
-	turn := response.Header.Get(sharedTurnHeader)
-	if _, err := strconv.ParseUint(turn, 10, 63); err != nil {
-		return queueStopping()
-	}
-	// Finish the previous response before verifying. This also reuses the
-	// existing authenticated local connection in the usual keep-alive case.
-	if _, err := io.Copy(io.Discard, response.Body); err != nil {
-		return err
-	}
-	return c.callOnce(ctx, http.MethodGet, sharedTurnPath+"?handover="+turn, nil, nil)
 }

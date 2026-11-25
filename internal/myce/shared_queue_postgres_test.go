@@ -22,15 +22,23 @@ type proofPostgres struct {
 	running   bool
 }
 
+func proofPostgresUnavailable(t *testing.T, reason string) {
+	t.Helper()
+	if os.Getenv("MYCE_GATE_REQUIRE_POSTGRES") == "1" {
+		t.Fatal(reason)
+	}
+	t.Skip(reason)
+}
+
 func startProofPostgres(t *testing.T) *proofPostgres {
 	t.Helper()
 	initdb, initErr := exec.LookPath("initdb")
 	pgCtl, ctlErr := exec.LookPath("pg_ctl")
 	if initErr != nil || ctlErr != nil {
-		t.Skip("shared queue proof requires PostgreSQL initdb and pg_ctl on PATH")
+		proofPostgresUnavailable(t, "shared queue proof requires PostgreSQL initdb and pg_ctl on PATH")
 	}
 	if os.Geteuid() == 0 {
-		t.Skip("initdb requires an unprivileged OS user")
+		proofPostgresUnavailable(t, "initdb requires an unprivileged OS user")
 	}
 	// Darwin's test TMPDIR can exceed the UNIX socket path limit.
 	root, err := os.MkdirTemp("/tmp", "myce-pg-")
@@ -236,5 +244,18 @@ func TestSharedQueueRowsReplayLostCommitReply(t *testing.T) {
 		return nil
 	}); err != nil || versions.Len() != 64 {
 		t.Fatalf("stable operations length=%d error=%v", versions.Len(), err)
+	}
+}
+
+func TestSharedQueuePostgresGateFailsWithoutFixture(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("MYCE_GATE_REQUIRE_POSTGRES", "1")
+	cmd := exec.CommandContext(t.Context(), os.Args[0],
+		"-test.run=^TestSharedQueuePostgresExpiryIsCheckedAfterLock$")
+	out, err := cmd.CombinedOutput()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 ||
+		!strings.Contains(string(out), "shared queue proof requires PostgreSQL initdb and pg_ctl on PATH") {
+		t.Fatalf("missing tools did not fail the selected PostgreSQL proof: %v\n%s", err, out)
 	}
 }

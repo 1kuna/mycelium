@@ -757,8 +757,8 @@ func (q *Queue) Run(ctx context.Context) error {
 var clientTransport = &http.Transport{Proxy: http.ProxyFromEnvironment}
 
 type Client struct {
-	// SharedQueueProof verifies a worker control reply through its local
-	// member before handing it to launch or stop code.
+	// SharedQueueProof requires durable acceptance of worker control decisions
+	// through the worker's local member.
 	SharedQueueProof bool
 	publication      *publicationProgress
 	publicationWire  *atomic.Bool
@@ -858,6 +858,16 @@ func requestDecodeRefused(err error) bool {
 var replaySafePost = map[string]bool{"/api/resolve": true, "/api/files/preflight": true, "/api/extensions": true}
 
 func (c Client) callOnce(ctx context.Context, method, path string, in, out any) error {
+	var handover string
+	if _, mutation := sharedWorkerControl(path); c.SharedQueueProof && mutation {
+		if selected, _ := ctx.Value(sharedControlHandoverKey{}).(*string); selected != nil {
+			handover = *selected
+		}
+	}
+	return c.callOnceShared(ctx, method, path, in, out, handover, "")
+}
+
+func (c Client) callOnceShared(ctx context.Context, method, path string, in, out any, handover, receipt string) error {
 	checkin, workerCheckin := in.(Checkin)
 	workerCheckin = workerCheckin && path == "/api/workers/checkin"
 	if workerCheckin && checkin.Machine.EphemeralRefusal != "" {
@@ -901,9 +911,16 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	if workerProtocolEndpoint(path) {
 		req.Header.Set("X-Myce-Start-Gate", startGateProtocol)
 	}
-	verifyTurn := c.SharedQueueProof && sharedWorkerControl(path)
-	if verifyTurn {
-		req.Header.Set(sharedVerifyHeader, "1")
+	proposal, mutation := sharedWorkerControl(path)
+	proposal, mutation = c.SharedQueueProof && proposal, c.SharedQueueProof && mutation
+	if proposal || mutation || receipt != "" {
+		req.Header.Set(sharedVerifyHeader, sharedControlProtocol)
+	}
+	if handover != "" {
+		req.Header.Set(sharedTurnHeader, handover)
+	}
+	if receipt != "" {
+		req.Header.Set(sharedReceiptHeader, receipt)
 	}
 	hc := c.HTTP
 	if hc == nil {
@@ -914,13 +931,14 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 		return err
 	}
 	defer res.Body.Close()
-	if c.stagingWire != nil && workerProtocolEndpoint(path) {
+	advertisesWorkerProtocol := workerProtocolEndpoint(path) && !(mutation && handover == "")
+	if c.stagingWire != nil && advertisesWorkerProtocol {
 		c.stagingWire.Store(res.Header.Get(stagingPhasesHeader) == stagingPhasesProtocol)
 	}
-	if c.launchTimingWire != nil && workerProtocolEndpoint(path) {
+	if c.launchTimingWire != nil && advertisesWorkerProtocol {
 		c.launchTimingWire.Store(res.Header.Get(launchTimingsHeader) == launchTimingsWire)
 	}
-	if c.faultWire != nil && workerProtocolEndpoint(path) {
+	if c.faultWire != nil && advertisesWorkerProtocol {
 		c.faultWire.Store(res.Header.Get(faultEvidenceHeader) == faultEvidenceProtocol)
 	}
 	if res.StatusCode >= 300 {
@@ -950,38 +968,74 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 		}
 		return e
 	}
-	if verifyTurn && res.Header.Get(sharedTurnHeader) == "" {
-		return queueStopping()
+	turn := res.Header.Get(sharedTurnHeader)
+	if proposal || mutation {
+		if number, err := strconv.ParseUint(turn, 10, 63); err != nil || number == 0 {
+			return queueStopping()
+		}
+	}
+	if mutation {
+		if handover == "" {
+			if res.StatusCode != http.StatusNoContent {
+				return queueStopping()
+			}
+			if selected, _ := ctx.Value(sharedControlHandoverKey{}).(*string); selected != nil {
+				*selected = turn
+			}
+			return c.callOnceShared(ctx, method, path, in, out, turn, "")
+		}
+		if turn != handover || res.StatusCode == http.StatusNoContent {
+			return queueStopping()
+		}
+	}
+	if proposal {
+		id := res.Header.Get(sharedReceiptHeader)
+		if id == "" || out == nil {
+			// Discard-only callers do not act on a directive.
+			if out != nil {
+				return queueStopping()
+			}
+			_, err = io.Copy(io.Discard, res.Body)
+			return err
+		}
+		dest := reflect.ValueOf(out)
+		if dest.Kind() != reflect.Pointer || dest.IsNil() {
+			return errors.New("shared queue control requires a response pointer")
+		}
+		next := reflect.New(dest.Elem().Type())
+		if err := json.NewDecoder(res.Body).Decode(next.Interface()); err != nil {
+			return err
+		}
+		if _, err := io.Copy(io.Discard, res.Body); err != nil {
+			return err
+		}
+		// Exposing the decoded proposal requires a durable acceptance under
+		// its original turn. A delayed proposal cannot spend a newer turn.
+		var accepted sharedControlReceipt
+		if err := c.callOnceShared(ctx, http.MethodPost, sharedTurnPath, nil, &accepted, turn, id); err != nil {
+			return err
+		}
+		if accepted.ID != id || accepted.Handover != turn {
+			return queueStopping()
+		}
+		dest.Elem().Set(next.Elem())
+		return nil
 	}
 	if out != nil {
 		if stream, ok := out.(io.Writer); ok {
 			return copyJSONDocument(stream, res.Body)
 		}
-		// A truncated reply must not leave fields that leak into the retry's
-		// complete reply when the replacement omits them.
+		// Keep a truncated reply from contaminating a retry's destination.
 		dest := reflect.ValueOf(out)
 		if dest.Kind() == reflect.Pointer && !dest.IsNil() {
 			next := reflect.New(dest.Elem().Type())
 			if err := json.NewDecoder(res.Body).Decode(next.Interface()); err != nil {
 				return err
 			}
-			if verifyTurn {
-				if err := c.verifySharedTurn(ctx, res); err != nil {
-					return err
-				}
-			}
 			dest.Elem().Set(next.Elem())
 			return nil
 		}
-		if !verifyTurn {
-			return json.NewDecoder(res.Body).Decode(out)
-		}
-		if err := json.NewDecoder(res.Body).Decode(out); err != nil {
-			return err
-		}
-	}
-	if verifyTurn {
-		return c.verifySharedTurn(ctx, res)
+		return json.NewDecoder(res.Body).Decode(out)
 	}
 	_, err = io.Copy(io.Discard, res.Body)
 	return err

@@ -77,6 +77,9 @@ type state struct {
 	BundleUploads map[string]time.Time `json:"bundle_uploads,omitempty"`
 	// Expired blob cleanup survives removal of its job/key answer, deduplicated by hash.
 	RetiredJobFiles map[string]bool `json:"retired_job_files,omitempty"`
+	// Shared-only. An empty claim is a cancellable intent. A nonempty
+	// claim blocks a new keeper until its one unlink actor has finished.
+	SharedBlobReclaims map[string]string `json:"shared_blob_reclaims,omitempty"`
 
 	WorkObservations     map[string]WorkObservation `json:"work_observations,omitempty"`
 	EnrollmentRelease    *EnrollmentRelease         `json:"enrollment_release,omitempty"`
@@ -485,12 +488,18 @@ func openQueue(path, root string, clock Clock, shared *sharedQueueWriter, lock *
 	if fileRoot == "" {
 		fileRoot = path + ".files"
 	}
-	if err = q.ConfigureFileStore(fileRoot, fileLimit, fileCheckpoints); err == nil {
-		err = q.verifyBundleFiles()
-	}
-	if err != nil {
-		db.Close()
-		return nil, err
+	if shared != nil {
+		// Shared members publish storage only after an independent setup and
+		// verification pass. Checkpoint mode stays fixed from startup.
+		q.fileCheckpoints = fileCheckpoints
+	} else {
+		if err = q.ConfigureFileStore(fileRoot, fileLimit, fileCheckpoints); err == nil {
+			err = q.verifyBundleFiles()
+		}
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	q.traceStartup("load_frozen_bundles")
 	q.unreported = map[string]bool{}
@@ -629,7 +638,20 @@ func (q *Queue) machineLossTimeout(id string) time.Duration {
 
 // Simulated workers have an always-available pretend NAS; production still probes it.
 func (q *Queue) checkpointsAvailable() bool { return q.simulation || q.nasAvailable }
+
+// Caller holds q.mu. A plain job can use authority during a file-store
+// outage. Jobs depending on bulk custody wait before the first payload start.
+func (q *Queue) sharedFileHold(j *Job) bool {
+	return q.sharedWriter != nil && (q.files == nil || q.sharedWriter.storageFault.Load()) &&
+		(needsCheckpoint(j) || j.Spec.ephemeral() || j.Spec.OutputDelivery == asyncNAS ||
+			len(j.Spec.Files)+len(j.Spec.SharedInputs)+len(j.Spec.ModelSnapshots) != 0 || j.Spec.extensionJob() ||
+			j.storedFileResults() && len(j.Spec.Outputs) != 0)
+}
+
 func (q *Queue) checkpointReady(j *Job, m *Machine) bool {
+	if q.sharedFileHold(j) {
+		return false
+	}
 	if j.Spec.localFirst() {
 		return contains(m.Capabilities, localFirstProtocol)
 	}
@@ -737,7 +759,7 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	var waitCapture *admissionWaitCapture
 	var idle idleCapture
 	available := true
-	if !q.simulation && !observationOnly {
+	if !q.simulation && !observationOnly && q.sharedWriter == nil {
 		if q.checkpointProbe != nil {
 			available = q.checkpointProbe()
 		} else {
@@ -860,10 +882,11 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 		if !observationOnly {
 			q.maintainSubmissions()
 			q.releaseFileUploadMarkers()
+			err = q.reconcileSharedBlobReferences()
 		}
 		tail.finish()
 		hold.next(holdPersist)
-		if audit != nil {
+		if err == nil && audit != nil {
 			err = audit()
 		}
 		if err == nil {
@@ -1672,7 +1695,9 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 	files := q.files
 	requestUnlock1()
 	fileAvailable := true
-	if !q.simulation && files != nil {
+	if q.sharedWriter != nil {
+		fileAvailable = files != nil && !q.sharedWriter.storageFault.Load()
+	} else if !q.simulation && files != nil {
 		fileAvailable, _ = q.healthStoreProbe.runProgress(files.root, func(progress func()) (bool, error) {
 			return checkpointAvailable(files.root, "queue-files", progress), nil
 		})
@@ -1695,6 +1720,9 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 	q.publishEfficiencyDiagnostics(diagnostics)
 	evidenceErr := q.maintainEvidence(requestCtx)
 	q.flushIdleEvidence(requestCtx)
+	if q.sharedWriter != nil && !fileAvailable {
+		return errors.Join(evidenceErr, q.pruneBatchLogs(requestCtx), q.pruneJobHistory(requestCtx))
+	}
 	return errors.Join(evidenceErr, q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx))
 }
 func (q *Queue) CheckinKeyed(c Checkin) (Reply, error) {

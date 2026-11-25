@@ -52,6 +52,12 @@ func (s *workerControlLatency) observe(path string, elapsed time.Duration) time.
 func (w Worker) controlHandshake(path string, in, out any) (time.Time, error) {
 	ctx := w.launchContext()
 	c := w.Client
+	if c.SharedQueueProof {
+		// Retry a lost reply with the same proposed handover. A successor
+		// cannot silently authorize a launch the worker queued for an old turn.
+		var handover string
+		ctx = context.WithValue(ctx, sharedControlHandoverKey{}, &handover)
+	}
 	if w.Clock != nil {
 		c.Clock = w.Clock
 	}

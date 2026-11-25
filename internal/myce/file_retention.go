@@ -653,6 +653,11 @@ func (q *Queue) expiredBlob(hash string, requestContexts ...context.Context) boo
 func (q *Queue) reclaimJobFilesContext(requestContexts ...context.Context) error {
 	requestCtx := requestContext(requestContexts)
 
+	if q.sharedWriter != nil {
+		// Interrupted upload files have a separate, mutable lifecycle. Until
+		// that lifecycle is fenced across members, leave them for recovery.
+		return q.reclaimPublishedFilesContext(requestCtx)
+	}
 	return errors.Join(q.reclaimInterruptedUploads(requestCtx), q.reclaimPublishedFilesContext(requestCtx))
 }
 
@@ -669,7 +674,9 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 // idle queue keeps draining; a capacity-refused write passes its need instead,
 // and collection of already authorized bytes continues until it frees that many.
 func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint64) (freed uint64, _ error) {
-
+	if err := q.clearFinishedSharedReclaims(requestCtx); err != nil {
+		return 0, err
+	}
 	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
 	store := q.files
 	if store == nil {
@@ -710,6 +717,7 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 	gone := map[string]bool{}
 	deferred, yielded := false, false
 	var reclaimedBlobs uint64
+	var reclaimErr error
 	// Reports false when the fence is busy and the batch was not attempted.
 	reclaimBatch := func(batch []candidate) bool {
 		// The same fence covers tus publication and verify-then-commit callers.
@@ -764,15 +772,32 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 			st, err := os.Lstat(path)
 			// Stat inside the publication fence: a publisher/HEAD may have
 			// refreshed mtime since the collection snapshot was taken.
-			if err == nil && age.payloadEligible(st, decisions[i].marked, decisions[i].expired) {
+			eligible := err == nil && age.payloadEligible(st, decisions[i].marked, decisions[i].expired)
+			claim := ""
+			if eligible && q.sharedWriter != nil {
+				claim, reclaimErr = q.claimSharedBlobUnlink(requestCtx, c.hash, revision)
+				if reclaimErr != nil {
+					return false
+				}
+				if claim == "" {
+					continue
+				}
+			}
+			if eligible {
 				err = os.Remove(path)
 				if err == nil {
-					gone[c.hash] = true
 					reclaimedBlobs++
 					freed = addDiskBytes(freed, uint64(st.Size()))
 				}
 			}
-			if errors.Is(err, os.ErrNotExist) {
+			if claim != "" {
+				// This receipt names a finished physical action, so the actor
+				// can report it even after handing over the coordinator turn.
+				if reclaimErr = q.finishSharedBlobUnlink(requestCtx, claim); reclaimErr != nil {
+					return false
+				}
+			}
+			if eligible && err == nil || errors.Is(err, os.ErrNotExist) {
 				gone[c.hash] = true
 				err = nil
 			}
@@ -811,9 +836,9 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 		log.Printf("file retention deferred: publication or reference verification in progress; retrying next tick")
 	}
 	if len(gone) == 0 {
-		return 0, nil
+		return 0, reclaimErr
 	}
-	return freed, q.updateRequest(requestCtx, func() error {
+	return freed, errors.Join(reclaimErr, q.updateRequest(requestCtx, func() error {
 		if q.files != store {
 			return nil
 		}
@@ -846,7 +871,7 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 			mark(record.Job)
 		}
 		return nil
-	}, nil)
+	}, nil))
 }
 
 // The planner and collector must agree on both publication grace and the

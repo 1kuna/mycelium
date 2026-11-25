@@ -381,6 +381,9 @@ func (q *Queue) startEligibilityTargets() []*Machine {
 // startPlacementRejection names the failed start-fence predicate, or "". The
 // names are fixed labels, safe to log without host, path or volume detail.
 func (q *Queue) startPlacementRejection(j *Job) string {
+	if j.StartedAt == nil && q.sharedFileHold(j) {
+		return "checkpoint_store_unavailable"
+	}
 	if j.StartedAt == nil && q.deviceFaultRetryBlocked(j, allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)) {
 		return deviceFaultRetryHold
 	}

@@ -37,6 +37,14 @@ func (q *Queue) verifyManifest(ctx context.Context, m FileManifest) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if q.sharedWriter != nil {
+		if len(m) == 0 {
+			return nil // An execution without artifacts needs only the queue.
+		}
+		if q.files == nil || q.sharedWriter.storageFault.Load() {
+			return queueStopping()
+		}
+	}
 	if q.files == nil {
 		return errors.New("file store unavailable")
 	}

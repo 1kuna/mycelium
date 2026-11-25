@@ -241,11 +241,12 @@ func replaySharedQueueChange(ctx context.Context, db *sql.DB, c sharedQueueChang
 }
 
 type sharedQueueWriter struct {
-	authority *sharedQueueAuthority
-	turn      sharedQueueTurn
-	timeout   time.Duration
-	sequence  int64 // Exclusive stage 1 writer turn.
-	disabled  atomic.Bool
+	authority    *sharedQueueAuthority
+	turn         sharedQueueTurn
+	timeout      time.Duration
+	sequence     int64 // Exclusive stage 1 writer turn.
+	disabled     atomic.Bool
+	storageFault atomic.Bool
 }
 
 func (w *sharedQueueWriter) apply(ctx context.Context, db *sql.DB, batch *queueWriteBatch, observe func(string, []any)) error {

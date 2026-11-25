@@ -13,8 +13,10 @@ import (
 )
 
 var (
-	errSharedTurn = errors.New("shared queue coordinator turn is unavailable")
-	errSharedHead = errors.New("shared queue copy does not match the committed sequence")
+	errSharedTurn               = errors.New("shared queue coordinator turn is unavailable")
+	errSharedHead               = errors.New("shared queue copy does not match the committed sequence")
+	errSharedPostgres           = errors.New("shared queue PostgreSQL authority could not be opened")
+	errSharedPostgresDurability = errors.New("PostgreSQL must enable fsync and full_page_writes for the shared queue proof")
 )
 
 type sharedQueueTurn struct {
@@ -48,6 +50,13 @@ CREATE TABLE IF NOT EXISTS myce_changes_v1 (
 	operation text UNIQUE NOT NULL,
 	payload bytea NOT NULL
 );
+CREATE TABLE IF NOT EXISTS myce_reclaim_finished_v1 (
+	claim text PRIMARY KEY
+);
+CREATE TABLE IF NOT EXISTS myce_control_receipts_v1 (
+	receipt text PRIMARY KEY,
+	handover bigint NOT NULL
+);
 `
 
 func openSharedQueueAuthority(ctx context.Context, dsn string) (*sharedQueueAuthority, error) {
@@ -70,7 +79,12 @@ func openSharedQueueAuthority(ctx context.Context, dsn string) (*sharedQueueAuth
 	a := &sharedQueueAuthority{db: db, commit: (*sql.Tx).Commit}
 	if err := a.initialize(ctx); err != nil {
 		db.Close()
-		return nil, err
+		if errors.Is(err, errSharedPostgresDurability) {
+			return nil, errSharedPostgresDurability
+		}
+		// pgx errors can contain connection settings or server-supplied
+		// text. This is also the boundary used by the CLI startup logger.
+		return nil, errSharedPostgres
 	}
 	return a, nil
 }
@@ -86,7 +100,7 @@ func (a *sharedQueueAuthority) initialize(ctx context.Context) error {
 		return err
 	}
 	if !durable {
-		return errors.New("PostgreSQL must enable fsync and full_page_writes for the shared queue proof")
+		return errSharedPostgresDurability
 	}
 	// Serialize first boot even when the coordinator table does not exist.
 	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(679900481)"); err != nil {
@@ -183,6 +197,28 @@ func (a *sharedQueueAuthority) renew(ctx context.Context, want sharedQueueTurn, 
 		return errSharedTurn
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE myce_coordinator_v1 SET expires=$1,ready=$2 WHERE id=1`, now.Add(lease), ready); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// Accept one issued proposal under the same lock used for handover. Its
+// durable receipt is the linearization point, even if the reply is delayed.
+func (a *sharedQueueAuthority) acceptControl(ctx context.Context, want sharedQueueTurn, receipt string) error {
+	tx, err := a.begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	t, now, err := lockedSharedTurn(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if !sameSharedTurn(t, want) || !t.ready || !t.expires.After(now) {
+		return errSharedTurn
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO myce_control_receipts_v1(receipt,handover)
+		VALUES($1,$2) ON CONFLICT DO NOTHING`, receipt, t.number); err != nil {
 		return err
 	}
 	return tx.Commit()

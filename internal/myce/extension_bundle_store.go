@@ -301,27 +301,21 @@ func (q *Queue) hydrateReply(reply *Reply, requestContexts ...context.Context) e
 	}, nil)
 }
 
-// Verify current frozen references before serving traffic. Startup never imports
-// embedded bundles from retired persistence formats.
-func (q *Queue) verifyBundleFiles() error {
-	q.fileLifecycle.RLock()
-	defer q.fileLifecycle.RUnlock()
-	checked := map[FileRef]bool{}
-	verify := func(ref *FileRef) error {
-		if ref == nil || checked[*ref] {
-			return nil
+// Snapshot frozen references under q.mu when the queue is open. Startup
+// never imports embedded bundles from retired persistence formats.
+func (q *Queue) frozenBundleFiles() (map[FileRef]bool, error) {
+	refs := map[FileRef]bool{}
+	note := func(ref *FileRef) {
+		if ref != nil {
+			refs[*ref] = true
 		}
-		if err := q.files.verify(context.Background(), *ref); err != nil {
-			return err
-		}
-		checked[*ref] = true
-		return nil
 	}
 	recipe := func(r *EnvironmentRecipe) error {
 		if len(r.Files) > 0 {
 			return errors.New("unsupported embedded environment bundle; frozen reference required")
 		}
-		return verify(r.FilesRef)
+		note(r.FilesRef)
+		return nil
 	}
 	extension := func(e *Extension) error {
 		if len(e.Files) > 0 {
@@ -330,15 +324,12 @@ func (q *Queue) verifyBundleFiles() error {
 		if e.FilesRef != nil && e.FilesRef.SHA256 != e.Digest {
 			return errors.New("extension bundle digest mismatch")
 		}
-		if err := verify(e.FilesRef); err != nil {
-			return err
-		}
+		note(e.FilesRef)
 		for i := range e.Variants {
-			for name, r := range e.Variants[i].Environments {
+			for _, r := range e.Variants[i].Environments {
 				if err := recipe(&r); err != nil {
 					return err
 				}
-				e.Variants[i].Environments[name] = r
 			}
 		}
 		return nil
@@ -352,44 +343,62 @@ func (q *Queue) verifyBundleFiles() error {
 				return err
 			}
 		}
-		for name, r := range j.EnvironmentRecipes {
+		for _, r := range j.EnvironmentRecipes {
 			if err := recipe(&r); err != nil {
 				return err
 			}
-			j.EnvironmentRecipes[name] = r
 		}
-		for name, recipes := range j.SidecarEnvironmentRecipes {
-			for key, r := range recipes {
+		for _, recipes := range j.SidecarEnvironmentRecipes {
+			for _, r := range recipes {
 				if err := recipe(&r); err != nil {
 					return err
 				}
-				recipes[key] = r
 			}
-			j.SidecarEnvironmentRecipes[name] = recipes
 		}
 		return nil
 	}
-	for name, e := range q.s.Extensions {
+	for _, e := range q.s.Extensions {
 		if err := extension(&e); err != nil {
-			return fmt.Errorf("verify frozen bundle: %w", err)
+			return nil, fmt.Errorf("verify frozen bundle: %w", err)
 		}
-		q.s.Extensions[name] = e
 	}
 	for _, j := range q.s.Jobs {
 		if err := job(j); err != nil {
-			return fmt.Errorf("verify job bundle: %w", err)
+			return nil, fmt.Errorf("verify job bundle: %w", err)
 		}
 	}
 	for _, r := range q.s.Submissions {
 		if err := job(r.Job); err != nil {
-			return fmt.Errorf("verify keyed bundle: %w", err)
+			return nil, fmt.Errorf("verify keyed bundle: %w", err)
 		}
 	}
 	for _, slot := range q.s.ModelSlots {
 		if slot.EnvironmentRecipe != nil {
 			if err := recipe(slot.EnvironmentRecipe); err != nil {
-				return err
+				return nil, err
 			}
+		}
+	}
+	return refs, nil
+}
+
+func (q *Queue) verifyBundleFiles() error {
+	q.fileLifecycle.RLock()
+	defer q.fileLifecycle.RUnlock()
+	q.mu.RLock()
+	refs, err := q.frozenBundleFiles()
+	store := q.files
+	q.mu.RUnlock()
+	if err != nil {
+		return err
+	}
+	return verifyFrozenBundleFiles(context.Background(), store, refs)
+}
+
+func verifyFrozenBundleFiles(ctx context.Context, store *FileStore, refs map[FileRef]bool) error {
+	for ref := range refs {
+		if err := store.verify(ctx, ref); err != nil {
+			return fmt.Errorf("verify frozen bundle: %w", err)
 		}
 	}
 	return nil
