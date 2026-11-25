@@ -161,7 +161,7 @@ func lockedTurn(ctx context.Context, tx pgx.Tx) (turn, time.Time, error) {
 		return turn{}, time.Time{}, err
 	}
 	var now time.Time
-	err = tx.QueryRow(ctx, "SELECT clock_timestamp()").Scan(&now)
+	err = tx.QueryRow(ctx, "SELECT pg_catalog.clock_timestamp()").Scan(&now)
 	return t, now, err
 }
 
@@ -304,7 +304,6 @@ type commitOptions struct {
 	rate                                         float64
 	profile                                      payloadProfile
 	seed                                         uint64
-	keep                                         bool
 	watch                                        *mountWatcher
 }
 
@@ -321,7 +320,6 @@ func cmdCommit(ctx context.Context, args []string, out io.Writer) error {
 	fs.DurationVar(&opt.opTimeout, "op-timeout", 30*time.Second, "give up on one operation after this long (kept long to see the whole tail)")
 	profile := fs.String("profile", "queue", "payload sizes: queue or fixed:BYTES")
 	fs.Uint64Var(&opt.seed, "seed", 1, "random seed for arrivals and payloads")
-	fs.BoolVar(&opt.keep, "keep", false, "keep the appended rows instead of truncating them afterwards")
 	watch := fs.String("watch", "", "directory on a file mount to probe while committing (isolation check)")
 	watchInterval := fs.Duration("watch-interval", time.Second, "mount probe interval")
 	watchTimeout := fs.Duration("watch-timeout", 2*time.Second, "a probe slower than this marks the mount unresponsive")
@@ -371,34 +369,28 @@ func cmdCommit(ctx context.Context, args []string, out io.Writer) error {
 	return r.finish(out)
 }
 
+// runCommit writes through two sessions, each vetted by open and holding its
+// own advisory lock, so a second commit run is refused. Appended rows stay:
+// the log continues from the previous run's head, and the storage owner
+// removes the qualification database afterwards.
 func runCommit(ctx context.Context, t *target, opt commitOptions) (*serverInfo, *commitResults, error) {
-	appendConn, err := t.connect(ctx)
+	appendConn, err := t.open(ctx, true, commitLockKey)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer func() { appendConn.Close(context.Background()) }()
-	renewConn, err := t.connect(ctx)
+	renewConn, err := t.open(ctx, true, commitRenewLockKey)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer func() { renewConn.Close(context.Background()) }()
-	if err := prepare(ctx, appendConn); err != nil {
-		return nil, nil, err
-	}
 	info, err := readServerInfo(ctx, renewConn, t.class, 200)
 	if err != nil {
 		return nil, nil, err
 	}
-	var locked bool
-	if err := appendConn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", commitLockKey).Scan(&locked); err != nil {
-		return nil, nil, err
-	}
-	if !locked {
-		return nil, nil, errors.New("another queue-qualify commit run holds this database")
-	}
-	// The advisory lock is session-scoped; closing the connection releases it.
-	if _, err := appendConn.Exec(ctx, `TRUNCATE myce_qualification.myce_changes_v1;
-		UPDATE myce_qualification.myce_coordinator_v1 SET owner='',endpoint='',head=0,expires='epoch',ready=false WHERE id=1`); err != nil {
+	// Free the turn a killed run may have left unexpired; the head stays.
+	if _, err := appendConn.Exec(ctx, `UPDATE myce_qualification.myce_coordinator_v1
+		SET owner='',endpoint='',expires='epoch',ready=false WHERE id=1`); err != nil {
 		return nil, nil, err
 	}
 	owner := fmt.Sprintf("queue-qualify-%d", time.Now().UnixNano())
@@ -411,11 +403,24 @@ func runCommit(ctx context.Context, t *target, opt commitOptions) (*serverInfo, 
 	arrivals := rand.New(rand.NewPCG(opt.seed+1, opt.seed+2))
 	var appends, renewals recorder
 
-	runCtx, stop := context.WithCancel(ctx)
-	defer stop()
 	start := time.Now()
 	measureFrom := start.Add(opt.warmup)
 	deadline := measureFrom.Add(opt.duration)
+	// runCtx ends the run at its deadline even while a reconnect is waiting
+	// on a server that is gone; one operation timeout of slack lets an append
+	// in flight at the deadline finish and be counted.
+	runCtx, stop := context.WithDeadline(ctx, deadline.Add(opt.opTimeout))
+	defer stop()
+	var fatalMu sync.Mutex
+	var fatal error
+	failRun := func(err error) {
+		fatalMu.Lock()
+		if fatal == nil {
+			fatal = err
+		}
+		fatalMu.Unlock()
+		stop()
+	}
 
 	var watchDone chan []mountWindow
 	if opt.watch != nil {
@@ -423,17 +428,25 @@ func runCommit(ctx context.Context, t *target, opt commitOptions) (*serverInfo, 
 		go func() { watchDone <- opt.watch.run(runCtx) }()
 	}
 
-	// reconnect replaces a connection the driver closed after a timeout.
-	reconnect := func(c **pgx.Conn) {
+	// reconnect replaces a connection the driver closed after a timeout. The
+	// new session is vetted and re-takes its lock before it writes; a
+	// refusal, such as a different server behind the same address, ends the
+	// run. A busy lock is retried, since it can be this run's own dead
+	// session that the server has not yet noticed.
+	reconnect := func(c **pgx.Conn, lock int64) {
 		if !(*c).IsClosed() {
 			return
 		}
 		for runCtx.Err() == nil {
 			call, cancel := context.WithTimeout(runCtx, opt.opTimeout)
-			next, err := t.connect(call)
+			next, err := t.open(call, true, lock)
 			cancel()
 			if err == nil {
 				*c = next
+				return
+			}
+			if errors.Is(err, errRefused) {
+				failRun(err)
 				return
 			}
 			sleepCtx(runCtx, time.Second)
@@ -467,7 +480,7 @@ func runCommit(ctx context.Context, t *target, opt commitOptions) (*serverInfo, 
 				// Start clean after a server or network error.
 				renewConn.Close(context.Background())
 			}
-			reconnect(&renewConn)
+			reconnect(&renewConn, commitRenewLockKey)
 		}
 	}()
 
@@ -481,23 +494,23 @@ func runCommit(ctx context.Context, t *target, opt commitOptions) (*serverInfo, 
 		if next.After(deadline) {
 			break
 		}
-		if !sleepUntil(ctx, next) {
+		if !sleepUntil(runCtx, next) || appendConn.IsClosed() {
 			break
 		}
 		if !walRead && !next.Before(measureFrom) {
 			walRead = true
-			_ = appendConn.QueryRow(ctx, "SELECT pg_current_wal_lsn()::text").Scan(&walStart)
+			_ = appendConn.QueryRow(ctx, "SELECT pg_catalog.pg_current_wal_lsn()::text").Scan(&walStart)
 		}
 		payload := pool.next()
 		turnMu.Lock()
 		want := cur
 		turnMu.Unlock()
 		began := time.Now()
-		call, cancel := context.WithTimeout(ctx, opt.opTimeout)
+		call, cancel := context.WithTimeout(runCtx, opt.opTimeout)
 		_, err := appendChange(call, appendConn, want, seq, fmt.Sprintf("%s-%d", owner, seq), payload)
 		cancel()
 		done := time.Now()
-		if ctx.Err() != nil {
+		if runCtx.Err() != nil {
 			break
 		}
 		appends.add(opSample{At: began, Lat: done.Sub(began), Resp: done.Sub(next), Kind: errorKind(err), Payload: len(payload)})
@@ -508,9 +521,9 @@ func runCommit(ctx context.Context, t *target, opt commitOptions) (*serverInfo, 
 				payloadBytes += len(payload)
 			}
 		case errors.Is(err, errTurn), errors.Is(err, errHead):
-			reconnect(&appendConn)
-			for ctx.Err() == nil {
-				call, cancel := context.WithTimeout(ctx, opt.opTimeout)
+			reconnect(&appendConn, commitLockKey)
+			for runCtx.Err() == nil && !appendConn.IsClosed() {
+				call, cancel := context.WithTimeout(runCtx, opt.opTimeout)
 				nt, err := takeOver(call, appendConn, owner, opt.lease)
 				cancel()
 				if err == nil {
@@ -521,18 +534,21 @@ func runCommit(ctx context.Context, t *target, opt commitOptions) (*serverInfo, 
 					reacquired++
 					break
 				}
-				reconnect(&appendConn)
-				sleepCtx(ctx, opt.interval)
+				reconnect(&appendConn, commitLockKey)
+				sleepCtx(runCtx, opt.interval)
 			}
 		default:
 			appendConn.Close(context.Background())
-			reconnect(&appendConn)
+			reconnect(&appendConn, commitLockKey)
+			if appendConn.IsClosed() {
+				continue
+			}
 			// The sequence may or may not have committed; resync from the head.
 			turnMu.Lock()
 			want = cur
 			turnMu.Unlock()
 			var head int64
-			call, cancel := context.WithTimeout(ctx, opt.opTimeout)
+			call, cancel := context.WithTimeout(runCtx, opt.opTimeout)
 			if appendConn.QueryRow(call, "SELECT head FROM myce_qualification.myce_coordinator_v1 WHERE id=1").Scan(&head) == nil {
 				seq = head + 1
 			}
@@ -549,10 +565,16 @@ func runCommit(ctx context.Context, t *target, opt commitOptions) (*serverInfo, 
 	if ctx.Err() != nil {
 		return nil, nil, ctx.Err()
 	}
+	fatalMu.Lock()
+	err = fatal
+	fatalMu.Unlock()
+	if err != nil {
+		return nil, nil, err
+	}
 	res := &commitResults{TargetRate: opt.rate, MeasuredSec: measured, Errors: map[string]int{}, Reacquired: reacquired, RoundTrip: info.RoundTrip}
 	if walStart != "" {
 		var bytes float64
-		if appendConn.QueryRow(context.Background(), "SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), $1::pg_lsn)", walStart).Scan(&bytes) == nil && measured > 0 {
+		if appendConn.QueryRow(context.Background(), "SELECT pg_catalog.pg_wal_lsn_diff(pg_catalog.pg_current_wal_lsn(), $1::pg_catalog.pg_lsn)", walStart).Scan(&bytes) == nil && measured > 0 {
 			res.WALkBps = bytes / measured / 1000
 		}
 	}
@@ -567,13 +589,11 @@ func runCommit(ctx context.Context, t *target, opt commitOptions) (*serverInfo, 
 	if opt.watch != nil {
 		res.Mount = correlateMount(windows, as, rs, opt.watch.probes.Load())
 	}
-	release := context.Background()
+	release, cancel := context.WithTimeout(context.Background(), opt.opTimeout)
+	defer cancel()
 	turnMu.Lock()
 	_ = renewTurn(release, appendConn, cur, 0)
 	turnMu.Unlock()
-	if !opt.keep {
-		_, _ = appendConn.Exec(release, "TRUNCATE myce_qualification.myce_changes_v1")
-	}
 	return info, res, nil
 }
 

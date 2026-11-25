@@ -40,22 +40,50 @@ file, and never point the harness at a queue or worker `config.json`.
 | `info` | Version, durability settings, data-directory identity and `SELECT 1` round trip |
 | `commit` | Durable coordinator-turn renewals and ordered change appends at the live rate. `--watch DIR` probes a file mount in the same process. |
 | `durability-write`, `durability-verify` | A sequence-numbered durable writer with a synced local ledger, then a check of every acknowledged row after a restart, crash, reboot or OS update |
-| `load` | Bounded bulk file I/O in one marked directory |
-| `catchup` | Snapshot copy from the share with hashing, and change-log replay into a local SQLite copy |
+| `load` | Bounded bulk file I/O, written into one new run directory and never deleted |
+| `catchup` | Snapshot creation into a new run directory, snapshot copy from the share with hashing, and change-log replay into a local SQLite copy |
 | `summarize` | One comparison of saved reports |
-| `cleanup` | Drops the qualification schema and removes marked leftovers |
 
 Each run writes a JSON and a Markdown report to `--out` and exits nonzero when a
 check fails. `--condition` and `--volume` take generic labels such as `idle`,
 `bulk-same-volume`, `busy` or `quiet`.
 
-**What it writes.** Only the `myce_qualification` schema, which it creates with
-an ownership comment. It runs only in a database whose name starts with
-`qualif`, such as `qualify` from the compose sketch below, so a production
-connection string fails even before the catalog checks. It refuses a database
-that holds any `myce_*` table in any schema, because stage 2 creates its tables
-unqualified on the `search_path`. It also refuses a `myce_qualification` schema
-it did not create, and a server with `fsync` or `full_page_writes` off.
+**It never deletes.** The harness has no cleanup command and no delete,
+truncate or drop anywhere. Agents never delete on the NAS; the storage owner
+runs every NAS delete NAS-local. Each `load` run and each created snapshot
+goes into a new directory of its own, and the run prints that directory's path
+and size for the storage owner to remove. Database runs only add rows under
+their own run ID or sequence; the storage owner removes the qualification
+database or its container afterwards. The only files the harness removes are
+its own scratch copies in `catchup --local-dir`, which it refuses to place on a
+network mount.
+
+**Where it writes.** Only the `myce_qualification` schema, which it creates
+with an ownership comment, in a dedicated qualification database inside a
+disposable container. It refuses, before writing:
+
+- a database whose name does not start with `qualif`, in any case, such as
+  `qualify` from the compose sketch below, so a production connection string
+  fails even before the catalog checks;
+- a database that holds any `myce_*` relation in any schema and in any case,
+  because stage 2 creates its tables unqualified on the `search_path`, and a
+  quoted name can be upper case;
+- a `myce_qualification` schema it did not create;
+- a server with `fsync` or `full_page_writes` off.
+
+Each session pins `search_path` to `pg_catalog, pg_temp`, and every catalog
+reference is written `pg_catalog.*`, so a schema placed ahead of the catalog by
+a role or database setting cannot shadow `pg_class` or `current_database()`.
+Every reconnect repeats all of these checks before it writes. It must also
+reach the same server (system identifier) and database as the run's first
+session, and it takes the run's advisory lock again, since a session lock ends
+with its connection.
+
+**Stopping.** Ctrl-C, SIGTERM or a run's own time limit stops the harness
+within 10 seconds, even when a call into a hung SMB mount never returns. After
+that grace it exits anyway and lists what it left for NAS-local removal,
+including partly written files. The grace lets a writer finish syncing a file
+on a healthy share.
 
 **Write shape.** `commit` copies the stage 2 authority SQL from
 `internal/myce/shared_queue_postgres.go` (`e5d9287a`, [#2107](https://github.com/1kuna/mycelium/pull/2107)).
@@ -155,23 +183,35 @@ The busy-volume condition needs realistic bulk traffic. Use either source.
   NAS monitor next to the report. This adds no load.
 - **Synthetic, only with the storage owner's consent for that window.** Run
   `queue-qualify load` from one or two fleet machines into a dedicated folder on
-  the target volume through SMB. It creates `myce-qual-load-*` with a manifest
-  and writes random 512 MiB files, fsyncing each. Each file is listed in the
-  manifest before it exists. It reads each file back once and deletes the
-  oldest files as it goes. On exit, including after Ctrl-C or SIGTERM, it
-  removes the files its manifest lists and then the empty directory. Writers
-  reserve each file's bytes against the working set and free space before
-  creating it, so the bounds hold across all writers together. It stops at the
-  first of these limits:
+  the target volume through SMB. Each run creates one new directory,
+  `myce-qual-load-<time>-<random ID>`, with an exclusive mkdir, writes a
+  `MYCE-QUALIFY-RUN` marker naming the run, and then writes random 512 MiB
+  files inside it, fsyncing each and reading each back once. It writes nowhere
+  else and deletes nothing, so the bytes on disk equal the bytes written. At the
+  end it prints the directory's path and total bytes. The storage owner removes
+  the directory NAS-local. It stops at the first of these limits:
 
 | Bound | Default | Hard limit |
 | --- | --- | --- |
-| Total written | 32 GiB | any value you pass |
-| On disk at once, including files being written | 4 GiB | |
+| Bytes written, which is also what stays on disk | 16 GiB | exact: the last file is cut to fit, so a 1-byte cap writes 1 byte |
 | Duration | 10 min | 1 h |
 | Writers | 2 | 8 |
-| Free-space floor | the larger of 100 GiB and 10% of the volume. Each file needs room for itself and every unwritten byte of the others. Free space is also checked every 250 ms during writes, and the run stops and removes its files once other work leaves too little. | refuses to start below floor + working set |
+| Free-space floor | the larger of 100 GiB and 10% of the volume | refuses to start unless free space covers the floor plus twice the cap |
 | Rate | none | `--rate-mib` caps it |
+
+The free-space accounting counts every byte the run has written or reserved
+against the floor, whether or not the share's free-space report shows it yet,
+and never gives a reservation back. Each file needs `free >= floor + everything
+reserved + this file`, read before the reservation is taken. A watcher reads
+free space every 250 ms and stops the run once `free < floor + everything
+reserved`, which only other work can cause. Neither holds a lock across a
+filesystem call. Counting the run's own bytes twice once the share reports
+them is why the start needs twice the cap.
+
+That leaves one assumed lag: other clients' writes that the share has not yet
+reported. This plan assumes it is at most a few seconds of other work, about
+5 GiB at 1 GiB/s. The default floor of 100 GiB stays far above that; don't
+lower it below 20 GiB.
 
 Ramp in steps: `--rate-mib 50`, then `100`, then uncapped. Run `commit` during
 each step. The storage owner watches the volume monitor and stops the run with
@@ -181,13 +221,9 @@ Ctrl-C if any of these happens:
 - the NAS UI or SMB stops responding;
 - production work reports I/O errors.
 
-`queue-qualify cleanup --skip-db --load-dir DIR` removes a hard-killed run's
-leftovers: only the files each manifest lists, and the directory only once it is
-empty. It keeps and reports a directory without this tool's manifest, a file
-the manifest doesn't list, and a snapshot whose ownership record doesn't match
-its first bytes. Free space reported over SMB can lag the client's write cache
-by up to one file per writer, so keep the floor far above writers × file size.
-The defaults give 100 GiB against 4 GiB. Running the Linux binary in a temporary container on the NAS loads
+Ctrl-C stops a run within 10 seconds and leaves its files, including any
+partly written file, listed for the storage owner. A run killed outright
+(`kill -9`) leaves its directory too; the marker names it. Running the Linux binary in a temporary container on the NAS loads
 the disk without the network limit. That load can exceed what SMB clients
 produce, so use it only if the storage owner wants a harsher test, starting at
 `--rate-mib 50`.
@@ -209,13 +245,13 @@ Each step's report goes to `.reports/` on the measuring side.
 | 6 | O | `info`, then `commit --condition idle --volume quiet` | Commit checks |
 | 7 | O, SO | `commit --condition bulk-other-volume --volume quiet` while bulk load runs on the **busy** volume. This is the production pairing. If backups run on a schedule, also run once during a backup. | Commit checks |
 | 8 | O, SO | `summarize` the commit reports and choose a volume (rule below). The SO stops the other container. | |
-| 9 | O, SO | On the chosen volume: `durability-write --duration 15m`, then `docker restart` mid-run, then `durability-verify` | Durability checks. Verify fails unless the server's start time is later than when writing began, so a missed restart can't pass. |
+| 9 | O, SO | On the chosen volume: the SO records the container ID and its data mount source (`docker inspect --format '{{.Id}} {{range .Mounts}}{{.Source}}{{end}}'`). Then `durability-write --duration 15m`, `docker restart` mid-run, and `durability-verify`. The SO records the same two values again. | Durability checks, and the same container ID and mount source before and after. Verify fails unless at least one acknowledgement came before the restart it observes. |
 | 10 | O, SO | Repeat with `docker kill`, which is a crash. | Durability checks |
 | 11 | O, SO | Repeat across a NAS reboot. Use `--max-outage 30m` and `--duration 45m`. | Durability checks. The container returns with no admin action. |
 | 12 | O, SO | At the next NAS OS update, run `durability-write --duration 2h --max-outage 60m` across it, then verify. Compare `docker inspect --format '{{.Image}}'` before and after. | Durability checks. Same image digest. No admin action except the update itself. |
 | 13 | O, machine admin | **Mount isolation.** Drain a fleet machine, then run `commit --watch <dir in its SMB mount> --duration 10m`. Mid-run, that machine's admin drops TCP 445 to the NAS for at least 60 s, then lifts it (`pfctl` on macOS, `nft` or `iptables` on Linux). Do this once on the Mac and once on Linux. | Mount check |
-| 14 | O | From machine X: `catchup --snapshot <share>/myce-qual-snapshot.bin --create-bytes 8157110272 --create-only`. From machine Y and the Mac: `catchup --snapshot ... --changes 6960`. | Replay check |
-| 15 | O, SO | `summarize` all reports. Decide, then clean up. | |
+| 14 | O | From machine X: `catchup --create-in <share dir> --create-bytes 8157110272 --create-only`, which prints the snapshot's path in its new run directory. From machine Y and the Mac: `catchup --snapshot <that path> --changes 6960`. | Replay check |
+| 15 | O, SO | `summarize` all reports. Decide. The SO removes the printed run directories and the qualification containers NAS-local. | |
 
 A drop rule makes SMB hang the way the observed stalls did. A reject rule would
 make SMB fail fast instead. The harness probes the mount from the same process
@@ -265,7 +301,9 @@ lease it judged against.
 | Failed appends or renewals | 0 | Each failure closes the writer turn or retires the coordinator | Stage 2 behavior |
 | Commits while the mount is unresponsive | At least one window of 10 s or more. Every such window has appends, 0 errors and every operation within the max limit. | An SMB stall blocking queue authority, which is why the design uses a database connection | 10 s spans 10 renewals and about 116 appends |
 | Every acknowledged write survives | 0 missing, 0 corrupt, no row from a transaction that failed before COMMIT | Losing an acknowledged assignment, start or result: duplicate execution or a lost result | The design's core promise |
-| Same data directory | System identifier unchanged | A container recreated on an empty directory, which starts a new, empty authority without notice | `pg_control_system()` |
+| Acknowledged before a server restart | At least 1 acknowledgement written under an earlier server start time than verify's | A pass from a server that never went down, or went down before the first acknowledgement | Each ledger line records the `pg_postmaster_start_time()` it was acknowledged under |
+| Same data directory | System identifier readable and unchanged; the writer stops rather than write to a different one | A container recreated on an empty directory, which starts a new, empty authority without notice | `pg_control_system()`; connect as the database owner |
+| Not an older copy | WAL at verify at or past every acknowledged position and the writer's end marker; timeline unchanged | Verifying against a restored backup or an older copy of the data directory | Each acknowledgement records its WAL insert position; the end marker adds 1 MiB of WAL after the last one |
 | Writer outlived every outage | Stopped by duration, not `--max-outage` | A server that never came back on its own | Restart policy under test |
 | Required settings | `fsync`, `full_page_writes` on; a primary, not a standby | Acknowledged commits held only in memory, and torn pages | PostgreSQL WAL rules |
 | Replay outruns live appends | ≥ 10× live in changes/s and bytes/s | A returning member that never converges, or a sole survivor waiting hours to coordinate | At 10×, an hour asleep costs six minutes |
@@ -288,47 +326,55 @@ profile at 11.6/s.
 | Run | Result |
 | --- | --- |
 | `commit`, idle | Pass. Append service p50/p95/p99/max 0.81 / 4.97 / 23.86 / 89.48 ms; renewal p99 23.57 ms; 11.49 appends/s; WAL 156 kB/s |
-| `commit` during `load` on the same disk | Pass. Append service 1.03 / 8.06 / 27.20 / 49.11 ms; renewal p99 3.57 ms. Load wrote and read about 24 GiB each at about 1.2 GiB/s and stopped at its byte cap after 20 s. Its directory was removed. |
+| `commit` during `load` on the same disk | Pass. Append service 1.03 / 8.06 / 27.20 / 49.11 ms; renewal p99 3.57 ms. Load wrote and read about 24 GiB each at about 1.2 GiB/s and stopped at its byte cap after 20 s. That earlier harness version, with a 4 GiB working set, then removed its directory; the harness no longer deletes. |
 | `durability-write` across `pg_ctl restart -m immediate` | Pass. 1,076 acknowledged, 1 failed before commit, 0.5 s outage, 1 restart seen, same identifier |
 | `durability-verify` | Pass. 0 of 1,076 missing, 0 corrupt |
 | `catchup` | Pass. 6,960 changes (78 MB) replayed in 5.1 s, 117× the live rate. The 1 GiB snapshot copy ran from a warm local cache, so it is no network measure. |
 | `commit --watch` with no fault | Incomplete, as designed: no unresponsive window, so the isolation check is `not-exercised` |
 
-After the review fixes, a shorter rerun on the same laptop, with a fresh cluster
-and 30 s commit runs, gave these results:
+After the harness became write-only, a shorter rerun on the same laptop with a
+fresh cluster gave these results:
 
-- `commit` idle passed: append p50/p99/max 0.72 / 3.94 / 4.30 ms.
-- `commit` during an eight-writer `load` passed: 0.72 / 4.12 / 5.47 ms. The
-  load stopped at its 4 GiB cap and removed its directory.
+- `commit` idle, 30 s, passed: append p50/p99/max 0.70 / 17.36 / 50.49 ms.
+- `commit` during a four-writer `load` capped at 150 MiB/s, 25 s, passed:
+  0.67 / 3.96 / 6.58 ms. The load wrote exactly its 4 GiB cap in eight
+  files, deleted nothing, and printed its run directory and size.
 - `durability-write` across `pg_ctl restart -m immediate`, then verify,
-  passed with 0 of 260 rows missing.
-- A verify after a write with no restart failed on the restart check, as
-  designed.
-- `catchup` of 2,000 changes passed.
-- `cleanup` with an outside view on a harness table dropped nothing and named
-  the view. After the view was removed, it dropped the schema. It kept an
-  unowned `myce-qual-snapshot-*` file and an unmanifested `myce-qual-load-*`
-  directory.
-- A connection to the `postgres` database was refused.
+  passed: 200 acknowledged, 84 of them before the restart, none missing, WAL
+  at verify past the end marker.
+- `catchup --create-in` wrote a 1 GiB snapshot into its own run directory.
+  Replay of 2,000 changes passed at 512× live.
+- Ctrl-C on a running `load` exited in 0.02 s and listed its run directory
+  with two partial files.
+- `commit` against the cluster's `postgres` database was refused.
+
+**Known limit: a byte-for-byte copy.** A copy of the data directory taken after
+the writer's end marker holds the same rows, identifier, timeline and WAL as
+the original, so nothing visible over SQL tells them apart. Verify detects a
+copy or backup from any earlier point, through the WAL check, but not that one.
+The procedural check in step 9 covers it: the same container ID and data mount
+source before and after the restart. Steps 10 to 12 repeat it.
 
 ## Rollback and cleanup
 
-Any step can stop at once. Ctrl-C stops the harness, and the load generator
-removes its files on the way out. `docker stop` stops a container. No fleet
-component uses these databases, so stopping one has no fleet effect.
+Any step can stop at once. Ctrl-C stops the harness within 10 seconds, even
+with the share hung, and lists what it left behind. `docker stop` stops a
+container. No fleet component uses these databases, so stopping one has no
+fleet effect.
 
-Afterwards:
+The harness deletes nothing on the NAS. Every NAS delete is the storage owner's,
+run NAS-local. Afterwards:
 
-- **O:** `queue-qualify cleanup --dsn-file F --load-dir <qualification folder>`
-  on each cluster that still runs. This drops the harness's four tables and
-  then `myce_qualification`, in one transaction and never with `CASCADE`. If
-  anything else is in the schema or depends on those tables, it drops nothing
-  and names the objects. It also removes the files the load manifests and
-  snapshot ownership records list. Delete the binaries, connection
-  files and ledgers from the measuring machines.
-- **SO:** Remove both containers and their data folders on both volumes. Remove
-  the qualification secret, any firewall rule, and optionally the image. Confirm
-  the volumes' free space is back to its pre-test level.
+- **O:** Collect the run directories that `load` and `catchup --create-in`
+  printed, with their sizes, and send the list to the SO. Delete the binaries,
+  connection files and ledgers from the measuring machines.
+- **SO:** Remove those run directories NAS-local, using the printed list and
+  each directory's `MYCE-QUALIFY-RUN` marker. Remove both containers and their
+  data folders on both volumes, which removes the qualification database. The
+  harness never drops its tables, and each 10-minute `commit` run adds about
+  80 MB of rows. Remove the qualification secret, any firewall rule, and
+  optionally the image. Confirm the volumes' free space is back to its
+  pre-test level.
 - **Machine admin (step 13):** Confirm the drop rule is gone and the SMB mount
   is healthy before undraining.
 - Keep the raw reports privately in `.reports/`. Post only sanitized numbers to

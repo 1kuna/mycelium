@@ -10,29 +10,37 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // The qualification tables live in their own schema. The coordinator and
 // change tables copy the stage 2 shapes (myce_coordinator_v1 and
 // myce_changes_v1 in internal/myce/shared_queue_postgres.go on the stage 2
 // branch at e5d9287a) so the measured writes match the real ones.
+//
+// The harness never drops, truncates or deletes. Every run writes rows under
+// its own run ID or sequence, and the storage owner removes the whole
+// qualification database or container afterwards.
 const qualSchema = "myce_qualification"
 
 // prepare creates the schema with an ownership comment and refuses a schema
-// of that name without it; cleanup drops only qualTables and then the schema,
-// never with CASCADE, so anything else in or depending on them stops it.
-const qualSchemaComment = "created by queue-qualify; cleanup drops only its own tables"
+// of that name without it.
+const qualSchemaComment = "created by queue-qualify; the storage owner removes the qualification database"
 
-var qualTables = []string{"myce_coordinator_v1", "myce_changes_v1", "catchup_changes_v1", "durability_v1"}
-
-// The harness runs only in a database whose name starts with this, such as
-// the plan's default "qualify". A production queue database never does, so
-// a mistaken connection string fails here even if every catalog check passed.
+// The harness runs only in a database whose name starts with this, in any
+// case, such as the plan's default "qualify". A production queue database
+// never does, so a mistaken connection string fails here even if every
+// catalog check passed.
 const qualDatabasePrefix = "qualif"
+
+// pinnedSearchPath makes every unqualified name resolve in the system catalog
+// first. A role's or database's search_path could otherwise put a schema
+// ahead of pg_catalog whose pg_class view or current_database() function
+// hides a queue. Every catalog reference is also written pg_catalog.*.
+const pinnedSearchPath = "pg_catalog, pg_temp"
 
 const qualDDL = `
 CREATE TABLE IF NOT EXISTS myce_qualification.myce_coordinator_v1 (
@@ -52,10 +60,12 @@ CREATE TABLE IF NOT EXISTS myce_qualification.myce_changes_v1 (
 	payload bytea NOT NULL
 );
 CREATE TABLE IF NOT EXISTS myce_qualification.catchup_changes_v1 (
-	sequence bigint PRIMARY KEY,
+	run text NOT NULL,
+	sequence bigint NOT NULL,
 	handover bigint NOT NULL,
-	operation text UNIQUE NOT NULL,
-	payload bytea NOT NULL
+	operation text NOT NULL,
+	payload bytea NOT NULL,
+	PRIMARY KEY (run, sequence)
 );
 CREATE TABLE IF NOT EXISTS myce_qualification.durability_v1 (
 	run text NOT NULL,
@@ -70,9 +80,10 @@ INSERT INTO myce_qualification.myce_coordinator_v1(id, identity)
 
 // Distinct from the stage 2 first-boot lock (679900481).
 const (
-	ddlLockKey     = 679900491
-	commitLockKey  = 679900492
-	catchupLockKey = 679900493
+	ddlLockKey         = 679900491
+	commitLockKey      = 679900492
+	catchupLockKey     = 679900493
+	commitRenewLockKey = 679900494
 )
 
 // redactor replaces every connection detail in a message. Driver errors name
@@ -130,6 +141,19 @@ func addConnFlags(fs *flag.FlagSet) *connFlags {
 type target struct {
 	cfg   *pgx.ConnConfig
 	class string
+
+	// identity is what the first vetted session saw; every later session,
+	// including each reconnect, must match it before it writes.
+	mu       sync.Mutex
+	identity *sessionIdentity
+}
+
+// sessionIdentity names the server and database a session reached. A
+// hostname or failover address can lead a reconnect somewhere else.
+type sessionIdentity struct {
+	Database         string
+	DatabaseOID      uint32
+	SystemIdentifier string
 }
 
 func (c *connFlags) load() (*target, error) {
@@ -164,6 +188,7 @@ func (c *connFlags) load() (*target, error) {
 		cfg.ConnectTimeout = 10 * time.Second
 	}
 	cfg.RuntimeParams["application_name"] = "queue-qualify"
+	cfg.RuntimeParams["search_path"] = pinnedSearchPath
 	return &target{cfg: cfg, class: endpointClass(cfg.Host)}, nil
 }
 
@@ -196,14 +221,166 @@ func (t *target) connect(ctx context.Context) (*pgx.Conn, error) {
 	return conn, nil
 }
 
+var (
+	// errRefused marks a target the harness must never write to. It is final:
+	// a reconnect loop stops on it rather than retrying.
+	errRefused = errors.New("refused")
+	// errLockBusy means another session holds this run's advisory lock. On a
+	// reconnect it can be this run's own dead session the server has not yet
+	// noticed, so callers may retry it.
+	errLockBusy = errors.New("another queue-qualify run holds this database")
+	// errTargetChanged is the refusal for a session that reached a different
+	// server or database than the run's first session.
+	errTargetChanged = errors.New("target changed")
+)
+
+func refused(format string, args ...any) error {
+	return fmt.Errorf("%w: "+format, append([]any{errRefused}, args...)...)
+}
+
+// open connects and vets the session before anything is written: pinned
+// search_path, a dedicated qualification database, no shared-queue tables in
+// any schema, durable settings, and the same server and database as the
+// first session. With write it also prepares the qualification tables. A
+// nonzero lock is the session's advisory lock, taken again on every
+// reconnect, because a session lock does not outlive its connection.
+func (t *target) open(ctx context.Context, write bool, lock int64) (*pgx.Conn, error) {
+	conn, err := t.connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := t.vet(ctx, conn, write, lock); err != nil {
+		conn.Close(context.Background())
+		return nil, err
+	}
+	return conn, nil
+}
+
+func (t *target) vet(ctx context.Context, conn *pgx.Conn, write bool, lock int64) error {
+	var path string
+	if err := conn.QueryRow(ctx, "SELECT pg_catalog.set_config('search_path', $1, false)", pinnedSearchPath).Scan(&path); err != nil {
+		return err
+	}
+	if path != pinnedSearchPath {
+		return refused("search_path is %q, not %q", path, pinnedSearchPath)
+	}
+	if err := requireDedicated(ctx, conn); err != nil {
+		return err
+	}
+	if err := refuseQueueTables(ctx, conn); err != nil {
+		return err
+	}
+	if err := requireDurable(ctx, conn); err != nil {
+		return err
+	}
+	id, err := readIdentity(ctx, conn)
+	if err != nil {
+		return err
+	}
+	if err := t.sameTarget(id); err != nil {
+		return err
+	}
+	if write {
+		if err := prepare(ctx, conn); err != nil {
+			return err
+		}
+	}
+	if lock != 0 {
+		var locked bool
+		if err := conn.QueryRow(ctx, "SELECT pg_catalog.pg_try_advisory_lock($1)", lock).Scan(&locked); err != nil {
+			return err
+		}
+		if !locked {
+			return errLockBusy
+		}
+	}
+	return nil
+}
+
+// sameTarget records the first identity and refuses any other later.
+func (t *target) sameTarget(id sessionIdentity) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.identity == nil {
+		t.identity = &id
+		return nil
+	}
+	if *t.identity != id {
+		return fmt.Errorf("%w: %w: this connection reached a different server or database than the run started on (system identifier or database changed); not writing", errRefused, errTargetChanged)
+	}
+	return nil
+}
+
+func readIdentity(ctx context.Context, conn *pgx.Conn) (sessionIdentity, error) {
+	var id sessionIdentity
+	var oid int64
+	if err := conn.QueryRow(ctx, `SELECT d.datname::text, d.oid::pg_catalog.int8 FROM pg_catalog.pg_database d
+		WHERE d.datname OPERATOR(pg_catalog.=) pg_catalog.current_database()`).Scan(&id.Database, &oid); err != nil {
+		return id, err
+	}
+	id.DatabaseOID = uint32(oid)
+	id.SystemIdentifier = readSystemIdentifier(ctx, conn)
+	return id, nil
+}
+
+// readSystemIdentifier returns "" when the role may not read pg_control.
+func readSystemIdentifier(ctx context.Context, conn *pgx.Conn) string {
+	var id string
+	if err := conn.QueryRow(ctx, "SELECT system_identifier::text FROM pg_catalog.pg_control_system()").Scan(&id); err != nil {
+		return ""
+	}
+	return id
+}
+
 // requireDedicated refuses a database not named for qualification.
 func requireDedicated(ctx context.Context, conn *pgx.Conn) error {
 	var name string
-	if err := conn.QueryRow(ctx, "SELECT current_database()").Scan(&name); err != nil {
+	if err := conn.QueryRow(ctx, "SELECT pg_catalog.current_database()::text").Scan(&name); err != nil {
 		return err
 	}
 	if !strings.HasPrefix(strings.ToLower(name), qualDatabasePrefix) {
-		return fmt.Errorf("the connected database is not a dedicated qualification database: its name must start with %q, as in the plan's compose sketch", qualDatabasePrefix)
+		return refused("the connected database is not a dedicated qualification database: its name must start with %q, as in the plan's compose sketch", qualDatabasePrefix)
+	}
+	return nil
+}
+
+// refuseQueueTables refuses a database holding any myce_* relation outside
+// the harness's schema, in any case. Stage 2 creates its tables unqualified,
+// so they land in whatever schema leads the search_path, and a quoted name
+// can be upper case. pg_class lists relations in every schema whatever the
+// role's privileges.
+func refuseQueueTables(ctx context.Context, conn *pgx.Conn) error {
+	rows, err := conn.Query(ctx, `SELECT n.nspname::text OPERATOR(pg_catalog.||) '.' OPERATOR(pg_catalog.||) c.relname::text
+		FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE pg_catalog.starts_with(pg_catalog.lower(c.relname::text), 'myce_')
+		  AND n.nspname OPERATOR(pg_catalog.<>) $1
+		ORDER BY 1 LIMIT 5`, qualSchema)
+	if err != nil {
+		return err
+	}
+	found, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return err
+	}
+	if len(found) > 0 {
+		return refused("this database holds shared queue tables (%s); qualify on a dedicated database", strings.Join(found, ", "))
+	}
+	if exists, ours, err := qualSchemaState(ctx, conn); err != nil {
+		return err
+	} else if exists && !ours {
+		return refused("schema %s exists but queue-qualify did not create it; qualify on a dedicated database", qualSchema)
+	}
+	return nil
+}
+
+func requireDurable(ctx context.Context, conn *pgx.Conn) error {
+	var durable bool
+	if err := conn.QueryRow(ctx, `SELECT pg_catalog.current_setting('fsync')::pg_catalog.bool
+		AND pg_catalog.current_setting('full_page_writes')::pg_catalog.bool`).Scan(&durable); err != nil {
+		return err
+	}
+	if !durable {
+		return refused("fsync and full_page_writes must be on; measurements without them say nothing about durable commits")
 	}
 	return nil
 }
@@ -214,7 +391,8 @@ func qualSchemaState(ctx context.Context, q interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }) (exists, ours bool, err error) {
 	var comment *string
-	err = q.QueryRow(ctx, "SELECT obj_description(oid, 'pg_namespace') FROM pg_namespace WHERE nspname = $1", qualSchema).Scan(&comment)
+	err = q.QueryRow(ctx, `SELECT pg_catalog.obj_description(n.oid, 'pg_namespace') FROM pg_catalog.pg_namespace n
+		WHERE n.nspname OPERATOR(pg_catalog.=) $1`, qualSchema).Scan(&comment)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, false, nil
 	}
@@ -224,47 +402,15 @@ func qualSchemaState(ctx context.Context, q interface {
 	return true, comment != nil && *comment == qualSchemaComment, nil
 }
 
-// prepare refuses a database that is not a dedicated qualification
-// database, holds shared-queue tables in any schema, or lacks durable writes,
-// then creates the qualification tables.
+// prepare creates the qualification tables. open has already vetted the
+// session; the schema check is repeated under the DDL lock.
 func prepare(ctx context.Context, conn *pgx.Conn) error {
-	if err := requireDedicated(ctx, conn); err != nil {
-		return err
-	}
-	// Stage 2 creates its tables unqualified, so they land in whatever schema
-	// leads the search_path. pg_class lists relations in every schema whatever
-	// the role's privileges. Every queue table is named myce_*.
-	rows, err := conn.Query(ctx, `SELECT n.nspname || '.' || c.relname FROM pg_class c
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE c.relname LIKE 'myce\_%' AND n.nspname <> $1 ORDER BY 1 LIMIT 5`, qualSchema)
-	if err != nil {
-		return err
-	}
-	found, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		return err
-	}
-	if len(found) > 0 {
-		return fmt.Errorf("this database holds shared queue tables (%s); qualify on a dedicated database", strings.Join(found, ", "))
-	}
-	if exists, ours, err := qualSchemaState(ctx, conn); err != nil {
-		return err
-	} else if exists && !ours {
-		return fmt.Errorf("schema %s exists but queue-qualify did not create it; qualify on a dedicated database", qualSchema)
-	}
-	var durable bool
-	if err := conn.QueryRow(ctx, "SELECT current_setting('fsync')::boolean AND current_setting('full_page_writes')::boolean").Scan(&durable); err != nil {
-		return err
-	}
-	if !durable {
-		return errors.New("fsync and full_page_writes must be on; measurements without them say nothing about durable commits")
-	}
 	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", ddlLockKey); err != nil {
+	if _, err := tx.Exec(ctx, "SELECT pg_catalog.pg_advisory_xact_lock($1)", ddlLockKey); err != nil {
 		return err
 	}
 	exists, ours, err := qualSchemaState(ctx, tx)
@@ -272,7 +418,7 @@ func prepare(ctx context.Context, conn *pgx.Conn) error {
 	case err != nil:
 		return err
 	case exists && !ours:
-		return fmt.Errorf("schema %s exists but queue-qualify did not create it", qualSchema)
+		return refused("schema %s exists but queue-qualify did not create it", qualSchema)
 	case !exists:
 		if _, err := tx.Exec(ctx, "CREATE SCHEMA "+qualSchema+"; COMMENT ON SCHEMA "+qualSchema+" IS '"+qualSchemaComment+"'"); err != nil {
 			return err
@@ -284,56 +430,12 @@ func prepare(ctx context.Context, conn *pgx.Conn) error {
 	return tx.Commit(ctx)
 }
 
-// dropQualification drops the tables prepare created and then the schema,
-// in one transaction and without CASCADE. If anything else lives in the
-// schema or depends on those tables, nothing is dropped and the error names
-// what is in the way.
-func dropQualification(ctx context.Context, conn *pgx.Conn) (bool, error) {
-	if err := requireDedicated(ctx, conn); err != nil {
-		return false, err
-	}
-	tx, err := conn.Begin(ctx)
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", ddlLockKey); err != nil {
-		return false, err
-	}
-	exists, ours, err := qualSchemaState(ctx, tx)
-	switch {
-	case err != nil:
-		return false, err
-	case !exists:
-		return false, nil
-	case !ours:
-		return false, fmt.Errorf("schema %s was not created by queue-qualify; left alone", qualSchema)
-	}
-	for _, table := range qualTables {
-		if _, err := tx.Exec(ctx, "DROP TABLE IF EXISTS "+qualSchema+"."+table+" RESTRICT"); err != nil {
-			return false, blocked(err)
-		}
-	}
-	if _, err := tx.Exec(ctx, "DROP SCHEMA "+qualSchema+" RESTRICT"); err != nil {
-		return false, blocked(err)
-	}
-	return true, tx.Commit(ctx)
-}
-
-// blocked explains a refused DROP with PostgreSQL's list of dependents.
-func blocked(err error) error {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Detail != "" {
-		return fmt.Errorf("cleanup dropped nothing: %s (%s); remove or move those objects first", pgErr.Message, strings.ReplaceAll(pgErr.Detail, "\n", "; "))
-	}
-	return fmt.Errorf("cleanup dropped nothing: %w", err)
-}
-
 type serverInfo struct {
 	Version          string            `json:"version"`
 	VersionNum       int               `json:"version_num"`
 	Settings         map[string]string `json:"settings"`
 	SystemIdentifier string            `json:"system_identifier,omitempty"`
+	Timeline         int               `json:"timeline,omitempty"`
 	StartedAt        time.Time         `json:"started_at"`
 	ClockOffsetMs    float64           `json:"clock_offset_ms"`
 	InRecovery       bool              `json:"in_recovery"`
@@ -353,16 +455,16 @@ func readServerInfo(ctx context.Context, conn *pgx.Conn, class string, pings int
 	s := &serverInfo{Settings: map[string]string{}, EndpointClass: class}
 	before := time.Now()
 	var server time.Time
-	err := conn.QueryRow(ctx, `SELECT version(), current_setting('server_version_num')::int,
-		pg_postmaster_start_time(), clock_timestamp(), pg_is_in_recovery(),
-		(SELECT rolsuper FROM pg_roles WHERE rolname = current_user)`).
+	err := conn.QueryRow(ctx, `SELECT pg_catalog.version(), pg_catalog.current_setting('server_version_num')::pg_catalog.int4,
+		pg_catalog.pg_postmaster_start_time(), pg_catalog.clock_timestamp(), pg_catalog.pg_is_in_recovery(),
+		(SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.rolname OPERATOR(pg_catalog.=) current_user)`).
 		Scan(&s.Version, &s.VersionNum, &s.StartedAt, &server, &s.InRecovery, &s.Superuser)
 	if err != nil {
 		return nil, err
 	}
 	mid := before.Add(time.Since(before) / 2)
 	s.ClockOffsetMs = ms(server.Sub(mid))
-	rows, err := conn.Query(ctx, "SELECT name, current_setting(name) FROM pg_settings WHERE name = ANY($1)", infoSettings)
+	rows, err := conn.Query(ctx, "SELECT s.name, pg_catalog.current_setting(s.name) FROM pg_catalog.pg_settings s WHERE s.name OPERATOR(pg_catalog.=) ANY($1)", infoSettings)
 	if err != nil {
 		return nil, err
 	}
@@ -379,11 +481,13 @@ func readServerInfo(ctx context.Context, conn *pgx.Conn, class string, pings int
 		return nil, err
 	}
 	// The identifier changes only when the data directory is recreated, so a
-	// match across a restart or OS update proves the same cluster came back.
-	// pg_control_system may be restricted to privileged roles.
-	var id string
-	if err := conn.QueryRow(ctx, "SELECT system_identifier::text FROM pg_control_system()").Scan(&id); err == nil {
-		s.SystemIdentifier = id
+	// match across a restart or OS update shows the same cluster came back.
+	// The timeline changes when a backup is restored and promoted. Both may
+	// be restricted to privileged roles.
+	s.SystemIdentifier = readSystemIdentifier(ctx, conn)
+	var timeline int32
+	if err := conn.QueryRow(ctx, "SELECT timeline_id FROM pg_catalog.pg_control_checkpoint()").Scan(&timeline); err == nil {
+		s.Timeline = int(timeline)
 	}
 	if pings > 0 {
 		var lat []float64
@@ -438,7 +542,7 @@ func cmdInfo(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	conn, err := t.connect(ctx)
+	conn, err := t.open(ctx, false, 0)
 	if err != nil {
 		return err
 	}
@@ -451,53 +555,4 @@ func cmdInfo(ctx context.Context, args []string, out io.Writer) error {
 	r.Server = s
 	r.Checks = infoChecks(s)
 	return r.finish(out)
-}
-
-func cmdCleanup(ctx context.Context, args []string, out io.Writer) error {
-	fs := newFlags("cleanup", out)
-	cf := addConnFlags(fs)
-	loadDir := fs.String("load-dir", "", "also remove leftover load runs and snapshots this tool created under this directory (listed in their manifests)")
-	skipDB := fs.Bool("skip-db", false, "do not connect; only remove load directories")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	// The database and the files are separate; a refusal in one still
-	// cleans the other, and both failures are returned.
-	var dbErr error
-	if !*skipDB {
-		dbErr = cleanupDatabase(ctx, cf, out)
-	}
-	if *loadDir == "" {
-		return dbErr
-	}
-	removed, kept, err := removeLoadLeftovers(*loadDir)
-	for _, r := range removed {
-		fmt.Fprintln(out, "removed", r)
-	}
-	for _, k := range kept {
-		fmt.Fprintln(out, "kept", k)
-	}
-	return errors.Join(dbErr, err)
-}
-
-func cleanupDatabase(ctx context.Context, cf *connFlags, out io.Writer) error {
-	t, err := cf.load()
-	if err != nil {
-		return err
-	}
-	conn, err := t.connect(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Close(context.Background())
-	dropped, err := dropQualification(ctx, conn)
-	if err != nil {
-		return err
-	}
-	if dropped {
-		fmt.Fprintln(out, "dropped schema", qualSchema, "and its", len(qualTables), "tables")
-	} else {
-		fmt.Fprintln(out, "no schema", qualSchema)
-	}
-	return nil
 }

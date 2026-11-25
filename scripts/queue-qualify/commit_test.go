@@ -107,26 +107,31 @@ func TestCommitAgainstDisposablePostgres(t *testing.T) {
 	if res.WALkBps <= 0 || res.PayloadkBps <= 0 || res.Mount == nil || res.Mount.Probes < 10 || len(res.Mount.Windows) != 0 {
 		t.Fatalf("rates or mount %+v %+v", res, res.Mount)
 	}
-	// The run leaves no rows behind and releases the turn; a second run can
-	// take over at once.
+	// The run keeps its rows, never truncating, and releases the turn; a
+	// second run can take over at once and continues the log.
 	conn, err := tg.connect(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close(ctx)
-	var rows int
+	var rows, head int64
 	var handover int64
 	var ready bool
-	if err := conn.QueryRow(ctx, `SELECT (SELECT count(*) FROM myce_qualification.myce_changes_v1), handover, ready
-		FROM myce_qualification.myce_coordinator_v1`).Scan(&rows, &handover, &ready); err != nil {
+	if err := conn.QueryRow(ctx, `SELECT (SELECT count(*) FROM myce_qualification.myce_changes_v1), head, handover, ready
+		FROM myce_qualification.myce_coordinator_v1`).Scan(&rows, &head, &handover, &ready); err != nil {
 		t.Fatal(err)
 	}
-	if rows != 0 || handover != 1 || ready {
-		t.Fatalf("after run: rows %d, handover %d, ready %v", rows, handover, ready)
+	if rows < int64(res.Append.Count) || rows != head || handover != 1 || ready {
+		t.Fatalf("after run: rows %d, head %d, handover %d, ready %v", rows, head, handover, ready)
 	}
 	opt.watch, opt.duration, opt.warmup = nil, time.Second, 0
 	if _, res, err := runCommit(ctx, tg, opt); err != nil || res.Reacquired != 0 {
 		t.Fatalf("second run: %v %+v", err, res)
+	}
+	var after int64
+	conn.QueryRow(ctx, "SELECT count(*) FROM myce_qualification.myce_changes_v1").Scan(&after)
+	if after <= rows {
+		t.Fatalf("the second run did not add to the kept log: %d then %d", rows, after)
 	}
 	// A concurrent run is refused while one holds the database.
 	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", commitLockKey); err != nil {

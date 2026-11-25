@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func TestEndpointClassNeverNamesTheHost(t *testing.T) {
@@ -62,29 +65,19 @@ func TestInfoAndPrepareAgainstDisposablePostgres(t *testing.T) {
 			t.Errorf("fixture fails %s: %s", c.Name, c.Measured)
 		}
 	}
-	if err := prepare(ctx, conn); err != nil {
-		t.Fatal(err)
-	}
-	if err := prepare(ctx, conn); err != nil {
-		t.Fatalf("prepare must be repeatable: %v", err)
+	for range 2 {
+		c, err := tg.open(ctx, true, 0)
+		if err != nil {
+			t.Fatalf("open must be repeatable: %v", err)
+		}
+		c.Close(ctx)
 	}
 	// A database that already holds a real authority is refused.
 	if _, err := conn.Exec(ctx, "CREATE TABLE public.myce_coordinator_v1(id int)"); err != nil {
 		t.Fatal(err)
 	}
-	if err := prepare(ctx, conn); err == nil || !strings.Contains(err.Error(), "dedicated database") {
+	if _, err := tg.open(ctx, true, 0); !errors.Is(err, errRefused) || !strings.Contains(err.Error(), "dedicated database") {
 		t.Fatalf("live authority not refused: %v", err)
-	}
-	// cleanup drops only the qualification schema.
-	t.Setenv("QQ_TEST_DSN", pg.dsn())
-	var out strings.Builder
-	if err := cmdCleanup(ctx, []string{"--dsn-env", "QQ_TEST_DSN"}, &out); err != nil {
-		t.Fatal(err)
-	}
-	var schema, kept bool
-	conn.QueryRow(ctx, "SELECT to_regnamespace('myce_qualification') IS NOT NULL, to_regclass('public.myce_coordinator_v1') IS NOT NULL").Scan(&schema, &kept)
-	if schema || !kept {
-		t.Fatalf("cleanup: qualification schema %v, unrelated table kept %v", schema, kept)
 	}
 }
 
@@ -102,7 +95,7 @@ func TestPrepareRefusesAQueueInAnySchemaOrAnUndedicatedDatabase(t *testing.T) {
 	if _, err := conn.Exec(ctx, "CREATE SCHEMA queue; CREATE TABLE queue.myce_changes_v1(sequence bigint PRIMARY KEY)"); err != nil {
 		t.Fatal(err)
 	}
-	if err := prepare(ctx, conn); err == nil || !strings.Contains(err.Error(), "queue.myce_changes_v1") {
+	if _, err := pg.target(t).open(ctx, true, 0); !errors.Is(err, errRefused) || !strings.Contains(err.Error(), "queue.myce_changes_v1") {
 		t.Fatalf("a queue table in schema queue was not refused: %v", err)
 	}
 	var made bool
@@ -121,51 +114,122 @@ func TestPrepareRefusesAQueueInAnySchemaOrAnUndedicatedDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer oconn.Close(ctx)
-	if err := prepare(ctx, oconn); err == nil || !strings.Contains(err.Error(), "dedicated") {
+	if err := other.vet(ctx, oconn, true, 0); !errors.Is(err, errRefused) || !strings.Contains(err.Error(), "dedicated") {
 		t.Fatalf("database postgres was not refused: %v", err)
 	}
 }
 
-// cleanup drops only what prepare created. An object someone else made that
-// depends on those tables, or sits in the schema, stays, and cleanup fails.
-func TestCleanupLeavesForeignDatabaseObjectsAndFails(t *testing.T) {
+// A queue created with a quoted upper-case name is still a queue.
+func TestRefusalMatchesQueueTablesInAnyCase(t *testing.T) {
 	pg := startPostgres(t)
 	ctx := context.Background()
-	conn, err := pg.target(t).connect(ctx)
+	tg := pg.target(t)
+	conn, err := tg.connect(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close(ctx)
-	cleanup := func() error {
-		var out strings.Builder
-		return cmdCleanup(ctx, []string{"--dsn-env", "QQ_TEST_DSN"}, &out)
+	if _, err := conn.Exec(ctx, `CREATE TABLE public."MYCE_CHANGES_V1"(sequence bigint PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
 	}
-	exists := func(rel string) bool {
-		var ok bool
-		conn.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", rel).Scan(&ok)
-		return ok
+	if _, err := tg.open(ctx, true, 0); !errors.Is(err, errRefused) || !strings.Contains(err.Error(), "MYCE_CHANGES_V1") {
+		t.Fatalf("an upper-case queue table was not refused: %v", err)
 	}
-	for _, foreign := range []struct{ create, rel string }{
-		{"CREATE VIEW public.their_view AS SELECT run FROM myce_qualification.durability_v1", "public.their_view"},
-		{"CREATE TABLE myce_qualification.their_table(id int)", "myce_qualification.their_table"},
-	} {
-		if err := prepare(ctx, conn); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := conn.Exec(ctx, foreign.create); err != nil {
-			t.Fatal(err)
-		}
-		if err := cleanup(); err == nil {
-			t.Fatalf("cleanup succeeded with %s in the way", foreign.rel)
-		}
-		if !exists(foreign.rel) || !exists("myce_qualification.durability_v1") {
-			t.Fatalf("cleanup removed %s or the tables it depends on", foreign.rel)
-		}
-		if _, err := conn.Exec(ctx, "DROP TABLE IF EXISTS myce_qualification.their_table; DROP VIEW IF EXISTS public.their_view"); err != nil {
-			t.Fatal(err)
-		}
+}
+
+// A role or database search_path that puts another schema ahead of
+// pg_catalog can shadow the catalog: a pg_class view that hides the queue,
+// or a current_database() that claims a qualification name. The harness
+// pins search_path and names pg_catalog explicitly, so neither works.
+func TestRefusalIgnoresAShadowedCatalog(t *testing.T) {
+	pg := startPostgres(t)
+	ctx := context.Background()
+	tg := pg.target(t)
+	conn, err := tg.connect(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := cleanup(); err != nil || exists("myce_qualification.durability_v1") {
-		t.Fatalf("cleanup of the harness's own objects: %v", err)
+	defer conn.Close(ctx)
+	if _, err := conn.Exec(ctx, `CREATE TABLE public.myce_coordinator_v1(id int);
+		CREATE SCHEMA shadow;
+		CREATE VIEW shadow.pg_class AS SELECT * FROM pg_catalog.pg_class WHERE false;
+		ALTER ROLE qualify SET search_path = shadow, pg_catalog, public`); err != nil {
+		t.Fatal(err)
+	}
+	// The shadow is live for an ordinary session.
+	plain, err := pgx.Connect(ctx, pg.dsn())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen int
+	plain.QueryRow(ctx, "SELECT count(*) FROM pg_class WHERE relname = 'myce_coordinator_v1'").Scan(&seen)
+	plain.Close(ctx)
+	if seen != 0 {
+		t.Fatal("the fixture's shadow view is not in effect")
+	}
+	if _, err := tg.open(ctx, true, 0); !errors.Is(err, errRefused) || !strings.Contains(err.Error(), "myce_coordinator_v1") {
+		t.Fatalf("a queue hidden by a shadowed pg_class was not refused: %v", err)
+	}
+
+	// A function that claims a qualification name, on the cluster's default
+	// database, through that database's own search_path.
+	t.Setenv("QQ_OTHER_DSN", strings.Replace(pg.dsn(), "/"+fixtureDB+"?", "/postgres?", 1))
+	other, err := (&connFlags{env: "QQ_OTHER_DSN"}).load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oconn, err := other.connect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer oconn.Close(ctx)
+	if _, err := oconn.Exec(ctx, `CREATE SCHEMA shadow;
+		CREATE FUNCTION shadow.current_database() RETURNS name LANGUAGE sql AS $$ SELECT 'qualify'::name $$`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.open(ctx, true, 0); !errors.Is(err, errRefused) || !strings.Contains(err.Error(), "dedicated") {
+		t.Fatalf("a shadowed current_database() was not refused: %v", err)
+	}
+}
+
+// Every reconnect is vetted again before it writes: the same address can
+// lead to a different server, and a session lock does not survive its
+// connection.
+func TestReconnectIsVettedAndRelocked(t *testing.T) {
+	first, second := startPostgres(t), startPostgres(t)
+	ctx := context.Background()
+	tg := first.target(t)
+	conn, err := tg.open(ctx, true, commitLockKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// While this session holds the lock, another is refused it.
+	if _, err := tg.open(ctx, true, commitLockKey); !errors.Is(err, errLockBusy) {
+		t.Fatalf("lock not held: %v", err)
+	}
+	conn.Close(ctx)
+	again, err := tg.open(ctx, true, commitLockKey)
+	if err != nil {
+		t.Fatalf("reconnect could not re-take the lock: %v", err)
+	}
+	if _, err := tg.open(ctx, true, commitLockKey); !errors.Is(err, errLockBusy) {
+		t.Fatalf("the reconnect did not re-take the lock: %v", err)
+	}
+	again.Close(ctx)
+	// The same target now reaches a different cluster, as a moved address or
+	// a recreated container would.
+	tg.cfg.Port = uint16(second.port)
+	if _, err := tg.open(ctx, true, 0); !errors.Is(err, errRefused) || !errors.Is(err, errTargetChanged) {
+		t.Fatalf("a reconnect to a different server was not refused: %v", err)
+	}
+	var made bool
+	sconn, err := second.target(t).connect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sconn.Close(ctx)
+	sconn.QueryRow(ctx, "SELECT to_regnamespace('myce_qualification') IS NOT NULL").Scan(&made)
+	if made {
+		t.Fatal("the refused reconnect wrote to the other server")
 	}
 }

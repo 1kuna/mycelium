@@ -29,7 +29,12 @@ Commands:
   load               bounded bulk file I/O generator for one directory
   catchup            snapshot transfer and change-log replay into local SQLite
   summarize          combine JSON reports into one comparison
-  cleanup            drop the qualification schema and leftover load directories
+
+The harness never deletes anything on the target. Each load or snapshot run
+writes into a new directory of its own and prints its path; the storage owner
+removes it, and the qualification database or container, NAS-local.
+Ctrl-C, SIGTERM or a run's time limit stops the process within 10 seconds,
+even when a call into a hung mount never returns.
 
 The connection string comes from the environment variable named by --dsn-env
 (default MYCE_QUAL_PG_DSN) or from --dsn-file. It is never printed.
@@ -38,7 +43,9 @@ Run "queue-qualify COMMAND -h" for each command's flags.
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	disarm := guard.arm(ctx)
 	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr)
+	disarm()
 	stop()
 	os.Exit(code)
 }
@@ -53,7 +60,6 @@ var commands = map[string]command{
 	"load":              cmdLoad,
 	"catchup":           cmdCatchup,
 	"summarize":         cmdSummarize,
-	"cleanup":           cmdCleanup,
 }
 
 // errChecksFailed reports a completed run whose report has a failing check.
