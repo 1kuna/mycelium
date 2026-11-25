@@ -1290,14 +1290,14 @@ myce extension check --gpu xpu --device 0 --digest SHA256 example@1
 
 Runtime checks read authority (including the certificate pin), `host_id`,
 `state_dir/extensions` and `environment_cache` from the installed worker config.
-Use `--config FILE` for a custom installation. Explicit `--host`, `--root` and
-`--environment-cache` override the local defaults; authority flags work as for
-other installed commands. `--gpu` and, for GPUs, `--device` remain explicit:
-they select what to qualify. For CPU checks use `--gpu cpu` without a device.
+Use `--config FILE` for a custom installation. An explicit `--host` must match
+the installed worker. Explicit `--root` and `--environment-cache` override the
+local defaults. Authority flags work as for other installed commands. Select
+what to qualify with `--gpu` and, for GPUs, `--device`. For CPU checks use `--gpu cpu` without a device.
 A different `--root` warns that the live worker is not qualified by that check.
 
-Without installed worker settings, supply host/cache explicitly or use
-`myce dev` for automatic local defaults. A successful check is evidence only
+For local development without installed worker settings, use `myce dev` for
+automatic local defaults and omit `--host`. A successful check is evidence only
 for the selected extension digest, target and hardware/driver fingerprint.
 See [extension authoring](adapter.md#install-and-qualify) and the
 [check guidance](adapter.md) for preparation and replay criteria.

@@ -221,13 +221,13 @@ func mustReadSkill(t *testing.T, dir string) map[string][]byte {
 
 // Older fleet helpers parse combined output, so a candidate version probe must
 // neither refresh the installed guide nor print the refresh notice (#1450).
-func TestSkillVersionProbeIsReadOnly(t *testing.T) {
-	if alias := os.Getenv("MYCE_TEST_VERSION_PROBE"); alias != "" {
+func TestSkillVersionAndReleaseCommandsDoNotRefresh(t *testing.T) {
+	if command := os.Getenv("MYCE_TEST_SKILL_READ_ONLY_COMMAND"); command != "" {
 		if err := os.Setenv("HOME", os.Getenv("MYCE_TEST_VERSION_HOME")); err != nil {
 			t.Fatal(err)
 		}
 		myce.BuildVersion = "v3.2.0"
-		os.Args = []string{"myce", alias, "--json"}
+		os.Args = append([]string{"myce"}, strings.Fields(command)...)
 		main()
 		os.Exit(0)
 	}
@@ -235,12 +235,12 @@ func TestSkillVersionProbeIsReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, alias := range []string{"version", "--version", "-v"} {
-		t.Run(alias, func(t *testing.T) {
+	for _, command := range []string{"version --json", "--version --json", "-v --json", "release build-targets", "release targets", "release manifest", "release approve"} {
+		t.Run(command, func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
 			t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
-			t.Setenv("MYCE_TEST_VERSION_PROBE", alias)
+			t.Setenv("MYCE_TEST_SKILL_READ_ONLY_COMMAND", command)
 			t.Setenv("MYCE_TEST_VERSION_HOME", home)
 			dir := filepath.Join(home, ".agents", "skills", "mycelium")
 			if err := (skillInstaller{Version: "v3.1.0", Out: io.Discard}).install([]string{dir}, false, false); err != nil {
@@ -251,14 +251,30 @@ func TestSkillVersionProbeIsReadOnly(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			output, err := exec.Command(binary, "-test.run=^TestSkillVersionProbeIsReadOnly$").CombinedOutput()
-			var info myce.VersionInfo
-			if err != nil || json.Unmarshal(output, &info) != nil || info.Version != "v3.2.0" {
-				t.Fatalf("old helper cannot decode candidate version: %v: %s", err, output)
+			output, err := exec.Command(binary, "-test.run=^TestSkillVersionAndReleaseCommandsDoNotRefresh$").CombinedOutput()
+			switch command {
+			case "release manifest", "release approve":
+				// Missing required inputs stop these commands before signing or contacting the queue.
+				want := "release directory and signing key required"
+				if command == "release approve" {
+					want = "release approve requires --release-manifest"
+				}
+				if err == nil || !strings.Contains(string(output), want) {
+					t.Fatalf("expected release validation error: %v: %s", err, output)
+				}
+			case "release build-targets", "release targets":
+				if err != nil || len(output) == 0 {
+					t.Fatalf("expected release targets: %v: %s", err, output)
+				}
+			default:
+				var info myce.VersionInfo
+				if err != nil || json.Unmarshal(output, &info) != nil || info.Version != "v3.2.0" {
+					t.Fatalf("old helper cannot decode candidate version: %v: %s", err, output)
+				}
 			}
 			afterMarker, err := os.ReadFile(filepath.Join(dir, skillMarker))
 			if err != nil || string(afterMarker) != string(marker) || !maps.EqualFunc(before, mustReadSkill(t, dir), func(a, b []byte) bool { return string(a) == string(b) }) {
-				t.Fatal("version probe changed installed guide", err)
+				t.Fatal("command changed installed guide", err)
 			}
 		})
 	}

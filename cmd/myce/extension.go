@@ -43,11 +43,19 @@ func extensionCommand(args []string) error {
 	host := f.String("host", "", "this host's configured worker host ID (default: installed worker; local execution only)")
 	digest := f.String("digest", "", "require exact extension SHA-256")
 	local := f.Bool("local", false, "add locally without registering with the queue")
-	platform := f.String("gpu", "", "qualification platform: cuda, xpu, metal or fake")
+	platform := f.String("gpu", "", "qualification platform: cpu, cuda, xpu, metal or fake")
 	device := f.String("device", "", "same selector as join --device")
 	timeout := f.Duration("timeout", 10*time.Minute, "setup time limit; check execution time limit per command (excludes waiting to start)")
 	if err := f.Parse(args[1:]); err != nil {
 		return err
+	}
+	var worker myce.ServiceConfig
+	var installedWorker bool
+	if args[0] == "check" && !*static {
+		worker, installedWorker = installedExtensionWorker(*config)
+		if *host != "" && (!installedWorker || *host != worker.HostID) {
+			return fmt.Errorf("runtime checks execute on the target host %q: run myce extension check there as the installation owner, or submit the useful job so the queue runs native qualification", *host)
+		}
 	}
 	if *reserve && (args[0] != "check" || *static || *reserveLifetime <= 0 || *reserveLifetime > myce.MaxReservationLifetime) {
 		return errors.New("--reserve requires a runtime check and --max-lifetime in (0, 24h]")
@@ -146,7 +154,7 @@ func extensionCommand(args []string) error {
 			return nil
 		}
 		if args[0] == "check" {
-			if worker, ok := installedExtensionWorker(*config); ok {
+			if installedWorker {
 				if *host == "" {
 					*host = worker.HostID
 				}
@@ -199,6 +207,9 @@ func extensionCommand(args []string) error {
 			}
 			for _, r := range reports {
 				fmt.Println(myce.FormatExtensionReport(r))
+				if args[0] == "check" && r.CheckID != "" {
+					fmt.Printf("check ID %s (queue submission key)\n", r.CheckID)
+				}
 			}
 			if err != nil {
 				if args[0] == "check" && strings.HasPrefix(err.Error(), "never started: ") {
