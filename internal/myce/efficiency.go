@@ -654,7 +654,7 @@ func (q *Queue) prepareEfficiencyDiagnostics(ctx context.Context) (*efficiencyDi
 	if q.simulation {
 		return nil, nil
 	}
-	v, _, err := q.captureObservation("", ctx)
+	v, _, err := q.captureObservationInputs("", nil, true, ctx)
 	if err != nil {
 		return nil, err
 	}

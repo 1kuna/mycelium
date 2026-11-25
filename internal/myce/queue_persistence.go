@@ -693,6 +693,10 @@ func readQueueRecordRows(rows queueRecordRows, visit func(string, []byte)) (map[
 	}
 	for key, members := range fields {
 		root, ok := roots[key]
+		// A reconstructed row owns a new encoding. Release the consumed
+		// physical rows as we go so they do not all survive the load beside it.
+		delete(fields, key)
+		delete(roots, key)
 		if !ok {
 			return nil, fmt.Errorf("queue field root missing")
 		}
