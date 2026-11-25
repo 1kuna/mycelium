@@ -581,7 +581,9 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 							err = s.save()
 						} else {
 							s.fileError = "file publication pending; local results retained"
-							if record.ownsResult(&finished) && finished.ExecutionCause != nil && finished.ExecutionCause.Finalization != nil {
+							// Warm checkpoints are fenced by exact release. Preserve the
+							// saved result and let this actor retry before releasing.
+							if !warmSave && record.ownsResult(&finished) && finished.ExecutionCause != nil && finished.ExecutionCause.Finalization != nil {
 								s.state.Result = &finished
 								if saveErr := s.save(); saveErr != nil {
 									finish(saveErr)

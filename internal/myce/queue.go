@@ -2516,6 +2516,9 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 	oomFailure := !r.Success && (r.OutOfMemory || ceilingFailure)
 	outcome.OutOfMemory = oomFailure
 	stageFailure := (j.Spec.Priority == "production" || plannedPriorityStop(j) || automaticExtensionCheck(j) != nil) && !r.Success && !r.Interrupted
+	// Main can observe a stopped warm boundary before the worker receives
+	// the stop directive. A clean exit then leaves the unsettled tail queued.
+	warmTail := j.Spec.warmPieces() && j.FanOut.Next < len(j.Spec.FanOut.Pieces)
 	poolPressure := j.Reason == memoryPressureCause || r.ExecutionCause != nil && r.ExecutionCause.Class == memoryPressureCause
 	// Bridge cleanup-to-inventory telemetry with the same absolute bound as
 	// pending cleanup. Completion and heartbeats cannot renew planning credit.
@@ -2545,7 +2548,7 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 			q.pauseJob(j, JobPause{Reason: floor.Error(), CheckpointFloor: floor})
 			admissionRequeueOutcome(&outcome)
 		}
-	} else if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure && !diskFailure && !wallFailure && !wallTimeStopped(j) && !launchCapacityRefusal(r) && !poolPressure {
+	} else if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j) || warmTail) && !oomFailure && !stageFailure && !diskFailure && !wallFailure && !wallTimeStopped(j) && !launchCapacityRefusal(r) && !poolPressure {
 		if cancelled(j) {
 			q.finishCancellation(j)
 		} else {

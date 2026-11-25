@@ -157,7 +157,7 @@ func (q *Queue) warmPiece(ctx context.Context, r warmPieceRequest) (reply warmPi
 			return ErrStale
 		}
 		if j.State != "running" {
-			if r.Op == "next" && r.Key == "" && r.Sequence == 0 && j.State == "stopping" && j.Reason == warmBoundaryYield {
+			if r.Op == "next" && r.Key == "" && r.Sequence == 0 && j.State == "stopping" {
 				reply.End = true
 				return nil
 			}
@@ -315,27 +315,9 @@ func (q *Queue) warmPieceYields(j *Job) bool {
 		return false
 	}
 	scan := q.placementScan()
-	target := slices.IndexFunc(scan.machines, func(m *Machine) bool {
-		if m.ID != j.Machine || m.Session != j.Session || len(m.groupMembers) > 0 {
-			return false
-		}
-		if j.Spec.Needs.cpuOnly() {
-			return m.Devices == nil || m.GPU == "cpu"
-		}
-		return batchOnTarget(j, m)
-	})
-	if target < 0 {
+	owner := q.s.Machines[j.Machine]
+	if owner == nil || owner.Session != j.Session {
 		return false
-	}
-	m := scan.machines[target]
-	projected := q.cpuAfterReleases(m, []*Job{j}, nil, 0)
-	room := q.hostRoomAfter(m, []*Job{j}, nil)
-	projected.FreeHostMemoryGB, projected.hostReservationDebtGB = max(0, room), max(0, -room)
-	if !j.Spec.Needs.cpuOnly() {
-		projected.FreeMemoryGB += deviceShareGB(j)
-		if m.TotalMemoryGB > 0 {
-			projected.FreeMemoryGB = min(m.TotalMemoryGB, projected.FreeMemoryGB)
-		}
 	}
 	// Exclude work with an immediate alternative. Compare against the
 	// original charge before making the local release projection.
@@ -347,11 +329,32 @@ func (q *Queue) warmPieceYields(j *Job) bool {
 	continuation := *j
 	continuation.State = "queued"
 	continuation.PreemptionPlacement = nil
-	// Fit with a hypothetical release, then measure ranking while all
-	// current allocations still count toward their project's active usage.
-	set, eligible := q.warmProjectedContenders(j, &projected, waiting)
-	set.jobs = append(set.jobs, &continuation)
-	return slices.ContainsFunc(eligible, func(candidate *Job) bool { return set.before(candidate, &continuation) })
+	for _, m := range scan.machines {
+		if hostID(m) != hostID(owner) || len(m.groupMembers) > 0 {
+			continue
+		}
+		// RAM and cores are host-wide. VRAM is released only on the card
+		// occupied by this attempt.
+		projected := q.afterReleases(m, []*Job{j}, nil)
+		if !j.Spec.Needs.cpuOnly() && batchOnTarget(j, m) {
+			projected.FreeMemoryGB += deviceShareGB(j)
+			if m.TotalMemoryGB > 0 {
+				projected.FreeMemoryGB = min(m.TotalMemoryGB, projected.FreeMemoryGB)
+			}
+		}
+		// Rank after restoring custody so active usage still counts.
+		set, eligible := q.warmProjectedContenders(j, &projected, waiting)
+		set.jobs = append(set.jobs, &continuation)
+		for _, candidate := range eligible {
+			if q.immediateCandidate(candidate, m) != nil && q.batchSlotFree(m, candidate) {
+				continue
+			}
+			if set.before(candidate, &continuation) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (q *Queue) warmProjectedContenders(j *Job, projected *Machine, waiting map[string]bool) (*candidateSet, []*Job) {
