@@ -193,14 +193,15 @@ func TestHostHygieneMountRecoveryReadBackoffAndHumanAlert(t *testing.T) {
 			p.measure = func(string, func()) hostMountResult {
 				fakeMu.Lock()
 				defer fakeMu.Unlock()
-				err := probeRecoveryMount("/storage/checkpoints", "/storage", osname, func(string) error {
+				probe := func(string) error {
 					return statHealthMount("root", func(path string) (os.FileInfo, error) {
 						if failure != nil {
 							return nil, failure
 						}
 						return fs.Stat(files, path)
 					}, func() {})
-				}, func() ([]nasMount, error) {
+				}
+				err := probeRecoveryMount("/storage/checkpoints", "/storage", osname, probe, probe, func() ([]nasMount, error) {
 					if mounted {
 						return []nasMount{{root: "/storage", kind: "smbfs"}}, nil
 					}

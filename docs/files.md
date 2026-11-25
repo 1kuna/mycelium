@@ -1372,10 +1372,14 @@ and the [Python checkpoint helper](../clients/python/README.md#resumable-command
 The helper owns atomic generation publication, including the CIFS exception above.
 Test stop/save/restart on a later attempt and verify complete output.
 
-Non-resumable production (`priority: production`, `resumable: false`) starts
-without NAS checkpoint access and receives a local scratch checkpoint directory
-under the worker state directory. Declare `resumable: true` when production needs
-NAS checkpoints. Experiments and resumable production still wait for NAS recovery.
+A worker with an unavailable NAS can start production, deadline, experiment and
+test jobs whose dependencies are available. Plain jobs without checkpoint
+requirements get an attempt-local scratch checkpoint directory. Explicit
+`local_first` jobs save locally and can restore the last queue-accepted
+generation through file transfer. Jobs that need an unavailable worker path
+wait with `storage_root` naming its role. A verified shared-input cache can
+serve ordinary staging during an outage. Ephemeral staging needs the NAS
+source for declared NAS inputs.
 
 The host-hygiene mount probe also checks configured checkpoint/NAS roots with a
 stat and one directory-entry read, using this host's healthy latency history.

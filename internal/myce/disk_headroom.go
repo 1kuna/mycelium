@@ -141,6 +141,19 @@ func diskVolumeNeed(j *Job, v DiskVolume, machines ...*Machine) (uint64, bool) {
 func (q *Queue) diskVolumeNeed(j *Job, v DiskVolume, m *Machine) (uint64, bool) {
 	return diskVolumeNeedWith(j, v, q.diskWork(j, m), m)
 }
+
+func checkpointDiskBytes(j *Job) uint64 {
+	if j.ResumeFiles != nil {
+		if bytes := manifestDiskBytes(j.ResumeFiles.Files); bytes > 0 {
+			return bytes
+		}
+	}
+	if j.Spec.Disk != nil {
+		return j.Spec.Disk.CheckpointBytes
+	}
+	return 0
+}
+
 func diskVolumeNeedWith(j *Job, v DiskVolume, work diskWork, machines ...*Machine) (uint64, bool) {
 	input, output := diskInputOutput(j)
 	spool := uint64(0)
@@ -156,6 +169,9 @@ func diskVolumeNeedWith(j *Job, v DiskVolume, work diskWork, machines ...*Machin
 		case "data":
 			relevant = true
 			need = addDiskBytes(need, addDiskBytes(input, output))
+			if j.Spec.localFirst() {
+				need = addDiskBytes(need, checkpointDiskBytes(j))
+			}
 			if j.Spec.ephemeral() {
 				for _, private := range j.Spec.SharedInputs {
 					need = addDiskBytes(need, uint64(private.bytes()))
@@ -186,19 +202,12 @@ func diskVolumeNeedWith(j *Job, v DiskVolume, work diskWork, machines ...*Machin
 				}
 			}
 		case "checkpoint":
-			if j.Spec.ephemeral() {
+			if j.Spec.ephemeral() || j.Spec.localFirst() {
 				continue
 			}
-			if j.Spec.Resumable || j.ResumeFiles != nil || j.Spec.Disk != nil && j.Spec.Disk.CheckpointBytes > 0 {
+			if needsCheckpoint(j) || j.ResumeFiles != nil {
 				relevant = true
-				checkpoint := uint64(0)
-				if j.ResumeFiles != nil {
-					checkpoint = manifestDiskBytes(j.ResumeFiles.Files)
-				}
-				if checkpoint == 0 && j.Spec.Disk != nil {
-					checkpoint = j.Spec.Disk.CheckpointBytes
-				}
-				need = addDiskBytes(need, checkpoint)
+				need = addDiskBytes(need, checkpointDiskBytes(j))
 			}
 		case "environment":
 			relevant = relevant || j.Spec.Environment.Key() != "" || j.Spec.extensionJob() || work.environment > 0

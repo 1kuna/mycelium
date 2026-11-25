@@ -94,7 +94,7 @@ func (c *resolveNASCache) resolve(req ResolveRequest, report *ResolveReport) {
 				c.entries[key] = entry
 				used += int64(len(key)+len(entry.check.ID)+len(entry.check.Path)) + int64(reflect.TypeFor[resolveNASEntry]().Size())
 			}
-			if entry != nil && target.Freshness == "fresh" {
+			if entry != nil && target.nasInspection && target.Freshness == "fresh" {
 				evidence.State, evidence.ObservedAt = entry.state, entry.observed
 			}
 			target.NASInputs = append(target.NASInputs, evidence)
@@ -116,6 +116,14 @@ func (c *resolveNASCache) checkin(in Checkin) []NASPathCheck {
 	defer c.mu.Unlock()
 	now := c.clock.Now()
 	c.expire(now)
+	if storageRootUnavailable(&in.Machine, "checkpoint") {
+		for key, entry := range c.entries {
+			if entry.machine == in.Machine.ID && entry.session == in.Machine.Session {
+				delete(c.entries, key)
+			}
+		}
+		return nil
+	}
 	reports := map[string]NASPathReport{}
 	for _, r := range in.NASPathReports {
 		if !math.IsNaN(r.AgeSeconds) && !math.IsInf(r.AgeSeconds, 0) && r.AgeSeconds >= 0 && r.AgeSeconds <= float64(math.MaxInt64)/float64(time.Second) && (r.State == "present" || r.State == "missing" || r.State == "unverified") {
@@ -167,7 +175,7 @@ func (w *Worker) inspectNASPaths(checks []NASPathCheck, root string) {
 }
 func (w *Worker) nasPathReports() []NASPathReport {
 	s := w.nasInspection
-	if s == nil {
+	if s == nil || storageRootUnavailable(&w.Machine, "checkpoint") {
 		return nil
 	}
 	// One operation each heartbeat costs at most the existing 25ms observation

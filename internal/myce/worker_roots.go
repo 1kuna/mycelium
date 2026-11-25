@@ -19,6 +19,10 @@ type UnavailableRoot struct {
 	Reason string `json:"reason"`
 }
 
+func storageRootUnavailable(m *Machine, role string) bool {
+	return slices.ContainsFunc(m.UnavailableRoots, func(root UnavailableRoot) bool { return root.Root == role })
+}
+
 type workerRootMonitor struct {
 	mu        sync.Mutex
 	paths     map[string]string
@@ -157,9 +161,9 @@ func storageRootReason(j *Job, m *Machine) string {
 		case "extension":
 			needs = j.Spec.extensionJob() || len(j.Extensions) > 0
 		case "checkpoint":
-			needs = needsCheckpoint(j) && !j.Spec.localFirst()
+			needs = needsNASCheckpoint(j)
 			for _, input := range j.Spec.SharedInputs {
-				needs = needs || input.NAS != "" && !slices.Contains(m.CachedSharedInputs, input.key())
+				needs = needs || input.NAS != "" && (j.Spec.ephemeral() || !slices.Contains(m.CachedSharedInputs, input.key()))
 			}
 		case "job-files":
 			needs = len(jobInputPaths(j)) > 0 || j.publishesNASOutputs()

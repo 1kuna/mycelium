@@ -1181,7 +1181,13 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			}
 			m.UnavailableRoots = w.sampleStorageRoots(ctx, root.state.CheckpointRoot)
 			w.Machine.UnavailableRoots = slices.Clone(m.UnavailableRoots)
-			m.DiskVolumes = w.sampleDisks(root.dir, root.state.CheckpointRoot)
+			checkpointRoot := root.state.CheckpointRoot
+			checkpointMissing := storageRootUnavailable(&m, "checkpoint")
+			checkpointDiskRoot := checkpointRoot
+			if checkpointMissing {
+				checkpointDiskRoot = ""
+			}
+			m.DiskVolumes = w.sampleDisks(root.dir, checkpointDiskRoot)
 			m.FileTransferError = diagnostics.FileTransferError
 			m.ResultPublications = diagnostics.ResultPublications
 			observed, probeErr, observation := inventory.snapshotWithObservation()
@@ -1278,12 +1284,14 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.SharedCPUEnforcement = ""
 			}
 
-			checkpointRoot := root.state.CheckpointRoot
-			available, _ := root.nasProbe.periodic(w.Clock, checkpointRoot, func(progress func()) (bool, error) {
-				err := workerCheckpointAvailable(checkpointRoot, progress)
-				probeWorker.observeStorageError(err)
-				return err == nil, err
-			})
+			available := false
+			if !checkpointMissing {
+				available, _ = root.nasProbe.periodic(w.Clock, checkpointRoot, func(progress func()) (bool, error) {
+					err := workerCheckpointAvailable(checkpointRoot, progress)
+					probeWorker.observeStorageError(err)
+					return err == nil, err
+				})
+			}
 			m.CheckpointUnavailable = !available || diagnostics.CheckpointUnavailable
 			if m.CapabilityProfile != nil {
 				profile := *m.CapabilityProfile

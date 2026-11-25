@@ -435,7 +435,8 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 			return e
 		}
 	}
-	if role == "worker" && c.Detection.Platform != "fake" && !c.Enrollment {
+	if role == "worker" && c.Detection.Platform != "fake" && !c.Enrollment &&
+		(installed == nil || !c.PreservesWorkerStorage(*installed)) {
 		c, e = myce.PrepareOnboardingStorage(ctx, c, installed == nil && !explicit["nas"], probe.Command)
 		if e != nil {
 			return e

@@ -37,10 +37,18 @@ is separate from the laptop fixture and requires an authorized test window.
 
 ## Worker mount recovery (Linux and macOS)
 
+An in-place update of an installed worker can proceed with its saved NAS
+selection absent. Preflight checks the existing path metadata and defers NAS
+write probes, recording a `storage_warning`. A regular file or symlink at the
+saved mountpoint still fails preflight. When a worker is readmitted degraded,
+jobs of any tier can use it if their storage dependencies are available.
+
 Workers reuse the host-hygiene mount probe for each configured checkpoint/NAS
 root. Checkpoint health reuses the existing admission access check: stat the
 root, rewrite one fixed per-host `.myce-probe-<host>-worker` file in place,
-close it and read it back. Probes never delete files: a NAS recycle bin keeps
+close it and read it back. With a known missing mount, recovery triggers the OS
+automount with metadata access and waits for mount inventory before retrying
+the write probe. Probes never delete files: a NAS recycle bin keeps
 every SMB delete, and a create-then-remove probe filled one bin folder until
 listing it stalled the share (#1545). The queue's probe works the same way and
 reuses a completed result for one measured worker check-in period; install
@@ -85,6 +93,10 @@ slow successes; an unfinished probe cannot confirm recovery.
 NAS-dependent work waits with a typed root reason; local/cached work continues
 when its own dependencies are available. Existing operator drains and attempt
 custody are unchanged.
+
+NAS input inspection reports `unverified` while the checkpoint root is
+unavailable. Recovery requires a fresh inspection. A local checkpoint restore
+error alone leaves NAS input inspection available.
 
 From the owned-NAS fault follow-up, errors in Mycelium-owned shared-input
 staging/hash reads, ordinary input staging, checkpoint preparation/progress and
