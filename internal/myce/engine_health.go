@@ -8,27 +8,7 @@ import (
 	"time"
 )
 
-type serverProbeFailures struct {
-	count   int
-	since   time.Time
-	latency readinessLatency
-}
-
-func (f *serverProbeFailures) observe(healthy bool, started, now time.Time) bool {
-	if healthy {
-		f.count, f.since = 0, time.Time{}
-		f.latency.observe(now.Sub(started))
-		return false
-	}
-	if f.count == 0 {
-		f.since = started
-	}
-	f.count++
-	// A second observation confirms continuous failure over the host's learned
-	// healthy-response envelope. One slow/failed request alone cannot withdraw
-	// readiness. This is confirmation, not a fleet-specific failure threshold.
-	return f.count > 1 && now.Sub(f.since) >= f.latency.budget()
-}
+const modelProbeInterval = time.Second
 
 // Probing is bounded I/O, independent of the queue's injected scheduling Clock.
 // It never releases custody or starts another process; the heartbeat owns that
@@ -47,15 +27,26 @@ func (l *LlamaEngine) startHealthMonitorTimeout(health string, timeout time.Dura
 	}
 	pause := l.healthPause
 	if pause == nil {
-		pause = readinessPause
+		pause = func(ctx context.Context, duration time.Duration) error {
+			timer := time.NewTimer(duration)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.C:
+				return nil
+			}
+		}
+	}
+	if timeout <= 0 {
+		timeout = modelProbeInterval
 	}
 	go func() {
 		defer close(l.monitorDone)
 		client := &http.Client{Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-		failures := serverProbeFailures{latency: l.probeLatency}
-		probe := readinessProbe{latency: l.probeLatency}
+		var failedSince time.Time
 		for {
-			if pause(ctx, failures.latency.cadence()) != nil {
+			if pause(ctx, modelProbeInterval) != nil {
 				return
 			}
 			select {
@@ -65,35 +56,24 @@ func (l *LlamaEngine) startHealthMonitorTimeout(health string, timeout time.Dura
 				return
 			default:
 			}
-			client.Timeout = probe.budget()
-			if timeout > 0 {
-				client.Timeout = timeout
-			}
 			started := clock.Now()
-			realStarted := RealClock{}.Now()
-			healthy, err := probeServerHealth(ctx, client, health)
+			healthy, _ := probeServerHealth(ctx, client, health)
 			if ctx.Err() != nil {
 				return
 			}
 			l.healthMu.Lock()
 			l.healthDegraded = !healthy
-			if !healthy {
+			if healthy {
+				failedSince = time.Time{}
+			} else {
 				l.healthRevision++
+				if failedSince.IsZero() {
+					failedSince = started
+				} else if clock.Now().Sub(failedSince) >= modelProbeInterval {
+					l.healthErr = errors.New("server health failed")
+				}
 			}
-			now := clock.Now()
-			elapsed := max(now.Sub(started), RealClock{}.Now().Sub(realStarted))
-			timedOut := errors.Is(err, context.DeadlineExceeded)
-			probe.observe(elapsed, timedOut)
-			// A learned transport allowance can censor a newly slower healthy
-			// response. Preserve degraded custody and retry with more uncertainty.
-			// An explicit injected observation deadline retains its test/author contract.
-			failed := false
-			if !timedOut || timeout > 0 {
-				failed = failures.observe(healthy, now.Add(-elapsed), now)
-			}
-			if failed {
-				l.healthErr = errors.New("server health failed")
-			}
+			failed := l.healthErr != nil
 			l.healthMu.Unlock()
 			if failed {
 				return

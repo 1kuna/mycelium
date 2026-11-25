@@ -1,5 +1,5 @@
 # DRY EXAMPLE ONLY: replace every *_PLACEHOLDER before use.
-# Obtain files/size_bytes/sha256 separately for each approval with approve-local.
+# Stage the verified immutable bundles at their path under the configured model root.
 # Preserve the consumer's approved argv/env; qualify memory and environment first.
 # Set LOOPBACK_BIND_PLACEHOLDER to the IPv4 loopback address.
 # These are shared entries. Declare backend/environment needs; Mycelium chooses
@@ -16,7 +16,7 @@ models:
     memory_gb: CHAT_GPU_GIB_PLACEHOLDER
     host_memory_gb: CHAT_HOST_GIB_PLACEHOLDER
     logs: none
-    local_source: CHAT_APPROVAL_PLACEHOLDER
+    path: CHAT_BUNDLE_PLACEHOLDER
     size_bytes: CHAT_SIZE_PLACEHOLDER
     sha256: CHAT_MANIFEST_SHA256_PLACEHOLDER
     files:
@@ -38,7 +38,7 @@ models:
     memory_gb: GLM_GPU_GIB_PLACEHOLDER
     host_memory_gb: GLM_HOST_GIB_PLACEHOLDER
     logs: none
-    local_source: GLM_APPROVAL_PLACEHOLDER
+    path: GLM_BUNDLE_PLACEHOLDER
     size_bytes: GLM_SIZE_PLACEHOLDER
     sha256: GLM_MANIFEST_SHA256_PLACEHOLDER
     files:
@@ -58,7 +58,7 @@ models:
     memory_gb: CHANDRA_GPU_GIB_PLACEHOLDER
     host_memory_gb: CHANDRA_HOST_GIB_PLACEHOLDER
     logs: none
-    local_source: CHANDRA_APPROVAL_PLACEHOLDER
+    path: CHANDRA_BUNDLE_PLACEHOLDER
     size_bytes: CHANDRA_SIZE_PLACEHOLDER
     sha256: CHANDRA_MANIFEST_SHA256_PLACEHOLDER
     files:

@@ -589,12 +589,6 @@ func (q *Queue) visitDurableFileReferences(pendingOnly bool, releasing map[strin
 		for _, e := range j.Extensions {
 			extension(e)
 		}
-		if r := j.Spec.Resident; r != nil && r.Engine != nil {
-			for _, env := range r.Engine.Environments {
-				keepFiles("resident_environment", env.Assets)
-			}
-			model("resident_model", r.Engine.Model)
-		}
 		for _, r := range j.EnvironmentRecipes {
 			recipe("environment_asset", r)
 		}
@@ -634,12 +628,6 @@ func (q *Queue) visitDurableFileReferences(pendingOnly bool, releasing map[strin
 		model("model_catalog", m)
 	}
 	for _, slot := range q.s.ModelSlots {
-		if slot.Resident != nil {
-			for _, recipe := range slot.Resident.Environments {
-				keepFiles("resident_environment", recipe.Assets)
-			}
-			model("resident_model", slot.Resident.Model)
-		}
 		if slot.EnvironmentRecipe != nil {
 			recipe("model_environment_asset", *slot.EnvironmentRecipe)
 		}

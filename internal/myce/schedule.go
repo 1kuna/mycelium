@@ -256,14 +256,6 @@ func (q *Queue) noFitDetail(j *Job, idle bool) string {
 			}
 			n := candidate.Spec.Needs
 			resourceFit := fitsResources(candidate, &copy, max(m.TotalMemoryGB, m.FreeMemoryGB))
-			if resourceFit && candidate.Spec.Resident != nil {
-				// Evaluate resident placement against live room, as the final
-				// placement gate does. The ordinary vector omits a cold engine.
-				if detail := q.residentWaitDetail(candidate, m); detail != "" {
-					sizedNeeds = append(sizedNeeds, m.ID+": "+detail)
-					continue
-				}
-			}
 			if n.Memory == "auto" {
 				pools := memoryPools(candidate)
 				var needs []string
@@ -315,7 +307,7 @@ func (q *Queue) noFitDetail(j *Job, idle bool) string {
 		slices.Sort(blocked)
 		return strings.Join(blocked, "; ")
 	}
-	if idle && (j.Spec.Resident == nil || possible > 0 || len(sizedNeeds) == 0) {
+	if idle {
 		return "waiting for a hypha to take this job"
 	}
 	qualifier := ""

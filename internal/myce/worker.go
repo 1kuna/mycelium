@@ -153,7 +153,6 @@ type Worker struct {
 	nativeCI                    bool // Current attempt declared isolation: ci (#1298).
 	CacheLimit                  int64
 	SecretRoot                  string
-	ModelApprovalRoot           string
 	ModelConfig                 ModelConfig
 	ModelListen, ModelAdvertise string
 	Client                      Client
@@ -721,13 +720,6 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if err := w.checkAvailability(); err != nil {
 		return nil, err
 	}
-	residentEnv, residentClose, residentErr := w.startResidentBridge(ctx, j, executionWork)
-	if residentErr != nil {
-		return nil, s.startFailure(j, launchRefused, residentErr)
-	}
-	oldSharedRelease := sharedRelease
-	sharedRelease = func() { residentClose(); oldSharedRelease() }
-	s.sharedRelease = sharedRelease
 	env := jobBaseEnvironment()
 	if compilerPath != "" {
 		env["GOCACHE"] = compilerPath
@@ -739,9 +731,6 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		env[k] = v
 	}
 	for k, v := range extensionEnv {
-		env[k] = v
-	}
-	for k, v := range residentEnv {
 		env[k] = v
 	}
 	if compilerPath != "" && env["GOCACHE"] != compilerPath {
@@ -802,7 +791,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if memoryAttempt != nil {
 		ceilingBytes = memoryAttempt.bytes
 		memoryAttempt.oomScore = attemptOOMScore(j)
-		if !j.Spec.Needs.cpuOnly() && j.Spec.Resident == nil && memoryPools(&j).RAM.Alone {
+		if !j.Spec.Needs.cpuOnly() && memoryPools(&j).RAM.Alone {
 			if available, ok := memoryAttempt.hostAvailable(); ok {
 				memoryAttempt.availableAtLaunch = &available
 			}
@@ -1404,7 +1393,7 @@ func (w Worker) replayWithProgress(ctx context.Context, s *workerStore, acknowle
 }
 func (w Worker) Run(stop context.Context) error {
 	if w.Custodian != "" {
-		return w.runExecutionCustodian(stop)
+		return w.runCustodian(stop)
 	}
 	w.Client.inventoryWire = &atomic.Bool{}
 	w.Client.inventoryWire.Store(true)
@@ -1486,14 +1475,14 @@ func (w Worker) Run(stop context.Context) error {
 		return err
 	}
 	w.reconcileFinishedCompilerPins(stop, s, stores)
-	modelSession, err := retainedModelSession(s.dir, w.Machine.ID)
+	legacyModels, err := modelRequests(s.dir)
 	if err != nil {
 		return err
 	}
-	if modelSession != "" && modelSession != s.state.Session {
-		return errors.New("detached model session differs from retained worker session")
+	if len(legacyModels) > 0 {
+		return &HTTPError{Code: "model_keeper_retired", Message: "drain detached models with the previous worker before replacing it (docs/services.md)"}
 	}
-	if len(stores) > 0 || modelSession != "" {
+	if len(stores) > 0 {
 		w.Machine.Session = s.state.Session
 	} else {
 		if !s.state.Fresh || s.state.Session == "" {

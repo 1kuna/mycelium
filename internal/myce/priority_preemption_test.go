@@ -66,23 +66,16 @@ func preemptionPolicy(t *testing.T, q *Queue) {
 		t.Fatal(err)
 	}
 }
-func TestPriorityPreemptionModelsAndPins(t *testing.T) {
-	for _, kind := range []string{"call", "load", "idle", "pin"} {
+func TestPriorityPreemptionModels(t *testing.T) {
+	for _, kind := range []string{"call", "load", "idle"} {
 		for _, higher := range []bool{false, true} {
 			if !higher && (kind == "call" || kind == "idle") {
-				continue // load and pin rows cover the shared same-tier path (#1086).
+				continue // the load row covers the shared same-tier path (#1086).
 			}
 			t.Run(fmt.Sprintf("%s/higher=%v", kind, higher), func(t *testing.T) {
 				q, _, m := modelFixture(t)
 				preemptionPolicy(t, q)
-				var c *ModelCall
-				if kind == "pin" {
-					if err := q.Pin(ModelPin{Project: "test", Model: "test", Machine: m.ID}); err != nil {
-						t.Fatal(err)
-					}
-				} else {
-					c = addModelCall(t, q, "experiment")
-				}
+				c := addModelCall(t, q, "experiment")
 				if kind != "load" {
 					reportModel(t, q, m, "ready")
 				}
@@ -115,9 +108,6 @@ func TestPriorityPreemptionModelsAndPins(t *testing.T) {
 							t.Fatal(err)
 						}
 					}
-					if kind == "pin" && len(q.s.Pins) != 1 {
-						t.Fatal("pin intent lost")
-					}
 					if kind == "load" && c.Error != "" {
 						t.Fatal("queued load caller lost", c)
 					}
@@ -127,9 +117,6 @@ func TestPriorityPreemptionModelsAndPins(t *testing.T) {
 					}
 					finish(t, q, r.Job, true)
 					check(t, q, m, nil)
-					if kind == "pin" && q.s.ModelSlots[slotKey(m.ID, "test")] == nil {
-						t.Fatal("pin did not return")
-					}
 				} else {
 					if s.PriorityStop != nil || kind == "call" && c.Error != "" {
 						t.Fatal("same tier preempted")
@@ -453,51 +440,32 @@ func TestPriorityPreemptionPreparationHysteresis(t *testing.T) {
 }
 
 func TestPriorityPreemptionEngineHysteresis(t *testing.T) {
-	for _, kind := range []string{"load", "pin", "pin-host-hold"} {
-		t.Run(kind, func(t *testing.T) {
-			pin := kind != "load"
-			q, clock, m := modelFixture(t)
-			preemptionPolicy(t, q)
-			if kind == "pin-host-hold" {
-				if err := q.ConfigureHosts(map[string]HostPolicy{hostID(&m): {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
-					t.Fatal(err)
-				}
+	q, clock, m := modelFixture(t)
+	preemptionPolicy(t, q)
+	addModelCall(t, q, "experiment")
+	for i := 0; i < 4; i++ {
+		check(t, q, m, nil)
+		slot := q.s.ModelSlots[slotKey(m.ID, "test")]
+		if slot == nil || slot.State != "loading" {
+			t.Fatal("engine never resumed", slot)
+		}
+		d := spec("experiment")
+		d.Project = "urgent"
+		demand := submit(t, q, d)
+		if i >= 2 {
+			if slot.PriorityStop != nil {
+				t.Fatal("resumed engine got no runtime", slot)
 			}
-			if pin {
-				if err := q.Pin(ModelPin{Project: "test", Model: "test", Machine: m.ID}); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				addModelCall(t, q, "experiment")
-			}
-			for i := 0; i < 4; i++ {
-				check(t, q, m, nil)
-				slot := q.s.ModelSlots[slotKey(m.ID, "test")]
-				if slot == nil || slot.State != "loading" {
-					t.Fatal("engine never resumed", slot)
-				}
-				d := spec("experiment")
-				d.Project = "urgent"
-				if kind == "pin-host-hold" {
-					d.Priority = "production"
-				}
-				demand := submit(t, q, d)
-				if i >= 2 {
-					if slot.PriorityStop != nil {
-						t.Fatal("resumed engine got no runtime", slot)
-					}
-					clock.Advance(10 * time.Second)
-					reportModel(t, q, m, "loading")
-				}
-				if slot.PriorityStop == nil {
-					t.Fatal("engine floor became a reservation", slot)
-				}
-				reply := recoveryReport(t, q, m, slot, "unloaded")
-				if reply.Job == nil || reply.Job.ID != demand.ID {
-					t.Fatal("no higher tier progress", reply)
-				}
-				finish(t, q, reply.Job, true)
-			}
-		})
+			clock.Advance(10 * time.Second)
+			reportModel(t, q, m, "loading")
+		}
+		if slot.PriorityStop == nil {
+			t.Fatal("engine floor became a reservation", slot)
+		}
+		reply := recoveryReport(t, q, m, slot, "unloaded")
+		if reply.Job == nil || reply.Job.ID != demand.ID {
+			t.Fatal("no higher tier progress", reply)
+		}
+		finish(t, q, reply.Job, true)
 	}
 }

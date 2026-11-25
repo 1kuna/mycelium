@@ -94,3 +94,8 @@ func modelSnapshotSourceLink(ctx context.Context, file, blobs string, allowEmula
 	}
 	return source, nil
 }
+
+func insideLocalRoot(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !filepath.IsAbs(rel) && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}

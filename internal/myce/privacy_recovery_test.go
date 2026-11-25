@@ -179,69 +179,6 @@ func TestPrivacyGenericRetryRequiresCatalogOptIn(t *testing.T) {
 	}
 }
 
-func TestPrivacyPinnedFailureBackoffAndStatus(t *testing.T) {
-	q, clock, m := modelFixture(t)
-	if err := q.Pin(ModelPin{Model: "test", Project: "test", Machine: m.ID}); err != nil {
-		t.Fatal(err)
-	}
-	fail := func() Reply {
-		t.Helper()
-		r, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: currentTestReportAttempt(q, m, "test"), State: "failed", Error: "synthetic-secret"}}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return r
-	}
-	fail()
-	get := func() ModelSlot {
-		t.Helper()
-		s, err := q.Snapshot()
-		if err != nil || len(s.LoadedModels) != 1 {
-			t.Fatal("missing pin status")
-		}
-		return s.LoadedModels[0]
-	}
-	s := get()
-	if s.State != "failed" || s.Error == "" || strings.Contains(s.Error, "synthetic-secret") {
-		t.Fatal("pin failure missing or unsafe")
-	}
-	clock.Advance(time.Second - time.Nanosecond)
-	fail()
-	if get().State != "failed" {
-		t.Fatal("retried too soon")
-	}
-	clock.Advance(time.Nanosecond)
-	r := reportModel(t, q, m, "failed")
-	if len(r.ModelPlan) != 1 || r.ModelPlan[0].State != "loading" {
-		t.Fatal("failed pin stuck instead of retrying")
-	}
-	fail()
-	clock.Advance(time.Second)
-	fail()
-	if get().State != "failed" {
-		t.Fatal("second failure did not back off")
-	}
-	clock.Advance(time.Second)
-	reportModel(t, q, m, "failed")
-	if get().State != "loading" {
-		t.Fatal("second retry missing")
-	}
-	reportModel(t, q, m, "ready")
-	if get().State != "ready" || get().Error != "" {
-		t.Fatal("successful retry retained failure")
-	}
-	// Cleanup failures must never be retried as though memory were free.
-	_, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: currentTestReportAttempt(q, m, "test"), State: "unload_failed", Error: "synthetic-secret"}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(time.Minute)
-	reportModel(t, q, m, "unload_failed")
-	if get().State != "unload_failed" {
-		t.Fatal("unsafe cleanup retried")
-	}
-}
-
 func TestPrivacyServerLogsNone(t *testing.T) {
 	m := serverTestModel(t, "ready")
 	if err := json.Unmarshal([]byte(`{"logs":"none"}`), &m); err != nil {
@@ -400,11 +337,14 @@ func TestPrivacyQueueOpenRemovesDefaultSpoolOrphans(t *testing.T) {
 
 func TestPrivacyStatusScrubsWorkerErrors(t *testing.T) {
 	q, _, m := modelFixture(t)
-	if err := q.Pin(ModelPin{Model: "test", Project: "test", Machine: m.ID}); err != nil {
+	call := addModelCall(t, q, "experiment")
+	slot := q.s.ModelSlots[slotKey(m.ID, "test")]
+	recoveryReport(t, q, m, slot, "ready")
+	if err := q.retryCall(call.ID); err != nil {
 		t.Fatal(err)
 	}
 	m.CacheError = strings.Repeat("synthetic-secret", 1000)
-	if _, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: currentTestReportAttempt(q, m, "test"), State: "failed", Error: m.CacheError}}}); err != nil {
+	if _, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: slot.Attempt, State: "failed", RuntimeFailed: true, Error: m.CacheError}}}); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{"/", "/api/status"} {

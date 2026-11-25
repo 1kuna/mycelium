@@ -984,7 +984,10 @@ func TestMemoryCeilingHostBudgetSurvivesWorkerLoss(t *testing.T) {
 			s.AllowedMachines = []string{a.ID}
 			var running *Job
 			if model {
-				if err := q.Pin(ModelPin{Model: "server", Project: "test", Machine: a.ID}); err != nil {
+				if err := q.ConfigureProjects(map[string]ProjectPolicy{"model-owner": {Weight: 1, AllowedMachines: []string{a.ID}}}); err != nil {
+					t.Fatal(err)
+				}
+				if err := q.addCall(&ModelCall{Model: "server", Project: "model-owner", Priority: "experiment"}); err != nil {
 					t.Fatal(err)
 				}
 			} else {

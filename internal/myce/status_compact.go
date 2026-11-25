@@ -194,17 +194,13 @@ func (o *statusOptions) includes(section string) bool {
 // fan-out member manifests and evidence never enter the default capture.
 func compactStatusJob(j *Job) Job {
 	started := commandStarted(j)
-	var resident *ResidentBinding
-	if j.Spec.Resident != nil {
-		resident = &ResidentBinding{Model: j.Spec.Resident.Model}
-	}
 	reason := j.Reason
 	if j.State == "queued" && reason != "" && j.SpecProjection == nil {
 		reason = statusWaitingText(j, reason)
 	}
 	return Job{ID: j.ID, State: j.State, Attempt: j.Attempt, Machine: j.Machine, Session: j.Session, CommandStarted: &started,
 		Copies: compactStatusCopies(j.Copies),
-		Spec: Spec{Resident: resident, Workload: j.Spec.Workload, QualityTolerance: j.Spec.QualityTolerance, ExtensionCheck: compactStatusCheck(j.Spec.ExtensionCheck), Logs: j.Spec.Logs, AuthoringOrigin: j.Spec.Origin(), AllowedMachines: j.Spec.AllowedMachines, ExcludedMachines: j.Spec.ExcludedMachines, Name: j.Spec.Name, Project: j.Spec.Project, SubmissionKey: j.Spec.SubmissionKey, Class: j.Spec.Class, Priority: j.Spec.Priority,
+		Spec: Spec{Workload: j.Spec.Workload, QualityTolerance: j.Spec.QualityTolerance, ExtensionCheck: compactStatusCheck(j.Spec.ExtensionCheck), Logs: j.Spec.Logs, AuthoringOrigin: j.Spec.Origin(), AllowedMachines: j.Spec.AllowedMachines, ExcludedMachines: j.Spec.ExcludedMachines, Name: j.Spec.Name, Project: j.Spec.Project, SubmissionKey: j.Spec.SubmissionKey, Class: j.Spec.Class, Priority: j.Spec.Priority,
 			Deadline: j.Spec.Deadline, StartWindow: j.Spec.StartWindow, Resumable: j.Spec.Resumable, Preemptible: j.Spec.Preemptible, Needs: j.Spec.Needs, StartBy: j.Spec.StartBy,
 			Program: compactStatusProgram(j.Spec.Program), Kind: j.Spec.Kind, WallTime: j.Spec.WallTime},
 		Queued: j.Queued, AssignedAt: j.AssignedAt, StartedAt: j.StartedAt, FinishedAt: j.FinishedAt,
@@ -274,7 +270,6 @@ func compactStatusMachine(m *Machine) Machine {
 	}
 	c.EnvironmentBuildSeconds, c.EnvironmentBytes, c.ModelCopySeconds = nil, nil, nil
 	c.Environments, c.CachedModels, c.Models = nil, nil, nil
-	c.ModelApprovalStates = nil
 	c.Devices = slices.Clone(c.Devices)
 	for i := range c.Devices {
 		d := &c.Devices[i]
@@ -395,7 +390,7 @@ func (q *Queue) compactStatusView(o *statusOptions, ctx context.Context, retaine
 		HostReleases: q.s.HostReleases, HostMaintenance: q.s.HostMaintenance, DeviceMaintenance: q.s.DeviceMaintenance,
 		Policies: q.s.Policies, PriorityPolicy: q.s.PriorityPolicy,
 		ComponentExclusions: map[string]ComponentExclusion{}, Reservations: map[string]Reservation{},
-		ModelSlots: q.s.ModelSlots, Pins: q.s.Pins, SyncRequests: q.s.SyncRequests, PreparationPlans: q.s.PreparationPlans}
+		ModelSlots: q.s.ModelSlots, PreparationPlans: q.s.PreparationPlans}
 	for key, r := range q.s.Reservations {
 		if r.active() || q.reservationCleanupPending(r, q.retainedJob(r.Job)) {
 			s.Reservations[key] = r

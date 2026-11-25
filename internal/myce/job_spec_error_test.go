@@ -39,6 +39,9 @@ func TestJobSpecInvalidHTTPAndQueueLog(t *testing.T) {
 			s.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"echo"}, MemoryGB: 1}}
 			s.Run.DockerSidecars = []any{map[string]any{"name": "server"}}
 		}},
+		{"resident binding", "job_resident_retired", "through /v1", func(_ *testing.T, _ *Queue, s *Spec) {
+			s.Advanced = &Advanced{Resident: &retiredField{}}
+		}},
 		{"fields", "job_fields_required", "required", func(_ *testing.T, _ *Queue, s *Spec) { s.Name = "" }},
 		{"deadline", "job_deadline_invalid", "deadline", func(_ *testing.T, _ *Queue, s *Spec) { s.Priority = "deadline" }},
 		{"project", "job_project_invalid", "project", func(_ *testing.T, _ *Queue, s *Spec) { s.Project = "bad/project" }},

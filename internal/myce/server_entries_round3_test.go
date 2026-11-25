@@ -1,14 +1,11 @@
 package myce
 
 import (
-	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -27,10 +24,6 @@ func entryHoldFixture(t *testing.T, fence string) (*Queue, *fakeClock, Machine, 
 		if err := q.ConfigureProjects(map[string]ProjectPolicy{"owner": {Weight: 1, AllowedMachines: []string{b.ID}}}); err != nil {
 			t.Fatal(err)
 		}
-	case "approval":
-		model.LocalSource = "approved"
-		b.ApprovedModels = map[string]string{"approved": model.SHA256}
-		b.ModelApprovalStates = map[string]ModelApprovalState{"approved": approvalVerified}
 	}
 	a.ModelConfigHash, b.ModelConfigHash = modelConfigHash(q.models), modelConfigHash(q.models)
 	if err := q.ConfigureHosts(map[string]HostPolicy{"ha": {ProductionHold: true, ProductionHoldScope: "device"}, "hb": {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
@@ -42,7 +35,7 @@ func entryHoldFixture(t *testing.T, fence string) (*Queue, *fakeClock, Machine, 
 }
 
 func TestEntryProductionBatchHoldRespectsModelFences(t *testing.T) {
-	for _, fence := range []string{"entry", "owner", "approval"} {
+	for _, fence := range []string{"entry", "owner"} {
 		t.Run(fence, func(t *testing.T) {
 			q, clock, a, b := entryHoldFixture(t, fence)
 			s := spec("production")
@@ -58,36 +51,6 @@ func TestEntryProductionBatchHoldRespectsModelFences(t *testing.T) {
 			got := check(t, q, b, nil).Job
 			if got == nil || got.ID != j.ID {
 				t.Fatal("eligible worker left idle")
-			}
-		})
-	}
-}
-
-func TestEntryPinsAndProductionHoldRespectModelFences(t *testing.T) {
-	for _, fence := range []string{"entry", "owner", "approval"} {
-		t.Run(fence, func(t *testing.T) {
-			q, clock, a, b := entryHoldFixture(t, fence)
-			if err := q.Pin(ModelPin{Project: "caller", Model: "test", Platform: "fake"}); err != nil {
-				t.Fatal(err)
-			}
-			if q.s.Pins[0].Assigned != b.ID || q.s.ModelSlots[slotKey(a.ID, "test")] != nil {
-				t.Fatal("pin escaped fence")
-			}
-			reportModel(t, q, b, "ready")
-			c := addModelCall(t, q, "production")
-			if c.Machine != b.ID {
-				t.Fatal("production call escaped fence or failed to reuse pin")
-			}
-			if err := q.finishCall(c.ID); err != nil {
-				t.Fatal(err)
-			}
-			clock.Advance(time.Second)
-			if err := q.Tick(); err != nil {
-				t.Fatal(err)
-			}
-			slot := q.s.ModelSlots[slotKey(b.ID, "test")]
-			if slot == nil || slot.State != "ready" || q.modelMemory(b.ID) != 8 {
-				t.Fatal("hold released pinned custody")
 			}
 		})
 	}
@@ -130,146 +93,5 @@ func TestEntryGenericHeadersBeforeSpooling(t *testing.T) {
 		if body := w.Body.String(); headers.Get("X-Myce-Project") == "" && headers.Get("X-Myce-Priority") == "" && (!strings.Contains(body, "X-Myce-Project and X-Myce-Priority are required") || strings.Contains(body, "default_call_priority") || strings.Contains(body, "entry")) {
 			t.Fatal("generic route suggests unsupported defaults:", body)
 		}
-	}
-}
-
-func TestEntryApprovalHeartbeatOneWalkAndBoundedTimeout(t *testing.T) {
-	c, model, _, _ := localApprovalFixture(t)
-	c.Limit = 1024
-	if err := c.init(); err != nil {
-		t.Fatal(err)
-	}
-	clock := &fakeClock{now: time.Date(2026, 10, 16, 0, 0, 0, 0, time.UTC)}
-	c.Clock = clock
-	var calls atomic.Int32
-	var blocked atomic.Bool
-	release, finished := make(chan struct{}), make(chan struct{})
-	var releaseOnce sync.Once
-	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
-	c.localMetadataProbe = func(ctx context.Context, path, root string) ([]localModelMetadata, error) {
-		calls.Add(1)
-		if blocked.Load() {
-			<-release
-			defer close(finished)
-		}
-		return localMetadata(ctx, path, root)
-	}
-	models := []Model{model, model} // Shared approval is walked only once, too.
-	approved := c.ApprovedModels(models)
-	if approved[model.LocalSource] != model.SHA256 || calls.Load() != 1 {
-		t.Fatal("healthy approval not checked exactly once")
-	}
-	if names, _, err := c.report(models, approved); err != nil || !contains(names, model.Name) || calls.Load() != 1 {
-		t.Fatal("cache report repeated the heartbeat walk", err)
-	}
-	blocked.Store(true)
-	heartbeat := func() {
-		t.Helper()
-		done := make(chan map[string]string, 1)
-		go func() { done <- c.ApprovedModels(models) }()
-		select {
-		case approved := <-done:
-			if len(approved) != 0 {
-				t.Fatal("timed-out approval advertised")
-			}
-		case <-time.After(testWaitTimeout):
-			t.Fatal("filesystem stalled the heartbeat")
-		}
-	}
-	heartbeat()
-	firstWarning := c.nextApprovalWarning
-	clock.Advance(time.Second)
-	heartbeat()
-	if calls.Load() != 2 {
-		t.Fatal("blocked filesystem scans accumulated")
-	}
-	if c.nextApprovalWarning != firstWarning {
-		t.Fatal("approval warnings were not rate limited")
-	}
-	clock.Advance(time.Minute)
-	heartbeat()
-	if !c.nextApprovalWarning.After(firstWarning) {
-		t.Fatal("approval warning did not recur after its interval")
-	}
-	blocked.Store(false)
-	releaseOnce.Do(func() { close(release) })
-	<-finished
-	// The completed but expired result must never revive approval readiness.
-	if len(c.ApprovedModels(models)) != 0 {
-		t.Fatal("expired check revived approval")
-	}
-	if c.ApprovedModels(models)[model.LocalSource] != model.SHA256 || calls.Load() != 3 {
-		t.Fatal("fresh check did not recover")
-	}
-}
-
-func TestEntryUnverifiableApprovalWithholdsLoadsAndRoutingKeepsCustody(t *testing.T) {
-	c, model, _, _ := localApprovalFixture(t)
-	rt := &modelRuntime{cache: c, config: ModelConfig{Models: []Model{model}}, models: map[string]*workerModel{}, session: "session", token: "test"}
-	rt.setLocalApprovals(nil, nil)
-	rt.sync([]ModelSlot{{Attempt: "test-engine", Model: model.Name, State: "loading", Session: rt.session}})
-	if len(rt.models) != 0 {
-		t.Fatal("unverified source started a load")
-	}
-	engine := &lifecycleEngine{}
-	rt.models[model.Name] = &workerModel{model: model, engine: engine, state: "ready", queueFlight: 1}
-	reports, memory := rt.report()
-	if memory != model.MemoryGB || len(reports) != 1 || reports[0].State != "ready" {
-		t.Fatal("unverifiable approval released local custody")
-	}
-	request := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test"}`))
-	request.Header.Set("Authorization", "Bearer test")
-	request.Header.Set("X-Myce-Session", rt.session)
-	response := httptest.NewRecorder()
-	rt.serve(response, request)
-	if response.Code != 503 || engine.unloads.Load() != 0 {
-		t.Fatal("unverified source routed or lost custody")
-	}
-
-	q, clock, m := modelFixture(t)
-	q.models.Models[0].LocalSource = model.LocalSource
-	q.models.Models[0].SHA256 = model.SHA256
-	m.ModelConfigHash = modelConfigHash(q.models)
-	m.ApprovedModels = map[string]string{model.LocalSource: model.SHA256}
-	m.ModelApprovalStates = map[string]ModelApprovalState{model.LocalSource: approvalVerified}
-	check(t, q, m, nil)
-	if err := q.Pin(ModelPin{Project: "test", Model: "test", Platform: "fake"}); err != nil {
-		t.Fatal(err)
-	}
-	reportModel(t, q, m, "ready")
-	m.ApprovedModels = nil
-	reportModel(t, q, m, "ready")
-	if slot := q.s.ModelSlots[slotKey(m.ID, "test")]; slot == nil || slot.State != "draining" || q.modelMemory(m.ID) != 8 {
-		t.Fatal("missing approval released queue custody")
-	}
-	clock.Advance(time.Second)
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
-	}
-	call := addModelCall(t, q, "experiment")
-	if call.Machine != "" || q.modelMemory(m.ID) != 8 {
-		t.Fatal("unverified source routed or elapsed time released custody")
-	}
-	reportModel(t, q, m, "unloaded")
-	if q.modelMemory(m.ID) != 0 {
-		t.Fatal("confirmed unload did not release custody")
-	}
-}
-
-func TestEntryApprovalHeartbeatRejectsExpiredCompletedSnapshot(t *testing.T) {
-	c, model, _, _ := localApprovalFixture(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	close(done)
-	// Completion and the heartbeat timeout can race; cancellation wins even if
-	// the filesystem computed a valid manifest just before the timeout returned.
-	c.localProbe.key = modelConfigHash(ModelConfig{Models: []Model{model}})
-	c.localProbe.pending = &checkpointIOResult[localApprovalSnapshot]{done: done, value: localApprovalSnapshot{ctx: ctx}}
-	cancel()
-	if len(c.ApprovedModels([]Model{model})) != 0 {
-		t.Fatal("expired completed result revived readiness")
-	}
-	if c.ApprovedModels([]Model{model})[model.LocalSource] != model.SHA256 {
-		t.Fatal("fresh metadata check failed to recover")
 	}
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -119,18 +118,6 @@ func TestCacheInterruptedCopyRetainedChecksumAndDirect(t *testing.T) {
 		}
 	}
 }
-func TestFetchRejectsInsecureURLAndOverwrite(t *testing.T) {
-	unused := t.TempDir()
-	if e := FetchModel(context.Background(), "http://huggingface.co/a", unused, "file", 1, strings.Repeat("0", 64)); e == nil {
-		t.Fatal("insecure URL accepted")
-	}
-	p := filepath.Join(t.TempDir(), "master")
-	os.WriteFile(p, []byte("existing"), 0600)
-	if e := FetchModel(context.Background(), "https://huggingface.co/a", filepath.Dir(p), filepath.Base(p), 1, strings.Repeat("0", 64)); e == nil {
-		t.Fatal("overwrite accepted")
-	}
-}
-
 func TestCatalogRefusesRemoteLoadArgs(t *testing.T) {
 	for _, arg := range []string{"--hf-repo", "--hf-file=weights.gguf", "-hf", "--model-url=https://example.com/m", "--mmproj-url"} {
 		c := ModelConfig{Idle: time.Minute, Wait: time.Minute, Models: []Model{{Name: "m", Path: "m.gguf", Engine: "llama.cpp", SizeBytes: 4, SHA256: strings.Repeat("a", 64), MemoryGB: 1, Platforms: []string{"fake"}, Args: []string{arg}}}}
@@ -147,31 +134,6 @@ func TestCatalogRefusesRemoteLoadArgs(t *testing.T) {
 type fetchTransport func(*http.Request) (*http.Response, error)
 
 func (f fetchTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-func TestExplicitFetchVerifiesMaster(t *testing.T) {
-	old := http.DefaultClient
-	defer func() { http.DefaultClient = old }()
-	http.DefaultClient = &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("data")), Header: make(http.Header)}, nil
-	})}
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	dest := filepath.Join(home, "nas", "m.gguf")
-	sum := fmt.Sprintf("%x", sha256.Sum256([]byte("data")))
-	if e := FetchModel(context.Background(), "https://huggingface.co/repo/resolve/hash/m.gguf", filepath.Dir(dest), filepath.Base(dest), 4, sum); e != nil {
-		t.Fatal(e)
-	}
-	if e := verifyModel(dest, Model{Name: "m", SizeBytes: 4, SHA256: sum}); e != nil {
-		t.Fatal(e)
-	}
-	bad := filepath.Join(home, "nas", "bad.gguf")
-	if e := FetchModel(context.Background(), "https://huggingface.co/repo/resolve/hash/m.gguf", filepath.Dir(bad), filepath.Base(bad), 4, strings.Repeat("0", 64)); e == nil {
-		t.Fatal("fetch accepted bad master")
-	}
-	if _, e := os.Stat(bad); !os.IsNotExist(e) {
-		t.Fatal("bad master published")
-	}
-}
-
 func TestCorruptProtectedCopyStopsAdvertisingVerifiedCache(t *testing.T) {
 	c, model := cacheFixture(t)
 	m := model("m", "good")

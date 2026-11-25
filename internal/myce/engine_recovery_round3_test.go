@@ -76,44 +76,35 @@ func TestEngineRecoveryReplacementWaitsForCleanup(t *testing.T) {
 // Copy/environment preparation can outlast process readiness. These worker
 // receipts represent a cold load still preparing weights before engine launch.
 func TestEngineRecoveryLoadDeadlineCoversCopy(t *testing.T) {
-	for _, pinned := range []bool{false, true} {
-		t.Run(fmt.Sprintf("pinned=%v", pinned), func(t *testing.T) {
-			q, clock, m := modelFixture(t)
-			config := q.models
-			config.Wait = 10 * time.Minute
-			config.Models[0].ReadyTimeout = time.Minute
-			if err := q.ConfigureModels(config); err != nil {
-				t.Fatal(err)
-			}
-			m.ModelConfigHash = modelConfigHash(q.models)
-			check(t, q, m, nil)
-			if pinned {
-				if err := q.Pin(ModelPin{Model: "test", Project: "test", Machine: m.ID}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			call := addModelCall(t, q, "experiment")
-			s := q.s.ModelSlots[slotKey(m.ID, "test")]
-			started := *s.RunSince
-			attempt := s.Attempt
-			for i := 0; i < 12; i++ {
-				clock.Advance(10 * time.Second)
-				recoveryReport(t, q, m, s, "loading")
-			}
-			if s.State != "loading" || s.LoadTimedOut || s.CrashCount != 0 || s.Attempt != attempt || call.Error != "" {
-				t.Fatalf("pre-launch preparation crossed readiness timeout: %+v %+v", s, call)
-			}
-			if s.LoadUntil != nil || !s.RunSince.Equal(started) {
-				t.Fatal("queue reintroduced a load wall deadline or moved the load start")
-			}
-			recoveryReport(t, q, m, s, "ready")
-			if s.State != "ready" || call.Machine != m.ID || s.LoadUntil != nil {
-				t.Fatal("cold load did not become routable")
-			}
-			if err := q.finishCall(call.ID); err != nil {
-				t.Fatal(err)
-			}
-		})
+	q, clock, m := modelFixture(t)
+	config := q.models
+	config.Wait = 10 * time.Minute
+	config.Models[0].ReadyTimeout = time.Minute
+	if err := q.ConfigureModels(config); err != nil {
+		t.Fatal(err)
+	}
+	m.ModelConfigHash = modelConfigHash(q.models)
+	check(t, q, m, nil)
+	call := addModelCall(t, q, "experiment")
+	s := q.s.ModelSlots[slotKey(m.ID, "test")]
+	started := *s.RunSince
+	attempt := s.Attempt
+	for i := 0; i < 12; i++ {
+		clock.Advance(10 * time.Second)
+		recoveryReport(t, q, m, s, "loading")
+	}
+	if s.State != "loading" || s.LoadTimedOut || s.CrashCount != 0 || s.Attempt != attempt || call.Error != "" {
+		t.Fatalf("pre-launch preparation crossed readiness timeout: %+v %+v", s, call)
+	}
+	if s.LoadUntil != nil || !s.RunSince.Equal(started) {
+		t.Fatal("queue reintroduced a load wall deadline or moved the load start")
+	}
+	recoveryReport(t, q, m, s, "ready")
+	if s.State != "ready" || call.Machine != m.ID || s.LoadUntil != nil {
+		t.Fatal("cold load did not become routable")
+	}
+	if err := q.finishCall(call.ID); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -282,42 +273,6 @@ func TestEngineRecoveryRejectedUnsafeCallRetries(t *testing.T) {
 	}
 }
 
-func TestEngineRecoveryPinnedReservationRelease(t *testing.T) {
-	for _, measured := range []bool{false, true} {
-		t.Run(fmt.Sprint(measured), func(t *testing.T) {
-			q, _, m := modelFixture(t)
-			q.models.Models[0].HostMemoryGB = 2
-			m.ModelConfigHash = modelConfigHash(q.models)
-			m.MemoryMeasured = measured
-			m.HostMemoryMeasured = true
-			m.HostAvailableMemoryGB = 10
-			check(t, q, m, nil)
-			if err := q.Pin(ModelPin{Model: "test", Project: "test", Machine: m.ID}); err != nil {
-				t.Fatal(err)
-			}
-			s := q.s.ModelSlots[slotKey(m.ID, "test")]
-			if measured {
-				m.FreeMemoryGB = 0
-			}
-			recoveryReport(t, q, m, s, "ready")
-			if measured {
-				m.FreeMemoryGB = 8
-			}
-			recoveryReport(t, q, m, s, "failed")
-			qm := q.s.Machines[m.ID]
-			if !s.RetryReserved || q.modelMemory(m.ID) != 8 || qm.FreeMemoryGB != 0 || qm.HostMemoryInUseGB != 2 {
-				t.Fatalf("pin lost planning GPU/RAM: %+v %+v", s, qm)
-			}
-			if err := q.Unpin("test", "test"); err != nil {
-				t.Fatal(err)
-			}
-			if q.s.ModelSlots[slotKey(m.ID, "test")] != nil || qm.FreeMemoryGB != 8 || qm.HostMemoryInUseGB != 0 {
-				t.Fatal("unpin retained a released planning reservation")
-			}
-		})
-	}
-}
-
 func TestEngineRecoveryPlaceholderAttempts(t *testing.T) {
 	for _, missing := range []bool{false, true} {
 		t.Run(fmt.Sprint(missing), func(t *testing.T) {
@@ -329,44 +284,6 @@ func TestEngineRecoveryPlaceholderAttempts(t *testing.T) {
 			reports, _ := rt.report()
 			if len(reports) != 1 || reports[0].Name != "test" || reports[0].Attempt != "B" || reports[0].State != "failed" {
 				t.Fatalf("unbound placeholder receipt: %+v", reports)
-			}
-		})
-	}
-}
-
-func TestEngineRecoveryReservationDoesNotInventFreeMemory(t *testing.T) {
-	for _, hostLow := range []bool{false, true} {
-		t.Run(fmt.Sprint(hostLow), func(t *testing.T) {
-			q, clock, m := modelFixture(t)
-			q.models.Models[0].HostMemoryGB = 2
-			m.ModelConfigHash = modelConfigHash(q.models)
-			m.MemoryMeasured = true
-			m.HostMemoryMeasured = true
-			m.HostAvailableMemoryGB = 10
-			check(t, q, m, nil)
-			if err := q.Pin(ModelPin{Model: "test", Project: "test", Machine: m.ID}); err != nil {
-				t.Fatal(err)
-			}
-			s := q.s.ModelSlots[slotKey(m.ID, "test")]
-			m.FreeMemoryGB = 0
-			recoveryReport(t, q, m, s, "ready")
-			m.FreeMemoryGB = 2
-			if hostLow {
-				m.FreeMemoryGB = 8
-				m.HostAvailableMemoryGB = 1
-			}
-			recoveryReport(t, q, m, s, "failed")
-			clock.Advance(time.Second)
-			check(t, q, m, nil)
-			if s.State != "failed" {
-				t.Fatal("planning reservation bypassed actual memory admission")
-			}
-			if err := q.Unpin("test", "test"); err != nil {
-				t.Fatal(err)
-			}
-			qm := q.s.Machines[m.ID]
-			if qm.FreeMemoryGB != m.FreeMemoryGB || qm.FreeHostMemoryGB != m.HostAvailableMemoryGB {
-				t.Fatalf("unpin invented memory: GPU=%v host=%v", qm.FreeMemoryGB, qm.FreeHostMemoryGB)
 			}
 		})
 	}

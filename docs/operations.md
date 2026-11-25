@@ -923,8 +923,8 @@ For each host in turn the queue:
    pending result publication.
 3. **Falls back to natural drain when proof is missing.** The `wait` reason
    explains missing custodian support, identity/attempt mismatch, preparation,
-   resident bridge, Linux shared-host aggregate CPU quota, model or unresolved
-   cleanup custody. Older workers need
+   Linux shared-host aggregate CPU quota, model or unresolved cleanup custody.
+   For older workers the reason can also name a resident bridge. Older workers need
    this first natural drain before their first custodian-capable release.
    `myce status --history --json` retains the most recent natural wait for
    each host as `takeover_wait` on the reported operation, including after the
@@ -1380,9 +1380,8 @@ An HTTPS owner write without provisioned trust refuses with
 Never source env files or set `MYCE_TOKEN` by hand, and never extract a joining
 token into environment variables. These are not supported operator workarounds.
 
-Other owner-scoped writes use the same `--config <installed-queue-config>` route,
-for example `myce model sync MODEL --to all --config <installed-queue-config>`
-and `myce host drain HOST --config <installed-queue-config>`. Enrollment still
+Other owner-scoped writes use the same route, for example
+`myce host drain HOST --config <installed-queue-config>`. Enrollment still
 uses provisional shared authority; this CLI route does not introduce separate
 server-side roles or grant authority to an unenrolled machine.
 
@@ -1589,8 +1588,7 @@ and read the [queue timing log lines](reference/queue-maintenance.md#outages-and
 
 ### Detached owner startup failures
 
-Installed workers launch each non-resident attempt in an independent manager
-scope. The CLI validates that exact attempt identity separately from the worker
+Installed workers launch detached attempts in an independent manager scope. The CLI validates that exact attempt identity separately from the worker
 service allowlist. An exiting service entry point (or its reaped Linux launcher)
 can publish `custodian_startup_failed` only before the first custodian snapshot,
 which is committed before staging or payload execution. Normal adoption and
@@ -1744,7 +1742,7 @@ Older links to these anchors land here; each entry points to the section's curre
 - <a id="parked-native-storage-integration-564"></a>[Parked native storage integration (#564)](reference/file-store.md#parked-native-storage-integration-564)
 - <a id="project-owner-early-file-release-465"></a>[Project-owner early file release (#465)](reference/file-store.md#project-owner-early-file-release-465)
 - <a id="worker-scratch-retention"></a>[Worker scratch retention](reference/worker-caches.md#worker-scratch-retention)
-- <a id="model-master-folder-worker-cache-and-production-reservations"></a>[Model master folder, worker cache, and production reservations](reference/models.md#model-master-folder-worker-cache-and-production-reservations)
+- <a id="model-master-folder-worker-cache-and-production-reservations"></a>[Model masters and worker cache](reference/models.md#model-masters-and-worker-cache)
 - <a id="general-model-servers-and-joint-measurement"></a>[General model servers and joint measurement](reference/models.md#general-model-servers-and-joint-measurement)
 - <a id="host-ram-admission-and-ceilings"></a>[Host RAM admission and ceilings](reference/host-capacity.md#host-ram-admission-and-ceilings)
 - <a id="optional-privileged-gpu-telemetry-source"></a>[Optional privileged GPU telemetry source](reference/host-capacity.md#optional-privileged-gpu-telemetry-source)
@@ -1777,7 +1775,6 @@ Older links to these anchors land here; each entry points to the section's curre
 - <a id="sqlite-backup-and-commit-limits"></a>[SQLite backup and commit limits](reference/queue-io.md#sqlite-backup-and-commit-limits)
 - <a id="standard-systemd-policy"></a>[Standard systemd policy](reference/queue-io.md#standard-systemd-policy)
 - <a id="laptop-experiment-and-native-acceptance"></a>[Laptop experiment and native acceptance](reference/queue-io.md#laptop-experiment-and-native-acceptance)
-- <a id="durable-model-engine-interval-history-663"></a>[Durable model-engine interval history (#663)](reference/models.md#durable-model-engine-interval-history-663)
 - <a id="completion-observer-upgrade-and-recovery-next-release"></a>[Completion observer upgrade and recovery](reference/completion-observer.md#completion-observer-upgrade-and-recovery-next-release)
 - <a id="completion-and-health-delivery-acceptance"></a>[Completion and health delivery acceptance](reference/completion-observer.md#completion-and-health-delivery-acceptance)
 

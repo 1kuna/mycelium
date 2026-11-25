@@ -10,7 +10,7 @@ import (
 // Every host work kind crosses the same maintenance and wait boundary. Sidecars
 // share their parent execution's exact release.
 func TestMaintenanceEveryWorkKind(t *testing.T) {
-	for _, kind := range []string{"batch-production", "batch-experiment", "model-production", "model-experiment", "engine", "engine-load", "engine-failed-pinned", "environment-build", "environment-plan-pending", "preparation", "native-sidecar", "extension check", "extension-check-setup"} {
+	for _, kind := range []string{"batch-production", "batch-experiment", "model-production", "model-experiment", "engine", "engine-load", "environment-build", "environment-plan-pending", "preparation", "native-sidecar", "extension check", "extension-check-setup"} {
 		for _, action := range []struct {
 			name, action string
 			stop         bool
@@ -18,7 +18,7 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 			// Without --stop, disabled and drained hosts share one wait path
 			// (maintenanceBlocked). Keep disable where the mode itself is read:
 			// running preparations, production custody and the failed-pin fix.
-			if action.name == "disable" && !slices.Contains([]string{"batch-production", "engine-failed-pinned", "environment-build", "preparation", "extension-check-setup"}, kind) {
+			if action.name == "disable" && !slices.Contains([]string{"batch-production", "environment-build", "preparation", "extension-check-setup"}, kind) {
 				continue
 			}
 			t.Run(kind+"/"+action.name, func(t *testing.T) {
@@ -112,13 +112,6 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 						}
 						call = nil
 					}
-				case "engine-failed-pinned":
-					if err := q.Pin(ModelPin{Model: "test", Project: "test", Machine: m.ID}); err != nil {
-						t.Fatal(err)
-					}
-					slot = q.s.ModelSlots[slotKey(m.ID, "test")]
-					recoveryReport(t, q, m, slot, "ready")
-					recoveryReport(t, q, m, slot, "failed")
 				case "environment-plan-pending":
 					env := spec("experiment")
 					env.Environment.Name = "pending"
@@ -169,39 +162,6 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 					}
 					return
 				}
-				if kind == "engine-failed-pinned" {
-					attempt := slot.Attempt
-					if !status.Quiescent || status.Sidecars != 0 || obligationCount() != 0 {
-						t.Fatal("cleaned pin counted as work", status)
-					}
-					clock.Advance(2 * StopGrace)
-					reply := pulse()
-					if !reply.AdmissionBlocked || slot.State != "failed" || slot.Attempt != attempt {
-						t.Fatal("pin restarted during maintenance", reply)
-					}
-					// Ticks and repeated failed reports cannot restart it or revive custody.
-					for range 3 {
-						clock.Advance(time.Second)
-						if err := q.Tick(); err != nil {
-							t.Fatal(err)
-						}
-						if slot.State != "failed" || slot.Attempt != attempt {
-							t.Fatal("tick restarted pin during maintenance", slot)
-						}
-						pulse()
-					}
-					if status, err := q.HostMaintenanceStatus("host"); err != nil || !status.Quiescent || !status.Healthy || status.Sidecars != 0 || obligationCount() != 0 {
-						t.Fatal("cleaned engine retained custody", status, err)
-					}
-					if len(q.s.Pins) != 1 || q.s.Pins[0].Assigned != m.ID {
-						t.Fatal("maintenance removed pin intent", q.s.Pins)
-					}
-					maintenanceChange(t, q, "resume", false)
-					if slot.State != "loading" || slot.Attempt == attempt {
-						t.Fatal("resume did not restart pin", slot)
-					}
-					return
-				}
 				if status.Quiescent || obligationCount() == 0 {
 					t.Fatal("wait ignored active work", status)
 				}
@@ -215,11 +175,8 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 				envJob := spec("experiment")
 				envJob.Environment.Name = "pending"
 				submit(t, q, envJob)
-				if err := q.SyncModel(SyncRequest{Model: "test", To: m.ID}); err != nil {
-					t.Fatal(err)
-				}
 				reply := pulse()
-				if !reply.AdmissionBlocked || reply.Job != nil || len(reply.CopyPlan) != 0 || len(reply.EnvironmentPlan) != 0 {
+				if !reply.AdmissionBlocked || reply.Job != nil || len(reply.EnvironmentPlan) != 0 {
 					t.Fatal("new work admitted", reply)
 				}
 				waiting := addModelCall(t, q, "experiment")
@@ -231,17 +188,12 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 				}
 				// Worker channels preserve running preparations on drain/disable, and
 				// cancel them on --stop. No missing plan may silently restart one.
-				if kind == "environment-build" || kind == "preparation" || kind == "extension-check-setup" {
+				if kind == "environment-build" || kind == "extension-check-setup" {
 					ctx, cancel := context.WithCancel(context.Background())
 					defer cancel()
 					keep := (reply.HostMaintenance == "drained" || reply.HostMaintenance == "disabled") && reply.PreparationStopAt == nil
-					if kind == "environment-build" || kind == "extension-check-setup" {
-						rt := &environmentRuntime{key: "build", cancel: cancel}
-						rt.sync(reply.EnvironmentPlan, false, keep)
-					} else {
-						rt := &modelRuntime{copies: map[string]*workerCopy{"test": {cancel: cancel}}}
-						rt.syncCopies(reply.CopyPlan, reply.CacheUsage, reply.CachePins, false, keep)
-					}
+					rt := &environmentRuntime{key: "build", cancel: cancel}
+					rt.sync(reply.EnvironmentPlan, false, keep)
 					if (ctx.Err() != nil) != action.stop {
 						t.Fatal("incorrect preparation stop channel", ctx.Err())
 					}

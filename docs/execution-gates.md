@@ -4,7 +4,9 @@ Implementation audit against [MY-44](DECISIONS.md#my-44), 2026-11-10. This
 records source behavior for the next release, not a deployment claim. The
 implementation worker received MY-44 through its task brief. Ordinary native
 commands already run without extension registration, qualification or sandbox
-opt-in; declaring needs is sufficient, subject to the protections below.
+opt-in; declaring needs is sufficient, subject to the protections below. The
+[B2 cut](services.md#stage-model-masters) later retired the built-in model
+downloader and in-place local approvals.
 
 | Boundary | Disposition and reason |
 | --- | --- |

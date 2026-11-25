@@ -1661,20 +1661,8 @@ helper. Header/load-command reads do not read symbols or binary sections and add
 no file-size cap, subprocess, network request or queue-lock I/O. Unreadable or
 malformed candidates are unknown, not proof of a missing library.
 
-### Reusing a resident model
+### Reusing a catalog model
 
-Set `advanced: {resident: {model: catalog-name}}` on an independent entry, or
-`resident: {model: catalog-name}` on a registered extension. Its command uses
-`"$MYCE_RESIDENT_CLIENT" resident --path /infer --input input.bin` and writes
-normal declared outputs. The engine remains resident across same-stage jobs;
-its catalog budget covers one request peak, charged once beside client memory.
-See [the complete example and lifecycle contract](services.md#resident-engines-for-independent-stage-jobs).
-Both plain-command `pieces:` and extension `fan_out` are supported. Every child
-is an independent, non-resumable, single-device job carrying the parent's frozen
-resident binding; per-piece arguments and inputs do not split the engine identity.
-For extension fan-out, `max_concurrency: 1` runs pieces serially against one warm
-copy when capacity remains available. Plain-command pieces omit that cap and
-are placed independently; calls serialize per host/card's copy. A failed piece
-keeps accepted siblings accepted, with the usual failure and dependency rules.
-Ephemeral worker-data, resumable stages, multi-device jobs and CPU fallback are
-refused with this opt-in; `after` dependencies work as usual.
+Call `/v1` for on-demand serving or declare a native sidecar for a
+job-local server. See [services](services.md#reusing-a-catalog-model).
+`advanced.resident` returns `job_resident_retired`.

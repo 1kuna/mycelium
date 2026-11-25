@@ -103,13 +103,11 @@ type LlamaEngine struct {
 	healthErr      error
 	healthRevision uint64
 	healthDegraded bool
-	probeLatency   readinessLatency
-	// healthPause replaces the wall-clock wait between health probes; nil uses readinessPause.
+	// healthPause replaces the wall-clock wait between health probes; nil uses a wall-clock timer.
 	healthPause func(context.Context, time.Duration) error
 }
 
 func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
-	progress := readinessFromContext(ctx)
 	loaded := false
 	if l.memoryPeaks != nil {
 		l.memoryPeaks.begin()
@@ -119,18 +117,13 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 			}
 		}()
 	}
-	if progress == nil {
-		var finish func(bool)
-		ctx, progress, finish = superviseModelLoad(ctx, m, l.Dir, l.Clock)
-		defer func() { finish(loaded) }()
-	}
 	for _, v := range os.Environ() {
 		if strings.HasPrefix(v, "LLAMA_ARG_HF_") {
-			return errors.New("remote llama-server model environment is forbidden; use myce model fetch")
+			return errors.New("remote llama-server model environment is forbidden; download and stage weights under the configured model root")
 		}
 		for _, key := range []string{"LLAMA_ARG_HF_REPO=", "LLAMA_ARG_HF_FILE=", "LLAMA_ARG_MODEL_URL=", "LLAMA_ARG_MMPROJ_URL="} {
 			if strings.HasPrefix(v, key) && strings.TrimPrefix(v, key) != "" {
-				return errors.New("remote llama-server model environment is forbidden; use myce model fetch")
+				return errors.New("remote llama-server model environment is forbidden; download and stage weights under the configured model root")
 			}
 		}
 	}
@@ -192,14 +185,7 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 	if e != nil {
 		return e
 	}
-	output := &modelReadinessOutput{output: l.log, progress: progress, line: diagnosticLine{tail: diagnosticTail{dir: l.Dir}}}
-	if m.Logs == "none" {
-		// Preserve null OS descriptors. OS activity still supplies progress;
-		// stdout progress records require captured output.
-		l.cmd.Stdout, l.cmd.Stderr = l.log, l.log
-	} else {
-		l.cmd.Stdout, l.cmd.Stderr = output, output
-	}
+	l.cmd.Stdout, l.cmd.Stderr = l.log, l.log
 	reader, writer, e := os.Pipe()
 	if e != nil {
 		l.log.Close()
@@ -231,7 +217,7 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 		l.custody.Cgroup = l.memoryAttempt.path
 	}
 	l.exited = make(chan struct{})
-	go func() { l.waitErr = l.cmd.Wait(); output.close(); close(l.exited) }()
+	go func() { l.waitErr = l.cmd.Wait(); close(l.exited) }()
 	if l.memoryAttempt != nil {
 		l.memoryAttempt.oomScore = int(l.memoryOOMScore.Load())
 	}
@@ -246,8 +232,7 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 	}
 	e = checkLaunchGate(ctx)
 	if e == nil {
-		stopActivity := l.observeReadinessActivity(ctx, progress)
-		defer stopActivity()
+		l.observeModelMemory()
 		_, e = writer.Write([]byte("start\n"))
 	}
 	if e != nil {
@@ -257,24 +242,13 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 	l.url = "http://127.0.0.1:" + strconv.Itoa(port)
 
 	hc := &http.Client{
-		Timeout:       l.probeLatency.budget(),
+		Timeout:       modelProbeInterval,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	lastStatus := 0
-	probe := readinessProbe{latency: l.probeLatency}
 	for {
-		started := progress.clock.Now()
-		realStarted := RealClock{}.Now()
-		hc.Timeout = probe.budget()
-		req, _ := http.NewRequestWithContext(ctx, "GET", health, nil)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, health, nil)
 		res, err := hc.Do(req)
 		if err == nil {
-			probe.observe(max(progress.clock.Now().Sub(started), RealClock{}.Now().Sub(realStarted)), false)
-			l.probeLatency = probe.latency
-			if res.StatusCode != lastStatus {
-				progress.advance()
-				lastStatus = res.StatusCode
-			}
 			_, _ = io.Copy(io.Discard, res.Body)
 			res.Body.Close()
 			if res.StatusCode >= 200 && res.StatusCode < 300 && ctx.Err() == nil {
@@ -296,9 +270,6 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 				}
 			}
 		}
-		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-			probe.observe(max(progress.clock.Now().Sub(started), RealClock{}.Now().Sub(realStarted)), true)
-		}
 
 		select {
 		case <-ctx.Done():
@@ -315,7 +286,7 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 				return oomErr
 			}
 			return fmt.Errorf("server exited during load: %v%s", l.waitErr, logHint)
-		case <-time.After(l.probeLatency.cadence()):
+		case <-time.After(modelProbeInterval):
 		}
 	}
 }
@@ -515,7 +486,6 @@ func cleanupRecordedProcesses(dir, pattern string, clock Clock) error {
 }
 
 type workerModel struct {
-	progress           *readinessProgress
 	device             string
 	bound              *Worker
 	runtimeFailed      bool
@@ -524,7 +494,6 @@ type workerModel struct {
 	engine             Engine
 	state, err         string
 	inflight           int
-	proxyFlight        int // Adjacent-release calls still traversing the worker bridge.
 	queueFlight        int
 	recipe             *EnvironmentRecipe
 	releaseEnvironment func()
@@ -542,9 +511,6 @@ type modelRuntime struct {
 	verifyDevice           func() error
 	deviceEnv              map[string]string
 	authorize              func(context.Context, HostLaunch) error
-	copyResults            map[string]CopyReport
-	localApprovals         map[string]string
-	localApprovalStates    map[string]ModelApprovalState
 	availability           *availabilityMonitor
 	admissionBlocked       bool
 	requireMemoryCeilings  bool
@@ -553,10 +519,6 @@ type modelRuntime struct {
 	memorySwapMaxBytes     int64
 
 	lastSavedSpeed        float64
-	copies                map[string]*workerCopy
-	copyParallel          int
-	cachePins             map[string]bool
-	cacheUsage            map[string]int
 	cache                 *ModelCache
 	mu                    sync.Mutex
 	models                map[string]*workerModel
@@ -592,7 +554,7 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	if e != nil {
 		return nil, e
 	}
-	rt := &modelRuntime{copyResults: map[string]CopyReport{}, availability: w.availability, copies: map[string]*workerCopy{}, copyParallel: max(1, w.CopyParallel), models: map[string]*workerModel{}, config: w.ModelConfig, session: w.Machine.Session, token: w.Client.Token, dir: dir, clock: w.Clock, url: "http://" + ln.Addr().String()}
+	rt := &modelRuntime{availability: w.availability, models: map[string]*workerModel{}, config: w.ModelConfig, session: w.Machine.Session, token: w.Client.Token, dir: dir, clock: w.Clock, url: "http://" + ln.Addr().String()}
 	root := w.CacheRoot
 	if root == "" {
 		root = filepath.Join(dir, "model-cache")
@@ -603,13 +565,12 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	}
 	rt.worker = &w
 	rt.secretRoot = w.SecretRoot
-	rt.cache = &ModelCache{ApprovalRoot: w.ModelApprovalRoot, FileClient: &w.Client, Root: root, NASRoot: w.ModelRoot, Limit: limit, Clock: w.Clock}
+	rt.cache = &ModelCache{FileClient: &w.Client, Root: root, NASRoot: w.ModelRoot, Limit: limit, Clock: w.Clock}
 	rt.cache.budget = w.diskBudget
 	rt.engineFactory = w.modelEngine
 	rt.cache.beforeChunk = w.beforeModelCopy
 	rt.cache.Parallel = max(1, w.CopyParallel)
 	rt.cache.Protected = rt.cacheProtected
-	rt.cache.Usage = rt.cachePopularity
 	if e = rt.cache.init(); e != nil {
 		ln.Close()
 		return nil, e
@@ -671,10 +632,6 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	if w.ModelAdvertise != "" {
 		rt.url = w.ModelAdvertise
 	}
-	if e = rt.restoreModelCustodians(); e != nil {
-		ln.Close()
-		return nil, e
-	}
 	rt.server = &http.Server{Handler: http.HandlerFunc(rt.serve), ReadHeaderTimeout: 5 * time.Second}
 	rt.wg.Add(1)
 	go func() {
@@ -685,36 +642,14 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	}()
 	return rt, nil
 }
-func (rt *modelRuntime) setLocalApprovals(approved map[string]string, states map[string]ModelApprovalState) {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	rt.localApprovals = approved
-	rt.localApprovalStates = states
-}
-
-// Called under the runtime lock; withholding readiness never releases custody.
-func (rt *modelRuntime) localApprovalAvailable(m Model) bool {
-	return m.LocalSource == "" || rt.localApprovalStates[m.LocalSource] == approvalVerified && rt.localApprovals[m.LocalSource] == m.SHA256
-}
-
 func (rt *modelRuntime) report() ([]ModelReport, float64) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	out := []ModelReport{}
 	memory := 0.0
 	for _, m := range rt.models {
-		if g, ok := m.engine.(*modelCustodian); ok {
-			g.refreshModel(m)
-		}
 		rt.checkEngineHealth(m)
 		report := ModelReport{memoryGB: m.model.MemoryGB, hostMemoryGB: m.model.HostMemoryGB, resourcesMeasured: true, Name: m.model.Name, Device: m.device, Attempt: m.attempt, RuntimeFailed: m.runtimeFailed, State: m.state, Error: ceilingDiagnostic(m.err, "model load or unload failed"), InFlight: m.inflight, CallsMeasured: true}
-		if g, ok := m.engine.(*modelCustodian); ok {
-			report.Custody, report.URL = g.proof(), g.bridgeURL()
-			report.CallsMeasured = report.Custody != nil
-		}
-		if m.state == "loading" {
-			report.Error = m.progress.coldReason()
-		}
 		if m.state == "ready" {
 			if owned, ok := m.engine.(*LlamaEngine); ok {
 				_, report.HealthRevision, report.HealthDegraded = owned.runtimeHealth()
@@ -786,7 +721,7 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 			if m.state == "ready" {
 				m.state = "draining"
 			}
-			if m.state == "draining" && m.inflight == 0 && m.proxyFlight == 0 && (m.queueFlight == 0 || rt.closing) {
+			if m.state == "draining" && m.inflight == 0 && (m.queueFlight == 0 || rt.closing) {
 				rt.unload(m)
 			}
 		}
@@ -819,9 +754,6 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 				model = m
 			}
 		}
-		if s.Resident != nil {
-			model = s.Resident.Model
-		}
 		if s.Placement != nil {
 			model.Project = s.Placement.Project
 		}
@@ -833,7 +765,7 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 			rt.models[engineKey(s.Model, s.Device)] = &workerModel{device: s.Device, model: Model{Name: s.Model}, attempt: s.Attempt, state: "failed", err: "model absent from worker config"}
 			continue
 		}
-		if !rt.localApprovalAvailable(model) || rt.admissionBlocked || rt.availability != nil && !rt.availability.snapshot().Available {
+		if rt.admissionBlocked || rt.availability != nil && !rt.availability.snapshot().Available {
 			continue
 		}
 		var bound *Worker
@@ -914,8 +846,6 @@ func updateModelOOMScore(m *workerModel, score int) error {
 		if (m.state == "ready" || m.state == "draining") && owned.memoryAttempt != nil {
 			return owned.memoryAttempt.updateOOMScore(score)
 		}
-	case *modelCustodian:
-		return owned.updateOOMScore(score)
 	}
 	return nil
 }
@@ -958,31 +888,6 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 			owned.readinessWorker = m.bound
 		}
 	}
-	identity := m.model
-	if m.recipe != nil {
-		identity.readinessRecipe = m.recipe.Key
-	}
-	platform, device := rt.platform, rt.device
-	if m.bound != nil {
-		platform, device = m.bound.Machine.GPU, m.bound.Machine.Device
-	}
-	identity.Platforms, identity.Device = []string{platform}, device
-	ctx, progress, finishReadiness := superviseModelLoadPhase(ctx, identity, rt.dir, rt.clock, true)
-	rt.mu.Lock()
-	m.progress = progress
-	rt.mu.Unlock()
-	if rt.cache != nil {
-		progress.mu.Lock()
-		progress.source = func() int64 {
-			if v, ok := rt.cache.progress.Load(cacheKey(m.model)); ok {
-				return v.(CopyReport).Bytes
-			}
-			return 0
-		}
-		progress.mu.Unlock()
-	}
-	loadSucceeded := false
-	defer func() { finishReadiness(loadSucceeded) }()
 	if e := rt.checkLoadMemory(ctx, m); e != nil {
 		m.cancel()
 		rt.mu.Lock()
@@ -996,15 +901,13 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 	parent := ctx
 	priorGate := launchGateFrom(parent)
 	ctx = withLaunchGate(parent, func(ctx context.Context) error {
-		resume := progress.pause()
-		defer resume()
 		if err := priorGate(ctx); err != nil {
 			return err
 		}
 		return rt.checkLoadMemory(ctx, m)
 	})
 	deviceEnv := rt.deviceEnv
-	platform, device = rt.platform, rt.device
+	platform, device := rt.platform, rt.device
 	if m.bound != nil {
 		platform, device = m.bound.Machine.GPU, m.bound.Machine.Device
 		deviceEnv, _ = m.bound.deviceEnvironment()
@@ -1036,13 +939,6 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 			model, m.releaseEnvironment, e = PrepareModelEnvironment(ctx, model, recipe.Platform, EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{model.Environment: {recipe.Platform: recipe}}}, rt.environmentCache)
 		}
 	}
-	// Only cache/model work can be classified by model-load progress. Start a
-	// fresh silence interval after admission and environment preparation.
-	progress.mu.Lock()
-	progress.last, progress.realLast = progress.clock.Now(), RealClock{}.Now()
-	progress.started, progress.realStarted = progress.last, progress.realLast
-	progress.suspended = false
-	progress.mu.Unlock()
 	if e == nil && (model.Engine == "llama.cpp" || model.SizeBytes > 0) {
 		model.Path, e = rt.cache.Prepare(ctx, model)
 	}
@@ -1050,11 +946,6 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 		e = checkLaunchGate(ctx)
 	}
 	if e == nil {
-		if rt.detachedModelSupported(model) {
-			rt.mu.Lock()
-			m.engine = rt.newModelCustodian(m, model)
-			rt.mu.Unlock()
-		}
 		e = m.engine.Load(ctx, model)
 	}
 	if e == nil && ctx.Err() != nil {
@@ -1065,7 +956,6 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 			e = context.Cause(ctx)
 		}
 	}
-	loadSucceeded = e == nil
 	m.cancel()
 	// A failed load may have started a process. Keep its memory reserved unless
 	// cleanup actually succeeds, even when the engine's own load cleanup failed.
@@ -1091,7 +981,7 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 		// request instead of exposing that engine as ready until another heartbeat.
 		if rt.closing || m.drainRequested {
 			m.state = "draining"
-			if m.inflight == 0 && m.proxyFlight == 0 && (m.queueFlight == 0 || rt.closing) {
+			if m.inflight == 0 && (m.queueFlight == 0 || rt.closing) {
 				rt.unload(m)
 			}
 		}
@@ -1359,25 +1249,15 @@ func (rt *modelRuntime) unload(m *workerModel) {
 	}()
 }
 func (rt *modelRuntime) close() error {
-	rt.pauseCopies()
 	rt.mu.Lock()
 	rt.closing = true
 	for _, m := range rt.models {
-		if _, detached := m.engine.(*modelCustodian); detached && rt.worker != nil && rt.worker.serviceStop != nil && rt.worker.serviceStop.Err() != nil {
-			// The detached bridge owns existing response sockets and the engine.
-			// Service replacement releases only this coordinator's references.
-			if m.releaseEnvironment != nil {
-				m.releaseEnvironment()
-				m.releaseEnvironment = nil
-			}
-			continue
-		}
 		if m.cancel != nil {
 			m.cancel()
 		}
 		if m.state == "ready" || m.state == "draining" {
 			m.state = "draining"
-			if m.inflight == 0 && m.proxyFlight == 0 {
+			if m.inflight == 0 {
 				rt.unload(m)
 			}
 		}
@@ -1469,34 +1349,20 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rt.checkEngineHealth(m)
-	if m == nil || m.runtimeFailed || !(rt.localApprovalAvailable(m.model) || rt.localApprovalStates[m.model.LocalSource] == approvalUnknown) || (m.state != "ready" && !(m.state == "draining" && m.queueFlight > 0)) {
+	if m == nil || m.runtimeFailed || (m.state != "ready" && !(m.state == "draining" && m.queueFlight > 0)) {
 		w.Header().Set("X-Myce-Engine-Rejected", r.Header.Get("X-Myce-Engine-Attempt"))
 		rt.mu.Unlock()
 		modelError(w, 503, "model is not ready")
 		return
 	}
-	_, detached := m.engine.(*modelCustodian)
 	finishMemory := m.trackRequest(w, r.Header.Get(modelMemoryRequestHeader))
-	if detached {
-		m.proxyFlight++
-	} else {
-		m.inflight++
-	}
-	// A routed call can arrive before the next queue check-in. Pause any idle
-	// copy immediately when the worker receives actual inference work.
-	for _, copy := range rt.copies {
-		copy.cancel()
-	}
+	m.inflight++
 	rt.mu.Unlock()
 	defer func() {
 		rt.mu.Lock()
 		defer rt.mu.Unlock()
-		if detached {
-			m.proxyFlight--
-		} else {
-			m.inflight--
-		}
-		if m.state == "draining" && m.inflight == 0 && m.proxyFlight == 0 && (m.queueFlight == 0 || rt.closing) {
+		m.inflight--
+		if m.state == "draining" && m.inflight == 0 && (m.queueFlight == 0 || rt.closing) {
 			rt.unload(m)
 		}
 	}()
@@ -1601,7 +1467,7 @@ func (rt *modelRuntime) withdrawLocalAvailability() {
 		if m.state == "ready" {
 			m.state = "draining"
 		}
-		if m.state == "draining" && m.inflight == 0 && m.proxyFlight == 0 {
+		if m.state == "draining" && m.inflight == 0 {
 			rt.unload(m)
 		}
 	}
@@ -1612,4 +1478,26 @@ func engineKey(model, device string) string {
 		return model
 	}
 	return model + "/" + device
+}
+
+func (rt *modelRuntime) copyTelemetry() ([]CopyReport, float64) {
+	reports, speed := rt.cache.CopyReports()
+	if speed > 0 && speed != rt.lastSavedSpeed {
+		if e := saveWorkerJSON(rt.dir, "copy-speed.json", speed); e != nil {
+			log.Printf("persist model copy speed: %v", e)
+		} else {
+			rt.lastSavedSpeed = speed
+		}
+	}
+	return reports, speed
+}
+func (rt *modelRuntime) cacheProtected(key string) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	for _, m := range rt.models {
+		if cacheKey(m.model) == key && m.state != "unloaded" && m.state != "failed" {
+			return true
+		}
+	}
+	return false
 }

@@ -197,7 +197,7 @@ func (q *Queue) jobHold(j *Job, resolving bool) (blocker *Hold) {
 	if specificWaitKind(wait.Kind) {
 		return b
 	}
-	if wait.Kind == "no_eligible_host" && q.calls[j.ID] == nil && j.Spec.Needs.Model == "" && j.Spec.Resident == nil {
+	if wait.Kind == "no_eligible_host" && q.calls[j.ID] == nil && j.Spec.Needs.Model == "" {
 		scan := q.placementScan()
 		for _, t := range targets {
 			if t.fit.failures != 0 || t.m.GPU == "cpu" || t.job.Spec.Needs.cpuOnly() || !q.inventoryFresh(q.s.Machines[t.m.ID]) {

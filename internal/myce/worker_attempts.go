@@ -1321,7 +1321,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.ModelURL = rt.url
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
-			m.Capabilities = append(slices.Clone(w.Machine.Capabilities), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1", "nas_inspection_v1", residentJobsCapability, scarceHostYieldCapability, localFirstProtocol)
+			m.Capabilities = append(slices.Clone(w.Machine.Capabilities), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1", "nas_inspection_v1", scarceHostYieldCapability, localFirstProtocol)
 			m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
 			if workerSyntheticMemoryHost || w.devEnvironmentSizing || w.Machine.GPU == "fake" && w.ServiceConfig == nil || runtime.GOOS == "darwin" && w.processMemory != nil && w.processMemory.OwnedFootprint != nil {
 				m.Capabilities = append(m.Capabilities, sampledMemoryCapability)
@@ -1346,8 +1346,6 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			if w.processMemory != nil && w.processMemory.OwnedFootprint != nil && backendFor(w.Machine.GPU).processFootprint {
 				m.Capabilities = append(m.Capabilities, metalFootprintGuardCapability)
 			}
-			m.ApprovedModels, m.ModelApprovalStates = rt.cache.modelApprovals(w.ModelConfig.Models)
-			rt.setLocalApprovals(m.ApprovedModels, m.ModelApprovalStates)
 			modelReports, _ := rt.report()
 			for _, r := range modelReports {
 				if r.State == "failed" {
@@ -1355,7 +1353,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				}
 			}
 			if rt.cache != nil {
-				m.CachedModels, m.CacheFreeBytes, err = rt.cache.report(w.ModelConfig.Models, m.ApprovedModels)
+				m.CachedModels, m.CacheFreeBytes, err = rt.cache.Report(w.ModelConfig.Models)
 				m.CopyReports, m.CopyBytesPerSecond = rt.copyTelemetry()
 				if err != nil {
 					m.CacheError = "cache report failed"
@@ -1533,16 +1531,10 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 					}
 				}
 				unavailable := leaving || recovering || reply.AdmissionBlocked || w.checkAvailability() != nil
-				busy := len(activeJobs()) > 0 || unavailable
 				// A plain build (no extension setup) never touches the device,
 				// so it runs beside device work like a CPU-scoped build (#1486).
 				cpuPreparation := len(reply.EnvironmentPlan) > 0 && (reply.EnvironmentPlan[0].Platform == "cpu" || reply.EnvironmentPlan[0].Preparation == nil)
 				environmentBusy := unavailable || !localEnvironmentPreparationFits(w, activeJobs(), reply.ModelPlan, cpuPreparation)
-				for _, slot := range reply.ModelPlan {
-					if slot.State == "loading" || slot.InFlight > 0 {
-						busy = true
-					}
-				}
 				for i := range reply.EnvironmentPlan {
 					r := &reply.EnvironmentPlan[i]
 					if r.BinaryRelative != "" && w.EnvironmentSourceRoot != "" {
@@ -1555,7 +1547,6 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				environments.prepare = prepareWorker.prepareRegisteredExtension
 				environments.mu.Unlock()
 				environments.sync(reply.EnvironmentPlan, environmentBusy, keep)
-				rt.syncCopies(reply.CopyPlan, reply.CacheUsage, reply.CachePins, busy, keep)
 				// A result can finish while check-in is in flight. Refresh the
 				// same exact local reservations before applying a new engine load.
 				currentJobs := activeJobs()
@@ -1576,7 +1567,6 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			}
 			if err != nil {
 				environments.sync(nil, true)
-				rt.cancelCopies()
 				for _, a := range actors {
 					a.update(w, AttemptDirective{}, false, false)
 				}

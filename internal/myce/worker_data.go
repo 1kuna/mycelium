@@ -135,9 +135,6 @@ func validateEphemeralExecution(s Spec) error {
 	if !s.ephemeral() {
 		return nil
 	}
-	if s.Resident != nil {
-		return errors.New("ephemeral worker data does not cover resident model runtimes: shared server memory and request spools are outside attempt cleanup")
-	}
 	if s.Needs.Network {
 		return errors.New("ephemeral commands currently require offline execution")
 	}
@@ -155,9 +152,6 @@ func validateEphemeralExtensions(s Spec, extensions []Extension) error {
 		return nil
 	}
 	for _, e := range extensions {
-		if e.Resident != nil {
-			return errors.New("ephemeral worker data does not cover extension resident model runtimes: shared server memory and request spools are outside attempt cleanup")
-		}
 		for _, v := range e.Variants {
 			candidate := s
 			candidate.Needs = v.Needs

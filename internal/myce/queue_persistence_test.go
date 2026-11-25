@@ -202,6 +202,22 @@ func TestQueuePersistenceRetiredDockerJob(t *testing.T) {
 	}
 }
 
+func TestQueuePersistenceIgnoresRetiredResident(t *testing.T) {
+	q, clock := fixture(t)
+	const record = `{"id":"model-history","state":"succeeded","attempt":1,
+		"queued":"2026-10-08T11:59:00Z","finished_at":"2026-10-08T12:00:00Z",
+		"spec":{"name":"historical model job","project":"test","priority":"experiment",
+		"run":{"command":["true"]},"resident":{"model":"old-model","engine":{"model":{"name":"private-model"}}}}}`
+	if _, err := q.db.Exec("INSERT INTO queue_state(key,data) VALUES(?,?)", "jobs/model-history", []byte(record)); err != nil {
+		t.Fatal(err)
+	}
+	q = reopenQueue(t, q, clock)
+	stored := q.s.Jobs["model-history"]
+	if stored == nil || stored.State != "succeeded" || stored.Spec.Resident != nil || stored.Spec.Name != "historical model job" {
+		t.Fatalf("retired binding affected restored job: %+v", stored)
+	}
+}
+
 func TestStorageEnvelopeLogicalDedupReplayRestart(t *testing.T) {
 	q, clock, m, s, out := storageFixture(t)
 	first := startObservation(t, q, m, s)

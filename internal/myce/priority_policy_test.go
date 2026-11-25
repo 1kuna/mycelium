@@ -162,11 +162,6 @@ func TestPriorityPolicyRejectsSlashProject(t *testing.T) {
 			t.Fatal("slash project accepted")
 		}
 	})
-	t.Run("pin", func(t *testing.T) {
-		if err := q.Pin(ModelPin{Project: project, Model: "test", Machine: "one"}); err == nil {
-			t.Fatal("slash project accepted")
-		}
-	})
 	t.Run("legacy identity", func(t *testing.T) {
 		got := q.priorityMatch(Spec{Project: project, Class: "experiment"})
 		if got.Tier != "experiment" || got.Selector != "*/*" {

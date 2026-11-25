@@ -1,17 +1,14 @@
-# Models and engine history
+# Models and engine measurements
 
-Model storage, general model servers, joint measurement and the durable
-model-engine interval history. See [services](../services.md) for the model and
-server contract.
+See [services](../services.md) for the model and server contract.
 
-## Model master folder, worker cache, and production reservations
+## Model masters and worker cache
 
-Models use immutable NAS masters, verified file-store imports or explicit local
-source approvals. Loading never downloads weights. Catalog hashes and byte counts
-identify content; cache verification precedes publication. Protect loaded/pinned
-files from eviction and keep recoverable copies. Use `model sync` for pre-copy;
-partial transfers and pins persist through restart. See [models](../services.md)
-and [files](../files.md) for transfer, retention and cache limits.
+Models use immutable masters under the configured model root or verified
+file-store imports. Catalog hashes and byte counts identify content. A cache
+copy resumes from its verified prefix and is published after size and SHA-256
+verification. The worker protects loaded models from eviction. See
+[models](../services.md) and [files](../files.md) for transfer and retention.
 
 ### Local acquisition root
 <a id="local-acquisition-root-1248-next-release"></a>
@@ -46,8 +43,8 @@ snapshot it lacks from the model hub into its own snapshot cache
 ## General model servers and joint measurement
 
 General HTTP servers, llama.cpp and vLLM share the queue's engine lifecycle,
-placement, pins and release custody. See [servers](../services.md) for routing,
-local secrets, approved folders, timeout/retry behavior and log policy.
+placement and release custody. See [servers](../services.md) for routing,
+local secrets, timeout/retry behavior and log policy.
 Accepted jobs retain their last duration and eligible memory peaks. Memory
 admission uses those observations with measured uncertainty; wall-time limits
 come only from the job's explicit contract. Native model qualification still
@@ -57,7 +54,7 @@ peaks below together with worker telemetry and the calling job’s attempt facts
 
 ### Resident engine memory peaks
 
-Read `loaded_models[].memory_peaks` in `myce status --jobs recent --json` or
+Read `loaded_models[].memory_peaks` in `myce status --json --sections work` or
 authenticated `GET /api/status?jobs=recent`. Use the model, machine, device and engine attempt to select
 the right record. `load` covers engine startup through readiness, `steady`
 accumulates samples taken while ready with no routed requests active, and
@@ -86,50 +83,6 @@ budget. Placement continues to enforce the configured resident model budget
 and its existing live headroom checks. Use representative, complete,
 unconstrained samples to qualify a catalog budget.
 
-Successful routed responses expose `X-Myce-Model-Request-ID`. Match that ID to
-`memory_peaks.request.request_id` on `memory_request` interval events. The
-queue records a request event when it receives the exact worker receipt.
-Interrupted transports can lose the individual receipt; an accepted worker
-report can still carry the latest completed window. Older workers can omit
-`memory_peaks`.
-
-## Durable model-engine interval history (#663)
-
-Authenticated `GET /api/models/intervals?limit=100` returns immutable transition
-`entries` with `sequence`, `at`, `kind`, model/attempt, machine/session, physical
-host, device ordinal/stable identity/platform, project/class/priority and the
-resolved `tier` (name, index, selector and policy revision). Events retain the
-interval's known `assigned_at`, `load_started_at`, `stopped_at`, `released_at`.
-Assignment records queue custody; load start records the first accepted engine
-launch authorization, not a process-start acknowledgement. Stop records queue
-stop intent, not signal delivery. Exact matching `failed` cleanup or accepted
-`unloaded` receipts record release. A fresh replacement check-in also records
-release for slots in its exact attested `previous_session`, before old slots are
-discarded. Stale receipts and unverified worker loss cannot establish release.
-A direct cleanup receipt without prior stop intent sets stop at receipt time.
-Class/tier changes use the scheduler's effective identity, including active
-production pins, and produce another event at their transition time, so a model
-promoted or demoted in place remains visible to overlap proofs.
-`memory_load` records the first finished load window. `memory_request` records
-the specific received request window. Accepted release events retain the last
-reported load, steady and request peaks after unload. The [generated intervals
-schema](../schemas/model-intervals-v1.schema.json) covers these optional fields.
-
-Begin with `after=0` and omit `high_water`. Follow `next` as `after`, retaining
-the first page's `high_water`, until `has_more=false`. `limit` is 1..256. Start
-a later snapshot at the previous high water to collect new arrivals. Even an
-empty snapshot's high water is a valid fixed bound. Events persist in SQLite
-with their queue transitions and survive slot removal and queue restarts; they
-are retained without automatic pruning. Reads fetch only a bounded indexed page
-outside the queue lock. Back up the entire queue database as usual.
-
-`coverage_since` starts the current uninterrupted ledger-enabled period. If an
-older binary rewrites state during rollback, re-upgrade recovers sequence
-allocation from retained SQLite events and starts a new coverage period; events
-from before that gap remain readable but do not establish continuous coverage
-through it. Existing slots
-are recorded as `observed` with unknown earlier times; there is no historical
-backfill. Missing assignment, load-start or release evidence cannot pass a
-complete interval proof. Join events by attempt/machine/session/device and use
-class-change event times to split tier occupancy. For batch copies, continue to
-use job GET times and the paginated job ledger described in [status](../status.md).
+Successful routed responses expose `X-Myce-Model-Request-ID`. Compare it with
+`loaded_models[].memory_peaks.request.request_id` for the latest reported
+completed request. Older workers can omit `memory_peaks`.

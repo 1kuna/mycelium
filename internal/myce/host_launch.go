@@ -204,7 +204,6 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 			if s == nil || s.Session != l.Session || s.Attempt != l.Attempt || s.State != "loading" || !q.reservationAllows(nil, allocationMachine(q.s.Machines[l.Machine], []string{l.Device})) || q.deviceAdmissionBlocked(allocationMachine(q.s.Machines[l.Machine], []string{l.Device})) {
 				reject("engine_custody")
 			} else {
-				q.recordModelInterval(s, "load_started")
 			}
 			return nil
 		}
@@ -375,9 +374,6 @@ func checkLaunchGate(ctx context.Context) error {
 func (q *Queue) cancelUnofferedPreparations(m *Machine, reply Reply) {
 	offered := map[string]bool{}
 	for _, r := range reply.EnvironmentPlan {
-		offered[launchAttempt(r.Launch)] = true
-	}
-	for _, r := range reply.CopyPlan {
 		offered[launchAttempt(r.Launch)] = true
 	}
 	for id, l := range q.s.PreparationPlans {

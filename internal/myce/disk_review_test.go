@@ -392,13 +392,14 @@ func TestDiskHeadroomRoutesReadyModelBelowFloor(t *testing.T) {
 	}
 }
 
-func TestDiskHeadroomPinnedEngineRestartsWithCachedFiles(t *testing.T) {
+func TestDiskHeadroomEngineRetriesWithCachedFiles(t *testing.T) {
 	q, c, m := modelFixture(t)
-	if err := q.Pin(ModelPin{Model: "test", Project: "test", Machine: m.ID}); err != nil {
-		t.Fatal(err)
-	}
+	call := addModelCall(t, q, "experiment")
 	slot := q.s.ModelSlots[slotKey(m.ID, "test")]
 	recoveryReport(t, q, m, slot, "ready")
+	if err := q.retryCall(call.ID); err != nil {
+		t.Fatal(err)
+	}
 	old := slot.Attempt
 	m.CachedModels = []string{"test"}
 	m = reportDisk(t, m, c, "volume", []string{"data", "model-cache"}, 100<<30, 512<<20)
@@ -408,7 +409,7 @@ func TestDiskHeadroomPinnedEngineRestartsWithCachedFiles(t *testing.T) {
 	m = reportDisk(t, m, c, "volume", []string{"data", "model-cache"}, 100<<30, 512<<20)
 	recoveryReport(t, q, m, slot, "failed")
 	if slot.State != "loading" || slot.Attempt == old {
-		t.Fatalf("disk floor blocked cached pinned-engine restart: %+v", slot)
+		t.Fatalf("disk floor blocked cached demand-driven reload: %+v", slot)
 	}
 }
 

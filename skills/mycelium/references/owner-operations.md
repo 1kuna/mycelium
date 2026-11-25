@@ -16,7 +16,7 @@ myce policy set policy.yaml --if-revision N --config <installed-queue-config>
 ```
 
 Use that same installed --config for other authorized owner writes, such as
-`myce model sync MODEL --to all --config <installed-queue-config>`.
+`myce host drain HOST --config <installed-queue-config>`.
 The CLI resolves credentials internally and preserves installed certificate trust.
 owner_authority_unavailable requires the installation owner to restore access;
 owner_authority_unpinned requires provisioned HTTPS trust. Retain either refusal;

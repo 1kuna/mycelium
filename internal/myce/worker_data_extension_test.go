@@ -267,7 +267,7 @@ while :; do sleep .01; done
 }
 
 func TestEphemeralExtensionFrozenScopeRefusals(t *testing.T) {
-	for _, field := range []string{"workdir", "network", "resident", "legacy-resident"} {
+	for _, field := range []string{"workdir", "network"} {
 		t.Run(field, func(t *testing.T) {
 			e := compositionExtension(t, false)
 			v := &e.Variants[0]
@@ -276,13 +276,6 @@ func TestEphemeralExtensionFrozenScopeRefusals(t *testing.T) {
 				v.Execution.Main.Workdir = "{cache}"
 			case "network":
 				v.Needs.Network = true
-			case "resident":
-				e.Resumable = false
-				e.Resident = &ResidentBinding{Model: "shared-engine"}
-			case "legacy-resident":
-				e = fakeExtension(t)
-				e.Resumable = false
-				e.Resident = &ResidentBinding{Model: "shared-engine"}
 			}
 			e = freezeComposition(t, e)
 			q, _ := fixture(t)

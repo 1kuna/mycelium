@@ -243,17 +243,13 @@ func (q *Queue) reconcileHostReleases(c Checkin) {
 
 // Placement policy is shared by batch, model, preparation and projections.
 func (q *Queue) placementAllowed(j *Job, m *Machine) bool {
-	return q.placementAllowedForUse(j, m, false)
-}
-
-func (q *Queue) placementAllowedForUse(j *Job, m *Machine, resident bool) bool {
 	if !q.admissionHold(j, m, q.checkpointInputHold(j), predicateCheckpointInputExpiry) {
 		return false
 	}
 	if !q.admissionPass(j, m, !(j.StartedAt == nil && q.deviceFaultRetryBlocked(j, m)), predicateDeviceFaultRetry) {
 		return false
 	}
-	return q.admissionPass(j, m, j.CommandDiscovery == nil || q.inventoryFresh(q.s.Machines[m.ID]), predicateInventory) && q.admissionPass(j, m, q.yieldPlacementAllows(j, m), predicateYieldPlacement) && q.admissionPass(j, m, j.Spec.Needs.cpuOnly() || !q.deviceAdmissionBlocked(m), predicateDeviceAdmission) && q.admissionHold(j, m, reasonHold("disk_headroom", q.diskHeadroomReason(j, m)), predicateDiskHeadroom) && q.placementPolicyAllowed(j, m, resident)
+	return q.admissionPass(j, m, j.CommandDiscovery == nil || q.inventoryFresh(q.s.Machines[m.ID]), predicateInventory) && q.admissionPass(j, m, q.yieldPlacementAllows(j, m), predicateYieldPlacement) && q.admissionPass(j, m, j.Spec.Needs.cpuOnly() || !q.deviceAdmissionBlocked(m), predicateDeviceAdmission) && q.admissionHold(j, m, reasonHold("disk_headroom", q.diskHeadroomReason(j, m)), predicateDiskHeadroom) && q.placementPolicyAllowed(j, m, false)
 }
 
 // Started preparation retains demand while contact is suspect. Resource,
@@ -262,25 +258,25 @@ func (q *Queue) placementDemandAllowed(j *Job, m *Machine) bool {
 	if !q.admissionPass(j, m, !(j.StartedAt == nil && q.deviceFaultRetryBlocked(j, m)), predicateDeviceFaultRetry) {
 		return false
 	}
-	return q.admissionPass(j, m, q.yieldPlacementAllows(j, m), predicateYieldPlacement) && q.admissionPass(j, m, j.Spec.Needs.cpuOnly() || !q.deviceAdmissionBlocked(m), predicateDeviceAdmission) && q.admissionHold(j, m, reasonHold("disk_headroom", q.diskHeadroomReason(j, m)), predicateDiskHeadroom) && q.admissionPass(j, m, q.reservationAllows(j, m), predicateReservation) && q.placementDemandPolicy(j, m, false)
+	return q.admissionPass(j, m, q.yieldPlacementAllows(j, m), predicateYieldPlacement) && q.admissionPass(j, m, j.Spec.Needs.cpuOnly() || !q.deviceAdmissionBlocked(m), predicateDeviceAdmission) && q.admissionHold(j, m, reasonHold("disk_headroom", q.diskHeadroomReason(j, m)), predicateDiskHeadroom) && q.admissionPass(j, m, q.reservationAllows(j, m), predicateReservation) && q.placementDemandPolicy(j, m)
 }
 
 // Recovery retains existing execution custody. Admission-time disk estimates
 // apply only to new work: its writes may already be reflected in observed free.
-func (q *Queue) placementPolicyAllowed(j *Job, m *Machine, resident bool) bool {
-	return q.admissionPass(j, m, q.reservationAllows(j, m), predicateReservation) && q.placementPolicyWithoutReservation(j, m, resident)
+func (q *Queue) placementPolicyAllowed(j *Job, m *Machine, _ bool) bool {
+	return q.admissionPass(j, m, q.reservationAllows(j, m), predicateReservation) && q.placementPolicyWithoutReservation(j, m)
 }
 
-func (q *Queue) placementPolicyWithoutReservation(j *Job, m *Machine, resident bool) bool {
+func (q *Queue) placementPolicyWithoutReservation(j *Job, m *Machine) bool {
 	if !q.admissionPass(j, m, !(q.workerSuspect(m, q.clock.Now()) && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))), predicateWorkerSuspect) {
 		return false
 	}
-	return q.placementDemandPolicy(j, m, resident)
+	return q.placementDemandPolicy(j, m)
 }
 
 // Useful demand survives temporary contact suspicion. This predicate grants no
 // assignment or preparation authority; those paths still require fresh contact.
-func (q *Queue) placementDemandPolicy(j *Job, m *Machine, resident bool) bool {
+func (q *Queue) placementDemandPolicy(j *Job, m *Machine) bool {
 	if j.State != "running" && j.State != "stopping" && !q.admissionHold(j, m, workerMemoryHold(m), predicateWorkerMemoryContract) {
 		return false
 	}
@@ -297,9 +293,6 @@ func (q *Queue) placementDemandPolicy(j *Job, m *Machine, resident bool) bool {
 		return false
 	}
 	if model, ok := q.model(j.Spec.Needs.Model); ok {
-		if resident {
-			model = q.residentModel(model, m)
-		}
 		if !q.admissionPass(j, m, logPolicyFits(model.Logs, m), predicateModelLogPolicy) || !q.admissionPass(j, m, modelFenceAllows(model, m), predicateModelFence) || !q.admissionPass(j, m, q.projectAllows(model.Project, m.ID), predicateModelProject) {
 			return false
 		}
@@ -326,22 +319,6 @@ func (q *Queue) holdWait(j *Job, scans ...*placementScan) *Hold {
 	}
 	if h := q.diskWait(j, "", scan); h != nil {
 		return h
-	}
-	if j.Spec.Priority == "production" {
-		for _, m := range scan.machines {
-			h := q.s.Hosts[hostID(m)]
-			if h == nil || !h.Policy.ProductionHold || !q.jobAllowsMachine(j, m.ID) || !fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
-				continue
-			}
-			for _, slot := range q.s.ModelSlots {
-				if slotOnTarget(slot, m) && q.slotPinned(slot) && q.comparePriority(q.slotSpec(slot), j.Spec) <= 0 && slot.Model != j.Spec.Needs.Model {
-					model, _ := q.model(slot.Model)
-					if model.MemoryGB+j.Spec.Needs.MemoryGB > m.TotalMemoryGB {
-						return newHold("pinned_model", "pinned model "+slot.Model+" on "+m.ID+" prevents production placement")
-					}
-				}
-			}
-		}
 	}
 	return nil
 }

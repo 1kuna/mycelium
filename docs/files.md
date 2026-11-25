@@ -747,15 +747,15 @@ set `file_store: true`, `size_bytes`, and `sha256`; `path` is unnecessary. For a
 bundle retain the existing `files` manifest and its combined size/hash identity,
 and import every listed file. Configuration and tokenizer files belong in that
 manifest too. Engine loading never downloads from the internet. Existing NAS
-catalog entries, `direct_nas`, pins, pre-copy, protected loaded models and model
-cache limits retain their behavior. Extensions can receive models as job inputs.
+catalog entries and `direct_nas` remain supported. Extensions can receive
+models as job inputs.
 
 `--file-cache` and `--file-cache-bytes` configure each hypha's reproducible cache
 (automatic from disk headroom by default, under its state folder). It counts complete and partial bytes,
 evicts least-recently-used entries, and refuses a file larger than its allowance.
 A private materialization keeps active jobs independent of eviction. Model
-loading/pre-copy uses the existing `--model-cache-bytes` admission and pin/loaded
-protection. Stored model eviction verifies that authoritative files remain before
+loading uses `--model-cache-bytes` for cache admission and protects files
+used by loaded engines. Stored model eviction verifies that authoritative files remain before
 removing disposable copies. The original NAS cache Trash behavior is unchanged.
 
 From the release containing #1365, omitted `--file-retention` is `72h`: finished

@@ -62,7 +62,7 @@ func TestCatalogTransitionCheckin(t *testing.T) {
 
 func assertCatalogFencedReply(t *testing.T, r Reply) {
 	t.Helper()
-	if !r.AdmissionBlocked || r.Job != nil || len(r.Attempts)+len(r.ModelPlan)+len(r.EnvironmentPlan)+len(r.CopyPlan)+len(r.ExtensionQualificationPlan) != 0 {
+	if !r.AdmissionBlocked || r.Job != nil || len(r.Attempts)+len(r.ModelPlan)+len(r.EnvironmentPlan)+len(r.ExtensionQualificationPlan) != 0 {
 		t.Fatalf("catalog-stale worker received work or preparation: %+v", r)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -28,117 +29,104 @@ func recoveryReport(t *testing.T, q *Queue, m Machine, s *ModelSlot, state strin
 }
 
 func TestEngineRecoveryCrashLoopClockAndFreshAttempt(t *testing.T) {
-	for _, pinned := range []bool{false, true} {
-		t.Run(fmt.Sprintf("pinned=%v", pinned), func(t *testing.T) {
-			q, clock, m := modelFixture(t)
-			q.models.Wait = time.Hour
-			if pinned {
-				if err := q.Pin(ModelPin{Model: "test", Project: "test", Machine: m.ID}); err != nil {
-					t.Fatal(err)
-				}
+	q, clock, m := modelFixture(t)
+	q.models.Wait = time.Hour
+	pending := addModelCall(t, q, "experiment")
+	s := q.s.ModelSlots[slotKey(m.ID, "test")]
+	recoveryReport(t, q, m, s, "ready")
+	if pending.Machine != m.ID || pending.Attempt == "" {
+		t.Fatal("no attempt-bound dispatch")
+	}
+	// The first transport failure excludes only this attempt on this worker.
+	if err := q.retryCall(pending.ID); err != nil {
+		t.Fatal(err)
+	}
+	for i, delay := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second, 30 * time.Second} {
+		old := s.Attempt
+		recoveryReport(t, q, m, s, "unloading")
+		if s.State == "ready" || s.CrashCount != i+1 {
+			t.Fatalf("death invisible: %+v", s)
+		}
+		recoveryReport(t, q, m, s, "failed")
+		if s.State != "failed" || s.RetryAt == nil || s.RetryDelay != delay || s.RetryAt.Sub(clock.Now()) != delay {
+			t.Fatalf("backoff: %+v", s)
+		}
+		if got := q.modelMemory(m.ID); got != 0 {
+			t.Fatalf("incorrect planning reservation after cleanup: %v", got)
+		}
+		if pending.Machine != "" {
+			t.Fatal("routed into dead engine")
+		}
+		snap, err := q.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, job := range snap.Jobs {
+			if job.ID == pending.ID && !strings.Contains(job.Reason, "engine restarting on "+m.ID+", retry at ") {
+				t.Fatalf("missing restart reason: %s", job.Reason)
 			}
-			pending := addModelCall(t, q, "experiment")
-			s := q.s.ModelSlots[slotKey(m.ID, "test")]
-			recoveryReport(t, q, m, s, "ready")
-			if pending.Machine != m.ID || pending.Attempt == "" {
-				t.Fatal("no attempt-bound dispatch")
+			if job.ID == pending.ID && (job.wait == nil || job.wait.Kind != "model_engine") {
+				t.Fatalf("call wait is not the scheduler's model_engine hold: %+v", job.wait)
 			}
-			// The first transport failure excludes only this attempt on this worker.
-			if err := q.retryCall(pending.ID); err != nil {
-				t.Fatal(err)
-			}
-			for i, delay := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second, 30 * time.Second} {
-				old := s.Attempt
-				recoveryReport(t, q, m, s, "unloading")
-				if s.State == "ready" || s.CrashCount != i+1 {
-					t.Fatalf("death invisible: %+v", s)
-				}
-				recoveryReport(t, q, m, s, "failed")
-				if s.State != "failed" || s.RetryAt == nil || s.RetryDelay != delay || s.RetryAt.Sub(clock.Now()) != delay {
-					t.Fatalf("backoff: %+v", s)
-				}
-				reserved := 0.0
-				if pinned {
-					reserved = q.models.Models[0].MemoryGB
-				}
-				if got := q.modelMemory(m.ID); got != reserved {
-					t.Fatalf("incorrect planning reservation after cleanup: %v", got)
-				}
-				if pending.Machine != "" {
-					t.Fatal("routed into dead engine")
-				}
-				snap, err := q.Snapshot()
-				if err != nil {
-					t.Fatal(err)
-				}
-				for _, job := range snap.Jobs {
-					if job.ID == pending.ID && !strings.Contains(job.Reason, "engine restarting on "+m.ID+", retry at ") {
-						t.Fatalf("missing restart reason: %s", job.Reason)
-					}
-					if job.ID == pending.ID && (job.wait == nil || job.wait.Kind != "model_engine") {
-						t.Fatalf("call wait is not the scheduler's model_engine hold: %+v", job.wait)
-					}
-				}
-				clock.Advance(delay - time.Nanosecond)
-				recoveryReport(t, q, m, s, "failed")
-				if s.State != "failed" {
-					t.Fatal("early restart")
-				}
-				clock.Advance(time.Nanosecond)
-				recoveryReport(t, q, m, s, "failed")
-				if s.State != "loading" || s.Attempt == old {
-					t.Fatalf("no fresh load: %+v", s)
-				}
-				stale, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: old, State: "ready"}}})
-				if err != nil {
-					t.Fatal(err)
-				}
-				if s.State != "loading" || stale.ModelPlan[0].Attempt != s.Attempt {
-					t.Fatal("stale readiness accepted")
-				}
-				recoveryReport(t, q, m, s, "ready")
-				if s.CrashCount != i+1 || s.RetryDelay != delay || pending.Machine != m.ID || pending.Attempt != s.Attempt {
-					t.Fatalf("fresh attempt cannot satisfy retry: %+v %+v", s, pending)
-				}
-				if err := q.retryCall(pending.ID); err != nil {
-					t.Fatal(err)
-				}
-			}
-			// One intermittent failure resets continuity even if readiness is retained.
-			clock.Advance(59 * time.Second)
-			_, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: s.Attempt, State: "ready", HealthRevision: 1, HealthDegraded: true}}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if s.CrashCount == 0 {
-				t.Fatal("reset before continuously healthy")
-			}
-			clock.Advance(time.Second)
-			_, err = q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: s.Attempt, State: "ready", HealthRevision: 1}}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			clock.Advance(59 * time.Second)
-			_, err = q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: s.Attempt, State: "ready", HealthRevision: 1}}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if s.CrashCount == 0 {
-				t.Fatal("reset before 60 seconds")
-			}
-			clock.Advance(time.Second)
-			_, err = q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: s.Attempt, State: "ready", HealthRevision: 1}}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if s.CrashCount != 0 || s.RetryDelay != 0 {
-				t.Fatalf("healthy reset missing: %+v", s)
-			}
-			recoveryReport(t, q, m, s, "failed")
-			if s.RetryDelay != time.Second || s.CrashCount != 1 {
-				t.Fatal("reset did not restart backoff at one second")
-			}
-		})
+		}
+		clock.Advance(delay - time.Nanosecond)
+		recoveryReport(t, q, m, s, "failed")
+		if s.State != "failed" {
+			t.Fatal("early restart")
+		}
+		clock.Advance(time.Nanosecond)
+		recoveryReport(t, q, m, s, "failed")
+		if s.State != "loading" || s.Attempt == old {
+			t.Fatalf("no fresh load: %+v", s)
+		}
+		stale, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: old, State: "ready"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.State != "loading" || stale.ModelPlan[0].Attempt != s.Attempt {
+			t.Fatal("stale readiness accepted")
+		}
+		recoveryReport(t, q, m, s, "ready")
+		if s.CrashCount != i+1 || s.RetryDelay != delay || pending.Machine != m.ID || pending.Attempt != s.Attempt {
+			t.Fatalf("fresh attempt cannot satisfy retry: %+v %+v", s, pending)
+		}
+		if err := q.retryCall(pending.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// One intermittent failure resets continuity even if readiness is retained.
+	clock.Advance(59 * time.Second)
+	_, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: s.Attempt, State: "ready", HealthRevision: 1, HealthDegraded: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.CrashCount == 0 {
+		t.Fatal("reset before continuously healthy")
+	}
+	clock.Advance(time.Second)
+	_, err = q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: s.Attempt, State: "ready", HealthRevision: 1}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(59 * time.Second)
+	_, err = q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: s.Attempt, State: "ready", HealthRevision: 1}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.CrashCount == 0 {
+		t.Fatal("reset before 60 seconds")
+	}
+	clock.Advance(time.Second)
+	_, err = q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: s.Attempt, State: "ready", HealthRevision: 1}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.CrashCount != 0 || s.RetryDelay != 0 {
+		t.Fatalf("healthy reset missing: %+v", s)
+	}
+	recoveryReport(t, q, m, s, "failed")
+	if s.RetryDelay != time.Second || s.CrashCount != 1 {
+		t.Fatal("reset did not restart backoff at one second")
 	}
 }
 
@@ -146,12 +134,11 @@ func TestEngineRecoveryRealProcessBothLogs(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		policy string
-		pinned bool
 		loss   string
-	}{{"", false, "kill"}, {"none", true, "exit"}, {"", true, "health"}} {
-		t.Run(fmt.Sprintf("logs=%s/pinned=%v/%s", tc.policy, tc.pinned, tc.loss), func(t *testing.T) {
-			policy, pinned, loss := tc.policy, tc.pinned, tc.loss
-			q, clock := fixture(t)
+	}{{"", "kill"}, {"none", "exit"}, {"", "health"}} {
+		t.Run(fmt.Sprintf("logs=%s/%s", tc.policy, tc.loss), func(t *testing.T) {
+			policy, loss := tc.policy, tc.loss
+			q, _ := fixture(t)
 			model := serverTestModel(t, "ready")
 			weights := []byte("synthetic immutable weights")
 			model.Path = filepath.Join(t.TempDir(), "weights")
@@ -193,11 +180,6 @@ func TestEngineRecoveryRealProcessBothLogs(t *testing.T) {
 				return reply
 			}
 			heartbeat()
-			if pinned {
-				if err := q.Pin(ModelPin{Model: model.Name, Project: "test", Machine: m.ID}); err != nil {
-					t.Fatal(err)
-				}
-			}
 			call := &ModelCall{Model: model.Name, Project: "test", Priority: "experiment"}
 			if err := q.addCall(call); err != nil {
 				t.Fatal(err)
@@ -211,7 +193,6 @@ func TestEngineRecoveryRealProcessBothLogs(t *testing.T) {
 			rt.mu.Lock()
 			engine := rt.models[model.Name].engine.(*LlamaEngine)
 			rt.mu.Unlock()
-			old := q.s.ModelSlots[slotKey(m.ID, model.Name)].Attempt
 			switch loss {
 			case "kill":
 				if err := syscall.Kill(-engine.cmd.Process.Pid, syscall.SIGKILL); err != nil {
@@ -229,7 +210,7 @@ func TestEngineRecoveryRealProcessBothLogs(t *testing.T) {
 				}
 				res.Body.Close()
 				await(t, func() bool { _, _, degraded := engine.runtimeHealth(); return degraded })
-				if _, err := engineClock.advance(readinessInitialRTT.Seconds()); err != nil {
+				if _, err := engineClock.advance(modelProbeInterval.Seconds()); err != nil {
 					t.Fatal(err)
 				}
 				await(t, func() bool { err, _, _ := engine.runtimeHealth(); return err != nil })
@@ -252,31 +233,8 @@ func TestEngineRecoveryRealProcessBothLogs(t *testing.T) {
 			await(t, func() bool { reports, used := rt.report(); return reports[0].State == "failed" && used == 0 })
 			heartbeat()
 			s := q.s.ModelSlots[slotKey(m.ID, model.Name)]
-			if !pinned {
-				if s != nil || q.modelMemory(m.ID) != 0 {
-					t.Fatal("idle failure kept queue reservation")
-				}
-				return
-			}
-			if s.State != "failed" || s.RetryAt == nil {
-				t.Fatal("pinned retry not pending")
-			}
-			queued := &ModelCall{Model: model.Name, Project: "test", Priority: "experiment"}
-			if err := q.addCall(queued); err != nil {
-				t.Fatal(err)
-			}
-			if queued.Machine != "" {
-				t.Fatal("queued call routed to dead slot")
-			}
-			clock.Advance(time.Second)
-			heartbeat()
-			await(t, func() bool { reports, _ := rt.report(); return reports[0].State == "ready" })
-			heartbeat()
-			if s.Attempt == old || queued.Machine != m.ID || s.State != "ready" {
-				t.Fatalf("pin did not reload: %+v %+v", s, queued)
-			}
-			if err := q.finishCall(queued.ID); err != nil {
-				t.Fatal(err)
+			if s != nil || q.modelMemory(m.ID) != 0 {
+				t.Fatal("idle failure kept queue reservation")
 			}
 		})
 	}
@@ -284,6 +242,29 @@ func TestEngineRecoveryRealProcessBothLogs(t *testing.T) {
 
 func TestEngineRecoveryHealthThresholdAndTimeout(t *testing.T) {
 	t.Parallel()
+	t.Run("nonempty_response_reuses_connection", func(t *testing.T) {
+		var mu sync.Mutex
+		connections := map[string]bool{}
+		server := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			connections[r.RemoteAddr] = true
+			mu.Unlock()
+			_, _ = w.Write([]byte("healthy"))
+		}))
+		defer server.Close()
+		client := server.Client()
+		defer client.CloseIdleConnections()
+		for range 3 {
+			if healthy, err := probeServerHealth(t.Context(), client, server.URL); err != nil || !healthy {
+				t.Fatalf("healthy response: healthy=%v err=%v", healthy, err)
+			}
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if len(connections) != 1 {
+			t.Fatalf("three healthy probes used %d TCP connections", len(connections))
+		}
+	})
 	for _, code := range []int{503, 302, 0} {
 		t.Run(fmt.Sprint(code), func(t *testing.T) {
 			var probes atomic.Int32
@@ -324,7 +305,7 @@ func TestEngineRecoveryHealthThresholdAndTimeout(t *testing.T) {
 					t.Fatalf("failed before third consecutive failure: %v", err)
 				}
 			}
-			clock.Advance(readinessInitialRTT)
+			clock.Advance(modelProbeInterval)
 			permits <- false
 			await(t, func() bool { err, _, _ := e.runtimeHealth(); return err != nil })
 		})
@@ -450,8 +431,7 @@ func TestEngineRecoveryWaitBoundAndStatus(t *testing.T) {
 	warm := addModelCall(t, q, "experiment")
 	s := q.s.ModelSlots[slotKey(m.ID, "test")]
 	recoveryReport(t, q, m, s, "ready")
-	q.finishCall(warm.ID)
-	if err := q.Pin(ModelPin{Model: "test", Project: "test", Machine: m.ID}); err != nil {
+	if err := q.retryCall(warm.ID); err != nil {
 		t.Fatal(err)
 	}
 	recoveryReport(t, q, m, s, "failed")
@@ -471,7 +451,9 @@ func TestEngineRecoveryWaitBoundAndStatus(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, job := range snap.Jobs {
-			if strings.Contains(job.Reason, "engine restarting on ") {
+			// The existing retry keeps recovery demand live. Wait until the
+			// actual HTTP call has acquired its own queue timestamp.
+			if job.ID != warm.ID && strings.Contains(job.Reason, "engine restarting on ") {
 				return true
 			}
 		}
@@ -513,26 +495,6 @@ func TestEngineRecoveryRejectsLateCallAndCompletion(t *testing.T) {
 	}
 	if s.InFlight != 2 {
 		t.Fatal("late completion consumed replacement capacity")
-	}
-}
-
-func TestEngineRecoveryPinReservesBackoffMemory(t *testing.T) {
-	q, clock, m := modelFixture(t)
-	if err := q.Pin(ModelPin{Model: "test", Project: "test", Machine: m.ID}); err != nil {
-		t.Fatal(err)
-	}
-	s := q.s.ModelSlots[slotKey(m.ID, "test")]
-	recoveryReport(t, q, m, s, "ready")
-	recoveryReport(t, q, m, s, "failed")
-	borrowed := submit(t, q, spec("experiment"))
-	running := check(t, q, m, nil).Job
-	if running != nil || q.s.Jobs[borrowed.ID].State != "queued" || !s.RetryReserved {
-		t.Fatal("batch borrowed pinned crash-backoff reservation")
-	}
-	clock.Advance(time.Second)
-	check(t, q, m, nil)
-	if s.State != "loading" || s.CrashCount != 1 || q.s.Jobs[borrowed.ID].State != "queued" {
-		t.Fatalf("pin recovery lost priority/history: %+v", s)
 	}
 }
 

@@ -745,7 +745,7 @@ loads the newest complete JSON. `StopSignal` handles cooperative SIGTERM/SIGINT
 on the main thread; callers explicitly save and exit. See the
 [client guide](../clients/python/README.md) and [examples](jobs.md).
 
-## Model cache and pins
+## Model cache and catalog serving
 
 | Option / command | Meaning |
 |---|---|
@@ -753,27 +753,16 @@ on the main thread; callers explicitly save and exit. See the
 | `join --model-cache DIR` | Local disk cache; defaults to `STATE_DIR/model-cache` |
 | `join --model-cache-bytes N` | Active cache allowance in bytes; default 107374182400 (100 GiB) |
 | `queue --production-stop-grace 10s` | Resumable experiment/deadline save allowance when production needs room |
-| `model fetch FILE --model-root DIR --url URL --size-bytes N --sha256 HASH` | Explicitly download one Hugging Face master; refuse overwrite |
-| `model approve-local NAME --path FOLDER --approved-root ROOT --model-approval-root DIR` | Approve an in-place folder on this host; emit a portable manifest |
-| `join --model-approval-root DIR --secret-root DIR` | Local approval records and named secret files; see the server-entry guide |
-| `join --model-copy-parallel N` | Concurrent background copies; default 1 |
-| `model sync MODEL --to M\|cuda\|metal\|xpu\|all` | Persist a pre-copy request; `--cancel` pauses it and preserves partial bytes |
-| `model pin MODEL --project P --machine M` | Hold a production model on M |
-| `model pin MODEL --project P --platform cuda` | Hold one copy on an eligible CUDA worker |
-| `model unpin MODEL --project P` | Release that project's pin |
+| `join --secret-root DIR` | Worker-local named secret files for server entries |
+| `join --model-copy-parallel N` | Maximum concurrent NAS model copies during load; default 1 |
 
-Pins optionally accept `--start HH:MM --end HH:MM --weekdays 1,2,3,4,5
---timezone America/New_York`. Weekdays use 0=Sunday through 6=Saturday. Times
-use a named IANA zone (default UTC), cannot cross midnight, and exclude the end.
-Wait for status to show the assigned slot ready before treating a pin as warm.
-Status JSON includes `pins`, worker `cached_models`, `cache_free_bytes`,
+Catalog calls load a model on demand. See [catalog setup and retired commands](services.md#stage-model-masters).
+Status JSON includes `loaded_models`, worker `cached_models`, `cache_free_bytes`,
 `cache_error`, and each job's `started_at` and `start_latency_seconds`.
 Latency is submission to the worker startup acknowledgement, using queue time; the real dev timing check also observes
 command start. Infrastructure losses remain separate from execution attempts.
 
-Model sync also accepts `POST /api/models/sync` with `{"model":"MODEL","to":"TARGET","cancel":false}`.
-A cancelled target suppresses idle copies; a pin still requires its copy.
-Status includes `sync_requests`, worker `copy_reports` (state, bytes, total,
+Status includes worker `copy_reports` (state, bytes, total,
 error and measured bytes/s), `copy_bytes_per_second`, and `model_copy_seconds`.
 Available cache bytes include unwritten copy reservations and are bounded by
 both filesystem free space and cache allowance. Loaded affinity precedes cached
@@ -1075,7 +1064,7 @@ frozen extension version. Plain command forms above remain supported. See
 form, setup/check qualification and per-attempt output contract.
 
 Native server entry placement, `env`/`secret_env`, local model approval and
-OpenAI client defaults: [operator configuration](services.md#shared-entries-local-secrets-and-approved-model-folders).
+OpenAI client defaults: [operator configuration](services.md#shared-entries-and-local-secrets).
 
 `GET /api/extensions` lists extension metadata and may include an optional
 `files_ref` bundle reference (`sha256` and `size_bytes`) instead of embedded

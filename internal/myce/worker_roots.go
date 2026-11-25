@@ -195,7 +195,7 @@ func environmentRecipeNeedsSource(recipe EnvironmentRecipe, m *Machine) bool {
 func storageRootReasonForModel(j *Job, m *Machine, model Model, recipe *EnvironmentRecipe) string {
 	copy := *m
 	copy.UnavailableRoots = nil
-	localModel := !model.DirectNAS && (model.FileStore || model.LocalSource != "" || slices.Contains(m.CachedModels, model.Name) || slices.Contains(m.Models, model.Name))
+	localModel := !model.DirectNAS && (model.FileStore || slices.Contains(m.CachedModels, model.Name) || slices.Contains(m.Models, model.Name))
 	for _, root := range m.UnavailableRoots {
 		if root.Root == "model" && localModel && len(j.Spec.ModelSnapshots) == 0 {
 			continue

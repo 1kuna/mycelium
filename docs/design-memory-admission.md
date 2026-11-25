@@ -289,7 +289,7 @@ budget = capacity − keep − (held by attempts that never finish) − head's c
 
 A job behind the head is admitted when it fits `room` now and the attempts
 admitted behind the head, including it, together hold no more than the
-budget. Attempts that never finish are resident engines and pins.
+budget. Loaded catalog engines count against the budget until they unload.
 
 The attempts that were running before the head arrived will finish, and
 everything admitted since fits inside the budget, so the head starts as soon

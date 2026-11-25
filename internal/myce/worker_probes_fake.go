@@ -19,7 +19,6 @@ func init() {
 	workerSyntheticMemoryHost = true
 	if os.Getenv("MYCE_TEST_CUSTODIANS_DISABLED") == "1" {
 		workerCustodians = false
-		workerModelCustodians = false
 	}
 	workerHostHealthSource = nil
 	workerMountRoots = func(context.Context) ([]string, error) { return []string{"/"}, nil }

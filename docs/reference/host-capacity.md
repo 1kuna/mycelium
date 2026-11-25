@@ -332,8 +332,8 @@ The kernel can OOM-kill an undersized attempt. The worker reads
 ceiling`, kills remaining descendants, confirms release and removes the empty
 kernel cgroup. This is a normal command failure: jobs become **failed**, with
 no infrastructure loss and no automatic retry. It preserves existing checkpoint
-files. A pinned model retains its pin and follows the existing bounded load
-retry backoff; an unpinned failed load is removed. Ready model-server OOMs are
+files. Failed catalog loads follow bounded backoff while a call still needs
+the engine. Ready model-server OOMs are
 also detected at heartbeat and reported as failed after cleanup. Cleanup failure
 retains RAM custody instead of granting a new allocation.
 
@@ -369,9 +369,9 @@ It creates an owned 32-MiB child, attempts a 128-MiB allocation, checks kernel
 OOM evidence and removes that empty cgroup. It skips without explicit delegation;
 no fleet or GPU access is needed.
 
-Production can stop lower-priority commands or drain unpinned models on another
-card of the same host when that releases RAM; GPU reclaim remains card-local.
-Pinned models and failed unloads remain protected. Reservations follow the
+Production can stop lower-priority commands or drain lower-priority models on
+another card of the same host when that releases RAM. GPU reclaim remains
+card-local. Failed unloads retain custody. Reservations follow the
 existing attempt, loss and restart reconciliation rules. Status shows host RAM
 headroom/probe errors and a plain RAM waiting reason.
 

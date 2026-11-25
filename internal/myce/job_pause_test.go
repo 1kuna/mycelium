@@ -313,29 +313,3 @@ func TestJobPauseFanOut(t *testing.T) {
 		t.Fatal("resumed parent did not retry its child", got)
 	}
 }
-
-func TestJobPauseModelCopyDemand(t *testing.T) {
-	q, _, m := syncFixture(t)
-	s := spec("experiment")
-	s.Needs.Model, s.Environment.Name = "a", "not-ready"
-	a, b := submit(t, q, s), submit(t, q, s)
-	initial := check(t, q, m, nil).CopyPlan
-	if len(initial) != 1 {
-		t.Fatal("missing copy", initial)
-	}
-	pauseForTest(t, q, a.ID, nil)
-	if err := q.AuthorizeLaunch(*initial[0].Launch); !errors.Is(err, ErrStale) {
-		t.Fatal("old copy authority retained", err)
-	}
-	fresh := check(t, q, m, nil).CopyPlan
-	if len(fresh) != 1 || fresh[0].Score != 1 {
-		t.Fatal("shared copy demand lost", fresh)
-	}
-	pauseForTest(t, q, b.ID, nil)
-	if err := q.AuthorizeLaunch(*fresh[0].Launch); !errors.Is(err, ErrStale) {
-		t.Fatal("copy authorized without runnable demand", err)
-	}
-	if got := check(t, q, m, nil).CopyPlan; len(got) != 0 {
-		t.Fatal("paused model demand offered", got)
-	}
-}

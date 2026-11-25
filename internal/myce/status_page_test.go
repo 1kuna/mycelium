@@ -34,7 +34,6 @@ func TestStatusPageRendersSnapshot(t *testing.T) {
 		LoadedModels: []ModelSlot{
 			{Machine: "spark", Model: "qwen", State: "ready", InFlight: 2, Error: "load warning"},
 		},
-		Pins: []ModelPin{{Machine: "spark", Assigned: "spark", Model: "qwen", Project: "atlas"}},
 		Usage: UsageReport{
 			Projects: []UsageSummary{{Name: "atlas", GPUHours: 9.5}},
 			Machines: []UsageSummary{{Name: "spark", BusyPercent: 72, IdleHours: 2}},

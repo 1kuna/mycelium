@@ -149,29 +149,18 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		respondOperation(w, report, e, "usage_unavailable")
 	})
 	mux.HandleFunc("/models/{name}/{path...}", a.modelCall)
-	mux.HandleFunc("/api/workers/resident/{id}/{path...}", a.residentCall)
+	mux.HandleFunc("/api/workers/resident/{id}/{path...}", func(w http.ResponseWriter, r *http.Request) {
+		respond(w, nil, retiredResidentError())
+	})
 	mux.HandleFunc("GET /api/workers/{id}/events", a.workerEvent)
 	mux.HandleFunc("POST /api/models/sync", func(w http.ResponseWriter, r *http.Request) {
-		var s SyncRequest
-		if !decode(w, r, &s) {
-			return
-		}
-		respondOperation(w, map[string]bool{"ok": true}, a.Queue.SyncModel(s, r.Context()), "model_sync_invalid")
+		respond(w, nil, &HTTPError{Status: http.StatusGone, Code: "model_sync_retired", Message: "stage verified weights under the model root and call the catalog model to load it on demand (docs/services.md)"})
 	})
-	mux.HandleFunc("POST /api/models/pin", func(w http.ResponseWriter, r *http.Request) {
-		var p ModelPin
-		if !decode(w, r, &p) {
-			return
-		}
-		respondOperation(w, map[string]bool{"ok": true}, a.Queue.Pin(p, r.Context()), "model_pin_invalid")
-	})
-	mux.HandleFunc("POST /api/models/unpin", func(w http.ResponseWriter, r *http.Request) {
-		var p ModelPin
-		if !decode(w, r, &p) {
-			return
-		}
-		respondOperation(w, map[string]bool{"ok": true}, a.Queue.Unpin(p.Project, p.Model, r.Context()), "model_unpin_invalid")
-	})
+	for _, command := range []string{"pin", "unpin"} {
+		mux.HandleFunc("POST /api/models/"+command, func(w http.ResponseWriter, r *http.Request) {
+			respond(w, nil, &HTTPError{Status: http.StatusGone, Code: "model_pin_retired", Message: "call the catalog model to load it on demand and set idle_timeout for retention (docs/services.md)"})
+		})
+	}
 	for _, path := range []string{"/v1/chat/completions", "/v1/completions", "/v1/embeddings"} {
 		mux.HandleFunc("POST "+path, a.modelCall)
 	}
@@ -325,7 +314,9 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		}
 		respondOperation(w, reply, err, "status_unavailable")
 	})
-	a.registerModelIntervals(mux)
+	mux.HandleFunc("GET /api/models/intervals", func(w http.ResponseWriter, r *http.Request) {
+		respond(w, nil, &HTTPError{Status: http.StatusGone, Code: "model_intervals_retired", Message: "read loaded_models from /api/status for current model state"})
+	})
 	mux.HandleFunc("GET /api/jobs/{id}/ledger", func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		values := []int{0, -1, 0}

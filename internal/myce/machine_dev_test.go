@@ -180,8 +180,9 @@ func TestM3DevTwoGPUScenario(t *testing.T) {
 
 func TestM3DevModelEnginesPerDevice(t *testing.T) {
 	root := t.TempDir()
+	catalog := ModelConfig{Models: []Model{{Name: "dev-model", Engine: "fake", Path: "fake", MemoryGB: 1, MaxInFlight: 1, Platforms: []string{"fake"}}}}
 	// Model/device custody is independent of host scheduling and loss timing.
-	d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "local-test", Workers: 1, Devices: 2, HostID: "model-machine", MemoryGB: 8, Interval: 10 * time.Millisecond}, func(q *Queue) { q.clock = &workerFakeClock{now: q.clock.Now()} })
+	d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "local-test", Workers: 1, Devices: 2, HostID: "model-machine", ModelConfig: catalog, MemoryGB: 8, Interval: 10 * time.Millisecond}, func(q *Queue) { q.clock = &workerFakeClock{now: q.clock.Now()} })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,9 +199,19 @@ func TestM3DevModelEnginesPerDevice(t *testing.T) {
 		return len(snap.Machines) > 0
 	})
 	for i, project := range []string{"first", "second"} {
-		if err := c.Call(ctx, "POST", "/api/models/pin", ModelPin{Project: project, Model: "dev-model", Machine: "model-machine", Device: strconv.Itoa(i)}, nil); err != nil {
+		call := &ModelCall{Project: project, Model: "dev-model", Priority: "experiment"}
+		if err := d.Queue.addCall(call); err != nil {
 			t.Fatal(err)
 		}
+		defer func() { _ = d.Queue.finishCall(call.ID) }()
+		await(t, func() bool {
+			d.Queue.mu.Lock()
+			defer d.Queue.mu.Unlock()
+			if ctx.Err() != nil {
+				t.Fatalf("call %d placement timed out: %s; slots=%v", i+1, d.Queue.callWait(call), d.Queue.s.ModelSlots)
+			}
+			return call.Machine != "" && len(d.Queue.s.ModelSlots) == i+1
+		})
 	}
 	var slots []ModelSlot
 	await(t, func() bool {

@@ -323,7 +323,7 @@ func (q *Queue) startDiskFloorReason(j *Job, m *Machine) string {
 // Model loads only write a cache copy when verified files are not present.
 // Calls to ready/loading slots and restarts with cached/local files write none.
 func (q *Queue) modelLoadDiskHeadroomReason(model Model, m *Machine) string {
-	if model.DirectNAS || model.LocalSource != "" || slices.Contains(m.CachedModels, model.Name) {
+	if model.DirectNAS || slices.Contains(m.CachedModels, model.Name) {
 		return ""
 	}
 	if slot := q.s.ModelSlots[targetSlotKey(m, model.Name)]; slot != nil && slot.Session == m.Session && (slot.State == "ready" || slot.State == "loading") {

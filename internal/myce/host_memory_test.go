@@ -2,7 +2,6 @@ package myce
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -113,41 +112,31 @@ func TestHostMemoryReaderReserve(t *testing.T) {
 	}
 }
 
-func TestHostMemoryModelReservationsAndPins(t *testing.T) {
-	for _, pin := range []bool{false, true} {
-		t.Run(fmt.Sprint(pin), func(t *testing.T) {
-			q, _ := fixture(t)
-			model := Model{Name: "speech", Engine: "fake", Path: "weights", Platforms: []string{"fake"}, MemoryGB: 2, HostMemoryGB: 10}
-			if err := q.ConfigureModels(ModelConfig{Models: []Model{model}, Idle: time.Hour, Wait: time.Minute}); err != nil {
-				t.Fatal(err)
-			}
-			a, b := machine("a", "fake"), machine("b", "fake")
-			for _, m := range []*Machine{&a, &b} {
-				m.HostID = "host"
-				m.HostMemoryMeasured = true
-				m.HostAvailableMemoryGB = 12
-				m.ModelURL = "http://worker"
-				m.ModelConfigHash = modelConfigHash(q.models)
-			}
-			check(t, q, a, nil)
-			check(t, q, b, nil)
-			if pin {
-				if err := q.Pin(ModelPin{Model: "speech", Project: "test", Machine: a.ID}); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				if err := q.addCall(&ModelCall{Model: "speech", Project: "test", Priority: "experiment"}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			s := spec("experiment")
-			s.Needs.HostMemoryGB = 4
-			s.AllowedMachines = []string{b.ID}
-			submit(t, q, s)
-			if r := check(t, q, b, nil); r.Job != nil {
-				t.Fatal("batch ignored server RAM")
-			}
-		})
+func TestHostMemoryModelReservations(t *testing.T) {
+	q, _ := fixture(t)
+	model := Model{Name: "speech", Engine: "fake", Path: "weights", Platforms: []string{"fake"}, MemoryGB: 2, HostMemoryGB: 10}
+	if err := q.ConfigureModels(ModelConfig{Models: []Model{model}, Idle: time.Hour, Wait: time.Minute}); err != nil {
+		t.Fatal(err)
+	}
+	a, b := machine("a", "fake"), machine("b", "fake")
+	for _, m := range []*Machine{&a, &b} {
+		m.HostID = "host"
+		m.HostMemoryMeasured = true
+		m.HostAvailableMemoryGB = 12
+		m.ModelURL = "http://worker"
+		m.ModelConfigHash = modelConfigHash(q.models)
+	}
+	check(t, q, a, nil)
+	check(t, q, b, nil)
+	if err := q.addCall(&ModelCall{Model: "speech", Project: "test", Priority: "experiment"}); err != nil {
+		t.Fatal(err)
+	}
+	s := spec("experiment")
+	s.Needs.HostMemoryGB = 4
+	s.AllowedMachines = []string{b.ID}
+	submit(t, q, s)
+	if r := check(t, q, b, nil); r.Job != nil {
+		t.Fatal("batch ignored server RAM")
 	}
 }
 func TestHostMemoryWorkerRefusesLatePressure(t *testing.T) {

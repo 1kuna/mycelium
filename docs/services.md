@@ -3,104 +3,18 @@
 Use [OpenAI-compatible calls](#calling-openai-models) for chat/completions/embeddings,
 [general HTTP servers](#calling-general-model-servers) for other protocols, and
 [native sidecars](#native-job-sidecars) for helpers owned by one attempt.
-Servers share managed engines/pins; sidecars share their attempt's cleanup and
+Servers share managed engines; sidecars share their attempt's cleanup and
 resource envelope. They are different runtime contracts. Preserve model identity,
 local secret handling and no replay after streaming output begins. Environment
 locks live in [environments](environments.md); trust limits in
 [native isolation](native-isolation.md).
 
-## Resident engines for independent stage jobs
+## Reusing a catalog model
 
-Use `advanced.resident: {model: catalog-name}` on an entry to reuse a loaded
-catalog engine across independent inputs. A registered extension declares
-`resident: {model: catalog-name}` beside its variants. The catalog model must
-already describe a foreground server, its health check, exact model/runtime,
-locked environment and measured memory budget (see [general servers](#calling-general-model-servers)).
-An arbitrary command that exits cannot become a resident model automatically:
-split model initialization into that server and make the stage command its client.
-
-```yaml
-project: example
-entries:
-  infer:
-    source: {git: HEAD}
-    needs: {platform: cuda, cpu_cores: 1, memory: auto}
-    inputs: {input.bin: samples/input.bin}
-    run:
-      command: [sh, -ec, '"$MYCE_RESIDENT_CLIENT" resident --path /infer --input input.bin > result.json']
-    outputs: {result.json: results}
-    advanced:
-      isolation: sandboxed
-      resident: {model: speech-engine}
-```
-
-Submit with `myce run --entry infer --out accepted`.
-Use `pieces` for many inputs; each piece remains a separate durable job and
-publishes its own verified outputs. All children inherit the parent's frozen
-resident binding before per-piece arguments and inputs are applied. For an
-extension entry or registered extension, declare serial pieces with:
-
-```yaml
-advanced: {resident: {model: speech-engine}} # Omit if the extension declares resident.
-workload: {input_shape: audio, units: 1}
-fan_out:
-  max_concurrency: 1
-  pieces: [{key: a, args: [a]}, {key: b, args: [b]}, {key: c, args: [c]}]
-```
-
-This runs one child at a time, back-to-back on one warm copy when capacity
-remains available. Plain-command entries use `pieces:` with per-piece `inputs`
-and `args`, without `max_concurrency`; their jobs are placed independently and
-calls serialize within each host/card's engine copy. Resident jobs and their
-children must be non-resumable and single-device, without CPU fallback.
-Existing ordinary-producer and per-piece
-`after` dependencies become ready only after exact-attempt output acceptance.
-Keep production target declarations and MY-19 parity checks for the client and
-server contract. This example's CUDA requirement is illustrative; select the
-platforms supported by the catalog runtime and the consumer's qualified code.
-An extension's qualification check inherits its resident binding too, so its
-check command can exercise that same client/server contract before useful work.
-
-The worker supplies `MYCE_RESIDENT_CLIENT`, the path to its matching executable.
-Its `resident` command streams stdin (or `--input FILE`) to `--path /endpoint`,
-with `--method POST` and `--content-type application/octet-stream` by default,
-and writes successful response bytes to stdout. Non-success HTTP status or an
-interrupted exchange fails the command; there is no transport replay. It reads
-only `MYCE_RESIDENT_PIPE` and `MYCE_RESIDENT_KEY`, which grant this attempt access
-to its frozen engine. It never reads installed credentials. Make calls sequentially
-within one attempt; interrupted exchanges require the normal job retry policy.
-No network opt-in is required. The existing sandbox stays in force.
-
-Reuse identity includes project, stage/entry or extension, immutable source,
-environment and exact catalog model/runtime. Per-item input bytes, arguments
-and memory-learning keys do not split an entry's engine. A different kind,
-environment or model gets a different identity; each host/card owns its copy.
-The queue admits the cold engine and client together, charging the engine once
-and each client's staging/CPU memory separately. The catalog budget must cover
-weights, runtime and the measured peak of one request, including host RAM.
-Calls serialize per resident engine, so concurrent request activations cannot
-spend that budget twice. The existing enforced ceilings and physical-host ledger
-continue to apply, including conservative unified-memory accounting.
-
-Known queued/running/dependent demand keeps the engine warm. After that demand
-ends, the existing measured load-cost and interarrival policy determines idle
-retention, overriding the catalog's fixed idle interval for this opt-in. Memory
-pressure and higher-priority demand can reclaim it earlier; memory remains
-charged until exact engine unload acknowledgement. Only the engine survives:
-work directories, accepted results, cancellation, retries and release custody
-remain attempt-specific. A failed input does not invalidate accepted siblings;
-plain pieces let other siblings settle, while extension fan-out retains its
-fail-fast policy for unfinished work. Engine death interrupts calls without
-silently replaying their request.
-
-`worker_data: ephemeral` remains unsupported with resident engines and receives
-`job_worker_data_unsupported`: request spools and shared server memory are outside
-attempt-only cleanup. Do not use this bridge to promise shared-server data erasure.
-Workers advertise `resident_jobs_v1`; older workers cannot run these jobs.
-Resident attempts use natural drain during worker upgrade until detached bridge
-custody is qualified. CPU fixture proof does not establish native model parity,
-hardware peaks, coexistence or production load amortization; measure those for
-the exact model/runtime before production adoption.
+Call the queue's `/v1` endpoint to load and reuse a catalog model on demand.
+For a server scoped to one job, declare a [native sidecar](#native-job-sidecars).
+`advanced.resident`, the registered extension's `resident` field and
+`myce resident` return `job_resident_retired`.
 
 ## Calling OpenAI models
 
@@ -299,10 +213,15 @@ The actual engine always binds loopback; only the token-protected worker proxy
 is LAN-visible. Model configuration hashes must match between queue and workers,
 so a mismatched catalog fails visibly rather than loading another model silently.
 `--model-idle` and `--model-wait` override YAML timeouts. These timeouts are not
-part of the model identity hash. Omitted values use adaptive residency and caller cancellation; a positive wait bounds caller queue waiting. See [adaptive readiness](readiness.md).
+part of the model identity hash. The default idle timeout is 10 minutes. A positive wait bounds caller queue waiting.
 General `server` engines and the `vllm` preset are described in the [server guide](services.md).
 
 ## Scheduling, draining, and recovery
+
+During a rolling upgrade, drain model engines on the previous worker before
+replacing it. New workers start model servers as worker-owned processes.
+A replacement with unfinished legacy detached model records reports
+`model_keeper_retired`. Resume the previous worker to finish the drain.
 
 Calls share batch priority, combined environment/model readiness, earliest
 deadline, and waiting-age ordering; competing experiment projects first share
@@ -323,7 +242,7 @@ Workers recheck before every command or
 model load. Each worker runs at most one batch, alongside models that fit.
 
 Idle time starts after load readiness or the most recent call finishes.
-`idle_timeout` is adaptive when omitted: observed demand spacing and reload cost determine residency. An explicit positive value overrides it. A higher-priority batch or call can drain
+`idle_timeout` defaults to 10 minutes. An explicit positive value overrides it. A higher-priority batch or call can drain
 lower-priority models to reclaim memory. Protection follows the highest priority
 of currently admitted calls, not historical use; an idle model is reclaimable
 as experiment priority. Draining stops new queue admissions;
@@ -333,18 +252,14 @@ after the worker reports successful unload. Failed unload retains its reservatio
 and appears in status. Lower-priority resumable batches may save and pause for
 calls, following the batch stop-grace rule: production grants 10 seconds and
 also stops non-resumable lower-priority batches immediately; deadlines grant
-2 minutes and preserve non-resumable work. Pinned models never idle-unload
-or surrender their memory to other work. A healthy resident pinned engine keeps
-its existing assignment when device-memory evidence is temporarily unavailable;
-unknown memory still blocks new engine placement. Leave, session replacement,
+2 minutes and preserve non-resumable work. Leave, session replacement,
 health loss and authorized stops retain their existing release fences.
 
 `max_wait` is omitted by default; queue/load waiting then ends on caller
 cancellation or a real load failure. A positive value bounds the caller's queue
 waiting (including retry placement). Inference has a separate per-model `request_timeout`
 (default `10m`). Clients should use
-a timeout that includes loading and inference. The load process follows local progress and successful same-model load history,
-with no automatic whole-load wall deadline. A failed load returns a clear error and a
+a timeout that includes loading and inference. The caller can cancel throughout the load. A failed load returns a clear error and a
 later request can try loading again.
 
 Quiet-worker timeouts follow the highest-priority active workload (including
@@ -375,73 +290,26 @@ no peer registry, leases, containers, or continuously reserved app GPUs.
 model's worker, loading/ready/draining state, idle seconds, calls in flight, and
 unload errors. In-flight calls show zero idle seconds.
 
-## Explicit master download and pins
+## Stage model masters
 
-From the release implementing MY-44, `myce model fetch` accepts any HTTPS file
-URL; it does not require a preapproved download host. Exact size and SHA-256
-verification remain required.
+Download catalog weights with the upstream client. Stage the immutable file
+or bundle under the configured model root, then declare its size and SHA-256
+in the catalog. The first call stages and verifies a local copy where needed.
+Copy time is part of load time. Cache eviction protects loaded models and
+preserves removed files in Trash. See [operations](operations.md) for
+disk capacity and recovery.
 
-For a multi-file master, keep `--model-root` at the directory **containing**
-the bundle and include the bundle name in each destination, including nested
-paths (for example `bundle/weights/model.bin`). Fetch downloads into a stable
-staging directory beside the bundle, on the same filesystem, and atomically
-renames each file into the bundle only after size and SHA-256 verification.
-The bundle contains neither partial downloads nor Trash. Run fetch for every
-manifest file before verifying or using the immutable master.
-
-Interrupted downloads resume from staging. If a server ignores `Range`, fetch
-restarts that file from its full response. Invalid partials move into a
-quarantine inside staging; fetch reports their preserved paths. A corrupt
-resumed file retries once from zero; a corrupt fresh response fails visibly.
-Fetch flushes files and directory entries before returning success. A directory
-sync failure rolls publication back into staging for a later retry. Repeating
-fetch verifies an already published file without overwriting it. Concurrent
-fetches of one bundle fail with an in-use error; retry when its active fetch
-finishes. Staging directories remain as stable lock locations and to retain
-quarantined bytes; do not remove them while a fetch is active.
-
-```sh
-myce model fetch chat.gguf --model-root /shared/models \
-  --url https://huggingface.co/OWNER/REPO/resolve/REVISION/chat.gguf \
-  --size-bytes EXACT_BYTES --sha256 APPROVED_HASH
-myce model pin chat --project atlas --machine gpu-host-a
-# Or choose one eligible machine on a platform, optionally during work hours:
-myce model pin chat --project atlas --platform cuda \
-  --weekdays 1,2,3,4,5 --start 08:00 --end 20:00 --timezone America/New_York
-myce status
-myce model unpin chat --project atlas
-```
-
-Use one pin command per project/model; unpin before changing its target. Wait
-for assigned ready state before expecting calls without load wait. Copy time
-counts as load time; the queue prefers ready, then locally cached, then cold
-placements. Cache eviction protects loaded models and preserves removed files in
-Trash. See [operations](operations.md) for physical disk space and recovery.
-
-
-Before the first real call, pre-copy the immutable master:
-
-```sh
-myce model sync chat --to gpu-worker
-myce status  # wait for verified cached_models and copy_reports state=ready
-myce model pin chat --project atlas --machine gpu-worker
-myce status  # additionally wait for the loaded slot to be ready
-```
-
-`sync --cancel` preserves partial bytes, and queue/worker restarts retain requests
-and resumable prefixes respectively. The worker rehashes the prefix and verifies
-the complete file before the engine can load it. Pins protect every compatible
-landing cache, even outside a reservation window. Real work and queue disconnection
-pause background copies without blocking worker check-ins; an outstanding NAS
-syscall remains subject to the mount's timeout. Copy speed in status measures NAS
-transfer; a cached model still needs engine startup. Follow the single ordered
-[first-machine checklist](development.md) for hardware acceptance.
+`myce model fetch` returns `model_fetch_retired`. `myce model sync` returns
+`model_sync_retired`. `myce model pin` and `myce model unpin` return
+`model_pin_retired`. Call the model on demand and set `idle_timeout` to
+configure how long an idle engine stays loaded. The queue ignores saved
+pins, schedules and pre-copy requests on startup and logs a warning.
 
 ## Calling general model servers
 
 A catalog model can run any trusted local HTTP server. Speech, separation,
-alignment, OCR and face APIs share the queue's model loading, pins, priority,
-draining, preemption, idle unloading, pre-copying and worker-loss handling.
+alignment, OCR and face APIs share the queue's model loading, priority, draining,
+preemption, idle unloading and worker-loss handling.
 No GPU or runtime substitution happens. A command must keep its server in the
 foreground, bind loopback, and keep descendants in its owned process group.
 These are plain commands with worker-user permissions, not a sandbox.
@@ -478,11 +346,7 @@ precede PATH. `{environment}` is the published environment directory;
 the physical selector; `{port}` is a chosen loopback port. Templates substitute
 individual argv strings with no implicit shell. The health check requires HTTP
 2xx. The whole load, including copies, environment setup and admission waits,
-has no default wall deadline. Comparable successful local load history detects
-silent stalls; unknown cold loads retain custody without a guessed deadline.
-Observed process CPU time, reads and memory growth also count as activity. An
-inactive cold load under eligible resource contention reports owner attention
-and raises an episode-based health alert, preserving custody. Advancing loads continue. The optional explicit `ready_timeout` starts
+has no default wall deadline. The optional explicit `ready_timeout` starts
 at engine launch and bounds process readiness. Timeout or crash
 kills the owned group and returns a visible error. The optional stop command
 and TERM share `stop_timeout` (default 10 seconds), followed by KILL and group
@@ -628,13 +492,8 @@ a fixed message plus HTTP status; control errors/public diagnostics never echo
 upstream bodies.
 
 After readiness, the supervisor watches process exit for the entire engine
-lifetime. Serial health checks learn their cost, response envelope and failure
-window from that worker. They require HTTP 2xx without redirects; one failed
-probe alone cannot withdraw readiness. Completed failures confirm continuous
-failure beyond the learned envelope; success resets failure continuity. A timed-out
-observation widens the next transport allowance and retains degraded custody, so
-a slower healthy response can still be observed. See
-[adaptive readiness](readiness.md) for load signals and the retired assumptions.
+lifetime. Health checks require HTTP 2xx without redirects. Consecutive failures spanning
+at least one probe interval withdraw readiness. Success resets the failure state.
 Process exit requires no health-failure threshold.
 At the next worker check-in the slot leaves `ready`, routing stops, and cleanup
 terminates/verifies the owned group. Memory and the environment lease stay held
@@ -719,31 +578,31 @@ escaping (including `<`, `>` and `&`). `ModelFilesIdentity` defines it. Use the
 approved source manifest, not a directory containing unreviewed mutable downloads.
 All files are verified before publishing a local directory. Prefix copies resume;
 corrupt partial bundles go to recoverable Trash. Admission counts full directory
-bytes and protects loaded/pinned bundles just like single files. Unexpected local
+bytes and protects loaded bundles just like single files. Unexpected local
 files, symlinks, path traversal and colliding names fail. Bundle roots must use
 canonical paths without symlink components (macOS use `/private/var`, not `/var`).
 `direct_nas` verifies the complete listed bundle before bypassing the local cache.
 
 The NAS is still the master; no model-weight download or quantization conversion
-is part of load. Declared software environments may build on demand. `model sync`, pins and cache telemetry work for bundles. Preserve
+is part of load. Declared software environments may build on demand. Preserve
 model directories/configuration with recorded immutable identities; laptop
 process tests do not certify real speech, OCR, vLLM or face model quality.
 
-## Shared entries, local secrets and approved model folders
+## Shared entries and local secrets
 
 ### Shared entries and placement
 
 Optional `project` identifies the entry owner, accounts for its idle model
 reservation, and supplies missing `/v1` project labels. Models remain shared:
-any project may call or pin any entry. Explicit caller labels retain their own
+any project may call an entry. Explicit caller labels retain their own
 call accounting and scheduling policy.
 
 Optional `allowed_machines` intersects the owner's project machine policy, the
-caller's policy, platform/device eligibility and pin restrictions. Empty lists
+caller's policy, and platform/device eligibility. Empty lists
 are unrestricted at that layer. Calls wait if no eligible worker is available;
 status shows the placement fences. A tightened fence drains excluded copies and
 retains memory custody until the worker confirms unloading. Load plans carry
-current fences; workers recheck them. Pre-copy and pins obey the same fences.
+current fences; workers recheck them.
 
 ### Environment and local named secrets
 
@@ -771,59 +630,12 @@ and `device_env` for device selection. `MYCE_TOKEN` is stripped; provisioning
 its value under another local secret name is rejected. Keep `env` literals
 non-secret; arbitrary credentials cannot be identified from their spelling.
 
-### Approved in-place model folders
+### Move an approved local model to the catalog root
 
-On each host, explicitly approve the exact folder and a root bounding both the
-folder and any symlinked HF snapshot blobs:
-
-```sh
-myce model approve-local APPROVAL_NAME \
-  --path MODEL_FOLDER --approved-root SNAPSHOT_AND_BLOB_ROOT \
-  --model-approval-root LOCAL_APPROVAL_DIRECTORY
-```
-
-This is a local command and does not contact the queue. It hashes regular files
-once, records the canonical folder, host, complete file/directory metadata and
-symlink targets, and prints portable `local_source`, `files`, `size_bytes` and
-`sha256` fields. Put those fields in the entry. Omit `path`, `file_store` and
-`direct_nas`. Start the worker with the same `--model-approval-root` directory.
-Keep the approval directory mode 0700 and records private and local; they contain source paths and host
-identity. File names in the portable manifest should also be reviewed before
-sharing a catalog.
-
-Loads use the original folder as `{model_path}`, with no copy, NAS fallback,
-rehash or external-file eviction. Workers advertise only approved identities.
-Every check uses the file set, size, mtime, mode, device/inode and symlink-target
-metadata. A changed/missing file, new file, changed blob or different host
-invalidates readiness. Re-run the explicit approval command after changes and
-update the catalog manifest if its content identity changed. All symlink targets
-must stay within the approved root; directory symlinks and special files are
-rejected. Hard links are regular files: another name for the same inode can
-exist outside that root, so the root does not bound hard-link aliases. This is
-acceptable because approval trusts operator-controlled immutable storage, not a
-filesystem sandbox. Protect every alias from writes; inode/size/mtime checks
-detect ordinary changes through any alias. The ordinary copied-model no-symlink
-rules are unchanged.
-
-Each heartbeat checks all cheap local approval records before any directory walk,
-including when an earlier walk is still blocked. Missing, revoked or host-mismatched
-records report `invalid`. Completed metadata results survive a sibling timeout;
-only unfinished checks report `unknown`. Record preflight and the metadata pass
-have separate 250 ms I/O budgets; checks do not accumulate blocked filesystem calls.
-Results are shared with cache inventory, and old valid results are not replayed.
-
-`unknown` blocks new loads, pre-copy and slot creation. Ready servers, including
-pinned slots, keep serving and routing for up to five continuous minutes of unknown
-state, measured by the queue Clock and persisted with the slot. A definite report
-resets the timer. Beyond five minutes the queue drains, with a clear status reason
-and rate-limited warning; memory stays reserved until unloading is confirmed.
-A load already in progress may drain immediately on unknown; this is an accepted trade-off.
-Changed folders and revoked approvals still drain immediately. Missing required approval evidence blocks new loads; current worker/report protocol is mandatory. Worker
-warnings appear at most once per minute; expired checks cannot authorize new work.
-
-Protect approved snapshots/blobs against writes and HF cleanup while used.
-Metadata checks trust operator-controlled immutable storage; they do not detect
-a malicious writer preserving all observed metadata. Retain a recovery source.
+Stage immutable weights under the configured model root and use a verified
+catalog `path` or file-store entry. `myce model approve-local` returns
+`model_local_source_retired`. Startup warns and skips saved entries that use
+`local_source`.
 
 ### Header-less OpenAI clients
 

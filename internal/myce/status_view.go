@@ -509,12 +509,6 @@ func (q *Queue) projectStatusMachine(m *Machine, compact bool) Machine {
 		copy.AdmissionReason = a.Reason
 	}
 	copy.ReservedMemoryGB, copy.MemoryUsedGB = 0, 0 // Used is total − free.
-	for _, slot := range q.s.ModelSlots {
-		if slot.Machine == m.ID && slotReservesMemory(slot) && q.slotPinned(slot) {
-			model, _ := q.model(slot.Model)
-			copy.ReservedMemoryGB += model.MemoryGB
-		}
-	}
 	copy.ModelCopySeconds = map[string]float64{}
 	if !compact {
 		for _, model := range q.models.Models {

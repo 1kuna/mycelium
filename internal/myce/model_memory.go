@@ -137,12 +137,6 @@ func (m *modelMemoryTracker) snapshot() *ModelMemoryPeaks {
 	return &peaks
 }
 
-func (m *modelMemoryTracker) activity() (*float64, *float64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.lastHost, m.lastDevice
-}
-
 func (m *modelMemoryTracker) begin() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -276,14 +270,6 @@ type modelMemoryEngine interface {
 func (l *LlamaEngine) modelMemory() *modelMemoryTracker { return l.memoryPeaks }
 
 func (m *workerModel) memorySnapshot() *ModelMemoryPeaks {
-	if g, ok := m.engine.(*modelCustodian); ok {
-		g.mu.Lock()
-		defer g.mu.Unlock()
-		if g.verified {
-			return g.last.Report.MemoryPeaks
-		}
-		return nil
-	}
 	if e, ok := m.engine.(modelMemoryEngine); ok {
 		if memory := e.modelMemory(); memory != nil {
 			return memory.snapshot()
@@ -332,4 +318,65 @@ func newestModelMemoryRequest(old, next *ModelMemoryWindow) *ModelMemoryWindow {
 		return old
 	}
 	return next
+}
+
+// Model memory measurements use the same owned-process probes as batch work.
+func (l *LlamaEngine) observeModelMemory() {
+	if l.memoryPeaks == nil {
+		return
+	}
+	w := Worker{Machine: l.memoryMachine, Clock: l.Clock}
+	if l.readinessWorker != nil {
+		w = *l.readinessWorker
+		w.Clock = l.Clock
+	}
+	if w.processMemory == nil && workerProcessMemory != nil {
+		w.processMemory = workerProcessMemory()
+	}
+	memory := l.memoryAttempt
+	owned := &process{cmd: l.cmd, memory: memory}
+	owned.birth, _ = processBirth(l.cmd.Process.Pid)
+	deviceTelemetry := memory != nil && backendFor(w.Machine.GPU).attemptMemory != nil
+	switch {
+	case deviceTelemetry, memory == nil && w.Machine.GPU == "metal" && w.processMemory != nil && w.processMemory.OwnedFootprint != nil:
+		l.memoryPeaks.setDeviceUnavailable(modelMemoryNoSample)
+	case backendFor(w.Machine.GPU).attemptMemory != nil:
+		l.memoryPeaks.setDeviceUnavailable(deviceMemoryNoCgroup)
+	default:
+		l.memoryPeaks.setDeviceUnavailable(deviceMemoryUnsupported)
+	}
+	j := Job{Spec: Spec{Needs: ResourceNeeds{Platform: Platform{Required: []string{w.Machine.GPU}}}}}
+	if memory != nil {
+		l.stopMemory = w.observeAttemptMemoryWith(memory, j, nil, deviceMemorySamplePeriod, l.memoryPeaks.observe)
+	} else {
+		l.stopMemory = w.observeAttemptMemoryWith(nil, j, func() []int { return []int{owned.cmd.Process.Pid} }, deviceMemorySamplePeriod, l.memoryPeaks.observe, owned)
+	}
+}
+
+// The model execs in the launch root itself. Unlike control-anchor accounting,
+// include that root's RSS via the existing group inventory, with birth checks
+// on both sides so a recycled group identity cannot supply memory evidence.
+func verifiedProcessGroupResident(probe *processMemoryProbe, roots map[int]string, birthOf func(int) (string, error)) (uint64, int, error) {
+	groups := map[int]bool{}
+	check := func() error {
+		for pid, saved := range roots {
+			birth, err := birthOf(pid)
+			if err != nil || saved == "" || birth != saved {
+				return errLivenessUnavailable
+			}
+			groups[pid] = true
+		}
+		return nil
+	}
+	if err := check(); err != nil {
+		return 0, 0, err
+	}
+	bytes, members, err := probe.Resident(groups)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := check(); err != nil {
+		return 0, 0, err
+	}
+	return bytes, members, nil
 }

@@ -69,10 +69,7 @@ func (q *Queue) fleetAdoptionReason(h *fleetUpgradeHost) string {
 	}
 	for _, p := range q.hostObligations(h.Host) {
 		if p.Engine != nil || p.Call != nil {
-			if reason := q.modelAdoptionReason(m, p); reason != "" {
-				return reason
-			}
-			continue
+			return "model engine must drain before worker replacement"
 		}
 		if p.Launch != nil && !p.Launch.Started {
 			continue // AuthorizeLaunch fences the still-unstarted offer at cutover.
