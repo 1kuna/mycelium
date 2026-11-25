@@ -202,6 +202,7 @@ Local installer and service updater failures. Updater reports expose a fixed
 | `fleet_artifact_download_failed`, `fleet_artifact_transfer_failed` | Restore connectivity to the queue and its publisher; check local disk space. |
 | `fleet_artifact_refused` | The bytes did not match the signed size or hash, or the publisher refused. Repair publication or approve a corrected release. |
 | `fleet_staging_write_failed`, `fleet_publish_failed` | Repair access or space in the installed binary's directory. |
+| `fleet_disk_preflight_failed` | Restore disk space or quota for staging and publishing. The helper received `ENOSPC` or `EDQUOT` before replacing the installed binary. |
 | `fleet_signature_refused`, `fleet_publisher_mismatch`, `fleet_publisher_unavailable` | Verify the signed release and the locally provisioned publisher key; rotating trust is local provisioning. |
 | `fleet_darwin_identity_refused` | The candidate's signing identity differs from the installed one. Never re-sign locally to bypass it. |
 | `fleet_candidate_invalid` | The candidate does not run or reports another version, target or protocol. Publish a corrected release. |

@@ -899,7 +899,7 @@ update and startup checks; a worker still unavailable remains deferred at
 completion. Its existing binary and maintenance policy stay untouched until it
 recovers. No managed proof, an incompatible target, legacy siblings, and
 unsupported identity/protocol evidence still refuse operation creation. Runtime
-failures after a host begins updating or startup verification still stop the
+failures during replacement, restart or startup verification still stop the
 operation.
 
 For each host in turn the queue:
@@ -1022,6 +1022,24 @@ disabled host without a usable runtime proof is `skipped` and named; rerun once
 it is back. Rerunning while the operation runs returns it unchanged; a different
 release or urgency is refused until it finishes or stops.
 
+**When a worker refuses preflight**, the queue can continue the rollout after a
+local storage, disk space, install validation or signing refusal. It requires
+the running worker and queue to match the signed release's start-gate and
+attempt protocols. A fresh report after the refusal must show that the worker
+is still running its original process and that the installed binary matches it.
+If compatibility or the unchanged binary cannot be proved, the rollout stops.
+A refusal by the queue service also stops the rollout.
+
+The refused worker stays drained or disabled on its current release. Status
+shows `phase: skipped`, `outcome: deferred`, and the typed
+`failure_code`. The operation continues to the other hosts. If the refused
+worker shares the queue's host, that host's queue update waits for the retry.
+After the operation completes, repair the named refusal and rerun
+`myce fleet upgrade`. The new operation runs the preflight again, resumes only
+its own drains after verification, and leaves current services in place.
+Operator-owned maintenance still applies to startup verification. The running
+queue must already support preflight deferral for this behavior to take effect.
+
 **When a host is unhealthy**, the operation stops (`state: stopped`) and later
 hosts are untouched. An existing drain stays. After start acceptance has resumed
 an operation-owned drain, a failure cancels only the probe and restores that drain
@@ -1051,8 +1069,10 @@ If the queue itself is
 unhealthy, roll it back as in
 [queue-only rollback](#queue-only-rollback-to-the-previous-release).
 
-**After.** `myce status` shows the operation `complete`, every host `complete`
-or a named `skipped`. Check `myce status --history --json` against `before.json`:
+**After.** `myce status` shows the operation `complete`, with each host
+`complete`, `skipped`, or `deferred`. Check outstanding
+hosts before treating the rollout as accepted across the fleet. Compare
+`myce status --history --json` with `before.json`:
 every earlier job ID is present, running attempts kept their attempt number, and
 the priority policy is unchanged. Confirm `myce status` lists each worker's
 release and that the default onboarding approval is the new release

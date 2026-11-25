@@ -188,6 +188,8 @@ durability is required. Status comes from the running worker.
   permanent TLS, authority and integrity refusals with their original reason.
 - For fleet startup, upgrade, containment migration or host-level recovery,
   give the installation owner the typed evidence and keep existing job IDs.
+  A preflight refusal can leave a host `skipped` with `outcome: deferred` on
+  its current release. Include its `failure_code` even if the operation is `complete`.
   See [owner operations](references/owner-operations.md).
 - Use `myce efficiency --project NAME` for sizing and placement evidence, and
   [file holdings](references/results.md#large-outputs-and-release) before

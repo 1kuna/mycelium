@@ -208,6 +208,25 @@ func TestFleetUpgradeStopsOnUnhealthyHost(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, "service_health_failed"},
+		"preflight with unsafe skew": {func(t *testing.T, q *Queue, c *fakeClock, i FleetUpdateInstruction) {
+			// Approval validates today's protocols. Simulate a target with an
+			// incompatible signed start gate at the point of refusal.
+			q.s.FleetUpgrade.Release.Manifest.StartGate = "incompatible"
+			err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed", Failure: "fleet_storage_preflight_failed"})
+			if err != nil || q.s.FleetUpgrade.State != "stopped" {
+				t.Fatalf("incompatible skew did not stop immediately: %+v %v", q.fleetUpgradeStatus(), err)
+			}
+		}, "storage_preflight_failed"},
+		"preflight with target already on disk": {func(t *testing.T, q *Queue, c *fakeClock, i FleetUpdateInstruction) {
+			err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed", Failure: "fleet_storage_preflight_failed"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := q.s.Machines[i.Machine]
+			m.Fleet.InstalledSlot = &ReleaseSlotIdentity{SHA256: strings.Repeat("a", 64)}
+			m.Fleet.SlotMismatch = true
+			fleetHeartbeatAdvance(t, q, c)
+		}, "storage_preflight_failed"},
 		"wrong bytes after restart": {func(t *testing.T, q *Queue, c *fakeClock, i FleetUpdateInstruction) {
 			fleetRestart(t, q, c, i, false)
 		}, "worker_running_hash_mismatch"},
