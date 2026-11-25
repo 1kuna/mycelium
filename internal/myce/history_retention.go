@@ -102,7 +102,10 @@ func (q *Queue) pruneJobHistory(requestContexts ...context.Context) error {
 	if q.simulation || q.db == nil {
 		return nil
 	}
-	unlock := requestLock(ctx, &q.mu)
+	unlock, err := requestObservationLock(ctx, &q.mu)
+	if err != nil {
+		return err
+	}
 	if q.records == nil {
 		q.rebuildRecords()
 	}
@@ -144,7 +147,7 @@ func (q *Queue) pruneJobHistory(requestContexts ...context.Context) error {
 	}
 	unlock()
 	if len(unstamped) > 0 {
-		if err := q.updateRequest(ctx, func() error {
+		if err := q.updateTransaction(ctx, func() error {
 			for _, id := range unstamped {
 				if j := q.s.Jobs[id]; j != nil && terminal(j.State) && j.FinishedAt == nil {
 					ended := q.clock.Now()
@@ -152,7 +155,7 @@ func (q *Queue) pruneJobHistory(requestContexts ...context.Context) error {
 				}
 			}
 			return nil
-		}, nil); err != nil {
+		}, nil, true, nil); err != nil {
 			return err
 		}
 	}
@@ -172,14 +175,11 @@ func (q *Queue) pruneJobHistory(requestContexts ...context.Context) error {
 		}
 		batch.add("INSERT INTO job_summaries(id,finished,summary,learned) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET finished=excluded.finished, summary=excluded.summary, learned=excluded.learned", row.id, row.finished.UnixNano(), row.summary, row.learned)
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := q.writeQueue(&batch, nil, nil, queueWriteDetached); err != nil {
+	if err := q.writeDetachedQueue(ctx, &batch); err != nil {
 		return err
 	}
 	var expired []expiredJobRow
-	err := q.updateTransaction(ctx, func() error {
+	err = q.updateTransaction(ctx, func() error {
 		now := q.clock.Now()
 		expired = expired[:0]
 		for _, c := range candidates {
@@ -206,7 +206,7 @@ func (q *Queue) pruneJobHistory(requestContexts ...context.Context) error {
 			expired = append(expired, c.row)
 		}
 		return nil
-	}, nil, false, func() {
+	}, nil, true, func() {
 		for _, row := range expired {
 			q.learnExpired(row.learning)
 		}

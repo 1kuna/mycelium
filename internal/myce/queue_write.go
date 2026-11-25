@@ -23,7 +23,7 @@ type queueRowWrite struct {
 type queueWriteMode uint8
 
 const (
-	queueWriteDetached  queueWriteMode = iota // Caller prepared the batch without a queue turn.
+	queueWriteDetached  queueWriteMode = iota // Maintenance owns the turn; mutable state is committed.
 	queueWriteLocked                          // Caller owns the turn; mutable state is committed.
 	queueWriteJournaled                       // Caller owns a speculative state journal.
 )
@@ -34,9 +34,9 @@ func (b *queueWriteBatch) add(query string, args ...any) {
 
 // applyRows is also used by startup evidence repairs, before a queue can
 // serve requests. It owns no queue data or scheduling decisions.
-func (b *queueWriteBatch) applyRows(tx *sql.Tx, observe func(string, []any)) error {
+func (b *queueWriteBatch) applyRows(ctx context.Context, tx *sql.Tx, observe func(string, []any)) error {
 	for _, row := range b.rows {
-		result, err := tx.Exec(row.query, row.args...)
+		result, err := tx.ExecContext(ctx, row.query, row.args...)
 		if err != nil {
 			return queueWriteError{err}
 		}
@@ -60,16 +60,26 @@ func (b *queueWriteBatch) applyRows(tx *sql.Tx, observe func(string, []any)) err
 }
 
 func (q *Queue) writeQueue(batch *queueWriteBatch, timing *queueUpdateTiming, measured *queuePersistenceTiming, mode queueWriteMode) error {
+	// A control transaction that owns its journal must reach its commit or
+	// rollback boundary even if the client leaves.
+	return q.applyQueueWrite(context.Background(), batch, timing, measured, mode)
+}
+
+func (q *Queue) writeDetachedQueue(ctx context.Context, batch *queueWriteBatch) error {
+	if err := lockUploadContext(ctx, q.mu.Lock, q.mu.Unlock); err != nil {
+		return err
+	}
+	defer q.mu.Unlock()
+	return q.applyQueueWrite(ctx, batch, nil, nil, queueWriteDetached)
+}
+
+func (q *Queue) applyQueueWrite(ctx context.Context, batch *queueWriteBatch, timing *queueUpdateTiming, measured *queuePersistenceTiming, mode queueWriteMode) error {
 	if len(batch.rows) == 0 {
 		return nil
 	}
-	if mode == queueWriteDetached {
-		q.mu.Lock()
-		defer q.mu.Unlock()
-	}
 	write := func() error {
 		writer := queueSQLiteWriter{db: q.db, clock: q.clock, holdClock: q.holdClock, observe: q.observeQueueRow}
-		return writer.apply(batch, timing, measured)
+		return writer.apply(ctx, batch, timing, measured)
 	}
 	if mode != queueWriteDetached && q.inLockCommit {
 		return write()
@@ -97,9 +107,8 @@ type queueSQLiteWriter struct {
 	observe   func(string, []any)
 }
 
-func (w queueSQLiteWriter) apply(batch *queueWriteBatch, timing *queueUpdateTiming, measured *queuePersistenceTiming) error {
+func (w queueSQLiteWriter) apply(ctx context.Context, batch *queueWriteBatch, timing *queueUpdateTiming, measured *queuePersistenceTiming) error {
 	started := holdNow(w.holdClock)
-	ctx := context.Background() // Cancellation cannot leave a half-applied batch.
 	var conn *sql.Conn
 	var err error
 	if timing != nil && timing.measureWriter {
@@ -116,7 +125,7 @@ func (w queueSQLiteWriter) apply(batch *queueWriteBatch, timing *queueUpdateTimi
 		return queueWriteError{err}
 	}
 	defer tx.Rollback()
-	if err := batch.applyRows(tx, w.observe); err != nil {
+	if err := batch.applyRows(ctx, tx, w.observe); err != nil {
 		return err
 	}
 	if measured != nil {
@@ -131,7 +140,7 @@ func (w queueSQLiteWriter) apply(batch *queueWriteBatch, timing *queueUpdateTimi
 		// Some SQLite commit errors (including BUSY) leave the transaction
 		// open. database/sql has already ended its Tx, so clean the pinned
 		// connection before returning it to the pool.
-		_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		_, _ = conn.ExecContext(context.WithoutCancel(ctx), "ROLLBACK")
 		return queueWriteError{err}
 	}
 	return nil

@@ -324,7 +324,8 @@ func WithStartupTrace(trace func(string)) QueueOption {
 }
 
 // WithQueueCommitUnderLock selects the one-release SQLite rollback path.
-// Both paths write the same rows and can open the same database.
+// Queue state commits under the lock and contact is saved on every accepted
+// check-in. Both paths can open the same database.
 func WithQueueCommitUnderLock(enabled bool) QueueOption {
 	return func(q *Queue) { q.inLockCommit = enabled }
 }

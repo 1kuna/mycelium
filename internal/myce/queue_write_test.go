@@ -7,8 +7,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -134,27 +138,236 @@ BEGIN INSERT INTO commit_child VALUES(1); END;`); err != nil {
 }
 
 func TestQueueSQLiteContactCheckpoint(t *testing.T) {
-	q, clock := fixture(t)
-	m := machine("writer", "fake")
-	check(t, q, m, nil)
-	initial := q.histories.contacts[m.ID].Seen
-	for range 3 {
+	for _, rollback := range []bool{false, true} {
+		t.Run(fmt.Sprint("rollback=", rollback), func(t *testing.T) {
+			q, clock := fixture(t)
+			q.inLockCommit = rollback
+			m := machine("writer", "fake")
+			check(t, q, m, nil)
+			initial := q.histories.contacts[m.ID].Seen
+			for range 3 {
+				clock.Advance(time.Second)
+				check(t, q, m, nil)
+			}
+			want := initial
+			if rollback {
+				want = clock.Now()
+			}
+			if got := q.histories.contacts[m.ID].Seen; !got.Equal(want) || !q.s.Machines[m.ID].LastSeen.Equal(clock.Now()) {
+				t.Fatalf("steady check-ins saved contact at %v, want %v", got, want)
+			}
+			clock.Advance(RestartGrace)
+			check(t, q, m, nil)
+			if got := q.histories.contacts[m.ID].Seen; !got.Equal(clock.Now()) {
+				t.Fatal("contact history missed the restart-window checkpoint")
+			}
+			clock.Advance(time.Second)
+			check(t, q, m, nil)
+			q = reopenQueue(t, q, clock)
+			if !q.unreported[m.ID] || !q.s.Machines[m.ID].LastSeen.Equal(clock.Now()) {
+				t.Fatal("clean close did not preserve the latest contact, or made it live after restart")
+			}
+		})
+	}
+}
+
+func TestQueueSQLiteCustodySurvivesUncleanRestart(t *testing.T) {
+	const period = 4 * time.Minute
+	start := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	worker, peer := machine("worker", "fake"), machine("peer", "fake")
+	open := func(dir string, now time.Time, rollback bool) (*Queue, *fakeClock) {
+		t.Helper()
+		clock := &fakeClock{now: now}
+		q, err := Open(filepath.Join(dir, "queue.db"), filepath.Join(dir, "checkpoints"), clock, WithQueueCommitUnderLock(rollback))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { q.Close() })
+		fakeCheckpointAvailability(t, q, true)
+		return q, clock
+	}
+	if phase := os.Getenv("MYCE_TEST_CONTACT_CRASH"); phase != "" {
+		q, clock := open(os.Getenv("MYCE_TEST_CONTACT_CRASH_DIR"), start, os.Getenv("MYCE_TEST_CONTACT_CRASH_ROLLBACK") == "true")
+		check(t, q, peer, nil) // Set the periodic checkpoint before the worker arrives.
 		clock.Advance(time.Second)
-		check(t, q, m, nil)
+		report := Checkin{Machine: worker, period: period}
+		if phase == "growing-allowance" {
+			report.period = time.Second
+		}
+		s := spec("production")
+		s.AllowedMachines = []string{worker.ID}
+		submitted := submit(t, q, s)
+		reply, err := q.Checkin(report)
+		if err != nil || reply.Job == nil || reply.Job.ID != submitted.ID || reply.Job.Attempt != 1 {
+			t.Fatalf("fixture did not assign the production attempt: %+v, %v", reply, err)
+		}
+		if phase != "assignment" {
+			if err := q.Started(result(reply.Job, true)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if phase == "growing-allowance" {
+			clock.Advance(time.Second)
+			report.period = period
+			report.Running = &Execution{ID: reply.Job.ID, Attempt: reply.Job.Attempt}
+			report.Machine.FreeMemoryGB = 0
+			if _, err := q.Checkin(report); err != nil {
+				t.Fatal(err)
+			}
+		}
+		fmt.Println("production custody accepted: " + reply.Job.ID)
+		if err := syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {
+			t.Fatal(err)
+		}
+		select {}
 	}
-	if got := q.histories.contacts[m.ID].Seen; !got.Equal(initial) || !q.s.Machines[m.ID].LastSeen.Equal(clock.Now()) {
-		t.Fatal("steady check-ins did not keep durable and live contact distinct")
+	for _, rollback := range []bool{false, true} {
+		for _, phase := range []string{"assignment", "new-custody", "growing-allowance"} {
+			t.Run(fmt.Sprintf("rollback=%t/%s", rollback, phase), func(t *testing.T) {
+				dir := t.TempDir()
+				ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
+				defer cancel()
+				child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestQueueSQLiteCustodySurvivesUncleanRestart$")
+				child.Env = []string{
+					"MYCE_TEST_CONTACT_CRASH=" + phase,
+					"MYCE_TEST_CONTACT_CRASH_DIR=" + dir,
+					fmt.Sprintf("MYCE_TEST_CONTACT_CRASH_ROLLBACK=%t", rollback),
+				}
+				out, err := child.CombinedOutput()
+				var exit *exec.ExitError
+				_, receipt, found := strings.Cut(string(out), "production custody accepted: ")
+				if ctx.Err() != nil || !errors.As(err, &exit) || exit.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL ||
+					!found {
+					t.Fatalf("fixture missed the crash after accepted custody: %v\n%s", err, out)
+				}
+				q, clock := open(dir, start.Add(2*time.Second), rollback)
+				id, _, _ := strings.Cut(receipt, "\n")
+				before := job(t, q, id)
+				if before.State != "running" || (before.StartedAt == nil) != (phase == "assignment") || !q.unreported[worker.ID] {
+					t.Fatalf("reopen did not restore the unreported attempt: state=%s started=%v unreported=%t",
+						before.State, before.StartedAt, q.unreported[worker.ID])
+				}
+				evidence := q.s.ContactEvidence[worker.ID]
+				if phase == "assignment" {
+					if evidence.Session != worker.Session || evidence.ArrivalAllowance < 2*period {
+						t.Fatalf("assignment committed without recovery evidence: %+v", evidence)
+					}
+					return
+				}
+				// A busy queue can accrue service through the reporting peer
+				// while making no idle control opportunities.
+				q.mu.control.begin()
+				defer q.mu.control.end(func() {})
+				check(t, q, peer, nil)
+				advanceReportingPeer(t, q, clock, peer, RestartGrace)
+				got := job(t, q, id)
+				if got.State != "running" || got.Attempt != before.Attempt || got.Losses != 0 || got.InfrastructureRetries != 0 ||
+					evidence.Session != worker.Session || evidence.ArrivalAllowance < 2*period {
+					t.Fatalf("restart lost production custody before the next heartbeat: state=%s attempt=%d losses=%d retries=%d evidence=%+v",
+						got.State, got.Attempt, got.Losses, got.InfrastructureRetries, evidence)
+				}
+				advanceReportingPeer(t, q, clock, peer, period-RestartGrace)
+				reply, err := q.Checkin(Checkin{Machine: worker, period: period, Running: &Execution{ID: id, Attempt: before.Attempt}})
+				if err != nil || reply.Stop || q.unreported[worker.ID] {
+					t.Fatalf("worker could not reconcile the same attempt: stop=%t unreported=%t, %v", reply.Stop, q.unreported[worker.ID], err)
+				}
+				got = job(t, q, id)
+				if got.State != "running" || got.Attempt != before.Attempt || got.Losses != 0 || got.InfrastructureRetries != 0 {
+					t.Fatalf("reconciliation changed production custody: state=%s attempt=%d losses=%d retries=%d",
+						got.State, got.Attempt, got.Losses, got.InfrastructureRetries)
+				}
+			})
+		}
 	}
-	clock.Advance(RestartGrace)
-	check(t, q, m, nil)
-	if got := q.histories.contacts[m.ID].Seen; !got.Equal(clock.Now()) {
-		t.Fatal("contact history missed the restart-window checkpoint")
-	}
-	clock.Advance(time.Second)
-	check(t, q, m, nil)
-	q = reopenQueue(t, q, clock)
-	if !q.unreported[m.ID] || !q.s.Machines[m.ID].LastSeen.Equal(clock.Now()) {
-		t.Fatal("clean close did not preserve the latest contact, or made it live after restart")
+}
+
+func TestQueueSQLiteCancelledHistorySweepSkipsWrite(t *testing.T) {
+	for _, rollback := range []bool{false, true} {
+		t.Run(fmt.Sprint("rollback=", rollback), func(t *testing.T) {
+			q, clock := fixture(t)
+			q.inLockCommit = rollback
+			m := machine("worker", "fake")
+			if err := q.ConfigureLogRetention(0); err != nil {
+				t.Fatal(err)
+			}
+			j := submit(t, q, spec("experiment"))
+			if err := q.Cancel(j.ID); err != nil {
+				t.Fatal(err)
+			}
+			clock.Advance(jobRecordRetention + time.Second)
+			check(t, q, m, nil)
+			clock.Advance(time.Second)
+			check(t, q, m, nil) // A fresh report for clean close to flush in batched mode.
+			drainAdmissionWait(t, q)
+
+			q.mu.Lock()
+			blocked := q.expiryBlocked(j.ID, q.s.Jobs[j.ID], clock.Now())
+			q.mu.Unlock()
+			if blocked {
+				t.Fatal("fixture did not make the completed job eligible for expiry")
+			}
+			q.initShutdown()
+			span := &requestSpan{}
+			ctx := context.WithValue(q.shutdownContext, requestSpanKey{}, span)
+			span.mu.Lock()
+			resumeSweep := sync.OnceFunc(span.mu.Unlock)
+			defer resumeSweep()
+			sweep := make(chan error, 1)
+			releases := q.mu.progress().Releases
+			go func() { sweep <- q.pruneJobHistory(ctx) }()
+			// Park the sweep immediately after it snapshots the candidate.
+			await(t, func() bool { return q.mu.progress().Releases > releases })
+
+			entered, resume := make(chan struct{}), make(chan struct{})
+			unblock := sync.OnceFunc(func() { close(resume) })
+			defer unblock()
+			hold := sync.OnceFunc(func() {
+				close(entered)
+				<-resume
+			})
+			q.mu.Lock()
+			q.observeQueueRow = func(query string, args []any) {
+				if query == upsertQueueState && strings.HasPrefix(args[0].(string), "jobs/") && args[0] != "jobs/"+j.ID {
+					hold()
+				}
+			}
+			q.mu.Unlock()
+			writer := make(chan error, 1)
+			go func() {
+				_, err := q.Submit(spec("experiment"))
+				writer <- err
+			}()
+			awaitQueueWrite(t, entered)
+			resumeSweep()
+			await(t, func() bool { return q.mu.progress().Waiting > 0 })
+			q.BeginShutdown()
+			// Only the already-started write may delay storage close.
+			select {
+			case err := <-sweep:
+				if !errors.Is(err, context.Canceled) {
+					t.Errorf("cancelled sweep returned %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Error("cancelled history sweep still waited for the active writer")
+				unblock()
+				awaitQueueWrite(t, sweep)
+			}
+			unblock()
+			if err := awaitQueueWrite(t, writer); err != nil {
+				t.Fatal(err)
+			}
+			var summaries int
+			// Take a turn after the cancelled lock waiter has drained.
+			q.mu.Lock()
+			q.mu.Unlock()
+			if err := q.db.QueryRow("SELECT count(*) FROM job_summaries WHERE id=?", j.ID).Scan(&summaries); err != nil || summaries != 0 {
+				t.Fatalf("cancelled sweep wrote a history summary: count=%d, %v", summaries, err)
+			}
+			q = reopenQueue(t, q, clock)
+			if !q.s.Machines[m.ID].LastSeen.Equal(clock.Now()) {
+				t.Fatal("clean close did not checkpoint the latest contact")
+			}
+		})
 	}
 }
 
@@ -175,5 +388,5 @@ func (e *memoryEvidence) persist(tx *sql.Tx) error {
 	if err := e.prepareWrite(&batch); err != nil {
 		return err
 	}
-	return batch.applyRows(tx, nil)
+	return batch.applyRows(context.Background(), tx, nil)
 }

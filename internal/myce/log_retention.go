@@ -81,16 +81,13 @@ func (q *Queue) pruneBatchLogs(requestContexts ...context.Context) error {
 }
 
 func (q *Queue) deleteLogRows(ctx context.Context, table, id string) (int64, error) {
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
 	var n int64
 	batch := queueWriteBatch{rows: []queueRowWrite{{
 		query: "DELETE FROM " + table + " WHERE rowid IN (SELECT rowid FROM " + table + " WHERE job=? LIMIT 512)",
 		args:  []any{id},
 		count: &n,
 	}}}
-	err := q.writeQueue(&batch, nil, nil, queueWriteDetached)
+	err := q.writeDetachedQueue(ctx, &batch)
 	return n, err
 }
 

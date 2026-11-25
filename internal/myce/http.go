@@ -742,7 +742,10 @@ func (q *Queue) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-t.C:
-			if err := q.Tick(); err != nil {
+			if err := q.TickContext(ctx); err != nil {
+				if ctx.Err() != nil {
+					return nil
+				}
 				return err
 			}
 		}

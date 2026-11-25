@@ -2,6 +2,7 @@ package myce
 
 import (
 	"cmp"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -179,7 +180,7 @@ func loadMemoryEvidence(db *sql.DB, s state) (*memoryEvidence, error) {
 		return nil, err
 	}
 	batch.add(`INSERT INTO memory_evidence(kind,key,data) VALUES ('projection','v1','true'), ('projection','v2','true'), ('projection','v3','true')`)
-	if err := (queueSQLiteWriter{db: db}).apply(&batch, nil, nil); err != nil {
+	if err := (queueSQLiteWriter{db: db}).apply(context.Background(), &batch, nil, nil); err != nil {
 		return nil, err
 	}
 	evidence.writes = nil

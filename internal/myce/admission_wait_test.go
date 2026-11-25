@@ -683,15 +683,11 @@ func TestAdmissionWaitCaptureYieldsAndRetainedHistoryShrinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tx, err := q.db.Begin()
-	if err != nil {
+	var batch queueWriteBatch
+	if err := q.writeFields(key, q.persisted[key], old, &queuePersistenceTiming{}, &batch, nil); err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback()
-	if err := q.writeFields(key, q.persisted[key], old, &queuePersistenceTiming{}, tx.Exec, nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := tx.Commit(); err != nil {
+	if err := q.writeDetachedQueue(context.Background(), &batch); err != nil {
 		t.Fatal(err)
 	}
 	q = reopenVariants(t, q, clock)

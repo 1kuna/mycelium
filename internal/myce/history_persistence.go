@@ -34,25 +34,59 @@ func (q *Queue) persistentBase() state {
 		return base
 	}
 	writeEfficiency := efficiencyNeedsWrite(q.histories.efficiency, q.s.EfficiencyHosts, q.clock.Now())
-	// Keep restart evidence without treating every accepted heartbeat as a
-	// durable change. One restart window bounds how far its contact checkpoint
-	// can lag. During recovery a saved report never substitutes for live contact.
-	writeContacts := q.s.LastWorkerContact.After(q.histories.lastWorkerContact) &&
-		q.s.LastWorkerContact.Sub(q.histories.lastWorkerContact) >= RestartGrace
-	stored := q.histories
-	if writeEfficiency || writeContacts {
-		next := *q.histories
-		if writeEfficiency {
-			next.efficiency = cloneEfficiencyHistory(q.s.EfficiencyHosts)
-		}
-		if writeContacts {
-			next.contacts, next.lastWorkerContact = maps.Clone(q.s.ContactEvidence), q.s.LastWorkerContact
-		}
-		q.historiesPending, stored = &next, &next
+	next := *q.histories
+	if writeEfficiency {
+		next.efficiency = cloneEfficiencyHistory(q.s.EfficiencyHosts)
 	}
-	base.EfficiencyHosts = stored.efficiency
-	base.ContactEvidence, base.LastWorkerContact = stored.contacts, stored.lastWorkerContact
+	writeContacts := q.inLockCommit || q.s.LastWorkerContact.Sub(next.lastWorkerContact) >= RestartGrace
+	var custodyContacts map[string]contactEvidence
+	if writeContacts {
+		next.contacts, next.lastWorkerContact = maps.Clone(q.s.ContactEvidence), q.s.LastWorkerContact
+	} else if custodyContacts = q.checkpointCustodyContacts(); custodyContacts != nil {
+		next.contacts = custodyContacts
+	}
+	if writeEfficiency || writeContacts || custodyContacts != nil {
+		q.historiesPending = &next
+	}
+	base.EfficiencyHosts = next.efficiency
+	base.ContactEvidence, base.LastWorkerContact = next.contacts, next.lastWorkerContact
 	return base
+}
+
+// A restart uses saved allowances to protect unreported attempts. Save the
+// matching report with assignment, start or recovery, and save increases for
+// existing custody before acknowledging them. Ordinary timestamps still use
+// the periodic checkpoint, whose deadline is independent of these writes.
+func (q *Queue) checkpointCustodyContacts() map[string]contactEvidence {
+	var next map[string]contactEvidence
+	for id, j := range q.records.live {
+		if j.State != "running" && j.State != "stopping" {
+			continue
+		}
+		live, ok := q.s.ContactEvidence[j.Machine]
+		if !ok || live.Session != j.Session {
+			continue
+		}
+		stored := q.histories.contacts[j.Machine]
+		before, dirty := q.records.jobs[id]
+		acquired := dirty && (before == nil || before.Machine != j.Machine || before.Session != j.Session ||
+			before.Attempt != j.Attempt || before.State != "running" && before.State != "stopping" ||
+			before.StartedAt == nil && j.StartedAt != nil)
+		if stored.Session == live.Session && !acquired &&
+			live.Allowance <= stored.Allowance && live.ArrivalAllowance <= stored.ArrivalAllowance {
+			continue
+		}
+		if stored.Session == live.Session {
+			live.Allowance = max(live.Allowance, stored.Allowance)
+			live.ArrivalAllowance = max(live.ArrivalAllowance, stored.ArrivalAllowance)
+		}
+		if next == nil {
+			next = make(map[string]contactEvidence, len(q.histories.contacts)+1)
+			maps.Copy(next, q.histories.contacts)
+		}
+		next[j.Machine] = live
+	}
+	return next
 }
 
 // Called after the SQLite commit that wrote the staged snapshot.
