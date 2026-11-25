@@ -467,6 +467,18 @@ func TestLaunchCapacityNativeHelperNeverDiscountsFullDemand(t *testing.T) {
 	}
 }
 
+func TestLaunchCapacityGateSamplesSurviveWorkerReplacement(t *testing.T) {
+	_, clock := fixture(t)
+	old := &modelRuntime{clock: clock, session: "adopted"}
+	first := old.nextRAMGateSampleID()
+	last := old.nextRAMGateSampleID()
+	clock.Advance(time.Second)
+	replacement := &modelRuntime{clock: clock, session: old.session}
+	if next := replacement.nextRAMGateSampleID(); first >= last || last >= next {
+		t.Fatalf("same-session replacement regressed sample order: %d, %d, %d", first, last, next)
+	}
+}
+
 func TestLaunchCapacityWorkerGateRecoveryDoesNotReclaim(t *testing.T) {
 	q, clock := fixture(t)
 	m := cpuMachine("worker", "host", "cpu", 8, 32)

@@ -1366,7 +1366,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			rt.mu.Unlock()
 
 			// Refresh memory together after inventory, then age through the reads.
-			ramGateSampleID := rt.ramGateSampleID.Add(1)
+			ramGateSampleID := rt.nextRAMGateSampleID()
 			rawAvailable := w.sampleHeartbeatMemory(ctx, &m, jobs, reports, actors)
 			if m.MemoryObservation != nil {
 				m.MemoryObservation.Quiescent = !recovering && !leaving && len(actors) == 0 && modelReportsQuiescent(modelReports) && environments.cores() == 0 && !hostPreparing(&m)

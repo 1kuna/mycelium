@@ -1123,13 +1123,22 @@ type nativeStartupMemory struct {
 	residentGB     float64
 }
 
+func (rt *modelRuntime) nextRAMGateSampleID() int64 {
+	// A replacement worker can adopt the same session. Seed each process
+	// from its start time so it does not reset a live session's sample order.
+	if rt.ramGateSampleID.Load() == 0 && rt.clock != nil {
+		rt.ramGateSampleID.CompareAndSwap(0, max(0, rt.clock.Now().UnixNano()-1))
+	}
+	return rt.ramGateSampleID.Add(1)
+}
+
 func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostLaunch) error {
 	attempt, err := strconv.Atoi(launch.Attempt)
 	key := attemptKey{launch.Key, attempt, launch.Session}
 	rt.mu.Lock()
 	actor := rt.batchSupervisors[key]
 	rt.mu.Unlock()
-	sampleID := rt.ramGateSampleID.Add(1)
+	sampleID := rt.nextRAMGateSampleID()
 	free, known := 0.0, false
 	if rt.poolHostMemorySource != nil {
 		var probeErr error
