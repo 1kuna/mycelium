@@ -777,6 +777,12 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 		return g.recordInfrastructure(launchRefused, m.Name, "", err)
 	}
 	l := HostLaunch{Machine: g.worker.Machine.ID, Session: g.session, Kind: "batch", Key: g.p.job.ID, Attempt: strconv.Itoa(g.p.job.Attempt)}
+	if len(g.members) > 1 {
+		l.NativeStartup = "continuation"
+		if m == g.members[0] {
+			l.NativeStartup = "first_member"
+		}
+	}
 	main := m.Name == "main"
 	if main || g.worker.compactNativeLaunch {
 		// Gated processes still need local admission before fork. For negotiated

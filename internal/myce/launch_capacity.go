@@ -3,17 +3,19 @@ package myce
 import (
 	"fmt"
 	"slices"
+	"time"
 )
 
 // LaunchCapacityWait remembers the evidence behind a refused offer. It is
 // admission policy only; Copies/HostReleases remain the exact custody authority.
 // No timer clears it: an unchanged heartbeat is not new capacity.
 type LaunchCapacityWait struct {
-	Machine   string           `json:"machine"`
-	Session   string           `json:"session"`
-	Attempt   int              `json:"attempt"`
-	Evidence  string           `json:"evidence"`
-	Admission *AdmissionDetail `json:"admission,omitempty"`
+	Machine    string           `json:"machine"`
+	Session    string           `json:"session"`
+	Attempt    int              `json:"attempt"`
+	Evidence   string           `json:"evidence"`
+	Admission  *AdmissionDetail `json:"admission,omitempty"`
+	ObservedAt time.Time        `json:"observed_at,omitzero"`
 	// Required surplus above the candidate's charge in the queue's physical
 	// RAM ledger. It can be signed because queue room can already be short.
 	LiveGrowthSurplusGB *float64 `json:"live_growth_surplus_gb,omitempty"`
@@ -45,6 +47,9 @@ func (q *Queue) launchCapacityEvidence(j *Job, m *Machine) string {
 	if m.CapabilityProfile != nil {
 		parts = append(parts, fmt.Sprint(m.CapabilityProfile.LogicalCPUs))
 	}
+	if gate := m.HostRAMGate; gate != nil {
+		parts = append(parts, fmt.Sprintf("ram-gate/%g/%g/%g", gate.RawGB, gate.HeldGB, gate.PendingGB))
+	}
 	for _, o := range q.hostObligations(hostID(m)) {
 		if o.Result.ID == j.ID {
 			continue
@@ -73,7 +78,7 @@ func (q *Queue) recordLaunchCapacityWait(j *Job, r Result) {
 	if m != nil {
 		key := targetKey(m)
 		wait := LaunchCapacityWait{Machine: j.Machine, Session: j.Session, Attempt: j.Attempt,
-			Admission: safeAdmissionDetail(r.ExecutionCause.Admission)}
+			Admission: safeAdmissionDetail(r.ExecutionCause.Admission), ObservedAt: q.clock.Now()}
 
 		if prior := j.LaunchCapacityWait[key]; prior.Session == wait.Session && prior.Attempt == wait.Attempt {
 			return // A repeated result must not move the baseline to a newer reading.
@@ -123,6 +128,13 @@ func (q *Queue) launchCapacityBlocked(j *Job, m *Machine) bool {
 	h, ok := j.LaunchCapacityWait[targetKey(m)]
 	if !ok {
 		return false
+	}
+	if worker := q.s.Machines[m.ID]; h.Admission != nil && h.Admission.Subcheck == memoryWaitReason &&
+		worker != nil && worker.HostRAMGate != nil && !h.ObservedAt.IsZero() && h.Session == m.Session {
+		// A delivery in flight when the refusal was accepted cannot validate
+		// a new offer. The next live gate, including an identical reading
+		// that genuinely recovered, has the same vote as ordinary admission.
+		return !worker.hostRAMGateAt.After(h.ObservedAt) || q.workerRAMGate(j, m) != nil
 	}
 	if h.Evidence == "" {
 		// Refused before the first post-restart report. Only a committed
@@ -192,7 +204,7 @@ func (q *Queue) queuedCapacityStatus(j *Job, scans ...*placementScan) (waiting, 
 			if !fitsResources(c, &room, room.TotalMemoryGB) {
 				continue
 			}
-			if drained || !hostFits(m, c.Spec.Needs.MemoryGB, c.Spec.Needs.HostMemoryGB) || !cpuFits(c, m) || !q.batchSlotFree(m, c) || m.FreeMemoryGB < c.Spec.Needs.MemoryGB || !q.poolCustodyAllows(c, m) {
+			if drained || !hostFits(m, c.Spec.Needs.MemoryGB, c.Spec.Needs.HostMemoryGB) || !cpuFits(c, m) || !q.batchSlotFree(m, c) || m.FreeMemoryGB < c.Spec.Needs.MemoryGB || !q.poolCustodyAllows(c, m) || q.workerRAMGate(c, m) != nil {
 				waiting = true
 			} else if pooledMemory(c) && !q.hostBackfillAllows(c, m, q.hostBackfillFences(scan)[hostID(m)]) {
 				waiting = true
@@ -214,6 +226,9 @@ func (q *Queue) launchCapacityProjection(j *Job, m *Machine) *Machine {
 		return m
 	}
 	d := h.Admission
+	if d.Subcheck == memoryWaitReason && m.HostRAMGate != nil {
+		return m // A failed live check cannot make a victim reclaimable.
+	}
 	if d.Unavailable || d.Available == nil || d.Required+d.HeldGB+d.KeepGB <= *d.Available {
 		return m
 	}

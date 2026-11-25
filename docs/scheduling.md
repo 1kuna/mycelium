@@ -63,6 +63,25 @@ Live free-memory checks, operator budgets and reservations still apply. Unknown
 native profile sizes wait; explicitly fake resources use their configured
 allowance. Workers must report the current protocol and a capability profile; unknown capacity withholds admission.
 
+### Unified host RAM admission and pressure
+
+The queue checks its host ledger and the worker's physical reading with the
+worker's pending growth and allowance. The worker repeats the same comparison
+at launch with current inputs. Native helpers receive no credit against the full
+launch requirement. If room falls between the first native member and a later
+member's refusal, subsequent offers on that route budget for the measured
+startup loss in physical RAM as well. This measurement cannot authorize reclaim
+or release. Fresh capacity and exact release still gate an offer.
+
+The host pressure forecast projects two horizons, through the next sample and
+through the stop grace. It projects an exact attempt's measured nonreclaimable
+growth only as far as its remaining RAM reservation. It continues forecasting
+over-reservation and unattributed physical loss. Low physical room and the
+existing production protections still apply. An exact pressure-stop receipt
+retains its measured peak as a sizing floor. An incomplete attempt contributes
+no successful-run calibration, and an existing OOM or shortage floor stays in
+force.
+
 ### Typed memory is a limit, not a reservation
 
 A typed `host_memory_gb` (or CPU `memory_gb`) is the job's enforced limit and

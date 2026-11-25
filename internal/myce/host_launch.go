@@ -16,6 +16,7 @@ const defaultWorkerInterval = time.Second
 // HostLaunch is exact queue custody for a preparation, or an engine attempt.
 // A cached reply is an offer, never permission to launch.
 type HostLaunch struct {
+	NativeStartup string `json:"native_startup,omitempty"`
 	// Zero preserves legacy preparation sharing with an execution reservation.
 	CPUCores     int                 `json:"cpu_cores,omitempty"`
 	Device       string              `json:"device,omitempty"`

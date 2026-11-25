@@ -104,6 +104,9 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 				}
 			}
 			hostFailure := hostFitFailure(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB)
+			if err := q.workerRAMGate(candidate, m); err != nil {
+				block(memoryWaitReason, err.Error())
+			}
 			if len(blocked) == 0 {
 				if why := q.cardWaitingReason(candidate, m); why != "" {
 					block("capacity", why)

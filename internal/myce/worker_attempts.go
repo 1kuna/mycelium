@@ -46,6 +46,7 @@ type attemptSupervisor struct {
 	admissionBlocked bool
 	// Confirmed local cleanup; independent of result delivery.
 	admissionReleased atomic.Bool
+	nativeStartupRAM  *HostRAMGate // Exact first member's full-demand reading, under admissionMu.
 	publication       *publicationProgress
 }
 
@@ -88,7 +89,7 @@ func (a *attemptSupervisor) snapshot() (AttemptReport, Machine, bool, error) {
 	return r, diagnostics, a.finished, a.err
 }
 
-func (w Worker) sampleHeartbeatMemory(ctx context.Context, m *Machine, jobs []Job, reports []AttemptReport, actors map[attemptKey]*attemptSupervisor) {
+func (w Worker) sampleHeartbeatMemory(ctx context.Context, m *Machine, jobs []Job, reports []AttemptReport, actors map[attemptKey]*attemptSupervisor) float64 {
 	for i := range reports {
 		// Inventory probes can outlast the original report while the actor
 		// keeps sampling. Read its latest exact-attempt memory snapshot, with
@@ -125,6 +126,7 @@ func (w Worker) sampleHeartbeatMemory(ctx context.Context, m *Machine, jobs []Jo
 		reports[i].ApplicationProgress = reports[i].ApplicationProgress.aged(w.Clock.Now())
 		reports[i].CurrentHostMemory = reports[i].CurrentHostMemory.aged(w.Clock.Now())
 	}
+	return rawAvailable
 }
 func (a *attemptSupervisor) update(w Worker, d AttemptDirective, connected, admissionBlocked bool) {
 	// Scarce-host yield is provisional until its delivery authorization. It
@@ -1364,7 +1366,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			rt.mu.Unlock()
 
 			// Refresh memory together after inventory, then age through the reads.
-			w.sampleHeartbeatMemory(ctx, &m, jobs, reports, actors)
+			rawAvailable := w.sampleHeartbeatMemory(ctx, &m, jobs, reports, actors)
 			if m.MemoryObservation != nil {
 				m.MemoryObservation.Quiescent = !recovering && !leaving && len(actors) == 0 && modelReportsQuiescent(modelReports) && environments.cores() == 0 && !hostPreparing(&m)
 			}
@@ -1374,6 +1376,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			// snapshot and age it with their own launch-time clock read.
 			rt.batchHostMemorySamples = w.hostMemorySamples
 			rt.publishHostLedgerLocked()
+			if ledger := rt.hostLedger.Load(); ledger != nil && m.HostMemoryError == "" && validMemoryValue(rawAvailable) {
+				m.HostRAMGate = &HostRAMGate{RawGB: rawAvailable, HeldGB: ledger.charge, PendingGB: ledger.pending}
+			}
 			rt.mu.Unlock()
 			probeClock := w.Clock
 			m.IOPressure, _ = ioProbe.run("host-io-pressure", func() (*IOPressure, error) {

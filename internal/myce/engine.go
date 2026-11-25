@@ -1147,8 +1147,22 @@ func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostL
 		}
 	}
 	held, pending := rt.hostChargesExcept(key)
-	free = memoryWithinAllowance(&rt.memoryMachine, free, pools.KeepGB, held, pending)
-	return checkMemoryPool(pools.RAM.TypicalGB, free, pools.KeepGB, pending, known)
+	gate := HostRAMGate{RawGB: free, HeldGB: held, PendingGB: pending}
+	refusal := gate.check(&rt.memoryMachine, pools, known)
+	if launch.NativeStartup == "first_member" {
+		actor.nativeStartupRAM = nil
+		if refusal == nil {
+			actor.nativeStartupRAM = &gate
+		}
+	}
+	if d, ok := refusal.(*admissionError); ok && known && launch.NativeStartup == "continuation" && actor.nativeStartupRAM != nil &&
+		pools.RAM.TypicalGB > gate.physicalRoom(pools.KeepGB) {
+		// The first member passed the full-demand check. Measure how much room
+		// disappeared while the native group started. Subtracting pending
+		// growth in both readings avoids recharging covered peer growth.
+		d.detail.StartupGB = max(0, actor.nativeStartupRAM.physicalRoom(pools.KeepGB)-gate.physicalRoom(pools.KeepGB))
+	}
+	return refusal
 }
 
 func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerModel) error {

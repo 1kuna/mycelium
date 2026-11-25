@@ -1291,12 +1291,19 @@ func (q *Queue) retry(j *Job, why string) {
 		j.Reason = "scarce_host_yield: " + j.ScarceHostYield.Hold
 		return
 	}
+	if queuedPoolStop(j) && !cancelled(j) {
+		q.requeueMemoryPressure(j)
+		return
+	}
 	q.requeue(j, why, !plannedStop(j))
 }
 
 // Admission refusal and planned stops do not spend infrastructure retry budgets.
 func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	q.touchJob(j.ID)
+	if queuedPoolStop(j) && !j.ReleaseConfirmed && !cancelled(j) {
+		return // A concurrent failure or lost worker cannot release the victim.
+	}
 	if j.YieldPause != nil && !j.ReleaseConfirmed && !cancelled(j) {
 		// Planned stop expiry and missing heartbeats cannot surrender custody.
 		// The existing exact release path calls retry again after confirmation.
@@ -1815,6 +1822,17 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			return errors.New("invalid machine report")
 		}
 		old := q.s.Machines[m.ID]
+		if m.HostRAMGate != nil && !m.HostRAMGate.valid() {
+			return errors.New("invalid worker RAM gate reading")
+		}
+		if old != nil && old.Session == m.Session {
+			m.hostRAMGateAt = memoryReceivedAt
+			if memoryReceivedAt.Before(old.hostRAMGateAt) {
+				m.HostRAMGate, m.hostRAMGateAt = old.HostRAMGate, old.hostRAMGateAt
+			}
+		} else {
+			m.hostRAMGateAt = memoryReceivedAt
+		}
 		if old != nil && m.ModelConfigHash == "" && q.catalogStale(old) {
 			return errors.New("worker model config does not match queue")
 		}
@@ -1967,7 +1985,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		}
 		body.next("checkin_memory")
 		q.recordExternalMemory(&m)
-		q.observePoolAvailability(&m, c.period, memoryReceivedAt)
+		q.observePoolAvailability(&m, c.period, memoryReceivedAt, reports)
 		if sample := q.poolAvailability[m.ID]; sample.session == m.Session && sample.at.Equal(memoryReceivedAt) {
 			q.maintenance.memoryCheckin = m.ID
 		}
@@ -2359,12 +2377,16 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 		}
 		q.settleRelease(r, true)
 		if j := q.touchJob(r.ID); j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+			if j.Spec.ephemeral() && !cleanupComplete(r.WorkerDataCleanup) {
+				return nil
+			}
 			if cause := safeAttemptRuntimeCause(j, r.ExecutionCause); !terminal(j.State) && cause != nil && cause.Finalization != nil {
 				j.ExecutionCause = cause
 				j.CleanupCause = safeAttemptRuntimeCause(j, r.CleanupCause)
 				j.Reason = "finalization pending: " + cause.String()
 			}
 			q.recordAttemptMemory(j, r)
+			q.recordPoolEvidence(j, r)
 			q.retainAttemptResources(j, r.Resources)
 			j.ReleaseConfirmed = true
 			if r.Forced {

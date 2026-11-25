@@ -113,6 +113,8 @@ func (q *Queue) recordAttemptMemory(j *Job, r Result) {
 	}
 	reason := "eligible"
 	switch {
+	case r.ReleaseOnly && r.MemoryPeak != nil && queuedPoolStop(j):
+		reason = "pressure_peak"
 	case r.ReleaseOnly:
 		reason = "release_only"
 	case r.OutOfMemory || j.Reason == memoryPressureCause:
@@ -143,7 +145,7 @@ func (q *Queue) recordAttemptMemory(j *Job, r Result) {
 			if facts.MemoryPeak != nil {
 				// Cleanup acknowledgements add telemetry, never rewrite the
 				// eligibility decision of the accepted completion.
-				if r.ReleaseOnly && old.LearningReason != "" {
+				if r.ReleaseOnly && old.LearningReason != "" && !(facts.LearningReason == "pressure_peak" && old.MemoryPeak == nil) {
 					facts.LearningReason = old.LearningReason
 					if facts.LearningReason == "infrastructure_interrupted" {
 						facts.MemoryPeak.Constrained = false

@@ -339,3 +339,155 @@ func TestLaunchCapacityKnownRefusalQuarantine(t *testing.T) {
 
 // Startup waiting resolves the generated-deadline backlog without rescanning
 // retained attempts per job/target or retaining evidence across mutations.
+
+func TestLaunchCapacityUnifiedWorkerGateAndNativeStartup(t *testing.T) {
+	q, clock := fixture(t)
+	m := sharedUnifiedMachine()
+	m.HostMemoryBudgetGB = 96
+	m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
+	const held, pending, keep = 60.0, 59.906, 4.0
+	report := func(raw float64) {
+		t.Helper()
+		m.HostAvailableMemoryGB = raw - keep
+		m.MemoryObservation = &HostMemoryObservation{TotalGB: 128, UsedGB: 128 - raw, ReserveGB: keep}
+		m.HostRAMGate = &HostRAMGate{RawGB: raw, HeldGB: held, PendingGB: pending}
+	}
+	s := sharedSpec("experiment", 24)
+	s.Needs.HostMemoryGB = 12
+	j := submit(t, q, s)
+	for i := range 25 {
+		report(93.435 + float64(i%2)*0.1)
+		if got := assignedJob(machineCheck(t, q, m)); got != nil {
+			t.Fatalf("poll %d offered %s against %.3f GiB worker room", i, got.ID, m.HostRAMGate.physicalRoom(keep))
+		}
+		clock.Advance(26 * time.Second)
+	}
+
+	// Actual room recovers at the first helper and drops during startup.
+	report(102)
+	run := assignedJob(machineCheck(t, q, m))
+	if run == nil || run.ID != j.ID || run.Attempt != 1 {
+		t.Fatal("fresh matching worker and queue readings did not admit", run)
+	}
+	if err := q.Started(result(run, true)); err != nil {
+		t.Fatal(err)
+	}
+	raw := 102.0
+	actor := &attemptSupervisor{job: *run}
+	rt := &modelRuntime{machine: m.ID, memoryMachine: m, clock: clock,
+		batchSupervisors:     map[attemptKey]*attemptSupervisor{jobKey(*run): actor},
+		poolHostMemorySource: func(context.Context) (float64, error) { return raw, nil }}
+	rt.hostLedger.Store(&hostLedger{charge: held, pending: pending})
+	stage := HostLaunch{Machine: m.ID, Session: run.Session, Kind: "batch", Key: run.ID, Attempt: "1", NativeStartup: "first_member"}
+	if err := rt.checkBatchLaunchMemory(t.Context(), stage); err != nil {
+		t.Fatal(err)
+	}
+	stage.NativeStartup, raw = "continuation", 93.435
+	err := rt.checkBatchLaunchMemory(t.Context(), stage)
+	d := admissionDetail(err, *run)
+	if d == nil || d.Required != 36 || d.HeldGB != pending || d.KeepGB != keep || d.StartupGB < 8.56 || d.StartupGB > 8.57 {
+		t.Fatalf("full native check lost its startup comparison: %v, %+v", err, d)
+	}
+	r := capacityResult(run, true)
+	r.ExecutionCause.Admission = d
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	report(102)
+	if next := assignedJob(machineCheck(t, q, m)); next != nil {
+		t.Fatal("native teardown is still pending", next)
+	}
+	r.ReleaseOnly, r.ReleasePending = true, false
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	// A heartbeat already in flight at refusal cannot reopen the route even
+	// if its physical reading would now fit.
+	report(116)
+	late := Checkin{Machine: m, period: time.Second, AttemptProtocol: keyedAttemptProtocol}
+	if reply, err := q.processCheckinContext(t.Context(), late, 0, clock.Now().Add(-2*time.Second), nil); err != nil || assignedJob(reply) != nil {
+		t.Fatalf("delayed heartbeat returned an offer: %t, error: %v", assignedJob(reply) != nil, err)
+	}
+	for i := range 25 {
+		report(102 + float64(i%2)*0.1)
+		if next := assignedJob(machineCheck(t, q, m)); next != nil {
+			t.Fatalf("poll %d re-offered the startup deficit", i)
+		}
+		clock.Advance(26 * time.Second)
+	}
+	report(110)
+	if next := assignedJob(machineCheck(t, q, m)); next == nil || next.ID != j.ID || next.Attempt != 2 {
+		t.Fatal("room for the full demand and measured startup loss did not unblock dispatch", next)
+	}
+}
+
+func TestLaunchCapacityNativeHelperNeverDiscountsFullDemand(t *testing.T) {
+	for _, reacquire := range []bool{false, true} {
+		_, clock := fixture(t)
+		m := unifiedCUDAAdmissionMachine()
+		j := Job{ID: "job", Attempt: 1, Session: m.Session, Memory: &MemoryPools{RAM: memoryPoolEstimate{TypicalGB: 36, ChargeGB: 36}, KeepGB: 4}}
+		actor := &attemptSupervisor{job: j}
+		helper := 8.0
+		rt := &modelRuntime{machine: m.ID, memoryMachine: m, clock: clock,
+			batchSupervisors: map[attemptKey]*attemptSupervisor{jobKey(j): actor},
+			poolHostMemorySource: func(context.Context) (float64, error) {
+				helper = 0
+				raw := 34 - helper
+				if reacquire {
+					helper = 8
+				}
+				return raw, nil
+			}}
+		launch := HostLaunch{Machine: m.ID, Session: m.Session, Kind: "batch", Key: j.ID, Attempt: "1", NativeStartup: "continuation"}
+		err := rt.checkBatchLaunchMemory(t.Context(), launch)
+		d := admissionDetail(err, j)
+		if d == nil || d.Required != 36 || !strings.Contains(err.Error(), "30.000 GiB net room") {
+			t.Fatalf("helper reacquire=%t changed the final full requirement: %v (%+v)", reacquire, err, d)
+		}
+	}
+}
+
+func TestLaunchCapacityWorkerGateRecoveryDoesNotReclaim(t *testing.T) {
+	q, clock := fixture(t)
+	m := cpuMachine("worker", "host", "cpu", 8, 32)
+	m.Devices = []MachineDevice{}
+	m.HostMemoryBudgetGB = 32
+	m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
+	low := submit(t, q, cpuSpec(1, 8))
+	victim := assignedJob(machineCheck(t, q, m))
+	if victim == nil || victim.ID != low.ID {
+		t.Fatal("expected an existing lower-tier execution", victim)
+	}
+	if err := q.Started(result(victim, true)); err != nil {
+		t.Fatal(err)
+	}
+	demand := cpuSpec(1, 4)
+	demand.Priority = "production"
+	queued := submit(t, q, demand)
+	m.HostRAMGate = &HostRAMGate{RawGB: 16, HeldGB: 8, PendingGB: 8}
+	offer := assignedJob(machineCheck(t, q, m, victim))
+	if offer == nil || offer.ID != queued.ID {
+		t.Fatal("both jobs should fit normal admission", offer)
+	}
+	if err := q.Started(result(offer, true)); err != nil {
+		t.Fatal(err)
+	}
+	r := capacityResult(offer, false)
+	r.ExecutionCause.Admission = admissionDetail(checkMemoryPool(4, 11, 0, 8, true), *offer)
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	m.HostRAMGate = &HostRAMGate{RawGB: 11.5, HeldGB: 8, PendingGB: 8}
+	if next := assignedJob(machineCheck(t, q, m, victim)); next != nil {
+		t.Fatal("partial recovery did not repay the shortfall", next)
+	}
+	requireState(t, q, low.ID, "running")
+	clock.Advance(time.Second)
+	m.HostRAMGate = &HostRAMGate{RawGB: 16, HeldGB: 8, PendingGB: 8}
+	if next := assignedJob(machineCheck(t, q, m, victim)); next == nil || next.ID != queued.ID {
+		t.Fatal("an unchanged, freshly measured pre-refusal reading did not reopen the route", next)
+	}
+	requireState(t, q, low.ID, "running")
+}

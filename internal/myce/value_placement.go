@@ -367,6 +367,7 @@ func (q *Queue) nextProjection(sets []*candidateSet, excluded map[string]bool, s
 
 func (q *Queue) immediateProjectionFits(j *Job, m *Machine, scan *placementScan) bool {
 	return q.admissionGate(j, m, !q.launchCapacityBlocked(j, m), predicateLaunchCapacity) &&
+		q.admissionGate(j, m, q.workerRAMGate(j, m) == nil, predicateLaunchCapacity) &&
 		q.admissionGate(j, m, !q.preemptionReleasesPending(j), predicateReleasePending) &&
 		q.admissionGate(j, m, scan.live[m.ID], predicateWorkerNotLive) &&
 		q.admissionGate(j, m, q.batchSlotFree(m, j), predicateBatchSlot) &&
