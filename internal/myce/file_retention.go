@@ -679,7 +679,7 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 	}
 	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
 	store := q.files
-	if store == nil {
+	if store == nil || !q.sharedFilesReady() {
 		requestUnlock1()
 		return 0, nil
 	}
@@ -755,10 +755,44 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 			// An expired/released job owns reclamation of its bundle bytes.
 			// Other custody still wins above; refreshed publication keeps its
 			// ordinary grace below. Only unclaimed bundles need the orphan window.
-			remove = remove && (!trackedBundle || expired || !bundleTime.After(orphanCutoff))
+			remove = remove && q.s.SharedBlobReclaims[c.hash] == "" && (!trackedBundle || expired || !bundleTime.After(orphanCutoff))
 			decisions[i] = decision{remove: remove, marked: c.orphan || trackedBundle, expired: expired}
 		}
 		requestUnlock2()
+		var claims map[string]string
+		var inspected map[string]os.FileInfo
+		if q.sharedWriter != nil {
+			inspected = make(map[string]os.FileInfo, len(batch))
+			var hashes []string
+			var planned uint64
+			for i, c := range batch {
+				if !decisions[i].remove || gone[c.hash] {
+					continue
+				}
+				st, err := os.Lstat(filepath.Join(store.root, "blobs", c.hash))
+				if errors.Is(err, os.ErrNotExist) {
+					gone[c.hash] = true
+				}
+				if err != nil || !age.payloadEligible(st, decisions[i].marked, decisions[i].expired) {
+					continue
+				}
+				hashes = append(hashes, c.hash)
+				inspected[c.hash] = st
+				planned = addDiskBytes(planned, uint64(st.Size()))
+				if need > 0 && addDiskBytes(freed, planned) >= need {
+					break
+				}
+			}
+			if len(hashes) != 0 {
+				claims, reclaimErr = q.claimSharedBlobUnlinks(requestCtx, hashes, revision)
+				if reclaimErr != nil {
+					return false
+				}
+			}
+			// Report all sealed claims, even when an unlink fails. Nothing
+			// can touch these paths once the batch returns.
+			defer q.sharedWriter.authority.recordFinishedReclaims(maps.Values(claims))
+		}
 		// The fence stays held from the recheck through every unlink below, so
 		// no publication can commit a new reference to a hash in this batch.
 		for i, c := range batch {
@@ -769,32 +803,24 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 				continue
 			}
 			path := filepath.Join(store.root, "blobs", c.hash)
-			st, err := os.Lstat(path)
-			// Stat inside the publication fence: a publisher/HEAD may have
-			// refreshed mtime since the collection snapshot was taken.
-			eligible := err == nil && age.payloadEligible(st, decisions[i].marked, decisions[i].expired)
-			claim := ""
-			if eligible && q.sharedWriter != nil {
-				claim, reclaimErr = q.claimSharedBlobUnlink(requestCtx, c.hash, revision)
-				if reclaimErr != nil {
-					return false
-				}
-				if claim == "" {
+			var st os.FileInfo
+			var err error
+			var eligible bool
+			if q.sharedWriter != nil {
+				if claims[c.hash] == "" {
 					continue
 				}
+				st, eligible = inspected[c.hash], true
+			} else {
+				// A publisher/HEAD may have refreshed mtime since the snapshot.
+				st, err = os.Lstat(path)
+				eligible = err == nil && age.payloadEligible(st, decisions[i].marked, decisions[i].expired)
 			}
 			if eligible {
 				err = os.Remove(path)
 				if err == nil {
 					reclaimedBlobs++
 					freed = addDiskBytes(freed, uint64(st.Size()))
-				}
-			}
-			if claim != "" {
-				// This receipt names a finished physical action, so the actor
-				// can report it even after handing over the coordinator turn.
-				if reclaimErr = q.finishSharedBlobUnlink(requestCtx, claim); reclaimErr != nil {
-					return false
 				}
 			}
 			if eligible && err == nil || errors.Is(err, os.ErrNotExist) {
@@ -819,6 +845,9 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 			deferred = true
 			break
 		}
+	}
+	if q.sharedWriter != nil && reclaimErr == nil {
+		reclaimErr = q.sharedWriter.flushFinishedReclaims(requestCtx)
 	}
 	left := map[string]bool{}
 	for _, c := range items {

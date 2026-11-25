@@ -858,16 +858,10 @@ func requestDecodeRefused(err error) bool {
 var replaySafePost = map[string]bool{"/api/resolve": true, "/api/files/preflight": true, "/api/extensions": true}
 
 func (c Client) callOnce(ctx context.Context, method, path string, in, out any) error {
-	var handover string
-	if _, mutation := sharedWorkerControl(path); c.SharedQueueProof && mutation {
-		if selected, _ := ctx.Value(sharedControlHandoverKey{}).(*string); selected != nil {
-			handover = *selected
-		}
-	}
-	return c.callOnceShared(ctx, method, path, in, out, handover, "")
+	return c.callOnceShared(ctx, method, path, in, out, "")
 }
 
-func (c Client) callOnceShared(ctx context.Context, method, path string, in, out any, handover, receipt string) error {
+func (c Client) callOnceShared(ctx context.Context, method, path string, in, out any, handover string) error {
 	checkin, workerCheckin := in.(Checkin)
 	workerCheckin = workerCheckin && path == "/api/workers/checkin"
 	if workerCheckin && checkin.Machine.EphemeralRefusal != "" {
@@ -913,14 +907,12 @@ func (c Client) callOnceShared(ctx context.Context, method, path string, in, out
 	}
 	proposal, mutation := sharedWorkerControl(path)
 	proposal, mutation = c.SharedQueueProof && proposal, c.SharedQueueProof && mutation
-	if proposal || mutation || receipt != "" {
+	confirm := c.SharedQueueProof && method == http.MethodPost && path == sharedTurnPath
+	if proposal || mutation || confirm {
 		req.Header.Set(sharedVerifyHeader, sharedControlProtocol)
 	}
 	if handover != "" {
 		req.Header.Set(sharedTurnHeader, handover)
-	}
-	if receipt != "" {
-		req.Header.Set(sharedReceiptHeader, receipt)
 	}
 	hc := c.HTTP
 	if hc == nil {
@@ -969,6 +961,12 @@ func (c Client) callOnceShared(ctx context.Context, method, path string, in, out
 		return e
 	}
 	turn := res.Header.Get(sharedTurnHeader)
+	if confirm {
+		if res.StatusCode != http.StatusNoContent || turn != handover {
+			return queueStopping()
+		}
+		return nil
+	}
 	if proposal || mutation {
 		if number, err := strconv.ParseUint(turn, 10, 63); err != nil || number == 0 {
 			return queueStopping()
@@ -979,22 +977,15 @@ func (c Client) callOnceShared(ctx context.Context, method, path string, in, out
 			if res.StatusCode != http.StatusNoContent {
 				return queueStopping()
 			}
-			if selected, _ := ctx.Value(sharedControlHandoverKey{}).(*string); selected != nil {
-				*selected = turn
-			}
-			return c.callOnceShared(ctx, method, path, in, out, turn, "")
+			return c.callOnceShared(ctx, method, path, in, out, turn)
 		}
 		if turn != handover || res.StatusCode == http.StatusNoContent {
 			return queueStopping()
 		}
 	}
 	if proposal {
-		id := res.Header.Get(sharedReceiptHeader)
-		if id == "" || out == nil {
+		if out == nil {
 			// Discard-only callers do not act on a directive.
-			if out != nil {
-				return queueStopping()
-			}
 			_, err = io.Copy(io.Discard, res.Body)
 			return err
 		}
@@ -1009,14 +1000,10 @@ func (c Client) callOnceShared(ctx context.Context, method, path string, in, out
 		if _, err := io.Copy(io.Discard, res.Body); err != nil {
 			return err
 		}
-		// Exposing the decoded proposal requires a durable acceptance under
-		// its original turn. A delayed proposal cannot spend a newer turn.
-		var accepted sharedControlReceipt
-		if err := c.callOnceShared(ctx, http.MethodPost, sharedTurnPath, nil, &accepted, turn, id); err != nil {
+		// A delayed proposal cannot spend a newer turn. Expose it only
+		// after a fresh read confirms the original turn in PostgreSQL.
+		if err := c.callOnceShared(ctx, http.MethodPost, sharedTurnPath, nil, nil, turn); err != nil {
 			return err
-		}
-		if accepted.ID != id || accepted.Handover != turn {
-			return queueStopping()
 		}
 		dest.Elem().Set(next.Elem())
 		return nil

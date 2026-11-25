@@ -2,80 +2,92 @@ package myce
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"maps"
 )
 
-// Reference publication and the pending/claimed transition use the same
-// ordered queue writer. A successor can cancel an unclaimed intent as part
-// of publishing a keeper. Once sealed, keepers must wait for the exact
-// unlink actor to finish, even if a newer coordinator is already serving.
+// Reference publication and sealing use the same ordered queue writer. A
+// sealed digest waits for the exact unlink actor, including across handover.
 func (q *Queue) reconcileSharedBlobReferences() error {
 	if q.sharedWriter == nil || len(q.s.SharedBlobReclaims) == 0 {
 		return nil
 	}
-	blocked := false
-	q.visitFileReferences(false, nil, func(ref FileRef, flags fileReferenceFlags, _ FileKeepingReference) {
-		if claim, exists := q.s.SharedBlobReclaims[ref.SHA256]; exists && flags&fileKept != 0 {
-			if claim == "" {
-				delete(q.s.SharedBlobReclaims, ref.SHA256)
-			} else {
-				blocked = true
-			}
+	check := func(ref FileRef, flags fileReferenceFlags, _ FileKeepingReference) {
+		if claim, exists := q.s.SharedBlobReclaims[ref.SHA256]; exists && claim == "" && flags&fileKept != 0 {
+			delete(q.s.SharedBlobReclaims, ref.SHA256)
 		}
-	})
-	if blocked {
-		return queueStopping()
+	}
+	for _, claim := range q.s.SharedBlobReclaims {
+		if claim != "" {
+			blocked := false
+			q.visitFileReferences(false, nil, func(ref FileRef, flags fileReferenceFlags, owner FileKeepingReference) {
+				if q.s.SharedBlobReclaims[ref.SHA256] != "" && flags&fileKept != 0 {
+					blocked = true
+				}
+				check(ref, flags, owner)
+			})
+			if blocked {
+				return queueStopping()
+			}
+			return nil
+		}
+	}
+	// Older proofs could leave unsealed intents. They authorize no unlink.
+	// Ordinary writes need only look at changed jobs and catalog references
+	// to cancel them. The collector also discards leftovers.
+	q.visitDurableFileReferences(false, nil, check, q.touchedJobs())
+	if q.records.editingInputClaims {
+		q.visitFileInputClaimKeepers(func(claim FileInputClaim, owner FileKeepingReference) {
+			check(claim.File, fileKept, owner)
+		})
 	}
 	return nil
 }
 
-// The caller holds the process-local lifecycle fence and has just checked
-// the file age outside q.mu. No path can be unlinked until both writes commit.
 func (q *Queue) claimSharedBlobUnlink(ctx context.Context, hash string, revision uint64) (string, error) {
-	eligible := false
+	claims, err := q.claimSharedBlobUnlinks(ctx, []string{hash}, revision)
+	return claims[hash], err
+}
+
+// Holding the local lifecycle fence and the observed revision through the
+// writer decision lets the batch seal directly. A takeover before this commit
+// prevents every unlink; a takeover afterwards observes all the sealed claims.
+func (q *Queue) claimSharedBlobUnlinks(ctx context.Context, hashes []string, revision uint64) (map[string]string, error) {
+	claims := make(map[string]string, len(hashes))
 	err := q.updateRequest(ctx, func() error {
-		if _, exists := q.s.SharedBlobReclaims[hash]; !exists && q.fileReferenceRevision == revision {
-			if q.s.SharedBlobReclaims == nil {
-				q.s.SharedBlobReclaims = map[string]string{}
+		if q.fileReferenceRevision != revision {
+			return nil
+		}
+		if q.s.SharedBlobReclaims == nil {
+			q.s.SharedBlobReclaims = map[string]string{}
+		}
+		for _, hash := range hashes {
+			if q.s.SharedBlobReclaims[hash] == "" && claims[hash] == "" {
+				claim := ID()
+				q.s.SharedBlobReclaims[hash] = claim
+				claims[hash] = claim
 			}
-			q.s.SharedBlobReclaims[hash] = ""
-		}
-		claim, exists := q.s.SharedBlobReclaims[hash]
-		eligible = exists && claim == ""
-		return nil
-	}, nil)
-	if err != nil || !eligible {
-		return "", err
-	}
-	claim := ID()
-	claimed := false
-	err = q.updateRequest(ctx, func() error {
-		if previous, exists := q.s.SharedBlobReclaims[hash]; exists && previous == "" {
-			q.s.SharedBlobReclaims[hash] = claim
-			claimed = true
 		}
 		return nil
 	}, nil)
-	if err != nil && claimed {
-		// An ambiguous seal can have committed even though this call will
-		// never unlink. The exact actor can safely release that claim.
-		err = errors.Join(err, q.finishSharedBlobUnlink(ctx, claim))
+	if err != nil {
+		// A seal may have committed despite the error. No unlink will run,
+		// so any of these exact claims can now report completion.
+		q.sharedWriter.authority.recordFinishedReclaims(maps.Values(claims))
+		return nil, err
 	}
-	if err != nil || !claimed {
-		return "", err
-	}
-	return claim, nil
+	return claims, nil
 }
 
 func (q *Queue) finishSharedBlobUnlink(ctx context.Context, claim string) error {
 	w := q.sharedWriter
+	w.authority.recordFinishedReclaims(func(yield func(string) bool) { yield(claim) })
+	return w.flushFinishedReclaims(ctx)
+}
+
+func (w *sharedQueueWriter) flushFinishedReclaims(ctx context.Context) error {
 	call, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.timeout)
 	defer cancel()
-	_, err := w.authority.db.ExecContext(call, `INSERT INTO myce_reclaim_finished_v1(claim)
-		VALUES($1) ON CONFLICT DO NOTHING`, claim)
-	return err
+	return w.authority.flushFinishedReclaims(call)
 }
 
 func (q *Queue) clearFinishedSharedReclaims(ctx context.Context) error {
@@ -83,31 +95,54 @@ func (q *Queue) clearFinishedSharedReclaims(ctx context.Context) error {
 	if w == nil {
 		return nil
 	}
+	if err := w.flushFinishedReclaims(ctx); err != nil {
+		return err
+	}
 	q.mu.RLock()
 	claims := maps.Clone(q.s.SharedBlobReclaims)
 	q.mu.RUnlock()
-	finished := make(map[string]string)
-	for hash, claim := range claims {
+	if len(claims) == 0 {
+		return nil
+	}
+	var sealed []string
+	unsealed := false
+	for _, claim := range claims {
 		if claim == "" {
-			continue
+			unsealed = true
+		} else {
+			sealed = append(sealed, claim)
 		}
+	}
+	done := make(map[string]bool, len(sealed))
+	if len(sealed) != 0 {
 		call, cancel := context.WithTimeout(ctx, w.timeout)
-		var done string
-		err := w.authority.db.QueryRowContext(call,
-			"SELECT claim FROM myce_reclaim_finished_v1 WHERE claim=$1", claim).Scan(&done)
+		rows, err := w.authority.db.QueryContext(call, "SELECT claim FROM myce_reclaim_finished_v1 WHERE claim=ANY($1)", sealed)
+		if err != nil {
+			cancel()
+			return err
+		}
+		for rows.Next() {
+			var claim string
+			if err := rows.Scan(&claim); err != nil {
+				rows.Close()
+				cancel()
+				return err
+			}
+			done[claim] = true
+		}
+		err = rows.Err()
+		rows.Close()
 		cancel()
-		if err == nil {
-			finished[hash] = claim
-		} else if !errors.Is(err, sql.ErrNoRows) {
+		if err != nil {
 			return err
 		}
 	}
-	if len(finished) == 0 {
+	if !unsealed && len(done) == 0 {
 		return nil
 	}
 	return q.updateRequest(ctx, func() error {
-		for hash, claim := range finished {
-			if q.s.SharedBlobReclaims[hash] == claim {
+		for hash, observed := range claims {
+			if current, exists := q.s.SharedBlobReclaims[hash]; exists && current == observed && (current == "" || done[current]) {
 				delete(q.s.SharedBlobReclaims, hash)
 			}
 		}

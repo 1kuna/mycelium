@@ -529,9 +529,11 @@ func openQueue(path, root string, clock Clock, shared *sharedQueueWriter, lock *
 		db.Close()
 		return nil, err
 	}
-	if err = q.ConfigureUploadSpool("", DefaultUploadSpoolBytes); err != nil {
-		db.Close()
-		return nil, err
+	if shared == nil || shared.spool == nil {
+		if err = q.ConfigureUploadSpool("", DefaultUploadSpoolBytes); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	q.traceStartup("load_defaults")
 	q.usageReader, err = openUsageReader(path)
@@ -641,11 +643,16 @@ func (q *Queue) checkpointsAvailable() bool { return q.simulation || q.nasAvaila
 
 // Caller holds q.mu. A plain job can use authority during a file-store
 // outage. Jobs depending on bulk custody wait before the first payload start.
-func (q *Queue) sharedFileHold(j *Job) bool {
-	return q.sharedWriter != nil && (q.files == nil || q.sharedWriter.storageFault.Load()) &&
-		(needsCheckpoint(j) || j.Spec.ephemeral() || j.Spec.OutputDelivery == asyncNAS ||
-			len(j.Spec.Files)+len(j.Spec.SharedInputs)+len(j.Spec.ModelSnapshots) != 0 || j.Spec.extensionJob() ||
-			j.storedFileResults() && len(j.Spec.Outputs) != 0)
+func (q *Queue) sharedFilesReady() bool {
+	return q.sharedWriter == nil || q.files != nil && !q.sharedWriter.storageFault.Load()
+}
+
+func (q *Queue) sharedFileHold(j *Job) bool { return !q.sharedFilesReady() && jobNeedsSharedFiles(j) }
+
+func jobNeedsSharedFiles(j *Job) bool {
+	return needsCheckpoint(j) || j.Spec.ephemeral() || j.Spec.OutputDelivery == asyncNAS ||
+		len(j.Spec.Files)+len(j.Spec.SharedInputs)+len(j.Spec.ModelSnapshots) != 0 || j.Spec.extensionJob() ||
+		j.storedFileResults() && len(j.Spec.Outputs) != 0 || jobHasFrozenFiles(j)
 }
 
 func (q *Queue) checkpointReady(j *Job, m *Machine) bool {
@@ -1002,18 +1009,23 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 	// Own all client maps/slices before the lock and across verification.
 	s = cloneJob(&Job{Spec: s}).Spec
 	unlockRequest := requestLock(ctx, submissionMutex{&q.mu})
-	store := q.files
+	store, ready := q.files, q.sharedFilesReady()
 	catalog := q.environments
 	environmentRevision := q.environmentRevision
 	replay := s.SubmissionKey != "" && q.s.Submissions[submissionDigest(s.Project, s.SubmissionKey)] != nil
-	if len(submissionFiles(s)) > 0 && !replay && q.submitVerificationSlot == nil {
+	files := submissionFiles(s)
+	if len(files) > 0 && !replay && ready && q.submitVerificationSlot == nil {
 		q.submitVerificationSlot = make(chan struct{}, 1)
 	}
 	slot := q.submitVerificationSlot
 	unlockRequest()
 	var verificationErr error
-	if len(submissionFiles(s)) > 0 && !replay {
-		verificationErr = verifySubmissionInputs(ctx, store, submissionFiles(s), slot)
+	if len(files) > 0 && !replay {
+		if ready {
+			verificationErr = verifySubmissionInputs(ctx, store, files, slot)
+		} else {
+			verificationErr = sharedFileStoreUnready()
+		}
 	}
 	// Use the same execution adapter as the transaction, on an owned copy.
 	// Validation errors are handled below in their existing order; key replay
@@ -1039,6 +1051,7 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 	var frozenLock *EnvironmentLock
 	var sidecarRecipes map[string]map[string]EnvironmentRecipe
 	var recipeErr error
+	requiresStore := len(files) > 0 || s.OutputDelivery == asyncNAS
 	var discovery *CommandDiscovery
 	var entryCoverage *EntryCoverage
 	var lockTargets []ExecutionTarget
@@ -1060,7 +1073,11 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 			entryCoverage = deriveEntryCoverage(prepared, recipes, discovery)
 			lockTargets, lockTargetsKnown = frozenCommandLockCoverage(prepared, recipes, sidecarRecipes)
 		}
-		if recipeErr == nil && !q.simulation {
+		requiresStore = requiresStore || recipesNeedFreeze(recipes)
+		for _, side := range sidecarRecipes {
+			requiresStore = requiresStore || recipesNeedFreeze(side)
+		}
+		if recipeErr == nil && !q.simulation && (ready || !requiresStore) {
 			verified := map[FileRef]bool{}
 			recipeErr = store.freezeRecipes(recipes, verified, ctx)
 			for _, side := range sidecarRecipes {
@@ -1074,7 +1091,7 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 	var resultCapacity FileStoreStatus
 	var resultPayloads map[string]storedPayload
 	var resultView *fileCapacitySnapshot
-	if s.OutputDelivery == asyncNAS && !replay && store != nil {
+	if s.OutputDelivery == asyncNAS && !replay && ready && store != nil {
 		resultView = store.snapshotCapacity(ctx)
 		defer resultView.release()
 	}
@@ -1113,6 +1130,9 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 				return typed
 			}
 			return reject("job_files_invalid", verificationErr)
+		}
+		if requiresStore && (!ready || !q.sharedFilesReady()) {
+			return sharedFileStoreUnready()
 		}
 		if q.files != store || q.environmentRevision != environmentRevision {
 			return ErrStale
@@ -1347,8 +1367,10 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 			return &out, errors.Join(err, healthErr)
 		}
 	}
-	if err == nil {
-		err = store.hydrateJob(&out) // Submit holds the publication fence through delivery.
+	if err == nil && (q.sharedWriter == nil || ready && !q.sharedWriter.storageFault.Load()) {
+		// Submit holds the publication fence through delivery. A replay
+		// can return its committed identity during a shared-store outage.
+		err = store.hydrateJob(&out)
 	}
 	return &out, err
 }
@@ -2106,6 +2128,19 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			if hold := workerMemoryHold(&m); hold != nil {
 				m.AdmissionReason = hold.Kind + ": " + hold.Reason
 			}
+			boundPreparationStops := func() {
+				for _, l := range q.s.PreparationPlans {
+					if l.Machine == m.ID && l.Session == m.Session && l.StopAt != nil {
+						boundStop(&reply.PreparationStopAt, *l.StopAt)
+					}
+				}
+			}
+			if !q.sharedFilesReady() {
+				boundPreparationStops()
+				deferSharedFileOffers(&reply)
+				q.cancelUnofferedPreparations(&m, reply)
+				return
+			}
 			if c.Recovering || q.workerSuspect(&m, q.clock.Now()) || workerMemoryHold(&m) != nil {
 				// Preserve retained engines and deliver their cleanup deadlines.
 				// A retention-only plan cannot start a missing engine: the worker
@@ -2122,11 +2157,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 				q.cancelUnofferedPreparations(&m, reply)
 				return
 			}
-			for _, l := range q.s.PreparationPlans {
-				if l.Machine == m.ID && l.Session == m.Session && l.StopAt != nil {
-					boundStop(&reply.PreparationStopAt, *l.StopAt)
-				}
-			}
+			boundPreparationStops()
 			if len(reply.EnvironmentPlan) == 0 {
 				reply.EnvironmentPlan = q.checkinEnvironmentPlan(&m)
 			}
@@ -3234,6 +3265,12 @@ func (q *Queue) startedWithCustody(ctx context.Context, request workerStartedReq
 			return nil
 		}
 		m := q.s.Machines[r.Machine]
+		if q.sharedWorkerAwaitingCheckin(m, r.Session) {
+			return sharedQueueControlRetry()
+		}
+		if j.StartedAt == nil && q.sharedFileHold(j) {
+			return sharedFileStoreUnready()
+		}
 		q.refreshHostMemory()
 		predicate := "host_launch"
 		if q.assignedLaunchAllowed(m, r.Session, j) {

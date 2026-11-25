@@ -877,7 +877,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 		if r.URL.RawQuery != "" {
 			endpoint += "?" + r.URL.RawQuery
 		}
-		spool, bodySize, e = a.Queue.uploadSpool.request(r.Context(), r.Body, 0, r.ContentLength)
+		spool, bodySize, e = a.Queue.modelUploadSpool().request(r.Context(), r.Body, 0, r.ContentLength)
 		if e != nil {
 			status := 400
 			if errors.Is(e, errModelRequestTooLarge) {

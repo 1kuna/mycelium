@@ -163,3 +163,61 @@ func TestSharedQueuePostgresReclaimClaimSurvivesHandover(t *testing.T) {
 		})
 	}
 }
+
+func TestSharedQueuePostgresReclaimBatchesAndRetriesFinishedRows(t *testing.T) {
+	pg := startProofPostgres(t)
+	a := pg.authority(t)
+	clock := proofClock()
+	q, _ := proofOpenReclaimQueue(t, a, t.TempDir(), "reclaimer", clock)
+	at := clock.Now().Add(-2 * DefaultFileRetention)
+	refs := FileManifest{}
+	bodies := map[string][]byte{}
+	markers := map[string]time.Time{}
+	for _, name := range []string{"first", "second", "third"} {
+		body := []byte("collect " + name)
+		ref := FileRef{SHA256: fmt.Sprintf("%x", sha256.Sum256(body)), SizeBytes: int64(len(body))}
+		refs[name], bodies[name], markers[ref.SHA256] = ref, body, at
+		path := q.files.blob(ref)
+		if err := os.WriteFile(path, body, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := q.update(func() error { q.s.JobInputUploads = markers; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.ExecContext(t.Context(), `ALTER TABLE myce_reclaim_finished_v1
+		ADD CONSTRAINT fixture_refuse_finished CHECK (false) NOT VALID`); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.reclaimPublishedFilesContext(t.Context()); err == nil {
+		t.Fatal("reclaim did not encounter the failed finished-row insert")
+	}
+	if _, err := a.db.ExecContext(t.Context(), `ALTER TABLE myce_reclaim_finished_v1 DROP CONSTRAINT fixture_refuse_finished`); err != nil {
+		t.Fatal(err)
+	}
+	for name, ref := range refs {
+		path := q.files.blob(ref)
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s was not unlinked in the batch: %v", name, err)
+		}
+		if err := os.WriteFile(path, bodies[name], 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := proofSpec("new-keeper")
+	s.Files = refs
+	_, err := q.Submit(s)
+	proofUnavailable(t, err)
+	if err := q.reclaimPublishedFilesContext(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if count := len(q.s.SharedBlobReclaims); count != 0 {
+		t.Errorf("next reclaim pass left %d sealed claims", count)
+	}
+	if _, err := q.Submit(s); err != nil {
+		t.Fatalf("verified republished bytes remained blocked: %v", err)
+	}
+}

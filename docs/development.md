@@ -101,27 +101,33 @@ uses `myce join --shared-queue-proof` with its local queue endpoint, the same
 disposable token and its own `--state-dir`. The worker's normal memory
 containment requirements apply. The active process can hand off
 on SIGTERM. On a crash, the others wait for its PostgreSQL turn to expire.
-Known endpoints use the same test token. A follower routes live requests to
-the current coordinator. During an outage an authenticated
+A follower routes live requests to the current coordinator. The Stage 2
+worker uses its local member. Reconnecting external clients across multiple
+known authenticated endpoints is part of the Stage 3 cutover rehearsal. During an outage an authenticated
 `GET /api/shared-queue/status?job=JOB_ID` returns the local SQLite sequence and
 the retained job's lifecycle fields, with `last_known: true`. An absent job in that
 response has unknown current status. Normal job and wait endpoints require
 authority.
 
-Worker check-ins and stop polls issue proposals. A worker accepts a proposal
-only after recording its receipt under the issuing handover. Launch and
-Started commit under the proposed handover and check exact custody in the
-same decision. An old verification response carries no authority. A receipt
-for an already committed decision remains evidence of that decision.
+Worker check-ins and stop polls issue proposals. Before using a proposal,
+the worker checks the issuing handover with a fresh PostgreSQL read. The
+turn must still be ready and unexpired. Launch and Started commit under the
+proposed handover and check exact custody in the same decision. If the turn
+changes, the worker probes again with the same attempt and session.
 
 Coordinator startup and renewal are independent of file-store setup and
-retained-bundle verification. An unavailable backing holds work that needs
-it. Published-blob collection commits a cancellable intent before sealing
-an unlink claim. Publishing a keeper cancels a pending intent. Once sealed,
-the digest stays reserved until the unlink actor reports that it finished,
-including after handover. A crash with an unreported unlink holds only
-that digest. Recovery for ambiguous unlink and interrupted uploads remains
-cutover work.
+retained-bundle verification. When storage is unavailable, the queue holds
+file-dependent jobs, defers preparation and model plans, and returns a
+retryable refusal for new submissions that need file verification or
+publication. Plain work can continue. The local upload spool stays with its
+member across coordinator turns, so retired handlers can drain independently.
+
+Published-blob collection seals a batch of unlink claims in one ordered
+decision. Each sealed digest stays reserved until the unlink actor reports
+completion, including after handover. A live actor retries finished
+reports until PostgreSQL accepts them. A crash with an unreported unlink
+holds that digest for recovery. Recovery for ambiguous unlink and
+interrupted uploads remains cutover work.
 
 PostgreSQL stores an ordered versioned row log. Each replica commits the cursor
 with the applied rows. The proof starts from sequence zero or an already bound

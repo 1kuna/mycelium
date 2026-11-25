@@ -212,13 +212,77 @@ func (s *FileStore) hydrateJob(j *Job) error {
 	}
 	return nil
 }
+func recipesNeedFreeze(recipes map[string]EnvironmentRecipe) bool {
+	for _, r := range recipes {
+		if len(r.Files) != 0 || r.FilesRef != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func jobHasFrozenFiles(j *Job) bool {
+	if recipesNeedFreeze(j.EnvironmentRecipes) {
+		return true
+	}
+	for _, r := range j.SidecarEnvironmentRecipes {
+		if recipesNeedFreeze(r) {
+			return true
+		}
+	}
+	for _, e := range j.Extensions {
+		if e.FilesRef != nil {
+			return true
+		}
+		for _, v := range e.Variants {
+			if recipesNeedFreeze(v.Environments) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func replyHasFrozenFiles(reply *Reply) bool {
+	for _, r := range reply.EnvironmentPlan {
+		if r.FilesRef != nil {
+			return true
+		}
+	}
+	for _, d := range reply.Attempts {
+		if d.Job != nil && jobHasFrozenFiles(d.Job) {
+			return true
+		}
+	}
+	for _, s := range reply.ModelPlan {
+		if s.EnvironmentRecipe != nil && s.EnvironmentRecipe.FilesRef != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func deferSharedFileOffers(reply *Reply) {
+	reply.FilePlansDeferred = true
+	reply.EnvironmentPlan, reply.ModelPlan, reply.ExtensionQualificationPlan = nil, nil, nil
+	attempts := reply.Attempts[:0]
+	for _, d := range reply.Attempts {
+		if d.Job == nil || !jobNeedsSharedFiles(d.Job) {
+			attempts = append(attempts, d)
+		}
+	}
+	reply.Attempts = attempts
+}
+
 func (q *Queue) hydrateReply(reply *Reply, requestContexts ...context.Context) error {
 	requestCtx := requestContext(requestContexts)
 
-	q.fileLifecycle.RLock()
-	defer q.fileLifecycle.RUnlock()
+	if q.sharedWriter == nil {
+		q.fileLifecycle.RLock()
+		defer q.fileLifecycle.RUnlock()
+	}
 	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
-	store := q.files
+	store, ready := q.files, q.sharedFilesReady()
 	// Plans can share maps or recipe pointers with frozen state. Own the whole
 	// response before loading any bytes; assignments already carry small refs.
 	data, err := json.Marshal(reply)
@@ -231,6 +295,29 @@ func (q *Queue) hydrateReply(reply *Reply, requestContexts ...context.Context) e
 		return err
 	}
 	*reply = out
+	if q.sharedWriter != nil {
+		if !ready {
+			deferSharedFileOffers(reply)
+			return nil
+		}
+		if !replyHasFrozenFiles(reply) {
+			return nil
+		}
+		// A blocked collector cannot stall control. Undelivered offers keep
+		// their exact custody and can be offered again on a later check-in.
+		if !q.fileLifecycle.TryRLock() {
+			deferSharedFileOffers(reply)
+			return nil
+		}
+		defer q.fileLifecycle.RUnlock()
+		unlock := requestReadLock(requestCtx, &q.mu)
+		store, ready = q.files, q.sharedFilesReady()
+		unlock()
+		if !ready {
+			deferSharedFileOffers(reply)
+			return nil
+		}
+	}
 	var failedJobs []*Job
 	var failedPlans []HostLaunch
 	plans := reply.EnvironmentPlan[:0]

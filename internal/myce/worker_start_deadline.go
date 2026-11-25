@@ -52,12 +52,6 @@ func (s *workerControlLatency) observe(path string, elapsed time.Duration) time.
 func (w Worker) controlHandshake(path string, in, out any) (time.Time, error) {
 	ctx := w.launchContext()
 	c := w.Client
-	if c.SharedQueueProof {
-		// Retry a lost reply with the same proposed handover. A successor
-		// cannot silently authorize a launch the worker queued for an old turn.
-		var handover string
-		ctx = context.WithValue(ctx, sharedControlHandoverKey{}, &handover)
-	}
 	if w.Clock != nil {
 		c.Clock = w.Clock
 	}
@@ -75,6 +69,8 @@ func (w Worker) controlHandshake(path string, in, out any) (time.Time, error) {
 		}
 		started := c.clock().Now()
 		var body json.RawMessage
+		// In shared mode each retry probes a fresh turn. The mutation
+		// remains exact-custody and idempotent if its prior reply was lost.
 		err := c.Call(ctx, "POST", path, in, &body)
 		measured := latency.observe(path, c.clock().Now().Sub(started))
 		if ctx.Err() != nil {

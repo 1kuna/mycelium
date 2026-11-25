@@ -247,6 +247,7 @@ type sharedQueueWriter struct {
 	sequence     int64 // Exclusive stage 1 writer turn.
 	disabled     atomic.Bool
 	storageFault atomic.Bool
+	spool        *uploadSpool
 }
 
 func (w *sharedQueueWriter) apply(ctx context.Context, db *sql.DB, batch *queueWriteBatch, observe func(string, []any)) error {

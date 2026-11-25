@@ -41,8 +41,9 @@ type sharedQueueMember struct {
 	sequence  int64 // Member loop only.
 	timeout   time.Duration
 
-	fileSetup sync.Mutex // One outstanding setup even if the mount hangs across turns.
-	mu        sync.Mutex // Protects local handler admission, never held for I/O.
+	spool     *uploadSpool // Owned by the member across all coordinator turns.
+	fileSetup sync.Mutex   // One outstanding setup even if the mount hangs across turns.
+	mu        sync.Mutex   // Protects local handler admission, never held for I/O.
 	leader    *sharedQueueLeader
 }
 
@@ -101,6 +102,11 @@ func ServeSharedQueueProof(ctx context.Context, listener net.Listener, cfg Share
 		cfg: cfg, authority: authority, replica: replica, lock: lock, owner: ID(),
 		endpoint: "http://" + addr.String(), timeout: cfg.lease / 3,
 	}
+	defer func() {
+		if m.spool != nil {
+			_ = m.spool.lock.Close()
+		}
+	}()
 	if err := m.bindReplica(ctx); err != nil {
 		return err
 	}
@@ -109,6 +115,11 @@ func ServeSharedQueueProof(ctx context.Context, listener net.Listener, cfg Share
 	go func() { serverDone <- server.Serve(listener) }()
 	loopCtx, stopLoop := context.WithCancel(ctx)
 	loopDone := make(chan struct{})
+	reclaimsDone := make(chan struct{})
+	go func() {
+		defer close(reclaimsDone)
+		m.retryFinishedReclaims(loopCtx)
+	}()
 	go func() {
 		defer close(loopDone)
 		m.run(loopCtx)
@@ -121,6 +132,7 @@ func ServeSharedQueueProof(ctx context.Context, listener net.Listener, cfg Share
 		err = errors.Join(server.Close(), <-serverDone)
 	}
 	<-loopDone
+	<-reclaimsDone
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
@@ -166,6 +178,21 @@ func (m *sharedQueueMember) bindReplica(ctx context.Context) error {
 	return tx.Commit()
 }
 
+func (m *sharedQueueMember) retryFinishedReclaims(ctx context.Context) {
+	tick := time.NewTicker(m.cfg.interval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			call, cancel := context.WithTimeout(ctx, m.timeout)
+			_ = m.authority.flushFinishedReclaims(call)
+			cancel()
+		}
+	}
+}
+
 func (m *sharedQueueMember) run(ctx context.Context) {
 	tick := time.NewTicker(m.cfg.interval)
 	defer tick.Stop()
@@ -205,8 +232,8 @@ func (m *sharedQueueMember) step(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	if err := m.promote(ctx, t); err != nil {
-		log.Print("shared queue promotion failed")
+	if failure := m.promote(ctx, t); failure != "" {
+		log.Printf("event=shared_queue_promotion_failed reason=%s", failure)
 		m.release(t)
 	}
 }
@@ -235,23 +262,53 @@ func (m *sharedQueueMember) pull(ctx context.Context, head int64) error {
 	return nil
 }
 
-func (m *sharedQueueMember) promote(ctx context.Context, turn sharedQueueTurn) error {
+type sharedPromotionFailure string
+
+const (
+	promotionReplay sharedPromotionFailure = "replica_replay"
+	promotionHead   sharedPromotionFailure = "replica_sequence_mismatch"
+	promotionSpool  sharedPromotionFailure = "local_upload_spool"
+	promotionQueue  sharedPromotionFailure = "local_queue_startup"
+	promotionTurn   sharedPromotionFailure = "coordinator_turn"
+	promotionDB     sharedPromotionFailure = "postgresql_renewal"
+)
+
+func (m *sharedQueueMember) promote(ctx context.Context, turn sharedQueueTurn) sharedPromotionFailure {
 	if err := m.pull(ctx, turn.head); err != nil {
-		return err
+		if errors.Is(err, errSharedHead) {
+			return promotionHead
+		}
+		return promotionReplay
 	}
-	writer := &sharedQueueWriter{authority: m.authority, turn: turn, sequence: turn.head, timeout: m.timeout}
+	if m.spool == nil {
+		spool := &uploadSpool{defaultDir: m.cfg.Database + ".uploads"}
+		if err := spool.configure("", DefaultUploadSpoolBytes); err != nil {
+			return promotionSpool
+		}
+		m.spool = spool
+	}
+	writer := &sharedQueueWriter{authority: m.authority, turn: turn, sequence: turn.head, timeout: m.timeout, spool: m.spool}
 	q, err := openQueue(m.cfg.Database, m.cfg.Checkpoints, m.cfg.Clock, writer, m.lock, WithFileStore(m.cfg.FileStore, 100<<30, true))
 	if err != nil {
 		// Startup may already have committed a projection before failing.
 		// Reload the atomic SQLite cursor before trying another promotion.
 		m.readCursor()
-		return err
+		if errors.Is(err, errSharedTurn) {
+			return promotionTurn
+		}
+		if errors.Is(err, errSharedHead) {
+			return promotionHead
+		}
+		return promotionQueue
 	}
 	if err := m.renew(ctx, turn, m.cfg.lease, true); err != nil {
 		writer.disabled.Store(true)
 		_ = q.Close()
 		m.readCursor()
-		return err
+		if errors.Is(err, errSharedTurn) {
+			return promotionTurn
+		}
+		return promotionDB
 	}
 	tickCtx, stop := context.WithCancel(ctx)
 	l := &sharedQueueLeader{writer: writer, queue: q, api: API{Queue: q, Token: m.cfg.Token}.Handler(), stopTick: stop, tickDone: make(chan struct{})}
@@ -272,7 +329,7 @@ func (m *sharedQueueMember) promote(ctx context.Context, turn sharedQueueTurn) e
 			}
 		}
 	}()
-	return nil
+	return ""
 }
 
 func (m *sharedQueueMember) prepareStorage(ctx context.Context, q *Queue) {
@@ -389,17 +446,19 @@ const (
 	sharedReplicaPath     = "/api/shared-queue/status"
 	sharedTurnHeader      = "X-Myce-Shared-Turn"
 	sharedVerifyHeader    = "X-Myce-Shared-Turn-Protocol"
-	sharedReceiptHeader   = "X-Myce-Shared-Control-Receipt"
-	sharedControlProtocol = "2"
+	sharedControlProtocol = "3"
 	sharedProxyHeader     = "X-Myce-Shared-Forward"
 )
 
-type sharedControlReceipt struct {
-	ID       string `json:"receipt"`
-	Handover string `json:"handover"`
+func sharedQueueControlRetry() error {
+	const code = "shared_queue_control_retry"
+	return &HTTPError{Status: http.StatusServiceUnavailable, Code: code, Message: rejectionMessages[code]}
 }
 
-type sharedControlHandoverKey struct{}
+func sharedFileStoreUnready() error {
+	const code = "shared_file_store_unready"
+	return &HTTPError{Status: http.StatusServiceUnavailable, Code: code, Message: rejectionMessages[code]}
+}
 
 // A check-in or event poll proposes directives. Launch, start and yield
 // authorize an effect only in the second request, with the proposed turn.
@@ -444,12 +503,18 @@ func (m *sharedQueueMember) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	number := strconv.FormatInt(turn.number, 10)
 	want := r.Header.Get(sharedTurnHeader)
-	if want != "" && want != number && mutation {
-		respond(w, nil, ErrStale)
+	if want != "" && want != number || confirm && want == "" {
+		// A changed turn is transient. The successor still has to check the
+		// exact custody when a worker retries a launch or start under its turn.
+		respond(w, nil, sharedQueueControlRetry())
 		return
 	}
-	if want != "" && want != number || confirm && want == "" {
-		respond(w, nil, queueStopping())
+	if confirm {
+		// The authoritative read above checks readiness and expiry against
+		// database time. Handover only increases, so the same number also
+		// proves that no takeover committed after the proposal was issued.
+		w.Header().Set(sharedTurnHeader, number)
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	if turn.owner != m.owner {
@@ -479,22 +544,6 @@ func (m *sharedQueueMember) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, queueStopping())
 		return
 	}
-	if confirm {
-		receipt := r.Header.Get(sharedReceiptHeader)
-		if len(receipt) != 32 {
-			respond(w, nil, queueStopping())
-			return
-		}
-		call, cancel := context.WithTimeout(r.Context(), m.timeout)
-		err := m.authority.acceptControl(call, turn, receipt)
-		cancel()
-		if err != nil {
-			respond(w, nil, queueStopping())
-			return
-		}
-		respond(w, sharedControlReceipt{ID: receipt, Handover: number}, nil)
-		return
-	}
 	if proposal || mutation {
 		w.Header().Set(sharedTurnHeader, number)
 	}
@@ -503,15 +552,14 @@ func (m *sharedQueueMember) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if proposal {
-		w.Header().Set(sharedReceiptHeader, ID())
-	}
-	if strings.HasPrefix(r.URL.Path, "/api/files/") && r.URL.Path != "/api/files/config" {
+	files := strings.HasPrefix(r.URL.Path, "/api/files/") && r.URL.Path != "/api/files/config"
+	extensions := r.URL.Path == "/api/extensions" && r.Method == http.MethodPost || strings.HasPrefix(r.URL.Path, "/api/extensions/")
+	if files || extensions {
 		l.queue.mu.RLock()
-		ready := l.queue.files != nil && !l.writer.storageFault.Load()
+		ready := l.queue.sharedFilesReady()
 		l.queue.mu.RUnlock()
 		if !ready {
-			respond(w, nil, queueStopping())
+			respond(w, nil, sharedFileStoreUnready())
 			return
 		}
 	}

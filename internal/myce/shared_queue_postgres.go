@@ -4,8 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"iter"
+	"maps"
 	"net"
 	"path/filepath"
+	"slices"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -31,6 +35,40 @@ type sharedQueueAuthority struct {
 	identity string
 	// A fixture can discard the response after PostgreSQL acknowledges COMMIT.
 	commit func(*sql.Tx) error
+
+	// A finished unlink can be acknowledged after its writer retires.
+	reclaimMu        sync.Mutex
+	finishedReclaims map[string]bool
+}
+
+func (a *sharedQueueAuthority) recordFinishedReclaims(claims iter.Seq[string]) {
+	a.reclaimMu.Lock()
+	defer a.reclaimMu.Unlock()
+	for claim := range claims {
+		if a.finishedReclaims == nil {
+			a.finishedReclaims = make(map[string]bool)
+		}
+		a.finishedReclaims[claim] = true
+	}
+}
+
+func (a *sharedQueueAuthority) flushFinishedReclaims(ctx context.Context) error {
+	a.reclaimMu.Lock()
+	claims := slices.Collect(maps.Keys(a.finishedReclaims))
+	a.reclaimMu.Unlock()
+	if len(claims) == 0 {
+		return nil
+	}
+	_, err := a.db.ExecContext(ctx, `INSERT INTO myce_reclaim_finished_v1(claim)
+		SELECT unnest($1::text[]) ON CONFLICT DO NOTHING`, claims)
+	if err == nil {
+		a.reclaimMu.Lock()
+		for _, claim := range claims {
+			delete(a.finishedReclaims, claim)
+		}
+		a.reclaimMu.Unlock()
+	}
+	return err
 }
 
 const sharedQueuePostgresSchema = `
@@ -52,10 +90,6 @@ CREATE TABLE IF NOT EXISTS myce_changes_v1 (
 );
 CREATE TABLE IF NOT EXISTS myce_reclaim_finished_v1 (
 	claim text PRIMARY KEY
-);
-CREATE TABLE IF NOT EXISTS myce_control_receipts_v1 (
-	receipt text PRIMARY KEY,
-	handover bigint NOT NULL
 );
 `
 
@@ -197,28 +231,6 @@ func (a *sharedQueueAuthority) renew(ctx context.Context, want sharedQueueTurn, 
 		return errSharedTurn
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE myce_coordinator_v1 SET expires=$1,ready=$2 WHERE id=1`, now.Add(lease), ready); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-// Accept one issued proposal under the same lock used for handover. Its
-// durable receipt is the linearization point, even if the reply is delayed.
-func (a *sharedQueueAuthority) acceptControl(ctx context.Context, want sharedQueueTurn, receipt string) error {
-	tx, err := a.begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	t, now, err := lockedSharedTurn(ctx, tx)
-	if err != nil {
-		return err
-	}
-	if !sameSharedTurn(t, want) || !t.ready || !t.expires.After(now) {
-		return errSharedTurn
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO myce_control_receipts_v1(receipt,handover)
-		VALUES($1,$2) ON CONFLICT DO NOTHING`, receipt, t.number); err != nil {
 		return err
 	}
 	return tx.Commit()
