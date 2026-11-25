@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -95,7 +96,100 @@ func TestMemoryPoolChargeAboveAllowance(t *testing.T) {
 	}
 }
 
-func TestMemoryPoolUnifiedAcceleratorSharesWithoutPrior(t *testing.T) {
+func TestMemoryPoolUnifiedAcceleratorShares(t *testing.T) {
+	t.Run("without prior", testMemoryPoolUnifiedAcceleratorSharesWithoutPrior)
+	const peak = 20.622669219970703
+	const peerPeak = 24.35720443725586
+	const ratio = 46.95225911511311 / peak
+	const coldCharge = 38.30582046508789
+	for _, tc := range []struct {
+		name              string
+		lower, familyHigh float64
+		coldCharge        float64
+		wantCharge        float64
+		peerHint          float64
+		wantPeer          bool
+	}{
+		{name: "one clean run", coldCharge: coldCharge, wantCharge: coldCharge, wantPeer: true},
+		{name: "larger comparable peak", coldCharge: coldCharge, familyHigh: 44, wantCharge: 44, wantPeer: true},
+		{name: "measured shortage", coldCharge: coldCharge, lower: 27, wantCharge: 54},
+		{name: "cold charge has no headroom", coldCharge: 20, wantCharge: ratio * peak},
+		{name: "insufficient cold evidence", wantCharge: ratio * peak},
+		{name: "unmeasured peer uses hint", coldCharge: coldCharge, wantCharge: coldCharge, peerHint: 60},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, _ := fixture(t)
+			m := sharedUnifiedMachine()
+			m.HostMemoryBudgetGB = 96
+			cpu := submit(t, q, cpuSpec(1, 5.5))
+			cpuRun := assignedJob(machineCheck(t, q, m))
+			if cpuRun == nil || cpuRun.ID != cpu.ID {
+				t.Fatalf("missing CPU offer: %+v", cpuRun)
+			}
+			if err := q.Started(result(cpuRun, false)); err != nil {
+				t.Fatal(err)
+			}
+
+			s := sharedSpec("experiment", 32)
+			s.Needs.HostMemoryGB = 12
+			queued := submit(t, q, s)
+			target := allocationMachine(&m, []string{"0"})
+			key := pooledEvidenceKey(queued, target)
+			if tc.coldCharge > 0 {
+				seedPoolReplay(q, queued, target, "ram", 20, tc.coldCharge)
+			}
+			e := q.memoryEvidence
+			e.observe(memoryEvidencePoint{Key: key, Peak: peak})
+			if tc.familyHigh > 0 {
+				sibling := key
+				sibling.Exact = "other-configuration"
+				e.observe(memoryEvidencePoint{Key: sibling, Peak: tc.familyHigh})
+			}
+			e.observe(memoryEvidencePoint{Key: key, Peak: tc.lower, Limited: true})
+			ratios := []float64{
+				0.9, 0.95, 1, 1.01, 1.05, 1.1, 1.2, 1.3, ratio,
+			}
+			e.ratios[memoryRatioKey{key.Platform, key.Pool, "exact", "", 1}] = ratios
+			e.ratios[memoryRatioKey{key.Platform, key.Pool, "family", "", 1}] = ratios
+
+			run := assignedJob(machineCheck(t, q, m, cpuRun))
+			if run == nil || run.ID != queued.ID || run.Memory == nil || run.Memory.Card != nil {
+				t.Fatalf("missing unified-memory offer: %+v", run)
+			}
+			if got := run.Memory.RAM; math.Abs(got.ChargeGB-tc.wantCharge) > 1e-9 || got.TypicalGB != max(peak, tc.lower) ||
+				got.Evidence != (memoryEstimateEvidence{Level: "exact", Runs: 1}) {
+				t.Fatalf("RAM estimate = %+v, want %.3f GiB with one exact run", got, tc.wantCharge)
+			}
+			if err := q.Started(result(run, false)); err != nil {
+				t.Fatal(err)
+			}
+
+			m.HostAvailableMemoryGB = 92
+			peerSpec := sharedSpec("experiment", 0)
+			peerSpec.Needs.HostMemoryGB = tc.peerHint
+			peer := submit(t, q, peerSpec)
+			if tc.peerHint == 0 {
+				// A different CPU configuration supplies family evidence.
+				// At the same ratio, 24.357 GiB charged 55.455 GiB.
+				peerKey := pooledEvidenceKey(peer, target)
+				peerKey.Exact = "other-cpu-configuration"
+				e.observe(memoryEvidencePoint{Key: peerKey, Peak: peerPeak})
+			}
+			offered := assignedJob(growthCheck(t, q, m, []*Job{run, cpuRun}, []float64{peak}, 0))
+			if tc.wantPeer {
+				if offered == nil || offered.ID != peer.ID || offered.Memory.RAM.ChargeGB != coldCharge ||
+					offered.Memory.RAM.Evidence != (memoryEstimateEvidence{Level: "family", Runs: 1}) {
+					t.Fatalf("peer offer = %+v, wait = %s", offered, job(t, q, peer.ID).Reason)
+				}
+			} else if offered != nil {
+				t.Fatalf("peer used room held by measured demand: %+v", offered)
+			}
+			requireState(t, q, run.ID, "running")
+		})
+	}
+}
+
+func testMemoryPoolUnifiedAcceleratorSharesWithoutPrior(t *testing.T) {
 	q, clock := fixture(t)
 	m := sharedUnifiedMachine()
 	holder := submit(t, q, sharedSpec("experiment", 2))

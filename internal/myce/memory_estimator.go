@@ -4,6 +4,7 @@ import (
 	"maps"
 	"math"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -250,7 +251,22 @@ func (e *memoryEvidence) estimateWithFloor(k memoryEvidenceKey, hint, confidence
 		peak := slices.Max(candidate.peaks)
 		median := memoryMedian(candidate.peaks)
 		if factor, ok := memoryQuantile(e.ratios[memoryRatioKey{k.Platform, k.Pool, candidate.level, "", memoryRatioBucket(n)}], confidence); ok && validRate(factor*peak) {
-			typical, charge = max(typical, median), max(charge, factor*peak)
+			predicted := factor * peak
+			if n == 1 && k.Pool == "ram" && strings.HasSuffix(k.Platform, "/cuda/unified") {
+				// A platform-wide growth ratio can extrapolate a single peak
+				// beyond the calibrated charge for an entirely new workload.
+				// Use that cold charge as a bound when it provides headroom
+				// above the observed peak. Never trim below a clean family peak.
+				// finish still applies measured limit floors.
+				if cold, ok := memoryQuantile(e.first[k.platformKey()], confidence); ok && cold > peak {
+					bound := cold
+					if len(family.Peaks) > 0 {
+						bound = max(bound, slices.Max(family.Peaks))
+					}
+					predicted = min(predicted, bound)
+				}
+			}
+			typical, charge = max(typical, median), max(charge, predicted)
 			return finish(candidate.level, n, false)
 		}
 		typical, charge = max(typical, median), max(charge, peak)

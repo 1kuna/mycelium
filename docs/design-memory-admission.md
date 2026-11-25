@@ -91,6 +91,11 @@ between 2 and 3, calibrated the same way and skipped when it cannot be.
    own history of *next peak ÷ maximum of the previous `n`* at that level,
    bucketed by `n` as in the table above. `typical` is the median of those
    peaks.
+   For unified CUDA RAM with one exact or family observation, bound the
+   ratio prediction by the larger of the calibrated first-run platform
+   charge and the largest clean peak from the work family. Apply the bound
+   when the platform charge meets rule Q and provides headroom above the
+   observed peak. Any measured shortage floor still applies.
 3. If rule Q cannot be met for `f`, move up one level. Moving up never
    forgets: the more specific level's own maximum and median stay as floors.
 4. At the platform level, `charge` is the `c`-quantile of first-run peaks and

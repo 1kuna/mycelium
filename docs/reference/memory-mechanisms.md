@@ -19,6 +19,10 @@ can share host RAM from the first run. With sparse accelerator RAM history,
 Mycelium uses available platform peaks, then same-OS CPU peaks.
 When a run has been measured but there is too little evidence to calibrate
 its charge, an existing hint remains a floor alongside the observed peak.
+For unified CUDA RAM with one exact or family run, the calibrated first-run
+charge and measured family peaks bound the headroom from platform-wide
+growth ratios when the first-run charge exceeds the observed peak.
+Measured shortage floors still apply.
 
 The available RAM reading already accounts for occupied memory. Mycelium
 subtracts the host reserve and the amount running work can still grow into.
