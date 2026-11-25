@@ -171,23 +171,108 @@ func TestQueueSQLiteContactCheckpoint(t *testing.T) {
 	}
 }
 
+func openContactCrashQueue(t *testing.T, dir string, now time.Time, rollback bool) (*Queue, *fakeClock) {
+	t.Helper()
+	clock := &fakeClock{now: now}
+	q, err := Open(filepath.Join(dir, "queue.db"), filepath.Join(dir, "checkpoints"), clock, WithQueueCommitUnderLock(rollback))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { q.Close() })
+	fakeCheckpointAvailability(t, q, true)
+	return q, clock
+}
+
+func killContactCrashQueue(t *testing.T, receipt string) {
+	t.Helper()
+	fmt.Println("contact crash receipt: " + receipt)
+	if err := syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	select {}
+}
+
+func runContactCrash(t *testing.T, testName, dir, phase string, rollback bool) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
+	defer cancel()
+	child := exec.CommandContext(ctx, os.Args[0], "-test.run=^"+testName+"$")
+	child.Env = []string{
+		"MYCE_TEST_CONTACT_CRASH=" + phase,
+		"MYCE_TEST_CONTACT_CRASH_DIR=" + dir,
+		fmt.Sprintf("MYCE_TEST_CONTACT_CRASH_ROLLBACK=%t", rollback),
+	}
+	out, err := child.CombinedOutput()
+	var exit *exec.ExitError
+	_, receipt, found := strings.Cut(string(out), "contact crash receipt: ")
+	if ctx.Err() != nil || !errors.As(err, &exit) || exit.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL || !found {
+		t.Fatalf("fixture missed the crash after accepted contact: %v\n%s", err, out)
+	}
+	value, _, _ := strings.Cut(receipt, "\n")
+	return value
+}
+
+func TestQueueSQLiteIdleSessionSurvivesUncleanRestart(t *testing.T) {
+	const period = 4 * time.Minute
+	start := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	worker, peer := machine("worker", "fake"), machine("peer", "fake")
+	if phase := os.Getenv("MYCE_TEST_CONTACT_CRASH"); phase != "" {
+		q, clock := openContactCrashQueue(t, os.Getenv("MYCE_TEST_CONTACT_CRASH_DIR"), start, os.Getenv("MYCE_TEST_CONTACT_CRASH_ROLLBACK") == "true")
+		if phase != "join" {
+			check(t, q, worker, nil) // Save short-cadence evidence for the existing worker.
+		}
+		check(t, q, peer, nil)
+		clock.Advance(time.Second)
+		report := Checkin{Machine: worker, period: period}
+		if phase == "replace" {
+			report.Fresh, report.PreviousSession = true, worker.Session
+			report.Machine.Session += "-replacement"
+		}
+		if reply, err := q.Checkin(report); err != nil || reply.Stop || reply.Job != nil {
+			t.Fatalf("fixture did not accept an idle session: %+v, %v", reply, err)
+		}
+		killContactCrashQueue(t, report.Machine.Session)
+	}
+	for _, rollback := range []bool{false, true} {
+		for _, phase := range []string{"join", "increase", "replace"} {
+			t.Run(fmt.Sprintf("rollback=%t/%s", rollback, phase), func(t *testing.T) {
+				dir := t.TempDir()
+				session := runContactCrash(t, "TestQueueSQLiteIdleSessionSurvivesUncleanRestart", dir, phase, rollback)
+				q, clock := openContactCrashQueue(t, dir, start.Add(2*time.Second), rollback)
+				m := q.s.Machines[worker.ID]
+				if m == nil || m.Session != session || m.Gone || !q.unreported[worker.ID] {
+					t.Fatal("reopen did not restore the accepted session as unreported")
+				}
+				evidence := q.s.ContactEvidence[worker.ID]
+				// The peer spends the restart service window while the slow worker
+				// has yet to reach its first scheduled post-restart heartbeat.
+				q.mu.control.begin()
+				defer q.mu.control.end(func() {})
+				check(t, q, peer, nil)
+				advanceReportingPeer(t, q, clock, peer, RestartGrace)
+				if q.s.Machines[worker.ID].Gone || !q.unreported[worker.ID] {
+					t.Fatalf("idle session expired before its next heartbeat: evidence=%+v", evidence)
+				}
+				if evidence.Session != session || evidence.ArrivalAllowance < 2*period || !evidence.Seen.Equal(start.Add(time.Second)) {
+					t.Fatalf("idle session reopened without its latest recovery evidence: %+v", evidence)
+				}
+				advanceReportingPeer(t, q, clock, peer, evidence.Seen.Add(period).Sub(clock.Now()))
+				worker := worker
+				worker.Session = session
+				if reply, err := q.Checkin(Checkin{Machine: worker, period: period}); err != nil || reply.Stop || q.unreported[worker.ID] {
+					t.Fatalf("idle session failed to reconcile: stop=%t unreported=%t, %v", reply.Stop, q.unreported[worker.ID], err)
+				}
+			})
+		}
+	}
+}
+
 func TestQueueSQLiteCustodySurvivesUncleanRestart(t *testing.T) {
 	const period = 4 * time.Minute
 	start := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
 	worker, peer := machine("worker", "fake"), machine("peer", "fake")
-	open := func(dir string, now time.Time, rollback bool) (*Queue, *fakeClock) {
-		t.Helper()
-		clock := &fakeClock{now: now}
-		q, err := Open(filepath.Join(dir, "queue.db"), filepath.Join(dir, "checkpoints"), clock, WithQueueCommitUnderLock(rollback))
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { q.Close() })
-		fakeCheckpointAvailability(t, q, true)
-		return q, clock
-	}
 	if phase := os.Getenv("MYCE_TEST_CONTACT_CRASH"); phase != "" {
-		q, clock := open(os.Getenv("MYCE_TEST_CONTACT_CRASH_DIR"), start, os.Getenv("MYCE_TEST_CONTACT_CRASH_ROLLBACK") == "true")
+		q, clock := openContactCrashQueue(t, os.Getenv("MYCE_TEST_CONTACT_CRASH_DIR"), start, os.Getenv("MYCE_TEST_CONTACT_CRASH_ROLLBACK") == "true")
 		check(t, q, peer, nil) // Set the periodic checkpoint before the worker arrives.
 		clock.Advance(time.Second)
 		report := Checkin{Machine: worker, period: period}
@@ -200,6 +285,14 @@ func TestQueueSQLiteCustodySurvivesUncleanRestart(t *testing.T) {
 		reply, err := q.Checkin(report)
 		if err != nil || reply.Job == nil || reply.Job.ID != submitted.ID || reply.Job.Attempt != 1 {
 			t.Fatalf("fixture did not assign the production attempt: %+v, %v", reply, err)
+		}
+		if phase == "new-custody" {
+			// Give the start its own accepted contact to checkpoint. Replaying
+			// the assignment leaves the job unstarted and the cadence unchanged.
+			clock.Advance(time.Second)
+			if next, err := q.Checkin(report); err != nil || next.Job == nil || next.Job.ID != reply.Job.ID || next.Job.StartedAt != nil {
+				t.Fatalf("fixture did not replay the unstarted assignment: %+v, %v", next, err)
+			}
 		}
 		if phase != "assignment" {
 			if err := q.Started(result(reply.Job, true)); err != nil {
@@ -215,39 +308,23 @@ func TestQueueSQLiteCustodySurvivesUncleanRestart(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		fmt.Println("production custody accepted: " + reply.Job.ID)
-		if err := syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {
-			t.Fatal(err)
-		}
-		select {}
+		killContactCrashQueue(t, reply.Job.ID)
 	}
 	for _, rollback := range []bool{false, true} {
 		for _, phase := range []string{"assignment", "new-custody", "growing-allowance"} {
 			t.Run(fmt.Sprintf("rollback=%t/%s", rollback, phase), func(t *testing.T) {
 				dir := t.TempDir()
-				ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
-				defer cancel()
-				child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestQueueSQLiteCustodySurvivesUncleanRestart$")
-				child.Env = []string{
-					"MYCE_TEST_CONTACT_CRASH=" + phase,
-					"MYCE_TEST_CONTACT_CRASH_DIR=" + dir,
-					fmt.Sprintf("MYCE_TEST_CONTACT_CRASH_ROLLBACK=%t", rollback),
-				}
-				out, err := child.CombinedOutput()
-				var exit *exec.ExitError
-				_, receipt, found := strings.Cut(string(out), "production custody accepted: ")
-				if ctx.Err() != nil || !errors.As(err, &exit) || exit.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL ||
-					!found {
-					t.Fatalf("fixture missed the crash after accepted custody: %v\n%s", err, out)
-				}
-				q, clock := open(dir, start.Add(2*time.Second), rollback)
-				id, _, _ := strings.Cut(receipt, "\n")
+				id := runContactCrash(t, "TestQueueSQLiteCustodySurvivesUncleanRestart", dir, phase, rollback)
+				q, clock := openContactCrashQueue(t, dir, start.Add(3*time.Second), rollback)
 				before := job(t, q, id)
 				if before.State != "running" || (before.StartedAt == nil) != (phase == "assignment") || !q.unreported[worker.ID] {
 					t.Fatalf("reopen did not restore the unreported attempt: state=%s started=%v unreported=%t",
 						before.State, before.StartedAt, q.unreported[worker.ID])
 				}
 				evidence := q.s.ContactEvidence[worker.ID]
+				if phase == "new-custody" && !evidence.Seen.Equal(start.Add(2*time.Second)) {
+					t.Fatalf("start did not checkpoint the contact after assignment: %+v", evidence)
+				}
 				if phase == "assignment" {
 					if evidence.Session != worker.Session || evidence.ArrivalAllowance < 2*period {
 						t.Fatalf("assignment committed without recovery evidence: %+v", evidence)

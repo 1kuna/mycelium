@@ -39,13 +39,13 @@ func (q *Queue) persistentBase() state {
 		next.efficiency = cloneEfficiencyHistory(q.s.EfficiencyHosts)
 	}
 	writeContacts := q.inLockCommit || q.s.LastWorkerContact.Sub(next.lastWorkerContact) >= RestartGrace
-	var custodyContacts map[string]contactEvidence
 	if writeContacts {
 		next.contacts, next.lastWorkerContact = maps.Clone(q.s.ContactEvidence), q.s.LastWorkerContact
-	} else if custodyContacts = q.checkpointCustodyContacts(); custodyContacts != nil {
-		next.contacts = custodyContacts
+	} else if contacts := q.checkpointRecoveryContacts(); contacts != nil {
+		next.contacts = contacts
+		writeContacts = true
 	}
-	if writeEfficiency || writeContacts || custodyContacts != nil {
+	if writeEfficiency || writeContacts {
 		q.historiesPending = &next
 	}
 	base.EfficiencyHosts = next.efficiency
@@ -53,30 +53,21 @@ func (q *Queue) persistentBase() state {
 	return base
 }
 
-// A restart uses saved allowances to protect unreported attempts. Save the
-// matching report with assignment, start or recovery, and save increases for
-// existing custody before acknowledging them. Ordinary timestamps still use
-// the periodic checkpoint, whose deadline is independent of these writes.
-func (q *Queue) checkpointCustodyContacts() map[string]contactEvidence {
+// Any active session can extend the restart service window. Save new sessions
+// and allowance increases with their accepted reports, and save the latest
+// matching contact when an attempt acquires custody or starts. Timestamp-only
+// heartbeats still use the independent periodic checkpoint.
+func (q *Queue) checkpointRecoveryContacts() map[string]contactEvidence {
 	var next map[string]contactEvidence
-	for id, j := range q.records.live {
-		if j.State != "running" && j.State != "stopping" {
-			continue
+	save := func(id, session string, acquired bool) {
+		live, ok := q.s.ContactEvidence[id]
+		if !ok || live.Session != session {
+			return
 		}
-		live, ok := q.s.ContactEvidence[j.Machine]
-		if !ok || live.Session != j.Session {
-			continue
-		}
-		stored := q.histories.contacts[j.Machine]
-		before, dirty := q.records.jobs[id]
-		acquired := dirty && (before == nil || before.Machine != j.Machine || before.Session != j.Session ||
-			before.Attempt != j.Attempt || before.State != "running" && before.State != "stopping" ||
-			before.StartedAt == nil && j.StartedAt != nil)
-		if stored.Session == live.Session && !acquired &&
-			live.Allowance <= stored.Allowance && live.ArrivalAllowance <= stored.ArrivalAllowance {
-			continue
-		}
-		if stored.Session == live.Session {
+		if stored, ok := q.histories.contacts[id]; ok && stored.Session == session {
+			if !acquired && live.Allowance <= stored.Allowance && live.ArrivalAllowance <= stored.ArrivalAllowance {
+				return
+			}
 			live.Allowance = max(live.Allowance, stored.Allowance)
 			live.ArrivalAllowance = max(live.ArrivalAllowance, stored.ArrivalAllowance)
 		}
@@ -84,7 +75,23 @@ func (q *Queue) checkpointCustodyContacts() map[string]contactEvidence {
 			next = make(map[string]contactEvidence, len(q.histories.contacts)+1)
 			maps.Copy(next, q.histories.contacts)
 		}
-		next[j.Machine] = live
+		next[id] = live
+	}
+	for id := range q.records.machines {
+		if m := q.s.Machines[id]; m != nil && !m.Gone {
+			save(id, m.Session, false)
+		}
+	}
+	for id, before := range q.records.jobs {
+		j := q.s.Jobs[id]
+		if j == nil || j.State != "running" && j.State != "stopping" {
+			continue
+		}
+		if before == nil || before.Machine != j.Machine || before.Session != j.Session ||
+			before.Attempt != j.Attempt || before.State != "running" && before.State != "stopping" ||
+			before.StartedAt == nil && j.StartedAt != nil {
+			save(j.Machine, j.Session, true)
+		}
 	}
 	return next
 }
