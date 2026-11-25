@@ -1411,7 +1411,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				}
 				w.fleet.noteReply(reply)
 				w.inspectNASPaths(reply.NASPathChecks, root.state.CheckpointRoot)
-				w.expireCheckpoints(reply.CheckpointExpiries, root.state.CheckpointRoot)
+				if reply.CheckpointExpiryProtocol == checkpointExpiryProtocol {
+					w.expireCheckpoints(reply.CheckpointExpiries, root.state.CheckpointRoot)
+				}
 				if reply.SharedHost != nil {
 					w.Machine.SharedHost = cloneSharedHost(reply.SharedHost)
 					if reply.SharedHost.InteractiveReserveGB == 0 {

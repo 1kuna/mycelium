@@ -1453,6 +1453,23 @@ live policy; a different startup file is refused, so edit host policy with
 
 See [retention](retention.md#job-records) for expiry eligibility, custody, retained summaries and keyed replay.
 
+### Shared checkpoint purge
+
+Schedule recurring storage-local reclamation of the children of
+`.myce-expired-checkpoints` under the shared checkpoint root. Workers place a
+job folder there only after the existing [settled expiry](files.md#resumable-jobs)
+check passes. Keep the purge directory itself in place and dedicated to Mycelium
+handoffs. On a NAS, use the storage server's local filesystem for the purge.
+Deleting through the SMB mount sends the files to the share's recycle bin.
+
+The storage operator verifies that the service can create entries there and that
+each scheduled purge reclaims storage. If reclamation stops, the purge directory
+grows even though the queue reports `checkpoint_expired`. Diagnose a handoff
+failure in the worker log or a growing `checkpoint_expiry.waiting` in the
+queue's storage status. During a mixed rollout, the updated queue gives expiry
+tasks only to workers that support the handoff. Until the queue updates, older
+queue and worker pairs can still perform direct mounted-share expiry.
+
 Deleted SQLite pages are reused. Retention bounds full history by age, not total
 bytes: permanent key digests and unresolved custody still accumulate. To reclaim
 physical disk space, stop the queue through normal maintenance, take a verified

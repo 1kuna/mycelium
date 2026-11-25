@@ -68,7 +68,7 @@ func TestCheckpointInputExpiryStopsQueuedConsumerBeforeStaging(t *testing.T) {
 	if err != nil || len(reply.CheckpointExpiries) != 1 || reply.CheckpointExpiries[0].ID != producer.ID || reply.Job != nil {
 		t.Fatalf("expected expiry work without a consumer assignment: tasks=%+v job=%v err=%v", reply.CheckpointExpiries, reply.Job != nil, err)
 	}
-	removal := expireCheckpoint(root, reply.CheckpointExpiries[0], os.RemoveAll)
+	removal := expireCheckpoint(root, reply.CheckpointExpiries[0], os.Rename)
 	if !removal.Removed {
 		t.Fatalf("expiry did not remove the source: %+v", removal)
 	}
@@ -119,7 +119,7 @@ func TestCheckpointInputExpiryRefusesAlreadyRemovedSource(t *testing.T) {
 	if len(tasks) != 1 || tasks[0].ID != producer.ID {
 		t.Fatalf("expected normal producer expiry: %+v", tasks)
 	}
-	removal := expireCheckpoint(root, tasks[0], os.RemoveAll)
+	removal := expireCheckpoint(root, tasks[0], os.Rename)
 	if !removal.Removed {
 		t.Fatalf("normal expiry did not remove the source: %+v", removal)
 	}
