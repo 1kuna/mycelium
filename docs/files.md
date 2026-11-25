@@ -873,9 +873,12 @@ as unverified. Optional `--inspect-nas` requests cached,
 authenticated worker existence evidence; repeat after worker heartbeats.
 `pending` or `unverified` remains unknown. `present` does not verify bytes,
 and `missing` flags a wrong checkpoint-root-relative path before submission.
-Samples expire with their worker session freshness fence
-([request budgets](request-budgets.md)); upgraded workers are required. A path relative to the NAS mount can therefore
-resolve successfully and still be missing beneath `--checkpoint-root`. Import
+Samples expire with their [worker session freshness fence](request-budgets.md)
+or when the checkpoint root becomes unavailable. A held root reports
+`unverified`. An ephemeral job requires the NAS source even when ordinary jobs
+can use a warm cache entry, because it stages a private copy from the source.
+A path relative to the NAS mount can resolve successfully and still be missing
+beneath `--checkpoint-root`. Import
 such a file with profile `local:` or `myce file put`, then omit `nas` and use its
 verified hash and size. This needs no worker root change or cache clearing.
 
@@ -1223,6 +1226,10 @@ mounted NAS before starting the queue. Dev creates a local root.
 The stable job folder holds `attempt-1`, `attempt-2`, etc.; the environment points
 to the current attempt's folder. Before starting, the worker copies checkpoints
 from the attempt with the highest durable checkpoint generation.
+If the queue has recorded a positive generation, the worker requires that
+generation or a newer one before starting a NAS resume. A previously observed
+nested checkpoint mount stays required across worker restarts, even when its
+parent NAS is reachable.
 The worker checks exact-attempt launch authorization before materializing that
 copy. If preparation outlives an observation budget, the same attempt waits for
 its existing writer before repeating admission or device probes; it does not

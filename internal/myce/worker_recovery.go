@@ -926,17 +926,31 @@ func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64
 	if !filepath.IsAbs(j.Checkpoint) {
 		return "", fmt.Errorf("checkpoint path %q is not absolute", j.Checkpoint)
 	}
-	if err := ensureCheckpointParent(j.Checkpoint); err != nil {
-		return "", fmt.Errorf("checkpoint root unavailable: %w", err)
+	var minimum int64
+	if j.Spec.Resumable && !j.Spec.localFirst() && !j.FileTransport && j.CheckpointTarget != nil {
+		minimum = j.CheckpointTarget.Generation
 	}
-	if err := os.MkdirAll(j.Checkpoint, 0700); err != nil {
-		return "", err
+	// When the queue knows a generation exists, search for it before creating
+	// anything. A writable but empty or stale backing cannot resume that job.
+	if minimum <= 0 {
+		if err := ensureCheckpointParent(j.Checkpoint); err != nil {
+			return "", fmt.Errorf("checkpoint root unavailable: %w", err)
+		}
+		if err := os.MkdirAll(j.Checkpoint, 0700); err != nil {
+			return "", err
+		}
 	}
 	dest := attemptCheckpoint(j)
 	if _, err := os.Stat(dest); err == nil {
 		progress, err := checkpointProgress(dest)
-		if err != nil || progress >= 0 {
-			return dest, err // A prepared retry must not overwrite its own durable saves.
+		if err != nil {
+			return dest, err
+		}
+		if minimum > 0 && progress >= 0 && progress < minimum {
+			return "", fmt.Errorf("prepared checkpoint generation %d is older than known generation %d", progress, minimum)
+		}
+		if progress >= 0 {
+			return dest, nil // A prepared retry must not overwrite its own durable saves.
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
@@ -969,6 +983,9 @@ func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64
 			newestAttempt = n
 			source = dir
 		}
+	}
+	if minimum > 0 && newest < minimum {
+		return "", fmt.Errorf("checkpoint generation %d is unavailable (found %d)", minimum, newest)
 	}
 	// Publish the whole copy together: a manifest must not outrank missing payloads.
 	staging, err := os.MkdirTemp(j.Checkpoint, ".myce-prepare-*.tmp")

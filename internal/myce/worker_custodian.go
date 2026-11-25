@@ -457,6 +457,9 @@ func custodiansDetached(actors map[attemptKey]*attemptSupervisor) bool {
 // initAttemptRuntime is shared by the coordinator and detached entry. Keep
 // launch dependencies here; coordinator-only loops and retention stay in Run.
 func (w *Worker) initAttemptRuntime(stop context.Context, s *workerStore) error {
+	if w.rootMonitor == nil {
+		w.rootMonitor = &workerRootMonitor{stateDir: s.dir}
+	}
 	if w.ExtensionRoot == "" {
 		w.ExtensionRoot = filepath.Join(s.dir, "extensions")
 	}
@@ -521,7 +524,6 @@ func (w Worker) runCustodian(stop context.Context) error {
 	w.initInventoryProbe()
 	w.Client.Clock = w.Clock
 	w.Client.launchTimingWire = &atomic.Bool{}
-	w.rootMonitor = &workerRootMonitor{expected: map[string]string{}}
 	// Linux adoption requires the delegated worker leaf. Refuse before the first
 	// snapshot if setup fails, so a helper can never wait at an unserviceable gate.
 	if runtime.GOOS == "linux" {

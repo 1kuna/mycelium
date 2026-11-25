@@ -99,11 +99,11 @@ helpers report only the failure code; absent details cannot identify the cause.
 
 A helper that supports NAS-optional updates records `storage_warning` with
 `root: nas` and `operation: inventory` if the unchanged, previously selected
-worker NAS is absent from mount inventory. The worker's configured checkpoint,
-model and environment source roots must be inside that NAS and its state and
-caches must be outside it. The remaining local state, signature and service
-checks still have to pass. The queue's existing protocol and installed-slot
-proof rules still apply to a preflight refusal.
+worker NAS is absent from mount inventory. The checkpoint and environment
+source roots must be inside that NAS. The model root may also use a verified
+local volume. Worker state and caches must be outside the NAS. Preflight
+refuses invalid mountpoint paths and still checks local state, signatures and
+service setup. The queue's installed-slot proof rules still apply.
 
 An older installed helper may refuse before fetching the new release. For
 that first update, keep the worker drained and use the publisher-verified

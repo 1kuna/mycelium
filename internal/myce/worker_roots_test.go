@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -54,6 +55,77 @@ func TestWorkerRootsMissingMountAndRecovery(t *testing.T) {
 		if slices.ContainsFunc(missing, func(r UnavailableRoot) bool { return r.Root == "environment" }) {
 			t.Fatal("local cache marked unavailable")
 		}
+	}
+}
+
+func TestWorkerRootsNestedCheckpointMountSurvivesRestart(t *testing.T) {
+	ctx := context.Background()
+	nas, state := t.TempDir(), t.TempDir()
+	nested := filepath.Join(nas, "nested")
+	root := filepath.Join(nested, "checkpoints")
+	j := Job{Checkpoint: filepath.Join(root, "job"), Attempt: 2, Spec: Spec{Resumable: true}}
+	first := filepath.Join(j.Checkpoint, "attempt-1")
+	if err := os.MkdirAll(first, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(first, "checkpoint.json"), []byte(`{"myce_checkpoint":{"generation":7}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mounts := []string{nas, nested}
+	newWorker := func() Worker {
+		return Worker{StateDir: state, CheckpointRoot: root, ServiceConfig: &ServiceConfig{NAS: nas}, MountRoots: func(context.Context) ([]string, error) { return mounts, nil }}
+	}
+	w := newWorker()
+	if missing := w.sampleStorageRoots(ctx, root); len(missing) != 0 {
+		t.Fatal("healthy nested mount", missing)
+	}
+	// A writable directory on the parent share is exposed after the distinct
+	// checkpoint mount disappears. The durable generation is on the other share.
+	mountedCopy := filepath.Join(t.TempDir(), "offline")
+	if err := os.Rename(nested, mountedCopy); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	mounts = []string{nas}
+	w.Machine.UnavailableRoots = w.sampleStorageRoots(ctx, root)
+	if reason := w.storageRootReason(&j); !strings.Contains(reason, "checkpoint unavailable") {
+		t.Fatal("running worker accepted the parent share", reason)
+	}
+	w = newWorker()
+	w.Machine.UnavailableRoots = w.sampleStorageRoots(ctx, root)
+	if reason := w.storageRootReason(&j); !strings.Contains(reason, "checkpoint unavailable") {
+		if err := workerCheckpointAvailable(root, func() {}); err != nil {
+			t.Fatal("fallback fixture is not writable", err)
+		}
+		dest, err := prepareCheckpoint(j)
+		if err != nil {
+			t.Fatal("fallback checkpoint preparation failed unexpectedly", err)
+		}
+		progress, err := checkpointProgress(dest)
+		t.Fatalf("restarted worker prepared a fallback attempt with progress %d: %v", progress, err)
+	}
+	if _, err := os.Lstat(j.Checkpoint); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("held checkpoint was materialized in the fallback", err)
+	}
+	if err := os.Rename(nested, filepath.Join(t.TempDir(), "fallback")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(mountedCopy, nested); err != nil {
+		t.Fatal(err)
+	}
+	mounts = []string{nas, nested}
+	w.Machine.UnavailableRoots = w.sampleStorageRoots(ctx, root)
+	if reason := w.storageRootReason(&j); reason != "" {
+		t.Fatal("restored checkpoint share remained held", reason)
+	}
+	dest, err := prepareCheckpoint(j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress, err := checkpointProgress(dest); err != nil || progress != 7 {
+		t.Fatalf("recovered attempt lost the durable generation: %d, %v", progress, err)
 	}
 }
 
@@ -190,6 +262,78 @@ func TestWorkerRootsReadmissionAndCheckpointPlacement(t *testing.T) {
 				finish(t, q, assigned, true)
 			})
 		}
+	}
+}
+
+func TestWorkerRootsRunCommandWithoutNAS(t *testing.T) {
+	q, clock := fixture(t)
+	fakeCheckpointAvailability(t, q, true)
+	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	nas := t.TempDir()
+	w := Worker{
+		Clock: clock, Interval: 10 * time.Millisecond,
+		Client: Client{URL: server.URL, Token: "test"}, Machine: machine("worker", "cpu", "fixture-worker"),
+		StateDir: newTestStateRoot(t), EnvironmentLimit: 1 << 30,
+		CheckpointRoot: filepath.Join(nas, "checkpoints"), ServiceConfig: &ServiceConfig{NAS: nas},
+		MountRoots:        func(context.Context) ([]string, error) { return nil, nil },
+		CPUIsolationProbe: func(context.Context) error { return nil },
+		sharedCPUDev:      true, devEnvironmentSizing: true, processMemory: workerDevProcessMemory(),
+	}
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	defer func() {
+		cancel()
+		await(t, func() bool {
+			clock.Advance(time.Millisecond)
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Error(err)
+				}
+				return true
+			default:
+				return false
+			}
+		})
+	}()
+	s := cpuSpec(1, 1)
+	s.Class, s.Priority = "test", ""
+	s.Run.Command = []string{"sh", "-c", `printf 'mountless command ran\n' | tee "$MYCE_CHECKPOINT_DIR/proof"`}
+	local := submit(t, q, s)
+	s.Name, s.Class, s.Resumable = "needs-checkpoint-mount", "experiment", true
+	dependent := submit(t, q, s)
+	deadline, stopWaiting := context.WithTimeout(ctx, testWaitTimeout)
+	defer stopWaiting()
+	var observed Job
+	defer func() {
+		if t.Failed() {
+			t.Logf("local command state=%s reason=%q release=%t", observed.State, observed.Reason, observed.ReleaseConfirmed)
+		}
+	}()
+	probeWait(t, deadline, func() bool {
+		clock.Advance(time.Millisecond)
+		v, err := q.jobSnapshot(local.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		observed = *v
+		if terminal(v.State) && v.State != "succeeded" {
+			t.Fatalf("mountless command failed: %s", v.Reason)
+		}
+		return v.State == "succeeded" && v.ReleaseConfirmed
+	})
+	logs, err := q.Logs(local.ID, 0)
+	if err != nil || !slices.ContainsFunc(logs, func(l Log) bool { return strings.Contains(l.Text, "mountless command ran") }) {
+		t.Fatal("worker never published command output", logs, err)
+	}
+	v, err := q.jobSnapshot(dependent.ID)
+	if err != nil || v.State != "queued" || v.Hold == nil || v.Hold.Kind != "storage_root" || !strings.Contains(v.Hold.Detail, "checkpoint unavailable") {
+		t.Fatalf("NAS checkpoint work escaped the mount hold: state=%s hold=%+v err=%v", v.State, v.Hold, err)
+	}
+	if _, err := os.Lstat(w.CheckpointRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("real worker created the unavailable NAS checkpoint root", err)
 	}
 }
 

@@ -1409,7 +1409,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			m.SharedHostPressure = pressureProbe.snapshot(w.Machine.SharedHost != nil)
 			w.Machine.SharedHostPressure = m.SharedHostPressure
 			heartbeatStarted := w.Clock.Now()
-			reply, err := w.checkin(observeCtx, Checkin{NASPathReports: w.nasPathReports(), Machine: m, fleetProofIssue: w.fleet.proofIssue(), ephemeralRefusal: refusal, Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
+			reply, err := w.checkin(observeCtx, Checkin{NASPathReports: w.nasPathReports(&m), Machine: m, fleetProofIssue: w.fleet.proofIssue(), ephemeralRefusal: refusal, Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
 			received := w.Clock.Now()
 			health.noteHeartbeat(received.Sub(heartbeatStarted))
 			if err == nil {

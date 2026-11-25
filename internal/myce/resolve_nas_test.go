@@ -164,6 +164,19 @@ func TestResolveNASCacheFreshnessAndSession(t *testing.T) {
 	if got := resolve().Targets[0]; got.Eligible || got.NASInputs[0].State != "missing" || got.NASInputs[0].ObservedAt.IsZero() {
 		t.Fatal("fresh replacement report lost", got)
 	}
+	m.UnavailableRoots = []UnavailableRoot{{Root: "checkpoint", Reason: "configured NAS mount missing"}}
+	check(t, q, m, nil)
+	if got := resolve().Targets[0].NASInputs[0]; got.State != "unverified" || !got.ObservedAt.IsZero() {
+		t.Fatal("pre-outage inspection survived the root hold", got)
+	}
+	if checks := cache.checkin(Checkin{Machine: m}); len(checks) != 0 {
+		t.Fatal("inspection dispatched across the root hold", checks)
+	}
+	m.UnavailableRoots = nil
+	check(t, q, m, nil)
+	if got := resolve().Targets[0].NASInputs[0]; got.State != "pending" || !got.ObservedAt.IsZero() {
+		t.Fatal("mount recovery did not require a fresh inspection", got)
+	}
 }
 
 func TestResolveNASWorkerChecksAreConfinedAndCached(t *testing.T) {
@@ -183,13 +196,19 @@ func TestResolveNASWorkerChecksAreConfinedAndCached(t *testing.T) {
 	w := Worker{Clock: clock}
 	checks := []NASPathCheck{{ID: "input", Path: "input"}}
 	w.inspectNASPaths(checks, root)
-	reports := w.nasPathReports()
+	reports := w.nasPathReports(&w.Machine)
 	if len(reports) != 1 || reports[0].State != "present" {
 		t.Fatal(reports)
 	}
 	clock.Advance(10 * time.Second)
-	if reports = w.nasPathReports(); reports[0].AgeSeconds != 10 {
+	if reports = w.nasPathReports(&w.Machine); reports[0].AgeSeconds != 10 {
 		t.Fatal("old sample was renewed", reports)
+	}
+	w.Machine.UnavailableRoots = []UnavailableRoot{{Root: "checkpoint", Reason: "configured NAS mount missing"}}
+	w.inspectNASPaths(checks, root)
+	reports = w.nasPathReports(&w.Machine)
+	if len(reports) != 1 || reports[0].State != "unverified" {
+		t.Fatal("fallback file was reported as available across a root hold", reports)
 	}
 }
 

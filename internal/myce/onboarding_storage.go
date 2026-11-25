@@ -187,15 +187,25 @@ func prepareOnboardingStorageFS(ctx context.Context, c ServiceConfig, discover b
 		return c, storageCheckError("nas", "inventory", time.Since(started), err)
 	}
 	mount := onboardingMount(c, roots)
+	var missingMount error
 	if mount == "" {
 		if discover || c.NAS == "" {
 			return c, storageCheckError("nas", "inventory", time.Since(started), nasNotConfigured(roots))
 		}
-		return c, storageCheckError("nas", "inventory", time.Since(started), preflightError("nas_not_mounted", "storage", "selected NAS is not mounted; restore the OS mount or supply --nas PATH"))
+		missingMount = storageCheckError("nas", "inventory", time.Since(started), preflightError("nas_not_mounted", "storage", "selected NAS is not mounted; restore the OS mount or supply --nas PATH"))
+		if !c.allowMissingInstalledNAS {
+			return c, missingMount
+		}
 	}
 	ioCtx, abort := context.WithCancelCause(ctx)
 	defer abort(nil)
 	_, err = onboardingNASIO.runContext(ioCtx, c.NAS+"\x00"+c.Checkpoints+"\x00"+c.ModelRoot+"\x00"+c.EnvironmentRoot, func() (bool, error) {
+		if missingMount != nil {
+			if err := validateAbsentNAS(ioCtx, abort, c, fs.lstat); err != nil {
+				return false, err
+			}
+			return false, missingMount
+		}
 		return false, validateOnboardingStorageFS(ioCtx, abort, c, mount, fs)
 	})
 	if errors.Is(ctx.Err(), context.Canceled) {
@@ -209,6 +219,28 @@ func prepareOnboardingStorageFS(ctx context.Context, c ServiceConfig, discover b
 	}
 	c.RequireMountedNAS = true
 	return c, nil
+}
+
+// An unchanged optional NAS may be absent or leave a real directory behind.
+// Validate the path without creating or probing writes on the fallback volume.
+func validateAbsentNAS(ctx context.Context, abort context.CancelCauseFunc, c ServiceConfig, lstat func(string) (os.FileInfo, error)) error {
+	nasCtx := storageRootContext(ctx, "nas")
+	for path := filepath.Clean(c.NAS); ; path = filepath.Dir(path) {
+		st, err := onboardingFSOperation(nasCtx, abort, func() (os.FileInfo, error) { return lstat(path) }, "mount-metadata")
+		if errors.Is(err, os.ErrNotExist) && path != filepath.Dir(path) {
+			continue
+		}
+		if err != nil || !st.IsDir() {
+			return storageRootRefusal(nasCtx, "mount-metadata", preflightError("nas_root_invalid", "storage", "selected NAS requires an accessible real directory"), err)
+		}
+		break
+	}
+	if !withinNAS(c.NAS, c.ModelRoot) {
+		modelCtx := storageRootContext(ctx, "model")
+		_, err := validateLocalModelVolume(modelCtx, abort, c.ModelRoot)
+		return err
+	}
+	return nil
 }
 
 // The operation stays in the sequence goroutine even after its deadline. The

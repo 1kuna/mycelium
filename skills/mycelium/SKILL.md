@@ -151,7 +151,10 @@ missing NAS mount can run any class of job whose dependencies are served locally
 or through the queue file store, including compatible `local_first` jobs.
 When a job requires a missing worker root, `hold.kind: storage_root` names
 the affected role in `hold.detail`. Keep the job and its submission key while
-the storage owner restores the mount.
+the storage owner restores the mount. A warm shared-input cache can serve
+ordinary work during an outage. Ephemeral work stages a private copy and still
+needs the declared NAS source. `myce spec check --resolve --inspect-nas` reports
+`unverified` while the worker's checkpoint root is unavailable.
 
 ## Wait, inspect and recover
 

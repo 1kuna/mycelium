@@ -181,6 +181,21 @@ func TestHostHygieneMountSingleOutstandingAndScopedRecovery(t *testing.T) {
 // Replay a working mount, dropped connection, permission-required remount and
 // recovery using only an in-memory filesystem and injected scheduling clock.
 func TestHostHygieneMountRecoveryReadBackoffAndHumanAlert(t *testing.T) {
+	t.Run("nested autofs never probes the parent directory", func(t *testing.T) {
+		parent, nested := "/storage", "/storage/nested"
+		mounts := []nasMount{{root: parent, kind: "smbfs"}, {root: nested, kind: "autofs"}}
+		triggered, probed := false, false
+		trigger := func(string) error { triggered = true; return nil }
+		probe := func(string) error { probed = true; return nil }
+		inventory := func() ([]nasMount, error) { return mounts, nil }
+		if err := probeRecoveryMount(nested+"/checkpoints", nested, "darwin", true, trigger, probe, inventory); err != mountRecoveryError("mount_automount_pending") || !triggered || probed {
+			t.Fatalf("absent nested mount: triggered=%t probed=%t err=%v", triggered, probed, err)
+		}
+		mounts[1].kind = "smbfs"
+		if err := probeRecoveryMount(nested+"/checkpoints", nested, "darwin", true, trigger, probe, inventory); err != nil || !probed {
+			t.Fatalf("restored nested mount: probed=%t err=%v", probed, err)
+		}
+	})
 	for _, osname := range []string{"linux", "darwin"} {
 		t.Run(osname, func(t *testing.T) {
 			q, clock := fixture(t)
@@ -193,7 +208,7 @@ func TestHostHygieneMountRecoveryReadBackoffAndHumanAlert(t *testing.T) {
 			p.measure = func(string, func()) hostMountResult {
 				fakeMu.Lock()
 				defer fakeMu.Unlock()
-				err := probeRecoveryMount("/storage/checkpoints", "/storage", osname, func(string) error {
+				err := probeRecoveryMount("/storage/checkpoints", "/storage", osname, false, nil, func(string) error {
 					return statHealthMount("root", func(path string) (os.FileInfo, error) {
 						if failure != nil {
 							return nil, failure

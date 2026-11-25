@@ -480,6 +480,37 @@ func TestEphemeralValidationAndOlderWorkerFence(t *testing.T) {
 }
 
 func TestEphemeralPlacementRefusalAndWaitReason(t *testing.T) {
+	t.Run("cached NAS input still needs its source", func(t *testing.T) {
+		q, _ := fixture(t)
+		if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "files"), 1<<20, true); err != nil {
+			t.Fatal(err)
+		}
+		s := ephemeralSpec()
+		input := SharedInput{NAS: "data/input", SHA256: strings.Repeat("a", 64), SizeBytes: 1}
+		s.SharedInputs = map[string]SharedInput{"data": input}
+		m := ephemeralMachine()
+		m.Capabilities = append(m.Capabilities, "shared_inputs_v1")
+		m.SharedInputCache = &SharedInputCapacity{CapacityBytes: 1 << 20, FreeBytes: 1 << 20}
+		m.CachedSharedInputs = []string{input.key()}
+		check(t, q, m, nil)
+		j := submit(t, q, s)
+		m.UnavailableRoots = []UnavailableRoot{{Root: "checkpoint", Reason: "configured NAS mount missing"}}
+		if r := check(t, q, m, nil); r.Job != nil {
+			t.Fatal("cache receipt admitted a private NAS copy without its source")
+		}
+		got, err := q.jobSnapshot(j.ID)
+		if err != nil || got.Hold == nil || got.Hold.Kind != "storage_root" || !strings.Contains(got.Hold.Detail, "checkpoint unavailable") {
+			t.Fatalf("private NAS input did not get a typed checkpoint hold: %+v %v", got.Hold, err)
+		}
+		if reason := (Worker{Machine: m}).storageRootReason(j); !strings.Contains(reason, "checkpoint unavailable") {
+			t.Fatal("worker launch gate ignored the private NAS dependency", reason)
+		}
+		m.UnavailableRoots = nil
+		if r := check(t, q, m, nil); r.Job == nil || r.Job.ID != j.ID {
+			t.Fatal("restored NAS source did not permit placement")
+		}
+	})
+
 	for _, tc := range []struct {
 		name    string
 		caps    []string

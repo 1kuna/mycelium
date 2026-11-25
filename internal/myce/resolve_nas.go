@@ -32,6 +32,11 @@ type ResolveNASInput struct {
 	State      string    `json:"state"`
 	ObservedAt time.Time `json:"observed_at,omitempty"` // queue receipt, not worker wall time
 }
+
+func checkpointRootUnavailable(m *Machine) bool {
+	return m.CheckpointUnavailable || slices.ContainsFunc(m.UnavailableRoots, func(root UnavailableRoot) bool { return root.Root == "checkpoint" })
+}
+
 type resolveNASEntry struct {
 	check             NASPathCheck
 	machine, session  string
@@ -87,6 +92,10 @@ func (c *resolveNASCache) resolve(req ResolveRequest, report *ResolveReport) {
 				continue
 			}
 			evidence := ResolveNASInput{Name: name, State: "unverified"}
+			if target.checkpointUnavailable {
+				target.NASInputs = append(target.NASInputs, evidence)
+				continue
+			}
 			key := identityHash([]string{target.Machine, target.session, input.NAS})
 			entry := c.entries[key]
 			if req.InspectNAS && target.nasInspection && target.Freshness == "fresh" && entry == nil && used+int64(len(key)+len(input.NAS))+int64(reflect.TypeFor[resolveNASEntry]().Size()) < capacity {
@@ -100,7 +109,7 @@ func (c *resolveNASCache) resolve(req ResolveRequest, report *ResolveReport) {
 			target.NASInputs = append(target.NASInputs, evidence)
 			if evidence.State == "missing" {
 				report.Findings = append(report.Findings, ResolveFinding{Field: "shared_inputs." + name + ".nas", Side: "worker", Problem: fmt.Sprintf("%s reports the path missing under its checkpoint root (existence only; bytes unverified)", target.Machine), Fix: "Correct the checkpoint-root-relative path, or import with profile local: or myce file put and omit nas."})
-				if !target.cachedInputs[input.key()] {
+				if req.Spec.ephemeral() || !target.cachedInputs[input.key()] {
 					target.Eligible = false
 					target.Reason = "blocked: worker reports missing NAS shared input " + name
 				}
@@ -108,7 +117,7 @@ func (c *resolveNASCache) resolve(req ResolveRequest, report *ResolveReport) {
 		}
 	}
 	if req.InspectNAS {
-		report.Notes = append(report.Notes, "NAS inspection is optional, authenticated, metadata-only and cached until the worker session freshness fence; pending/unverified is unknown. For one path, repeat after two successful worker heartbeats: the first delivers the check and the next returns its observation. More paths or slow metadata can require further heartbeats. Only declared shared_inputs.nas paths are inspected under the worker checkpoint root. No bytes, hashes or runtime readiness are verified; submission and staging revalidate. Workers need the inspection-capable release.")
+		report.Notes = append(report.Notes, "NAS inspection is optional, authenticated, metadata-only and cached while the worker session is fresh and its checkpoint root is available. Pending/unverified is unknown. For one path, repeat after two successful worker heartbeats: the first delivers the check and the next returns its observation. More paths or slow metadata can require further heartbeats. Only declared shared_inputs.nas paths are inspected under the worker checkpoint root. No bytes, hashes or runtime readiness are verified; submission and staging revalidate. Workers need the inspection-capable release.")
 	}
 }
 func (c *resolveNASCache) checkin(in Checkin) []NASPathCheck {
@@ -116,6 +125,14 @@ func (c *resolveNASCache) checkin(in Checkin) []NASPathCheck {
 	defer c.mu.Unlock()
 	now := c.clock.Now()
 	c.expire(now)
+	if checkpointRootUnavailable(&in.Machine) {
+		for key, entry := range c.entries {
+			if entry.machine == in.Machine.ID && entry.session == in.Machine.Session {
+				delete(c.entries, key)
+			}
+		}
+		return nil
+	}
 	reports := map[string]NASPathReport{}
 	for _, r := range in.NASPathReports {
 		if !math.IsNaN(r.AgeSeconds) && !math.IsInf(r.AgeSeconds, 0) && r.AgeSeconds >= 0 && r.AgeSeconds <= float64(math.MaxInt64)/float64(time.Second) && (r.State == "present" || r.State == "missing" || r.State == "unverified") {
@@ -165,10 +182,21 @@ func (w *Worker) inspectNASPaths(checks []NASPathCheck, root string) {
 	s.root = root
 	s.checks = slices.Clone(checks)
 }
-func (w *Worker) nasPathReports() []NASPathReport {
+func (w *Worker) nasPathReports(m *Machine) []NASPathReport {
 	s := w.nasInspection
 	if s == nil {
 		return nil
+	}
+	if checkpointRootUnavailable(m) {
+		reports := make([]NASPathReport, 0, len(s.checks)+len(s.reports))
+		for _, check := range s.checks {
+			reports = append(reports, NASPathReport{ID: check.ID, State: "unverified"})
+		}
+		for _, report := range s.reports {
+			reports = append(reports, NASPathReport{ID: report.ID, State: "unverified"})
+		}
+		s.checks, s.reports = nil, nil
+		return reports
 	}
 	// One operation each heartbeat costs at most the existing 25ms observation
 	// budget. A stuck syscall retains one slot and never stalls stop delivery.

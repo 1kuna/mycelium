@@ -59,6 +59,12 @@ OS; no separate repair daemon or privileged command is installed. Cached mount
 inventory is checked again after access, so an empty local mountpoint cannot
 pretend to be a recovered NAS. Independent local checkpoint roots remain local.
 
+The worker saves the observed network mountpoint for its checkpoint root in
+private local state before admitting work that depends on it. Across worker
+restarts, a surviving parent share cannot stand in for a previously observed
+nested checkpoint mount. A metadata read can trigger an automount. The write
+probe waits for mount inventory to confirm the expected backing.
+
 A learned whole-sequence latency outlier is advisory while filesystem
 operations still progress. The existing hygiene band and confirmation count
 remain unchanged; a slow success retains its evidence and alert without
@@ -88,10 +94,12 @@ custody are unchanged.
 
 An in-place update of an installed worker can report a storage warning when
 mount inventory lacks its unchanged configured NAS. This applies when the
-checkpoint, model and environment source paths are inside the configured NAS
-and state and caches are outside it, so the affected roles can be identified
-before the worker has seen the mount. Local state and service preflights
-still apply. After an owner resumes a drained worker, `myce host status`
+checkpoint and environment source paths are inside the configured NAS, the
+model root is on the NAS or on a verified local volume, and state and caches
+are outside the NAS. Preflight checks the absent NAS path without creating
+directories or probing writes. A file or symlink at the mountpoint is a
+preflight refusal. Local state and service preflights still apply.
+After an owner resumes a drained worker, `myce host status`
 continues to report `degraded` and the unavailable roles until the mount
 recovers. See [the first upgrade from a strict helper](fleet-upgrades.md#first-upgrade-of-a-worker-with-a-missing-nas).
 
@@ -141,10 +149,10 @@ Healthy operation adds no recovery reads. During a data fault one recovery
 owner per backing performs at most two page reads per completion, plus opens,
 stats and closes. An unreturned syscall retains that one lane.
 
-Known limit: a worker restart forgets this in-memory fault latch. The first
+Known limit: a worker restart forgets the in-memory data-fault latch. The first
 NAS-dependent attempt after restart may encounter the fault again and re-latch
-it. There is no new local-state writer or crash-recovery protocol. Durability is
-parked on #894; revisit on an observed post-restart repeat failure.
+it. Durability for that latch is parked on #894. Revisit on an observed
+post-restart repeat failure.
 
 An incident owner's temporary whole-host exclusion remains independent. Retire
 it only after deploying the reviewed release and verifying live that the fault

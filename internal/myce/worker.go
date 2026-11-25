@@ -1440,9 +1440,6 @@ func (w Worker) Run(stop context.Context) error {
 	w.toolReport = &workerToolReport{}
 	w.diskBudgetWire = &workerDiskBudgetWire{}
 	w.checkpointExpiry = newWorkerCheckpointExpiry()
-	if w.rootMonitor == nil {
-		w.rootMonitor = &workerRootMonitor{expected: map[string]string{}}
-	}
 	if err := ValidateDeviceSettings(w.DeviceSettings); err != nil {
 		return err
 	}

@@ -51,47 +51,72 @@ func mountHumanReason(osname string) mountRecoveryError {
 // Access is the supported, unprivileged automount trigger on both systems. We
 // never invoke mount, sudo, Finder, AppleScript, or a credential helper. A failed
 // trigger is retried by the same single-outstanding probe lane.
-func probeRecoveryMount(path, required, osname string, probe func(string) error, inventory func() ([]nasMount, error)) error {
+func probeRecoveryMount(path, required, osname string, exact bool, trigger, probe func(string) error, inventory func() ([]nasMount, error)) error {
 	mounts, err := inventory()
 	if err != nil {
 		return mountRecoveryError("mount_inventory_unavailable")
 	}
-	found := false
+	var mounted, automount string
 	for _, m := range mounts {
-		if withinNAS(m.root, path) {
-			found = true
-			if required == "" || len(m.root) > len(required) {
-				required = m.root
+		if !withinNAS(m.root, path) {
+			continue
+		}
+		if m.kind == "autofs" {
+			if len(m.root) > len(automount) {
+				automount = m.root
 			}
+		} else if (!exact || m.root == required) && len(m.root) > len(mounted) {
+			mounted = m.root
 		}
 	}
-	if required != "" && !found {
+	if !exact {
+		if len(automount) > len(mounted) {
+			required, mounted = automount, ""
+		} else if mounted != "" {
+			required, exact = mounted, true
+		}
+	}
+	if required == "" {
+		return probe(path) // Explicit local checkpoint roots stay local.
+	}
+	confirm := func() error {
+		mounts, err := inventory()
+		if err != nil {
+			return mountRecoveryError("mount_inventory_unavailable")
+		}
+		if slices.ContainsFunc(mounts, func(m nasMount) bool {
+			return m.kind != "autofs" && withinNAS(m.root, path) &&
+				(m.root == required || !exact && withinNAS(required, m.root))
+		}) {
+			return nil
+		}
+		if slices.ContainsFunc(mounts, func(m nasMount) bool { return m.kind == "autofs" && withinNAS(m.root, path) }) {
+			return mountRecoveryError("mount_automount_pending")
+		}
 		return mountHumanReason(osname)
+	}
+	if mounted == "" {
+		if automount == "" {
+			return mountHumanReason(osname)
+		}
+		// Read-only access triggers autofs. A surviving parent directory must
+		// never receive the checkpoint write probe while the nested mount is down.
+		if err := trigger(path); err != nil {
+			if errors.Is(err, os.ErrPermission) {
+				return mountHumanReason(osname)
+			}
+			return err
+		}
+		if err := confirm(); err != nil {
+			return err
+		}
 	}
 	err = probe(path)
-	if required == "" {
-		return err
-	} // Explicit local checkpoint roots stay local.
-	// Re-read after access: an automount can have become a real network mount.
-	mounts, invErr := inventory()
-	if invErr != nil {
-		return mountRecoveryError("mount_inventory_unavailable")
-	}
-	mounted, automount := false, false
-	for _, m := range mounts {
-		if withinNAS(m.root, required) {
-			if m.kind == "autofs" {
-				automount = true
-			} else {
-				mounted = true
-			}
-		}
-	}
-	if !mounted && !automount || errors.Is(err, os.ErrPermission) {
+	if errors.Is(err, os.ErrPermission) {
 		return mountHumanReason(osname)
 	}
-	if !mounted && err == nil {
-		return mountRecoveryError("mount_automount_pending")
+	if invErr := confirm(); invErr != nil {
+		return invErr
 	}
 	return err
 }
@@ -105,26 +130,31 @@ func healthMountAccess(role string) func(string, func()) error {
 
 func recoveryMountProbe(w Worker, role, path string) func(string, func()) error {
 	probe := healthMountAccess(role)
-	required := ""
-	if w.ServiceConfig != nil && withinNAS(w.ServiceConfig.NAS, path) && w.ServiceConfig.NAS != "" {
-		required = w.ServiceConfig.NAS
-	}
-	if w.rootMonitor != nil {
-		w.rootMonitor.mu.Lock()
-		if expected := w.rootMonitor.expected[role]; expected != "" {
-			required = expected
-		}
-		w.rootMonitor.mu.Unlock()
-	}
 	return func(_ string, progress func()) error {
+		required, exact := "", false
+		if w.ServiceConfig != nil && w.ServiceConfig.NAS != "" && withinNAS(w.ServiceConfig.NAS, path) {
+			required = w.ServiceConfig.NAS
+		}
 		if w.rootMonitor != nil {
 			w.rootMonitor.mu.Lock()
-			if expected := w.rootMonitor.expected[role]; expected != "" {
-				required = expected
+			expected := w.rootMonitor.expected[role]
+			if role == "checkpoint" {
+				w.rootMonitor.loadCheckpointBacking()
+				if w.rootMonitor.checkpointUnreadable {
+					w.rootMonitor.mu.Unlock()
+					return mountRecoveryError("mount_inventory_unavailable")
+				}
+				if saved := w.rootMonitor.checkpointBacking; expected == "" && saved.Path == path {
+					expected = saved.Mount
+				}
 			}
 			w.rootMonitor.mu.Unlock()
+			if expected != "" && withinNAS(expected, path) {
+				required, exact = expected, true
+			}
 		}
-		return probeRecoveryMount(path, required, runtime.GOOS, func(path string) error { return probe(path, progress) }, func() ([]nasMount, error) {
+		trigger := func(path string) error { return statHealthMount(path, os.Stat, progress) }
+		return probeRecoveryMount(path, required, runtime.GOOS, exact, trigger, func(path string) error { return probe(path, progress) }, func() ([]nasMount, error) {
 			probeguard.Check()
 			defer progress()
 			return mountedNASInventory(context.Background(), runtime.GOOS, func(ctx context.Context, _ string, _ ...string) ([]byte, error) {

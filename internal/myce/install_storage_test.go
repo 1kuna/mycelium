@@ -175,28 +175,54 @@ func TestFleetInstallMissingNASWarning(t *testing.T) {
 }
 
 func TestPreservedWorkerInstallMissingNAS(t *testing.T) {
-	saved, _ := onboardingNAS(t, "linux")
-	saved.RequireMountedNAS = true
 	missing := func(context.Context, string, ...string) ([]byte, error) { return nil, nil }
 	for _, tc := range []struct {
-		name string
-		edit func(*ServiceConfig)
+		name    string
+		edit    func(*testing.T, *ServiceConfig)
+		refusal string
 	}{
-		{"preserved", func(*ServiceConfig) {}},
-		{"changed selection", func(c *ServiceConfig) { c.Checkpoints = filepath.Join(c.NAS, "other-checkpoints") }},
-		{"unclassified root", func(c *ServiceConfig) { c.Checkpoints = filepath.Join(filepath.Dir(c.NAS), "other-checkpoints") }},
-		{"state on NAS", func(c *ServiceConfig) { c.ModelCache = filepath.Join(c.NAS, "cache") }},
+		{"preserved", func(*testing.T, *ServiceConfig) {}, ""},
+		{"mountpoint is absent", func(t *testing.T, c *ServiceConfig) {
+			if err := os.Remove(c.NAS); err != nil {
+				t.Fatal(err)
+			}
+		}, ""},
+		{"changed selection", func(_ *testing.T, c *ServiceConfig) { c.Checkpoints = filepath.Join(c.NAS, "other-checkpoints") }, "nas_not_mounted"},
+		{"unclassified root", func(_ *testing.T, c *ServiceConfig) {
+			c.Checkpoints = filepath.Join(filepath.Dir(c.NAS), "other-checkpoints")
+		}, "nas_not_mounted"},
+		{"state on NAS", func(_ *testing.T, c *ServiceConfig) { c.ModelCache = filepath.Join(c.NAS, "cache") }, "nas_not_mounted"},
+		{"mountpoint is a file", func(t *testing.T, c *ServiceConfig) {
+			if err := os.Remove(c.NAS); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(c.NAS, []byte("not a mountpoint"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}, "nas_root_invalid"},
+		{"verified local model root", func(t *testing.T, c *ServiceConfig) { c.ModelRoot = t.TempDir() }, ""},
+		{"invalid local model root", func(t *testing.T, c *ServiceConfig) {
+			c.ModelRoot = filepath.Join(t.TempDir(), "model-file")
+			if err := os.WriteFile(c.ModelRoot, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+		}, "model_root_not_local"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			saved, _ := onboardingNAS(t, "linux")
+			saved.RequireMountedNAS = true
 			c, previous := saved, saved
-			tc.edit(&c)
-			if tc.name == "unclassified root" {
-				previous = c // Historical config whose backing cannot be inferred at boot.
+			tc.edit(t, &c)
+			if tc.name != "changed selection" {
+				previous = c // The fallback applies only to unchanged storage selections.
 			}
 			for _, mode := range []installStorageMode{installStoragePreview, installStorageProbe, installStorageWrite} {
 				warning, err := prepareInstallStorage(context.Background(), c.WithInstalledStorage(previous), missing, mode, nil)
-				if tc.name != "preserved" {
-					requirePreflightCode(t, err, "nas_not_mounted")
+				if tc.refusal != "" {
+					requirePreflightCode(t, err, tc.refusal)
+					if warning != nil {
+						t.Fatal("definitive refusal was advisory", warning)
+					}
 					continue
 				}
 				if err != nil || warning == nil || warning.Root != "nas" || warning.Operation != "inventory" {

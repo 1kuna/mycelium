@@ -42,17 +42,18 @@ type ResolveEnvironment struct {
 }
 
 type ResolveTarget struct {
-	session       string
-	freshUntil    time.Time
-	cachedInputs  map[string]bool
-	nasInspection bool
-	Environment   *ResolveEnvironment `json:"environment,omitempty"`
-	NASInputs     []ResolveNASInput   `json:"nas_inputs,omitempty"`
-	Machine       string              `json:"machine"`
-	Target        ExecutionTarget     `json:"target"`
-	Freshness     string              `json:"freshness"`
-	Eligible      bool                `json:"eligible"`
-	Reason        string              `json:"reason"`
+	session               string
+	freshUntil            time.Time
+	cachedInputs          map[string]bool
+	nasInspection         bool
+	checkpointUnavailable bool
+	Environment           *ResolveEnvironment `json:"environment,omitempty"`
+	NASInputs             []ResolveNASInput   `json:"nas_inputs,omitempty"`
+	Machine               string              `json:"machine"`
+	Target                ExecutionTarget     `json:"target"`
+	Freshness             string              `json:"freshness"`
+	Eligible              bool                `json:"eligible"`
+	Reason                string              `json:"reason"`
 }
 
 // ResolveFinding names the field, the side that cannot see or run it
@@ -334,6 +335,7 @@ func (q *Queue) resolveTargets(j *Job) []ResolveTarget {
 			row.Reason = targetFitReason(fit.first, candidate, m)
 		}
 		row.nasInspection = slices.Contains(m.Capabilities, "nas_inspection_v1")
+		row.checkpointUnavailable = checkpointRootUnavailable(m)
 		row.cachedInputs = map[string]bool{}
 		for _, key := range m.CachedSharedInputs {
 			row.cachedInputs[key] = true

@@ -132,10 +132,13 @@ func (c ServiceConfig) WithInstalledStorage(previous ServiceConfig) ServiceConfi
 		c.ModelRoot != previous.ModelRoot || c.EnvironmentRoot != previous.EnvironmentRoot {
 		return c
 	}
-	for _, path := range []string{c.Checkpoints, c.ModelRoot, c.EnvironmentRoot} {
+	for _, path := range []string{c.Checkpoints, c.EnvironmentRoot} {
 		if !filepath.IsAbs(path) || !withinNAS(c.NAS, path) {
 			return c
 		}
+	}
+	if !filepath.IsAbs(c.ModelRoot) {
+		return c
 	}
 	roots, err := c.StateRoots()
 	if err != nil {

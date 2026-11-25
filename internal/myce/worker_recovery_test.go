@@ -264,6 +264,42 @@ func TestWorkerAttemptCheckpointIsolation(t *testing.T) {
 	if string(data) != "new" {
 		t.Fatal("new attempt modified previous checkpoint")
 	}
+
+	t.Run("known generation is required", func(t *testing.T) {
+		j.Checkpoint = filepath.Join(t.TempDir(), "job")
+		j.Spec.Resumable = true
+		j.CheckpointTarget = &CheckpointOrigin{Generation: 8, Attempt: 2}
+		if _, err := prepareCheckpoint(j); err == nil {
+			t.Fatal("missing job directory was accepted as an empty resume")
+		}
+		if _, err := os.Lstat(j.Checkpoint); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("resume created an empty job directory", err)
+		}
+		prev := filepath.Join(j.Checkpoint, "attempt-2")
+		if err := os.MkdirAll(prev, 0700); err != nil {
+			t.Fatal(err)
+		}
+		save := filepath.Join(prev, "checkpoint.json")
+		if err := os.WriteFile(save, []byte(`{"myce_checkpoint":{"generation":7}}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := prepareCheckpoint(j); err == nil {
+			t.Fatal("stale fallback generation was accepted")
+		}
+		if _, err := os.Lstat(attemptCheckpoint(j)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("stale resume created an attempt directory", err)
+		}
+		if err := os.WriteFile(save, []byte(`{"myce_checkpoint":{"generation":8}}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		dest, err := prepareCheckpoint(j)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if progress, err := checkpointProgress(dest); err != nil || progress != 8 {
+			t.Fatalf("resume generation %d: %v", progress, err)
+		}
+	})
 }
 func TestWorkerMissingCheckpointRootNotCreated(t *testing.T) {
 	w := recoveryWorker(t)
