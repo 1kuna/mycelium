@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"syscall"
 )
 
 // Reuse tus creation-with-upload, already supported by previous queues. A new
@@ -22,7 +23,7 @@ func (c Client) uploadOutputFile(ctx context.Context, path string, ref FileRef) 
 	if err := ref.validate(); err != nil {
 		return err
 	}
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return err
 	}

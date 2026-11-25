@@ -477,7 +477,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		floorRefusal := s.state.Result != nil && s.state.Result.CheckpointFloorMissing != nil
 		if floorRefusal {
 			report.Progress = -1 // A declined launch has no running checkpoint writer.
-		} else if needsCheckpoint(&a.job) {
+		} else if needsCheckpoint(&a.job) && !a.job.Spec.warmPieces() {
 			var err error
 			report.Progress, err = s.checkpointReport(w, a.job, recoveryProgress, canRelease)
 			if !errors.Is(err, errCheckpointIOPending) {
@@ -521,7 +521,11 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			publicationStarted := w.Clock.Now()
 			var err error
 			resultReady := p == nil && s.state.Result != nil
-			stopWithoutPublication := d.Stop && d.Kill && !scarceYieldStop(s.state.PriorityStop)
+			// Report a warm stop with its actual result. A release-only report
+			// would requeue before the queue can classify pressure or completion.
+			warmResult := a.job.Spec.warmPieces() && !d.UserCancel
+			warmSave := warmResult && a.job.Spec.Resumable
+			stopWithoutPublication := d.Stop && d.Kill && !scarceYieldStop(s.state.PriorityStop) && !warmResult
 			var resultAcknowledged, discarded bool
 			if stopWithoutPublication {
 				if canRelease {
@@ -546,7 +550,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			if err == nil && !floorRefusal && (!stopWithoutPublication || !resultReady) && (a.job.storedFileResults() || resultReady && scarceYieldStop(s.state.Result.PriorityStop)) {
 				w.storageObserver = s.storageObserver
 				if resultReady {
-					if canRelease && !releaseSent {
+					if canRelease && !releaseSent && !warmResult {
 						err = w.ackAttemptRelease(ioCtx, *s.state.Result)
 						releaseSent = err == nil
 						if stale(err) {
@@ -580,7 +584,9 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 							err = s.save()
 						} else {
 							s.fileError = "file publication pending; local results retained"
-							if record.ownsResult(&finished) && finished.ExecutionCause != nil && finished.ExecutionCause.Finalization != nil {
+							// Warm checkpoints are fenced by exact release. Preserve the
+							// saved result and let this actor retry before releasing.
+							if !warmSave && record.ownsResult(&finished) && finished.ExecutionCause != nil && finished.ExecutionCause.Finalization != nil {
 								s.state.Result = &finished
 								if saveErr := s.save(); saveErr != nil {
 									finish(saveErr)
@@ -593,7 +599,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 							}
 						}
 					}
-				} else if a.job.FileTransport && report.Progress > s.fileGeneration {
+				} else if a.job.FileTransport && !a.job.Spec.warmPieces() && report.Progress > s.fileGeneration {
 					value := *s.state.Job
 					published, e := s.fileProgress.run(attemptCheckpoint(value), func() (int64, error) { return w.publishFileCheckpoint(value, s.dir) })
 					if e == nil {
@@ -1319,6 +1325,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
 			m.Capabilities = append(slices.Clone(w.Machine.Capabilities), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1", "nas_inspection_v1", scarceHostYieldCapability, localFirstProtocol)
+			if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+				m.Capabilities = append(m.Capabilities, warmPiecesCapability)
+			}
 			m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
 			if workerSyntheticMemoryHost || w.devEnvironmentSizing || w.Machine.GPU == "fake" && w.ServiceConfig == nil || runtime.GOOS == "darwin" && w.processMemory != nil && w.processMemory.OwnedFootprint != nil {
 				m.Capabilities = append(m.Capabilities, sampledMemoryCapability)

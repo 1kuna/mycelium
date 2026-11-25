@@ -198,6 +198,21 @@ func profileMemoryIdentity(j *Job) string {
 	if j.planningMemoryIdentity != "" {
 		return j.planningMemoryIdentity
 	}
+	base := plainMemoryIdentity(j)
+	if !j.Spec.warmPieces() {
+		return base
+	}
+	// A whole warm attempt measures a different workload from a one-shot
+	// command, even when they load the same model and use the same profile.
+	return "warm:" + identityHash(struct {
+		Base   string
+		Pieces []FanOutPiece
+		Files  FileManifest
+		Models map[string]ModelSnapshot
+	}{base, j.Spec.FanOut.Pieces, j.Spec.Files, j.Spec.ModelSnapshots})
+}
+
+func plainMemoryIdentity(j *Job) string {
 	s := j.Spec
 	if s.ProfileMemory != "" {
 		return "profile:" + identityHash(struct {

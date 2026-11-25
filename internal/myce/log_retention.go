@@ -185,7 +185,7 @@ func (w Worker) publishedAttemptFiles(ctx context.Context, st workerState) (*Exe
 	if accepted.ID != r.ID || accepted.Attempt != r.Attempt || accepted.Session != r.Session || accepted.Machine != r.Machine || !accepted.ReleaseConfirmed {
 		return nil, nil
 	}
-	if accepted.State == "succeeded" && r.Success && !r.Interrupted && maps.Equal(accepted.OutputRefs, r.OutputRefs) {
+	if accepted.State == "succeeded" && r.Success && !r.Interrupted && (j.Spec.warmPieces() || maps.Equal(accepted.OutputRefs, r.OutputRefs)) {
 		execution := r.Execution
 		return &execution, nil
 	}

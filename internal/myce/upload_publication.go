@@ -3,7 +3,9 @@ package myce
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"path/filepath"
@@ -173,6 +175,25 @@ func (d *uploadDiagnostic) log(r *http.Request, status int, headers http.Header,
 		r.Method, d.hash, job, attempt.Attempt, status, requested, d.accepted, d.length, d.operation, d.failure, code)
 }
 
+// tus answers any other callback error with 500. A queue wait that ended
+// because the request did is an interruption, and a stopping queue keeps its
+// typed retryable refusal. Genuine storage and persistence failures stay 500.
+func uploadCallbackError(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return tus.NewError("ERR_UPLOAD_INTERRUPTED", "upload request interrupted", http.StatusRequestTimeout)
+	}
+	var api *HTTPError
+	if errors.As(err, &api) && api.Code == "queue_stopping" {
+		body, _ := json.Marshal(map[string]string{"code": api.Code, "error": api.Message})
+		return tus.Error{ErrorCode: "ERR_QUEUE_STOPPING", Message: api.Message, HTTPResponse: tus.HTTPResponse{
+			StatusCode: api.Status, Body: string(body), Header: tus.HTTPHeader{"Content-Type": "application/json"}}}
+	}
+	return err
+}
+
 // Both ordinary completion and an accepted-end retry run the same durability
 // and purpose/custody barriers. No queue mutex is held during file I/O.
 func (s *FileStore) finishUpload(ctx context.Context, info tus.FileInfo) error {
@@ -237,6 +258,15 @@ func (s *FileStore) resumeUploadPublication(w http.ResponseWriter, r *http.Reque
 	err = uploadFailure(ctx, "upload_finish", upload.FinishUpload(ctx))
 	if err == nil {
 		err = s.finishUpload(ctx, info)
+	}
+	var refusal tus.Error
+	if errors.As(uploadCallbackError(ctx, err), &refusal) {
+		for name, value := range refusal.HTTPResponse.Header {
+			w.Header().Set(name, value)
+		}
+		w.WriteHeader(refusal.HTTPResponse.StatusCode)
+		_, _ = io.WriteString(w, refusal.HTTPResponse.Body)
+		return
 	}
 	if err != nil {
 		http.Error(w, "upload publication unavailable", http.StatusInternalServerError)

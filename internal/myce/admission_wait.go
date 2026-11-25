@@ -724,7 +724,7 @@ func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration, 
 			q.closeAdmissionWait(j, j.State)
 			continue
 		}
-		if j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next >= len(j.Spec.FanOut.Pieces) {
+		if j.Spec.childFanOut() && j.FanOut != nil && j.FanOut.Next >= len(j.Spec.FanOut.Pieces) {
 			q.closeAdmissionWait(j, "wave_admitted")
 			continue
 		}
@@ -789,7 +789,7 @@ func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration, 
 				if candidate == nil {
 					resolution = "serial_diagnostic_projection"
 					template := j
-					if j.Spec.FanOut != nil {
+					if j.Spec.childFanOut() {
 						template = q.fanOutTemplate(j)
 					}
 					for _, c := range q.memoryCandidates(template, m) {

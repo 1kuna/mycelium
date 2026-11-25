@@ -181,6 +181,12 @@ for source in ('fleet_adoption', 'fleet_handover'):
         'fleet_normal_test.go', 'fleet_critical_test.go')
 
 
+# Warm item transport and checkpoints share queue and dev coverage.
+for source in ('warm_piece_checkpoint', 'warm_piece_worker'):
+    SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = (
+        'warm_pieces_test.go', 'warm_pieces_dev_test.go')
+
+
 PYTHON_CLIENT = ('@python-client', 'test_client.DevTests.test_consumer_skill_examples')
 
 

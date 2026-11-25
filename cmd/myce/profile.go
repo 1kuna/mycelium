@@ -321,6 +321,9 @@ func (p executionProfile) placementAdvisories() []string {
 }
 
 func runPreparedProfile(ctx context.Context, root string, p executionProfile, data []byte, args []string, itemInputs map[string]string, key, notify, config, joining, address, token string, out, errOut io.Writer, overrides ...profileOverrides) error {
+	if p.WarmPieces != "" && len(p.Check) != 0 {
+		return waitError(64, "profile_invalid: warm_pieces validates each item before success; omit checks.result")
+	}
 	var override profileOverrides
 	if len(overrides) > 0 {
 		override = overrides[0]

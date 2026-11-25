@@ -152,6 +152,7 @@ type cancellationObservationInput struct {
 	ReleaseConfirmed                  bool
 	CancelledAt                       *time.Time
 	Copies                            []Copy
+	WarmPieces                        string
 	FanOut                            *FanOutProgress
 	Declaration                       *FanOut
 	After                             *PieceDependency
@@ -167,6 +168,7 @@ func cancellationInputs(j *Job) cancellationObservationInput {
 	for _, copy := range j.Copies {
 		in.Copies = append(in.Copies, Copy{Attempt: copy.Attempt, ReleaseConfirmed: copy.ReleaseConfirmed})
 	}
+	in.WarmPieces = j.Spec.WarmPieces
 	if j.FanOut != nil {
 		in.FanOut = &FanOutProgress{Children: slices.Clone(j.FanOut.Children), Results: map[string]PieceResult{}}
 		for key := range j.FanOut.Results {
@@ -192,5 +194,5 @@ func cancellationInputs(j *Job) cancellationObservationInput {
 	return in
 }
 func (in cancellationObservationInput) job() *Job {
-	return &Job{ID: in.ID, State: in.State, Spec: Spec{Project: in.Project, SubmissionKey: in.SubmissionKey, FanOut: in.Declaration, After: in.After}, Attempt: in.Attempt, ReleaseConfirmed: in.ReleaseConfirmed, CancelledAt: in.CancelledAt, Copies: in.Copies, FanOut: in.FanOut, Batch: in.Batch}
+	return &Job{ID: in.ID, State: in.State, Spec: Spec{Project: in.Project, WarmPieces: in.WarmPieces, SubmissionKey: in.SubmissionKey, FanOut: in.Declaration, After: in.After}, Attempt: in.Attempt, ReleaseConfirmed: in.ReleaseConfirmed, CancelledAt: in.CancelledAt, Copies: in.Copies, FanOut: in.FanOut, Batch: in.Batch}
 }

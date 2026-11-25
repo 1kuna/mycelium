@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -64,6 +65,9 @@ type nativeGroup struct {
 	memberMemory           map[string]*memoryAttempt
 	custody                workerState
 	supervisor             *exec.Cmd
+	// warmUnsettled records that the helper loop ended because the queue
+	// could not accept an item, rather than at completion or a stop.
+	warmUnsettled atomic.Bool
 }
 
 // Only this attempt's payload leaves are shared for metrics. The aggregate
@@ -469,6 +473,12 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, reservation nativeLaunch
 		p.mu.Lock()
 		r = classifyAttemptOutcome(r, attemptCause{PriorityStop: p.priorityStop, memberOutcome: facts, OutOfMemory: r.OutOfMemory || oom != nil && strings.Contains(oom.Error(), "exceeded its ")})
 		p.mu.Unlock()
+		if r.Success && g.warmUnsettled.Load() {
+			// Main exited cleanly at the worker's end of work. Report the
+			// interruption so the queue requeues the unsettled tail.
+			r.Success, r.Interrupted, r.ExecutionCause = false, true, warmSettleCause()
+			r.Error = r.ExecutionCause.String()
+		}
 		r.StoragePeak = w.storageObserver.finish()
 		if r.Success {
 			if e := w.publishExtensionFiles(j, attemptStorageRoot(j, g.dir)); e != nil {
@@ -768,7 +778,7 @@ func environmentList(env map[string]string) []string {
 	return out
 }
 
-func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]string, dir string, output *os.File) error {
+func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]string, dir string, output *os.File, warmFD ...*os.File) error {
 	timing := g.worker.launchTiming
 	if m.Name == "main" {
 		timing.enter(launchSupervisor)
@@ -816,6 +826,12 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	cmd := exec.Command("/bin/sh", args...)
 	cmd.Dir = dir
 	env = maps.Clone(env)
+	delete(env, warmPieceFD)
+	if main && len(warmFD) == 1 {
+		// The native namespace uses 3/4 for its launch receipts.
+		cmd.ExtraFiles = []*os.File{nil, nil, warmFD[0]}
+		env[warmPieceFD] = strconv.Itoa(warmBootstrapFD)
+	}
 	bound, e := g.worker.deviceEnvironment()
 	if e != nil {
 		return e
@@ -1023,6 +1039,15 @@ func (g *nativeGroup) independentMemberFailureLocked() bool {
 }
 
 func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string, output *os.File) (error, bool) {
+	if j.Spec.warmPieces() && j.FanOut.Next == len(j.Spec.FanOut.Pieces) {
+		var err error
+		if g.worker.compactNativeLaunch {
+			err = g.worker.authorizeStartWithCustody(j, g.session, g.custodyStart, g.dir)
+		} else {
+			err = g.worker.authorizeStart(j, g.session, g.dir)
+		}
+		return err, false
+	}
 	g.worker.launchTiming.enter(launchSidecarEnv)
 	// Acquire all helper environments before starting any payload; hold cache use
 	// protections until every member has exited (the outer goroutine defers release).
@@ -1167,8 +1192,34 @@ func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string,
 		env[k] = replace.Replace(v)
 	}
 	main := g.members[len(g.members)-1]
-	if err := g.launch(main, expandArgs(j.Spec.Run.Command, replace), env, j.Spec.Run.Workdir, output); err != nil {
+	var conn *net.UnixConn
+	var child *os.File
+	var fds []*os.File
+	if j.Spec.warmPieces() {
+		var err error
+		conn, child, err = newWarmPieceChannel()
+		if err != nil {
+			return err, true
+		}
+		defer conn.Close()
+		defer child.Close()
+		fds = []*os.File{child}
+	}
+	if err := g.launch(main, expandArgs(j.Spec.Run.Command, replace), env, j.Spec.Run.Workdir, output, fds...); err != nil {
 		return err, !errors.Is(err, context.Canceled) && !errors.Is(err, errWorkerStartAuthorization)
+	}
+	var warmDone <-chan error
+	if conn != nil {
+		child.Close()
+		ctx, cancel := context.WithCancel(g.ctx)
+		done := make(chan error, 1)
+		defer func() {
+			cancel()
+			conn.Close()
+			<-done
+		}()
+		warmDone = done
+		go func() { done <- g.serveWarmPieces(ctx, conn, j); close(done) }()
 	}
 	wake := time.NewTicker(10 * time.Millisecond)
 	defer wake.Stop()
@@ -1180,6 +1231,11 @@ func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string,
 			return err, !stopped || g.independentMemberFailure()
 		}
 		select {
+		case err := <-warmDone:
+			warmDone = nil
+			if err != nil && g.ctx.Err() == nil {
+				return err, true
+			}
 		case <-main.done:
 			g.p.mu.Lock()
 			stopped := g.p.stopped || g.p.killed

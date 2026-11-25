@@ -352,3 +352,11 @@ for all metadata reads in that reply). Successful reads retain the job deadline;
 unavailable so batch observation continues. Use an owner timeout when that bound
 matters. Queue execution
 deadlines always apply. A full terminal Job is still fetched for results.
+
+### Fixed warm pieces
+
+An ordinary plain-command job can use the worker's
+[`WarmPieces` helper](src/mycelium/warm_pieces.py) inside main. Run
+[the scoring example](examples/warm_score.py) with the declarations in
+[the jobs guide](../../docs/jobs.md#fixed-warm-pieces). The helper uses an
+attempt-local descriptor and needs no queue client or fleet token.

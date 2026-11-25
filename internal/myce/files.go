@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/tus/tusd/v2/pkg/filelocker"
@@ -79,7 +80,7 @@ func identifyFileContext(ctx context.Context, path string) (FileRef, error) {
 	if err = noModelSymlinks(path, false); err != nil {
 		return FileRef{}, err
 	}
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return FileRef{}, err
 	}
@@ -172,7 +173,7 @@ type fileStoreConfiguration struct {
 // Stored inputs and their results use the queue file store independently of
 // checkpoint mode. FileTransport continues to select file-store checkpoints.
 func (j Job) storedFileResults() bool {
-	if j.Spec.ephemeral() || j.Spec.OutputDelivery == asyncNAS || j.FileTransport || len(jobInputFiles(&j))+len(j.Spec.ModelSnapshots) > 0 {
+	if j.Spec.warmPieces() || j.Spec.ephemeral() || j.Spec.OutputDelivery == asyncNAS || j.FileTransport || len(jobInputFiles(&j))+len(j.Spec.ModelSnapshots) > 0 {
 		return true
 	}
 	for _, input := range j.Spec.SharedInputs {
@@ -233,16 +234,16 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 				return tus.HTTPResponse{}, tus.FileInfoChanges{}, errors.New("invalid file upload identity")
 			}
 			if err := s.recordUpload(ref.SHA256, e.Upload.MetaData["purpose"], true, ctx); err != nil {
-				return tus.HTTPResponse{}, tus.FileInfoChanges{}, uploadFailure(ctx, "upload_creation_commit", err)
+				return tus.HTTPResponse{}, tus.FileInfoChanges{}, uploadCallbackError(ctx, uploadFailure(ctx, "upload_creation_commit", err))
 			}
 			if err := ctx.Err(); err != nil {
-				return tus.HTTPResponse{}, tus.FileInfoChanges{}, err
+				return tus.HTTPResponse{}, tus.FileInfoChanges{}, uploadCallbackError(ctx, err)
 			}
 			return tus.HTTPResponse{}, tus.FileInfoChanges{ID: ref.SHA256}, nil
 		},
 		PreFinishResponseCallback: func(e tus.HookEvent) (tus.HTTPResponse, error) {
 			ctx := creationContext(e.Context)
-			return tus.HTTPResponse{}, s.finishUpload(ctx, e.Upload)
+			return tus.HTTPResponse{}, uploadCallbackError(ctx, s.finishUpload(ctx, e.Upload))
 		},
 	})
 	if err != nil {
@@ -1256,7 +1257,7 @@ func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpos
 	if err := verifyFile(ctx, path, ref); err != nil {
 		return err
 	}
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return err
 	}

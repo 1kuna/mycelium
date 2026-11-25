@@ -141,7 +141,9 @@ func priorityStop(j *Job) *PriorityPreemption {
 	return nil
 }
 func plannedPriorityStop(j *Job) bool { return priorityStop(j) != nil }
-func plannedStop(j *Job) bool         { return plannedMaintenanceStop(j) || plannedPriorityStop(j) }
+func plannedStop(j *Job) bool {
+	return plannedMaintenanceStop(j) || plannedPriorityStop(j) || j.Spec.warmPieces() && j.State == "stopping" && j.Reason == warmBoundaryYield
+}
 
 // Pending cleanup is planning credit only. A slow kill must eventually stop
 // attracting demand so another device can be reclaimed without releasing custody.

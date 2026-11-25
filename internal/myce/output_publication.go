@@ -201,10 +201,13 @@ func openOutputConfirmations(root string, files FileManifest) (*os.File, map[str
 }
 
 func (w Worker) publishOutputFiles(ctx context.Context, j Job, parent string, step, outputName *string) (FileManifest, bool, error) {
+	return w.publishOutputFilesAt(ctx, j, parent, filepath.Join(attemptPublicationRoot(j, parent), "outputs"), step, outputName)
+}
+
+func (w Worker) publishOutputFilesAt(ctx context.Context, j Job, parent, root string, step, outputName *string) (FileManifest, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
-	root := filepath.Join(attemptPublicationRoot(j, parent), "outputs")
 	p, terminal, err := w.outputPublication(ctx, j, root, step, outputName)
 	if err != nil {
 		if ctx.Err() != nil {

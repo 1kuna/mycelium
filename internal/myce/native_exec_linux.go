@@ -88,9 +88,17 @@ func NativeExec(args []string) error {
 			return fmt.Errorf("native seccomp: %w", err)
 		}
 	}
-	// Keep start-by receipts 3/4 alive until _command-exec consumes them. All
-	// other inherited helper descriptors close at exec, including Go runtime FDs.
-	if err := unix.CloseRange(5, ^uint(0), unix.CLOSE_RANGE_CLOEXEC); err != nil {
+	// Keep start-by receipts 3/4 until _command-exec consumes them. Main may
+	// also inherit its warm bootstrap socket. Close every other helper FD.
+	first := uint(warmBootstrapFD)
+	if p.WarmPieceFD {
+		addr, err := unix.Getpeername(warmBootstrapFD)
+		if _, ok := addr.(*unix.SockaddrUnix); err != nil || !ok {
+			return errors.New("native warm bootstrap socket is missing")
+		}
+		first++
+	}
+	if err := unix.CloseRange(first, ^uint(0), unix.CLOSE_RANGE_CLOEXEC); err != nil {
 		return fmt.Errorf("native descriptor hygiene: %w", err)
 	}
 	payloadEnv := p.Env

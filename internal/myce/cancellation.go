@@ -271,6 +271,9 @@ func (q *Queue) projectCancellation(out, stored *Job) {
 	for _, p := range stored.Spec.FanOut.Pieces {
 		_, accepted := stored.FanOut.Results[p.Key]
 		piece := CancellationPiece{Key: p.Key, Accepted: accepted, WillNotRun: cancelled(stored), Release: "not_applicable", Dependents: []string{}}
+		if stored.Spec.warmPieces() && !accepted && stored.Attempt > 0 {
+			piece.Release = q.observedRelease(stored)
+		}
 		if wave := waves[p.Key]; wave != nil {
 			piece.Materialized, piece.WaveID, piece.Release = true, wave.ID, q.observedRelease(wave)
 		}

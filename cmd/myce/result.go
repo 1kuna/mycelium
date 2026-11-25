@@ -106,7 +106,7 @@ func fetchResult(ctx context.Context, c myce.Client, id, out string, attempt int
 		if err != nil {
 			return failure(err)
 		}
-	} else if j.State != "succeeded" || len(j.OutputRefs) == 0 {
+	} else if (j.State != "succeeded" && (j.FanOut == nil || j.FanOut.Warm == nil)) || len(j.OutputRefs) == 0 {
 		msg := "job has no accepted result (state " + j.State + ")"
 		if j.Finding != nil {
 			msg += "; " + j.Finding.Text()

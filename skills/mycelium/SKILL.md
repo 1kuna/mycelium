@@ -213,6 +213,32 @@ uses the declared NAS source even when an ordinary shared-input cache holds a co
   [file holdings](references/results.md#large-outputs-and-release) before
   releasing finished files.
 
+## Fixed warm pieces
+
+Use `advanced: {warm_pieces: fixed}` with plain-command `pieces:` when one
+main process can load a model once and handle the items serially. Submit
+normally and keep the parent ID. Main opens the worker helper, loads the
+model, calls `next()` for the key, args and paths, writes the declared
+outputs for that item, and waits for `success()` or reports `failure()`.
+The worker supplies the attempt's helper descriptor to main. Main can
+delegate it to a descendant for serial use. Sidecars receive no descriptor,
+and job processes never receive the fleet token.
+
+Inspect the parent's `fan_out.results` for accepted keys. Fetch them as
+`KEY/OUTPUT_NAME` with `myce result PARENT --out DIR`, including partial
+results. When `next()` returns `None`, main exits. This also happens at a
+planned stop, when the next attempt resumes at the first unsettled key.
+`success()` or `failure()` returns `False` when a stop or an unreachable
+queue left that item unsettled; it runs again later. `success()` also
+returns `False` when the queue rejected the outputs and recorded the item
+as failed; `next()` continues. `checkpoint()` returns `False` when a save
+was not published; keep working.
+Use repeatable item work and, for resumable submissions, publish complete
+file-store generations from the active item's checkpoint directory. A
+reported item failure settles the key and the loop continues. Plan the full
+attempt reservation for CPU or one device. See the
+[warm pieces contract and Python loop](../../docs/jobs.md#fixed-warm-pieces).
+
 ## Pause, resume and cancel
 
 Pause your own queued job with `myce pause JOB_ID --reason TEXT` and resume it
