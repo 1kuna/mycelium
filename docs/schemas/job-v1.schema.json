@@ -85,6 +85,9 @@
         "memory_room": {
           "$ref": "#/$defs/MemoryRoomDecision"
         },
+        "ram_gate_end_ns": {
+          "type": "integer"
+        },
         "ram_gate_sample_id": {
           "type": "integer"
         },
@@ -1744,6 +1747,9 @@
           "type": "number"
         },
         "min_gb": {
+          "type": "number"
+        },
+        "owned_peak_gb": {
           "type": "number"
         },
         "peak_at_seconds": {
@@ -4902,6 +4908,9 @@
         "grace_seconds": {
           "type": "number"
         },
+        "growth_gb_per_second": {
+          "type": "number"
+        },
         "next_loss_gb": {
           "type": "number"
         },
@@ -4909,19 +4918,13 @@
           "format": "date-time",
           "type": "string"
         },
-        "other_growth_gb_per_second": {
-          "type": "number"
-        },
-        "remaining_reserved_gb": {
-          "type": "number"
-        },
         "reserve_gb": {
           "type": "number"
         },
-        "reserved_growth_gb_per_second": {
+        "sample_seconds": {
           "type": "number"
         },
-        "sample_seconds": {
+        "sustained_growth_gb_per_second": {
           "type": "number"
         },
         "trigger": {
@@ -4932,9 +4935,8 @@
         "observed_at",
         "available_gb",
         "reserve_gb",
-        "reserved_growth_gb_per_second",
-        "other_growth_gb_per_second",
-        "remaining_reserved_gb",
+        "growth_gb_per_second",
+        "sustained_growth_gb_per_second",
         "next_loss_gb",
         "grace_loss_gb",
         "sample_seconds",

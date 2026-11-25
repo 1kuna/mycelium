@@ -8,17 +8,20 @@ import "time"
 // Complete coverage uses the guard's existing one-missed-cycle tolerance.
 // This diagnostic does not discount DeviceGrowthGB or authorize GPU sharing.
 type DeviceMemorySampling struct {
-	Samples            int     `json:"samples"`
-	Complete           bool    `json:"complete"`
-	MinGB              float64 `json:"min_gb"`
-	MaxGB              float64 `json:"max_gb"`
-	LastGB             float64 `json:"last_gb"`
-	MaxStepGB          float64 `json:"max_step_gb"`
-	LastStepGB         float64 `json:"last_step_gb"`
-	FirstAtSeconds     float64 `json:"first_at_seconds"`
-	PeakAtSeconds      float64 `json:"peak_at_seconds"`
-	ElapsedSeconds     float64 `json:"elapsed_seconds"`
-	MaxIntervalSeconds float64 `json:"max_interval_seconds"`
+	// OwnedPeakGB is set when every reading identifies the attempt's device
+	// memory without ambiguity from shared allocations or indirect estimates.
+	OwnedPeakGB        *float64 `json:"owned_peak_gb,omitempty"`
+	Samples            int      `json:"samples"`
+	Complete           bool     `json:"complete"`
+	MinGB              float64  `json:"min_gb"`
+	MaxGB              float64  `json:"max_gb"`
+	LastGB             float64  `json:"last_gb"`
+	MaxStepGB          float64  `json:"max_step_gb"`
+	LastStepGB         float64  `json:"last_step_gb"`
+	FirstAtSeconds     float64  `json:"first_at_seconds"`
+	PeakAtSeconds      float64  `json:"peak_at_seconds"`
+	ElapsedSeconds     float64  `json:"elapsed_seconds"`
+	MaxIntervalSeconds float64  `json:"max_interval_seconds"`
 }
 
 type deviceSampling struct {

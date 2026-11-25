@@ -241,6 +241,16 @@ func (e *memoryEvidence) estimate(k memoryEvidenceKey, hint, confidence float64)
 	return e.estimateWithFloor(k, hint, confidence, e.exact[k].Lower)
 }
 
+func (e *memoryEvidence) retainPressurePeak(key memoryEvidenceKey, peak float64) {
+	exact := e.exact[key]
+	if peak <= exact.PressurePeak || !validRate(peak) || key.Platform == "" || key.Family == "" || key.Exact == "" {
+		return
+	}
+	exact.PressurePeak = peak
+	e.exact[key] = exact
+	e.write(memoryEvidenceRowKey{kind: "exact", key: key}, exact)
+}
+
 func (e *memoryEvidence) estimateWithFloor(k memoryEvidenceKey, hint, confidence, lower float64) memoryPoolEstimate {
 	exact, family := e.exact[k], e.family[k.familyKey()]
 	var typical, charge float64

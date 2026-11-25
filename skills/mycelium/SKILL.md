@@ -188,6 +188,10 @@ uses the declared NAS source even when an ordinary shared-input cache holds a co
   For a host memory-pool stop, use `myce status --history --json JOB_ID` and
   inspect `attempt_history[].priority_stop.memory_pool` for the forecast
   that triggered the stop. `stop_observation` gives the later outcome reading.
+  `memory_attempts[].learning_reason` reports `pressure_peak` when attributed
+  usage sets an admission floor and `pressure_peak_unattributed` when the
+  receipt lacked complete attribution. A floor beyond all eligible pools
+  fails with `memory_capacity`.
   A unified-memory GPU can run one attempt per work family when measured
   overlap lowers that family's throughput. Other families can use remaining
   room under the ordinary memory and tier rules. Keep queued peers on their

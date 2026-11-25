@@ -129,14 +129,19 @@ func (q *Queue) launchCapacityBlocked(j *Job, m *Machine) bool {
 	if !ok {
 		return false
 	}
-	if worker := q.s.Machines[m.ID]; h.Admission != nil && h.Admission.Subcheck == memoryWaitReason &&
-		worker != nil && worker.HostRAMGate != nil && !h.ObservedAt.IsZero() && h.Session == m.Session {
-		// Use the worker's probe order even when a delayed heartbeat first
-		// reaches the queue after the refusal. Legacy receipts use ingress.
-		if before, after := h.Admission.RAMGateSampleID, worker.HostRAMGate.SampleID; before > 0 && after > 0 {
-			return after <= before
+	if worker := q.s.Machines[m.ID]; h.Admission != nil && h.Admission.Subcheck == memoryWaitReason && h.Session == m.Session {
+		if end := h.Admission.RAMGateEndNS; end > 0 {
+			return worker == nil || worker.HostRAMGate == nil || worker.HostRAMGate.SampleStartedNS <= end
 		}
-		return !worker.hostRAMGateAt.After(h.ObservedAt)
+		if before := h.Admission.RAMGateSampleID; before > 0 {
+			// A missing gate or older probe cannot prove recovery. Placement
+			// independently requires the full demand to fit the newer gate.
+			return worker == nil || worker.HostRAMGate == nil || worker.HostRAMGate.SampleID <= before
+		}
+		// Older workers have no probe identity on a refusal.
+		if worker != nil && worker.HostRAMGate != nil && !h.ObservedAt.IsZero() {
+			return !worker.hostRAMGateAt.After(h.ObservedAt)
+		}
 	}
 	if h.Evidence == "" {
 		// Refused before the first post-restart report. Only a committed

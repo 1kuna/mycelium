@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestAttemptMemoryDeviceQueryInheritedPipe(t *testing.T) {
@@ -104,6 +105,44 @@ func TestAttemptMemoryDeviceAccounting(t *testing.T) {
 	}
 	if _, _, _, err := drmAttemptMemory([]byte("drm-client-id: 7\ndrm-pdev: 0000:03:00.0\n"), "0000:03:00.0"); err != errAttemptMemoryPending {
 		t.Fatal("uninitialised DRM counters disabled sampling", err)
+	}
+}
+
+func TestAttemptMemoryDevicePeakRequiresUnambiguousOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name, rows string
+		want       bool
+	}{
+		{name: "one owned contributor", rows: "GPU-one, 7, 2048\nGPU-one, 42, 8192\n", want: true},
+		{name: "overlap unknown", rows: "GPU-one, 7, 2048\nGPU-one, 9, 2048\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Unix(60, 0)
+			clock := &fakeClock{now: start}
+			w := Worker{Machine: Machine{GPU: "cuda", Device: "GPU-one"}, Clock: clock,
+				cudaMemoryQuery: func(context.Context) ([]byte, error) {
+					clock.Advance(time.Second)
+					return []byte(tc.rows), nil
+				}}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			ticks := make(chan time.Time)
+			sampled := make(chan struct{})
+			reads := w.observeDeviceMemoryWith(ctx, func() (map[int]bool, map[int]bool, error) {
+				return map[int]bool{7: true, 9: true}, nil, nil
+			}, nil, time.Second, clock, nil, func(_, _ time.Time, _ *AttemptMemoryPeak, _ time.Duration, _ bool) {
+				sampled <- struct{}{}
+			}, ticks)
+			for range 2 {
+				ticks <- clock.Now()
+				<-sampled
+			}
+			cancel()
+			got := (<-reads).peak.DeviceSampling
+			if got == nil || !got.Complete || (got.OwnedPeakGB != nil) != tc.want || tc.want && *got.OwnedPeakGB != 2 {
+				t.Fatalf("unexpected ownership evidence: %+v", got)
+			}
+		})
 	}
 }
 

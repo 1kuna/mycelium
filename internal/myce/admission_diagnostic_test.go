@@ -62,6 +62,7 @@ func TestAdmissionDiagnosticRetained(t *testing.T) {
 			} else if subcheck == "live_host_ram" {
 				// The detached custodian uses this entry and classifies the
 				// returned error directly. No actor rewrites the refusal first.
+				w.Custodian = ID()
 				p, e := w.startAssignedAttempt(context.Background(), store, *j)
 				if p != nil {
 					t.Fatal("started without RAM")
@@ -107,6 +108,12 @@ func TestAdmissionDiagnosticRetained(t *testing.T) {
 				t.Fatal("unchanged refusal re-offered", got)
 			}
 			m.HostAvailableMemoryGB++
+			if subcheck == "live_host_ram" {
+				// The detached receipt requires a worker probe that began
+				// after its read ended. A legacy capacity scalar cannot prove it.
+				stamp := clock.Now().UnixNano()
+				m.HostRAMGate = &HostRAMGate{SampleID: stamp, SampleStartedNS: stamp, RawGB: m.HostAvailableMemoryGB}
+			}
 			next := check(t, q, m, nil).Job
 			if next == nil || next.Attempt != 2 {
 				t.Fatal("no retry", next)
@@ -141,6 +148,9 @@ func TestAdmissionDiagnosticRetained(t *testing.T) {
 			}
 			if d == nil || d.Subcheck != memoryWaitReason || d.Unit != "GiB" || d.Required != required || d.Available == nil || *d.Available != available || d.Unavailable || d.EnvelopeSource != j.MemoryEnvelope.Source || d.EnvelopeHostGB != j.MemoryEnvelope.HostGB || d.EnvelopeDeviceGB != j.MemoryEnvelope.DeviceGB {
 				t.Fatalf("lost original comparison: %+v", d)
+			}
+			if subcheck == "live_host_ram" && (d.RAMGateEndNS <= 0 || d.RAMGateEndNS != d.RAMGateSampleID) {
+				t.Fatalf("lost detached preflight sample identity: %+v", d)
 			}
 			var status Snapshot
 			if err := client.Call(context.Background(), "GET", "/api/status?jobs=recent&sections=jobs", nil, &status); err != nil {

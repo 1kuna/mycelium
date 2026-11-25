@@ -508,7 +508,7 @@ type modelRuntime struct {
 	batchHostMemorySamples map[attemptKey]hostMemorySample
 	hostLedger             atomic.Pointer[hostLedger]
 	poolHostMemorySource   MemorySource
-	ramGateSampleID        atomic.Int64
+	ramGateSampler         ramGateSampler
 	verifyDevice           func() error
 	deviceEnv              map[string]string
 	authorize              func(context.Context, HostLaunch) error
@@ -1123,13 +1123,23 @@ type nativeStartupMemory struct {
 	residentGB     float64
 }
 
-func (rt *modelRuntime) nextRAMGateSampleID() int64 {
-	// A replacement worker can adopt the same session. Seed each process
-	// from its start time so it does not reset a live session's sample order.
-	if rt.ramGateSampleID.Load() == 0 && rt.clock != nil {
-		rt.ramGateSampleID.CompareAndSwap(0, max(0, rt.clock.Now().UnixNano()-1))
+type ramGateSampler struct {
+	mu   sync.Mutex
+	last int64
+}
+
+func (s *ramGateSampler) begin(clock Clock) (int64, func()) {
+	if s == nil {
+		return 0, func() {} // Standalone worker without a check-in stream.
 	}
-	return rt.ramGateSampleID.Add(1)
+	s.mu.Lock()
+	// Order the physical probes themselves. A replacement process can adopt
+	// the same session, so IDs also follow the worker's clock across restarts.
+	s.last++
+	if clock != nil {
+		s.last = max(s.last, clock.Now().UnixNano())
+	}
+	return s.last, s.mu.Unlock
 }
 
 func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostLaunch) error {
@@ -1138,13 +1148,14 @@ func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostL
 	rt.mu.Lock()
 	actor := rt.batchSupervisors[key]
 	rt.mu.Unlock()
-	sampleID := rt.nextRAMGateSampleID()
+	sampleID, sampled := rt.ramGateSampler.begin(rt.clock)
 	free, known := 0.0, false
 	if rt.poolHostMemorySource != nil {
 		var probeErr error
 		free, probeErr = rt.poolHostMemorySource(ctx)
 		known = probeErr == nil && validMemoryValue(free)
 	}
+	sampled()
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	rt.admissionMu.Lock()

@@ -83,10 +83,12 @@ transport error is included. Retryable publication errors remain pending and
 retain local results; their typed cause clears after successful publication.
 
 For a host memory-pool stop, `attempt_history[].priority_stop.memory_pool`
-holds the queue's decision-time availability, reserve, growth rates,
+holds the queue's decision-time availability, reserve, physical growth rates,
 forecast losses and trigger. `stop_observation` is the later outcome
-observation. A `pressure_peak` learning reason means the exact cleanup
-receipt supplied a peak for future admission.
+observation. In `memory_attempts[].learning_reason`, `pressure_peak` means
+the exact attempt supplied an attributed floor for future admission.
+`pressure_peak_unattributed` means the queue lacked complete attribution
+and did not learn a floor from the attempt.
 
 ## Automatic host health (#834)
 

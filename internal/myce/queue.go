@@ -1328,7 +1328,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	if chargeInfrastructure && strings.HasPrefix(why, "machine quiet for ") {
 		q.alertAttemptLoss(j, outcome, true)
 	}
-	q.recordAttemptMemory(j, Result{Interrupted: true})
+	q.recordAttemptMemory(j, Result{Interrupted: true}, "")
 	defer func() { q.recordAttemptOutcome(j, outcome) }()
 	if cancelled(j) {
 		if !terminal(j.State) {
@@ -1827,9 +1827,11 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		}
 		m.hostRAMGateAt = memoryReceivedAt
 		if old != nil && old.Session == m.Session {
-			stale := m.HostRAMGate != nil && old.HostRAMGate != nil && m.HostRAMGate.SampleID > 0 &&
-				m.HostRAMGate.SampleID <= old.HostRAMGate.SampleID
-			if stale || memoryReceivedAt.Before(old.hostRAMGateAt) {
+			stale := memoryReceivedAt.Before(old.hostRAMGateAt)
+			if m.HostRAMGate != nil && m.HostRAMGate.SampleID > 0 && old.HostRAMGate != nil && old.HostRAMGate.SampleID > 0 {
+				stale = m.HostRAMGate.SampleID <= old.HostRAMGate.SampleID
+			}
+			if stale {
 				m.HostRAMGate, m.hostRAMGateAt = old.HostRAMGate, old.hostRAMGateAt
 			}
 		}
@@ -1985,7 +1987,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		}
 		body.next("checkin_memory")
 		q.recordExternalMemory(&m)
-		q.observePoolAvailability(&m, c.period, memoryReceivedAt, reports)
+		q.observePoolAvailability(&m, c.period, memoryReceivedAt)
 		if sample := q.poolAvailability[m.ID]; sample.session == m.Session && sample.at.Equal(memoryReceivedAt) {
 			q.maintenance.memoryCheckin = m.ID
 		}
@@ -2385,8 +2387,8 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 				j.CleanupCause = safeAttemptRuntimeCause(j, r.CleanupCause)
 				j.Reason = "finalization pending: " + cause.String()
 			}
-			q.recordAttemptMemory(j, r)
-			q.recordPoolEvidence(j, r)
+			pressureReason := q.recordPoolEvidence(j, r)
+			q.recordAttemptMemory(j, r, pressureReason)
 			q.retainAttemptResources(j, r.Resources)
 			j.ReleaseConfirmed = true
 			if r.Forced {
@@ -2405,7 +2407,15 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 						j.ExecutionEvidence = unstartedExecution(j.Attempt)
 					}
 					q.recordSharedHostLatencyStop(j, r)
+					var pressureOutcome AttemptOutcome
+					if queuedPoolStop(j) {
+						r.PriorityStop = priorityStop(j)
+						pressureOutcome = attemptOutcome(j, r)
+					}
 					q.retry(j, j.Reason)
+					if pressureOutcome.PriorityStop != nil && terminal(j.State) {
+						q.recordAttemptOutcome(j, pressureOutcome)
+					}
 				}
 			}
 		}
@@ -2506,8 +2516,8 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 	q.retainYieldFinal(j, r)
 	outcome := attemptOutcome(j, r)
 	q.recordAttemptStorage(j, r)
-	q.recordAttemptMemory(j, r) // Preserve facts before retry clears the envelope.
-	q.recordPoolEvidence(j, r)
+	pressureReason := q.recordPoolEvidence(j, r)
+	q.recordAttemptMemory(j, r, pressureReason) // Preserve facts before retry clears the envelope.
 	j.ExecutionEvidence = safeExecutionEvidence(r.ExecutionEvidence, j.Attempt)
 	j.ExecutionCause = safeRuntimeCause(r.ExecutionCause)
 	j.CleanupCause = safeRuntimeCause(r.CleanupCause)
@@ -2674,6 +2684,9 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 	if terminal(j.State) {
 		now := q.clock.Now()
 		j.FinishedAt = &now
+	}
+	if j.State == "stopping" && queuedPoolStop(j) {
+		outcome.PriorityStop = priorityStop(j)
 	}
 	if j.State == "failed" && filesVerified && !r.Success && j.Spec.capturesFailure() {
 		outcome.Diagnostics = r.Diagnostics

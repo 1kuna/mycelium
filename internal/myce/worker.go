@@ -40,6 +40,7 @@ type Worker struct {
 	nasInspection        *workerNASInspection
 	storageObserver      *storageObserver
 	hostMemorySamples    map[attemptKey]hostMemorySample
+	ramGateSampler       *ramGateSampler // Shared by heartbeat, preflight and launch.
 	DiskProbe            func(string) (DiskReading, error)
 	diskSampler          *workerDiskSampler
 	diskBudget           *workerDiskBudget
@@ -1714,10 +1715,24 @@ func (w Worker) checkJobRAM(ctx context.Context, j Job) error {
 
 func (w Worker) checkJobRAMWithReservations(ctx context.Context, j Job, held, pending float64) error {
 	pools := memoryPools(&j)
+	sampleID, sampled := w.ramGateSampler.begin(w.Clock)
 	free, known := 0.0, w.hostRawMemorySource != nil || w.HostMemorySource != nil
 	if known {
 		_, raw, err := w.sampleHostMemory(ctx)
 		free, known = raw, err == nil && validMemoryValue(raw)
 	}
-	return (HostRAMGate{RawGB: free, HeldGB: held, PendingGB: pending}).check(&w.Machine, pools, known)
+	sampled()
+	// The detached custodian has its own Clock and can overlap a worker
+	// heartbeat. Fence recovery past the whole probe on their shared host
+	// clock, since its in-process sequence cannot order the two reads.
+	var endNS int64
+	if w.Custodian != "" && w.Clock != nil {
+		endNS = max(0, w.Clock.Now().UnixNano())
+		sampleID = endNS
+	}
+	err := (HostRAMGate{SampleID: sampleID, RawGB: free, HeldGB: held, PendingGB: pending}).check(&w.Machine, pools, known)
+	if refusal, ok := err.(*admissionError); ok {
+		refusal.detail.RAMGateEndNS = endNS
+	}
+	return err
 }

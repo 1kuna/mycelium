@@ -89,7 +89,7 @@ func (a *attemptSupervisor) snapshot() (AttemptReport, Machine, bool, error) {
 	return r, diagnostics, a.finished, a.err
 }
 
-func (w Worker) sampleHeartbeatMemory(ctx context.Context, m *Machine, jobs []Job, reports []AttemptReport, actors map[attemptKey]*attemptSupervisor) float64 {
+func (w Worker) sampleHeartbeatMemory(ctx context.Context, m *Machine, reports []AttemptReport, actors map[attemptKey]*attemptSupervisor) HostRAMGate {
 	for i := range reports {
 		// Inventory probes can outlast the original report while the actor
 		// keeps sampling. Read its latest exact-attempt memory snapshot, with
@@ -114,7 +114,10 @@ func (w Worker) sampleHeartbeatMemory(ctx context.Context, m *Machine, jobs []Jo
 	}
 	// Sample physical headroom after the attempt counters. Crediting newer
 	// resident memory against older availability would spend its growth twice.
+	sampleID, sampled := w.ramGateSampler.begin(w.Clock)
+	probeStartedNS := max(0, w.Clock.Now().UnixNano())
 	hostFree, rawAvailable, err := w.sampleHostMemory(ctx)
+	sampled()
 	m.HostAvailableMemoryGB = hostFree
 	if err != nil || !validMemoryValue(hostFree) {
 		m.HostAvailableMemoryGB = 0
@@ -126,7 +129,13 @@ func (w Worker) sampleHeartbeatMemory(ctx context.Context, m *Machine, jobs []Jo
 		reports[i].ApplicationProgress = reports[i].ApplicationProgress.aged(w.Clock.Now())
 		reports[i].CurrentHostMemory = reports[i].CurrentHostMemory.aged(w.Clock.Now())
 	}
-	return rawAvailable
+	gate := HostRAMGate{SampleID: sampleID, SampleStartedNS: probeStartedNS}
+	if m.HostMemoryError != "" || !validMemoryValue(rawAvailable) {
+		gate.Unavailable = true
+	} else {
+		gate.RawGB = rawAvailable
+	}
+	return gate
 }
 func (a *attemptSupervisor) update(w Worker, d AttemptDirective, connected, admissionBlocked bool) {
 	// Scarce-host yield is provisional until its delivery authorization. It
@@ -950,6 +959,7 @@ func firstDevice(j Job, m Machine) string {
 func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*workerStore, rt *modelRuntime, environments *environmentRuntime, rawMemory MemorySource, requestRetention func(string, time.Time)) error {
 	w.batchAdmission = rt.checkBatchLaunchMemory
 	w.hostChargesExcept = rt.hostChargesExcept
+	w.ramGateSampler = &rt.ramGateSampler
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// Interactive leave can finish work. Installed TERM must not depend on a
@@ -1366,8 +1376,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			rt.mu.Unlock()
 
 			// Refresh memory together after inventory, then age through the reads.
-			ramGateSampleID := rt.nextRAMGateSampleID()
-			rawAvailable := w.sampleHeartbeatMemory(ctx, &m, jobs, reports, actors)
+			ramGate := w.sampleHeartbeatMemory(ctx, &m, reports, actors)
 			if m.MemoryObservation != nil {
 				m.MemoryObservation.Quiescent = !recovering && !leaving && len(actors) == 0 && modelReportsQuiescent(modelReports) && environments.cores() == 0 && !hostPreparing(&m)
 			}
@@ -1377,8 +1386,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			// snapshot and age it with their own launch-time clock read.
 			rt.batchHostMemorySamples = w.hostMemorySamples
 			rt.publishHostLedgerLocked()
-			if ledger := rt.hostLedger.Load(); ledger != nil && m.HostMemoryError == "" && validMemoryValue(rawAvailable) {
-				m.HostRAMGate = &HostRAMGate{SampleID: ramGateSampleID, RawGB: rawAvailable, HeldGB: ledger.charge, PendingGB: ledger.pending}
+			if ledger := rt.hostLedger.Load(); ledger != nil {
+				ramGate.HeldGB, ramGate.PendingGB = ledger.charge, ledger.pending
+				m.HostRAMGate = &ramGate
 			}
 			rt.mu.Unlock()
 			probeClock := w.Clock
