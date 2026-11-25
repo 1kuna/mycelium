@@ -101,10 +101,11 @@ func retainedMemoryLimits(s state, candidates map[memoryEvidenceKey]importedMemo
 			assignment := retainedMemoryAssignment(j, facts)
 			limited := legacyWorkloadLimited(peak)
 			pressure := assignment.StopCause == memoryPressureCause
-			automatic := false
+			automatic, oom := false, false
 			for _, outcome := range j.AttemptHistory {
 				if outcome.Attempt == facts.Attempt && outcome.Machine == facts.Machine && outcome.Session == facts.Session {
-					limited = limited || outcome.OutOfMemory
+					oom = outcome.OutOfMemory
+					limited = limited || oom
 					pressure = pressure || outcome.Reason == memoryPressureCause ||
 						outcome.ExecutionCause != nil && outcome.ExecutionCause.Class == memoryPressureCause
 					automatic = outcome.State == "succeeded" && !outcome.OutOfMemory && !pressure && legacyAutomaticCeilingOnly(j, facts)
@@ -128,7 +129,7 @@ func retainedMemoryLimits(s state, candidates map[memoryEvidenceKey]importedMemo
 				if _, ok := candidates[point.Key]; !ok {
 					continue
 				}
-				if pools := assignment.Memory; pressure && pools != nil {
+				if pools := assignment.Memory; pressure && !oom && pools != nil {
 					estimate := pools.RAM
 					if point.Key.Pool == "card" && pools.Card != nil {
 						estimate = *pools.Card

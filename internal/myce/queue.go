@@ -2478,15 +2478,15 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 	r = withStopProvenance(r, priorityStop(j))
 	q.retainYieldFinal(j, r)
 	outcome := attemptOutcome(j, r)
-	q.recordAttemptStorage(j, r)
-	q.recordAttemptMemory(j, r) // Preserve facts before retry clears the envelope.
-	q.recordPoolEvidence(j, r)
-	j.ExecutionEvidence = safeExecutionEvidence(r.ExecutionEvidence, j.Attempt)
-	j.ExecutionCause = safeRuntimeCause(r.ExecutionCause)
-	j.CleanupCause = safeRuntimeCause(r.CleanupCause)
 	// A kernel OOM is the payload's failure even if preemption raced it.
 	ceilingFailure := !r.Success && strings.HasPrefix(ceilingDiagnostic(r.Error, ""), "exceeded its ")
 	oomFailure := !r.Success && (r.OutOfMemory || ceilingFailure)
+	q.recordAttemptStorage(j, r)
+	q.recordAttemptMemory(j, r) // Preserve facts before retry clears the envelope.
+	q.recordPoolEvidence(j, r, oomFailure)
+	j.ExecutionEvidence = safeExecutionEvidence(r.ExecutionEvidence, j.Attempt)
+	j.ExecutionCause = safeRuntimeCause(r.ExecutionCause)
+	j.CleanupCause = safeRuntimeCause(r.CleanupCause)
 	outcome.OutOfMemory = oomFailure
 	stageFailure := (j.Spec.Priority == "production" || plannedPriorityStop(j) || automaticExtensionCheck(j) != nil) && !r.Success && !r.Interrupted
 	poolPressure := j.Reason == memoryPressureCause || r.ExecutionCause != nil && r.ExecutionCause.Class == memoryPressureCause

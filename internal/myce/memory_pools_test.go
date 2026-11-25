@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -95,7 +96,242 @@ func TestMemoryPoolChargeAboveAllowance(t *testing.T) {
 	}
 }
 
-func TestMemoryPoolUnifiedAcceleratorSharesWithoutPrior(t *testing.T) {
+func TestMemoryPoolUnifiedCUDAFallbackFitsAllowance(t *testing.T) {
+	q, _ := fixture(t)
+	m := sharedUnifiedMachine()
+	m.HostMemoryBudgetGB, m.HostAvailableMemoryGB = 40, 24
+	s := sharedSpec("experiment", 0)
+	s.Resumable = true
+	machineCheck(t, q, m)
+	queued := submit(t, q, s)
+	target := allocationMachine(&m, []string{"0"})
+	key := pooledEvidenceKey(queued, target)
+	seedPoolReplay(q, queued, target, "ram", 20, 38.31)
+	q.memoryEvidence.observe(memoryEvidencePoint{Key: key, Peak: 20})
+	q.memoryEvidence.ratios[memoryRatioKey{key.Platform, key.Pool, "exact", "", 1}] =
+		[]float64{2.277, 2.277, 2.277, 2.277, 2.277, 2.277, 2.277, 2.277, 2.277}
+	offered := assignedJob(machineCheck(t, q, m))
+	if offered == nil || offered.ID != queued.ID || offered.Memory.RAM.ChargeGB != 20 {
+		t.Fatalf("20 GiB estimate did not fit 24 GiB of room: %+v, %s", offered, job(t, q, queued.ID).Reason)
+	}
+}
+
+func TestMemoryPoolUnifiedCUDARejectsIncompleteCleanPeak(t *testing.T) {
+	q, _ := fixture(t)
+	m := sharedUnifiedMachine()
+	machineCheck(t, q, m)
+	s := sharedSpec("experiment", 35)
+	queued := submit(t, q, s)
+	run := assignedJob(machineCheck(t, q, m))
+	if run == nil || run.ID != queued.ID {
+		t.Fatal("fixture did not admit the CUDA job")
+	}
+	if err := q.Started(result(run, true)); err != nil {
+		t.Fatal(err)
+	}
+	r := result(run, true)
+	host := 20.0
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, DeviceUnavailable: deviceMemoryNotReported}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	key := pooledEvidenceKey(run, allocationMachine(&m, run.AllocatedDevices))
+	size := q.resolvePooledSize(queued, allocationMachine(&m, run.AllocatedDevices))
+	if got := size.pools.RAM; got.Evidence.Level != "hint" || got.Evidence.Runs != 0 || got.ChargeGB != 36 {
+		t.Fatalf("incomplete CUDA memory changed the authored charge: %+v", got)
+	}
+	if got := q.memoryEvidence.exact[key].Peaks; len(got) != 0 {
+		t.Fatalf("cgroup footprint entered clean history: %v", got)
+	}
+	if got := job(t, q, run.ID).Memory.RAM.PeakGB; got != host {
+		t.Fatalf("incomplete telemetry lost its observed floor: %.3f", got)
+	}
+
+	next := submit(t, q, s)
+	run = assignedJob(machineCheck(t, q, m))
+	if run == nil || run.ID != next.ID {
+		t.Fatal("fixture did not admit the repeat CUDA job")
+	}
+	if err := q.Started(result(run, true)); err != nil {
+		t.Fatal(err)
+	}
+	r = result(run, true)
+	device := 8.0
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, DeviceGB: &device,
+		DeviceSampling: &DeviceMemorySampling{Complete: true, Samples: 2, ElapsedSeconds: 11}}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	if got := q.memoryEvidence.exact[key.attributedRAM()].Peaks; !slices.Equal(got, []float64{28}) {
+		t.Fatalf("complete CUDA footprint was not learned: %v", got)
+	}
+	if got := q.memoryEvidence.feedback; len(got) != 1 || got[0] >= 0 {
+		t.Fatalf("only the clean CUDA peak should contribute confidence feedback: %v", got)
+	}
+}
+
+func TestMemoryPoolUnifiedCUDARepeatCanExceedColdPrior(t *testing.T) {
+	q, _ := fixture(t)
+	m := sharedUnifiedMachine()
+	m.HostMemoryBudgetGB, m.HostAvailableMemoryGB = 96, 96
+	blocker := submit(t, q, cpuSpec(1, 55))
+	holder := assignedJob(machineCheck(t, q, m))
+	if holder == nil || holder.ID != blocker.ID {
+		t.Fatal("fixture did not admit the 55 GiB holder")
+	}
+	if err := q.Started(result(holder, true)); err != nil {
+		t.Fatal(err)
+	}
+	s := sharedSpec("experiment", 0)
+	s.Resumable = true
+	queued := submit(t, q, s)
+	target := allocationMachine(&m, []string{"0"})
+	key := pooledEvidenceKey(queued, target)
+	seedPoolReplay(q, queued, target, "ram", 20, 38.31)
+	e := q.memoryEvidence
+	e.observe(memoryEvidencePoint{Key: key, Peak: 38.30})
+	seedPoolRepeatCalibration(e, key, "exact", 38.30, 50)
+	attributed := key.attributedRAM()
+	e.observe(memoryEvidencePoint{Key: attributed, Peak: 38.30})
+	seedPoolRepeatCalibration(e, attributed, "exact", 38.30, 50)
+
+	if got := assignedJob(machineCheck(t, q, m, holder)); got != nil {
+		t.Fatalf("repeat with a measured 50 GiB charge shared beside 55 GiB: %+v", got)
+	}
+	requireState(t, q, holder.ID, "running")
+	finish(t, q, holder, true)
+	if got := assignedJob(machineCheck(t, q, m)); got == nil || got.ID != queued.ID || got.Memory.RAM.ChargeGB != 50 {
+		t.Fatalf("cold prior clipped the repeat estimate: %+v", got)
+	}
+
+	delete(e.ratios, memoryRatioKey{key.Platform, key.Pool, "exact", "", 1})
+	delete(e.ratios, memoryRatioKey{attributed.Platform, attributed.Pool, "exact", "", 1})
+	if got := q.resolvePooledSize(queued, target).pools.RAM; !got.Alone || got.TypicalGB != 38.30 {
+		t.Fatalf("first-run prior was used to share a repeat without calibrated headroom: %+v", got)
+	}
+}
+
+func seedPoolRepeatCalibration(e *memoryEvidence, k memoryEvidenceKey, level string, prior, next float64) {
+	// Eight stable comparisons and the stated measured growth are sufficient
+	// for Rule Q at the initial confidence.
+	for i := 0; i < 8; i++ {
+		e.observeRatio(k, level, "", []float64{prior}, prior)
+	}
+	e.observeRatio(k, level, "", []float64{prior}, next)
+}
+
+func TestMemoryPoolUnifiedAcceleratorShares(t *testing.T) {
+	t.Run("without prior", testMemoryPoolUnifiedAcceleratorSharesWithoutPrior)
+	const peak, livePeak = 20.622669219970703, 20.99
+	const peerPeak = 24.35720443725586
+	const ratio = 46.95225911511311 / peak
+	// Read-only retained telemetry. The exact comparison keeps the same
+	// visible configuration; the family comparison includes distinct configs.
+	const exactPrior, exactNext = 47.868038177490234, 73.58222198486328
+	const familyPrior, familyNext = 17.966625213623047, 41.976078033447266
+	const charge = (exactNext / exactPrior) * peak
+	const peerCharge = (familyNext / familyPrior) * peerPeak
+	for _, tc := range []struct {
+		name              string
+		lower, familyHigh float64
+		sparse            bool
+		protectedClass    string
+		nonresumable      bool
+		wantCharge        float64
+		peerHint          float64
+		wantPeer          bool
+	}{
+		{name: "one clean run", wantCharge: charge, wantPeer: true},
+		{name: "larger comparable peak", familyHigh: 36, wantCharge: 36},
+		{name: "measured shortage", lower: 27, wantCharge: 54},
+		{name: "insufficient attributed repeats", sparse: true, wantCharge: ratio * peak},
+		{name: "production retains its protection", protectedClass: "production", wantCharge: ratio * peak},
+		{name: "nonresumable retains its protection", nonresumable: true, wantCharge: ratio * peak},
+		{name: "unmeasured peer keeps its hint", wantCharge: charge, peerHint: 60},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, _ := fixture(t)
+			m := sharedUnifiedMachine()
+			m.HostMemoryBudgetGB = 96
+			cpu := submit(t, q, cpuSpec(1, 5.5))
+			cpuRun := assignedJob(machineCheck(t, q, m))
+			if cpuRun == nil || cpuRun.ID != cpu.ID {
+				t.Fatalf("missing CPU offer: %+v", cpuRun)
+			}
+			if err := q.Started(result(cpuRun, false)); err != nil {
+				t.Fatal(err)
+			}
+
+			s := sharedSpec("experiment", 32)
+			s.Resumable = !tc.nonresumable
+			if tc.protectedClass != "" {
+				s.Priority, s.Class = tc.protectedClass, tc.protectedClass
+			}
+			s.Needs.HostMemoryGB = 12
+			queued := submit(t, q, s)
+			target := allocationMachine(&m, []string{"0"})
+			key := pooledEvidenceKey(queued, target)
+			seedPoolReplay(q, queued, target, "ram", 20, 38.31)
+			e := q.memoryEvidence
+			e.observe(memoryEvidencePoint{Key: key, Peak: peak})
+			seedPoolRepeatCalibration(e, key, "exact", peak, ratio*peak)
+			seedPoolRepeatCalibration(e, key, "family", peak, ratio*peak)
+
+			attributed := key.attributedRAM()
+			e.observe(memoryEvidencePoint{Key: attributed, Peak: peak})
+			if tc.familyHigh > 0 {
+				sibling := attributed
+				sibling.Exact = "other-configuration"
+				e.observe(memoryEvidencePoint{Key: sibling, Peak: tc.familyHigh})
+			}
+			if !tc.sparse {
+				seedPoolRepeatCalibration(e, attributed, "exact", exactPrior, exactNext)
+				seedPoolRepeatCalibration(e, attributed, "family", familyPrior, familyNext)
+			}
+			e.observe(memoryEvidencePoint{Key: key, Peak: tc.lower, Limited: true})
+
+			run := assignedJob(machineCheck(t, q, m, cpuRun))
+			if run == nil || run.ID != queued.ID || run.Memory == nil || run.Memory.Card != nil {
+				t.Fatalf("missing unified-memory offer: %+v", run)
+			}
+			if got := run.Memory.RAM; math.Abs(got.ChargeGB-tc.wantCharge) > 1e-9 || got.TypicalGB != max(peak, tc.lower) {
+				t.Fatalf("RAM estimate = %+v, want %.3f GiB", got, tc.wantCharge)
+			}
+			if err := q.Started(result(run, false)); err != nil {
+				t.Fatal(err)
+			}
+
+			m.HostAvailableMemoryGB = 88.77
+			peerSpec := sharedSpec("experiment", 0)
+			peerSpec.Needs.HostMemoryGB = tc.peerHint
+			peer := submit(t, q, peerSpec)
+			peerKey := pooledEvidenceKey(peer, target)
+			if tc.peerHint == 0 {
+				// A different configuration supplies family evidence only.
+				peerKey.Exact = "other-configuration"
+				e.observe(memoryEvidencePoint{Key: peerKey, Peak: peerPeak})
+				e.observe(memoryEvidencePoint{Key: peerKey.attributedRAM(), Peak: peerPeak})
+			}
+			offered := assignedJob(growthCheck(t, q, m, []*Job{run, cpuRun}, []float64{livePeak}, 0))
+			if tc.wantPeer {
+				if offered == nil || offered.ID != peer.ID || math.Abs(offered.Memory.RAM.ChargeGB-peerCharge) > 1e-9 ||
+					offered.Memory.RAM.Evidence != (memoryEstimateEvidence{Level: "family", Runs: 1}) {
+					t.Fatalf("peer offer = %+v, wait = %s", offered, job(t, q, peer.ID).Reason)
+				}
+			} else if offered != nil {
+				t.Fatalf("peer used room held by measured demand: %+v", offered)
+			}
+			if tc.peerHint > 0 {
+				if got := q.resolvePooledSize(peer, target).pools.RAM; got.ChargeGB != tc.peerHint || got.Evidence.Level != "hint" {
+					t.Fatalf("unmeasured peer changed the authored charge: %+v", got)
+				}
+			}
+			requireState(t, q, run.ID, "running")
+		})
+	}
+}
+
+func testMemoryPoolUnifiedAcceleratorSharesWithoutPrior(t *testing.T) {
 	q, clock := fixture(t)
 	m := sharedUnifiedMachine()
 	holder := submit(t, q, sharedSpec("experiment", 2))

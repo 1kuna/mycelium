@@ -19,6 +19,13 @@ can share host RAM from the first run. With sparse accelerator RAM history,
 Mycelium uses available platform peaks, then same-OS CPU peaks.
 When a run has been measured but there is too little evidence to calibrate
 its charge, an existing hint remains a floor alongside the observed peak.
+For unified CUDA RAM, repeat charges use comparable runs with complete
+CUDA sampling and retain measured peak and shortage floors. Resumable
+work outside production can use a smaller calibrated estimate. Production
+and non-resumable work retain the more conservative charge and launch check.
+When repeat calibration is sparse, the previous estimate may appear as
+`evidence.level: legacy`. A known workload with an attributed peak and
+no repeat forecast runs alone.
 
 The available RAM reading already accounts for occupied memory. Mycelium
 subtracts the host reserve and the amount running work can still grow into.
@@ -51,7 +58,8 @@ projected to run out before the next sample. A pressure stop
 follows tier priority and measured overage. Workers without usable native
 containment or sampled protection report a typed readiness hold.
 
-A stop or an OOM provides a lower bound for future estimates. Save
+A pressure stop above charge or a confirmed OOM provides a lower bound for
+future estimates. Save
 checkpointable progress so that a pressure stop can resume the work. A
 non-resumable job starts again from scratch after a stop for higher-priority
 work. [Checkpoint contract](../files.md#resumable-jobs)

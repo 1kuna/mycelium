@@ -26,6 +26,7 @@ func TestMemoryEvidenceRepairRetainsNativeLimits(t *testing.T) {
 		{"smaller OOM", smaller, true, "", 0, true, smaller, nil},
 		{"pressure stop", smaller, false, memoryPressureCause, 4, true, smaller, nil},
 		{"bystander stop", smaller, false, memoryPressureCause, 6, true, 0, nil},
+		{"OOM during pressure stop", smaller, true, memoryPressureCause, 6, true, smaller, nil},
 		{"unresolved OOM", smaller, true, "", 0, false, prior, nil},
 		{"pooled max event", smaller, false, "", 0, true, smaller, &JobMemoryEnvelope{Basis: pooledMemoryCapability}},
 		{"legacy explicit max event", smaller, false, "", 0, true, smaller, &JobMemoryEnvelope{

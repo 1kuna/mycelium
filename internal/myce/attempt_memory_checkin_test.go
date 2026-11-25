@@ -123,3 +123,34 @@ func TestAttemptMemoryCheckinBeforeCUDAContext(t *testing.T) {
 		t.Fatal("pre-context enumeration did not produce exact fresh zero", sample)
 	}
 }
+
+func TestAttemptMemoryUnreportedCUDATickBreaksCoverage(t *testing.T) {
+	clock := &lockedTestClock{now: time.Unix(100, 0)}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	queries := 0
+	w := Worker{Machine: Machine{GPU: "cuda", Device: "GPU-one", UnifiedMemory: true}, Clock: clock,
+		cudaMemoryQuery: func(context.Context) ([]byte, error) {
+			queries++
+			clock.advance(deviceMemorySamplePeriod)
+			if queries == 2 {
+				return []byte("GPU-one, 42, [N/A]\n"), nil
+			}
+			return []byte("GPU-one, 42, 2048\n"), nil
+		}}
+	ticks := make(chan time.Time, 4)
+	for range cap(ticks) {
+		ticks <- clock.Now()
+	}
+	done := w.observeDeviceMemory(ctx, func() (map[int]bool, map[int]bool, error) {
+		if queries == 3 {
+			cancel()
+			return nil, nil, nil
+		}
+		return map[int]bool{42: true}, nil, nil
+	}, nil, deviceMemorySamplePeriod, clock, nil, ticks)
+	got := <-done
+	if s := got.peak.DeviceSampling; s == nil || s.Samples != 2 || s.Complete || !got.unreported {
+		t.Fatalf("N/A between valid samples reported complete CUDA attribution: %+v", s)
+	}
+}
