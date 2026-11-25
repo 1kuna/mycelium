@@ -3,7 +3,6 @@ package myce
 import (
 	"context"
 	"database/sql"
-	"time"
 )
 
 // A batch owns only SQLite row operations and their captured values. Queue
@@ -88,15 +87,7 @@ func (q *Queue) applyQueueWrite(ctx context.Context, batch *queueWriteBatch, tim
 		q.activeHold.pause()
 		defer q.activeHold.resume()
 	}
-	var started time.Time
-	if timing != nil {
-		started = time.Now()
-	}
-	err := q.mu.commitOutsideLock(mode == queueWriteJournaled, write)
-	if timing != nil {
-		timing.offLock += time.Since(started)
-	}
-	return err
+	return q.mu.commitOutsideLock(mode == queueWriteJournaled, write)
 }
 
 // Startup evidence migrations also use this writer, without a live queue turn.

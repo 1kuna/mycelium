@@ -282,7 +282,7 @@ func unlockTimedRequest(ctx context.Context, mu sync.Locker, timing *queueUpdate
 	}
 	end := time.Now()
 	mu.Unlock()
-	s.observe(timing.mutexWait, end.Sub(timing.lockedAt)-timing.offLock, end)
+	s.observe(timing.mutexWait, end.Sub(timing.lockedAt), end)
 	if timing.measureWriter {
 		s.mu.Lock()
 		if !s.finished {

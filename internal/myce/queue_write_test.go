@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -137,32 +138,23 @@ BEGIN INSERT INTO commit_child VALUES(1); END;`); err != nil {
 	}
 }
 
-func TestQueueSQLiteContactCheckpoint(t *testing.T) {
+func TestQueueSQLiteSavesContactWithEveryCheckin(t *testing.T) {
 	for _, rollback := range []bool{false, true} {
 		t.Run(fmt.Sprint("rollback=", rollback), func(t *testing.T) {
 			q, clock := fixture(t)
 			q.inLockCommit = rollback
 			m := machine("writer", "fake")
-			check(t, q, m, nil)
-			initial := q.histories.contacts[m.ID].Seen
 			for range 3 {
 				clock.Advance(time.Second)
 				check(t, q, m, nil)
+				var stored state
+				if err := json.Unmarshal(q.persisted["state"], &stored); err != nil {
+					t.Fatal(err)
+				}
+				if got := stored.ContactEvidence[m.ID].Seen; !got.Equal(clock.Now()) {
+					t.Fatalf("check-in committed contact at %v, want %v", got, clock.Now())
+				}
 			}
-			want := initial
-			if rollback {
-				want = clock.Now()
-			}
-			if got := q.histories.contacts[m.ID].Seen; !got.Equal(want) || !q.s.Machines[m.ID].LastSeen.Equal(clock.Now()) {
-				t.Fatalf("steady check-ins saved contact at %v, want %v", got, want)
-			}
-			clock.Advance(RestartGrace)
-			check(t, q, m, nil)
-			if got := q.histories.contacts[m.ID].Seen; !got.Equal(clock.Now()) {
-				t.Fatal("contact history missed the restart-window checkpoint")
-			}
-			clock.Advance(time.Second)
-			check(t, q, m, nil)
 			q = reopenQueue(t, q, clock)
 			if !q.unreported[m.ID] || !q.s.Machines[m.ID].LastSeen.Equal(clock.Now()) {
 				t.Fatal("clean close did not preserve the latest contact, or made it live after restart")
@@ -273,7 +265,7 @@ func TestQueueSQLiteCustodySurvivesUncleanRestart(t *testing.T) {
 	worker, peer := machine("worker", "fake"), machine("peer", "fake")
 	if phase := os.Getenv("MYCE_TEST_CONTACT_CRASH"); phase != "" {
 		q, clock := openContactCrashQueue(t, os.Getenv("MYCE_TEST_CONTACT_CRASH_DIR"), start, os.Getenv("MYCE_TEST_CONTACT_CRASH_ROLLBACK") == "true")
-		check(t, q, peer, nil) // Set the periodic checkpoint before the worker arrives.
+		check(t, q, peer, nil)
 		clock.Advance(time.Second)
 		report := Checkin{Machine: worker, period: period}
 		if phase == "growing-allowance" {
@@ -373,8 +365,6 @@ func TestQueueSQLiteCancelledHistorySweepSkipsWrite(t *testing.T) {
 			}
 			clock.Advance(jobRecordRetention + time.Second)
 			check(t, q, m, nil)
-			clock.Advance(time.Second)
-			check(t, q, m, nil) // A fresh report for clean close to flush in batched mode.
 			drainAdmissionWait(t, q)
 
 			q.mu.Lock()
@@ -439,10 +429,6 @@ func TestQueueSQLiteCancelledHistorySweepSkipsWrite(t *testing.T) {
 			q.mu.Unlock()
 			if err := q.db.QueryRow("SELECT count(*) FROM job_summaries WHERE id=?", j.ID).Scan(&summaries); err != nil || summaries != 0 {
 				t.Fatalf("cancelled sweep wrote a history summary: count=%d, %v", summaries, err)
-			}
-			q = reopenQueue(t, q, clock)
-			if !q.s.Machines[m.ID].LastSeen.Equal(clock.Now()) {
-				t.Fatal("clean close did not checkpoint the latest contact")
 			}
 		})
 	}

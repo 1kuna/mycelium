@@ -22,11 +22,12 @@ import (
 
 // Run with -benchtime=1x. One iteration is a fixed traffic window, so the
 // rates remain comparable when an endpoint starts responding faster.
+// MYCE_BENCH_COMMIT_UNDER_LOCK=true measures the rollback path.
 func BenchmarkQueueIdleTraffic(b *testing.B) {
 	source, workers := candidateCostFixture(b)
 	dir := b.TempDir()
 	db := filepath.Join(dir, "queue.db")
-	q, err := Open(db, filepath.Join(dir, "checkpoints"), RealClock{})
+	q, err := Open(db, filepath.Join(dir, "checkpoints"), RealClock{}, WithQueueCommitUnderLock(os.Getenv("MYCE_BENCH_COMMIT_UNDER_LOCK") == "true"))
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -137,7 +138,7 @@ func BenchmarkQueueIdleTraffic(b *testing.B) {
 		b.Fatal(err)
 	}
 	var persistence queuePersistenceTiming
-	var commits, checkinHolds []time.Duration
+	var commits, checkinHolds, checkinTurns []time.Duration
 	pending, classes := map[string]int{}, map[string]*idleWriteRate{}
 	q.observeQueueRow = func(query string, args []any) {
 		if !strings.HasPrefix(query, "INSERT") {
@@ -175,7 +176,8 @@ func BenchmarkQueueIdleTraffic(b *testing.B) {
 	}
 	q.observePersistenceHold = func(p queueHoldPhases) {
 		if p.checkinBody {
-			checkinHolds = append(checkinHolds, p.duration())
+			checkinHolds = append(checkinHolds, p.mutexHold())
+			checkinTurns = append(checkinTurns, p.duration())
 		}
 	}
 	stopProfile := idleCPUProfile(b)
@@ -212,6 +214,7 @@ func BenchmarkQueueIdleTraffic(b *testing.B) {
 		b.ReportMetric(float64(rate.commits)/elapsed.Seconds(), class+"-commits/s")
 	}
 	samples["checkin-mutex"] = checkinHolds
+	samples["checkin-turn"] = checkinTurns
 	samples["sqlite-commit"] = commits
 	for name, durations := range samples {
 		if len(durations) == 0 {

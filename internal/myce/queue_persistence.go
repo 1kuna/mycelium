@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -401,10 +400,7 @@ func (q *Queue) loadPersistedState() error {
 		return err
 	}
 	q.rebuildRecords()
-	q.histories = &historySnapshot{
-		efficiency: cloneEfficiencyHistory(q.s.EfficiencyHosts),
-		contacts:   maps.Clone(q.s.ContactEvidence), lastWorkerContact: q.s.LastWorkerContact,
-	}
+	q.histories = cloneHistories(q.s.EfficiencyHosts)
 	return nil
 }
 
@@ -472,9 +468,8 @@ func withoutAvailability(p *CapabilityProfile) *CapabilityProfile {
 	return &copy
 }
 
-// A checkpoint holds accepted contact for restart diagnostics. Preserve the
-// later of it and the legacy machine timestamp. Live eligibility still needs
-// a report from the current session.
+// LastSeen rides in each session's contact evidence, which every check-in
+// already rewrites with the small control record. Keep the later of the two.
 func (q *Queue) restoreLastSeen() {
 	for id, m := range q.s.Machines {
 		e, ok := q.s.ContactEvidence[id]

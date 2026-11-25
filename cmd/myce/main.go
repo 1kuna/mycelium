@@ -294,7 +294,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	debugListen := f.String("debug-listen", "", "optional loopback-only queue profiling address (disabled by default)")
 	address := f.String("listen", "127.0.0.1:7331", "queue listen address")
 	db := f.String("db", "myce-state/myce.db", "SQLite database file")
-	queueCommitUnderLock := f.Bool("queue-commit-under-lock", false, "temporarily commit queue state under the lock and save contact on every check-in")
+	queueCommitUnderLock := f.Bool("queue-commit-under-lock", false, "temporarily commit queue state under the lock")
 	uploadSpoolDir := f.String("upload-spool-dir", "", "queue model-upload directory (default private directory beside DB)")
 	logRetention := f.Duration("log-retention", myce.DefaultLogRetention, "retention of completed batch and inactive model-server logs")
 	uploadSpoolBytes := f.Int64("upload-spool-bytes", myce.DefaultUploadSpoolBytes, "total model-upload bytes (-1: measured free disk capacity)")

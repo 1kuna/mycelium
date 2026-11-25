@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"maps"
 	"reflect"
 	"time"
 )
@@ -9,16 +8,15 @@ import (
 // Retain efficiency readings until their own validity ends; a clean close
 // flushes the latest integral. Launch-drift histories no longer size first runs.
 type historySnapshot struct {
-	efficiency        map[string]EfficiencyHost
-	contacts          map[string]contactEvidence
-	lastWorkerContact time.Time
+	efficiency map[string]EfficiencyHost
 }
 
-func cloneEfficiencyHistory(efficiency map[string]EfficiencyHost) map[string]EfficiencyHost {
-	if efficiency == nil {
-		return nil
+func cloneHistories(efficiency map[string]EfficiencyHost) *historySnapshot {
+	h := &historySnapshot{}
+	if efficiency != nil {
+		h.efficiency = copyObservationValue(reflect.ValueOf(efficiency)).Interface().(map[string]EfficiencyHost)
 	}
-	return copyObservationValue(reflect.ValueOf(efficiency)).Interface().(map[string]EfficiencyHost)
+	return h
 }
 
 // persistentBase is the state root as SQLite should hold it. It also stages
@@ -27,73 +25,18 @@ func (q *Queue) persistentBase() state {
 	base := queueBase(q.s, false)
 	q.historiesPending = nil
 	if q.persisted == nil || q.histories == nil || q.flushHistoriesNow {
-		q.historiesPending = &historySnapshot{
-			efficiency: cloneEfficiencyHistory(q.s.EfficiencyHosts),
-			contacts:   maps.Clone(q.s.ContactEvidence), lastWorkerContact: q.s.LastWorkerContact,
-		}
+		q.historiesPending = cloneHistories(q.s.EfficiencyHosts)
 		return base
 	}
 	writeEfficiency := efficiencyNeedsWrite(q.histories.efficiency, q.s.EfficiencyHosts, q.clock.Now())
-	next := *q.histories
+	stored := q.histories
 	if writeEfficiency {
-		next.efficiency = cloneEfficiencyHistory(q.s.EfficiencyHosts)
+		next := *q.histories
+		next.efficiency = cloneHistories(q.s.EfficiencyHosts).efficiency
+		q.historiesPending, stored = &next, &next
 	}
-	writeContacts := q.inLockCommit || q.s.LastWorkerContact.Sub(next.lastWorkerContact) >= RestartGrace
-	if writeContacts {
-		next.contacts, next.lastWorkerContact = maps.Clone(q.s.ContactEvidence), q.s.LastWorkerContact
-	} else if contacts := q.checkpointRecoveryContacts(); contacts != nil {
-		next.contacts = contacts
-		writeContacts = true
-	}
-	if writeEfficiency || writeContacts {
-		q.historiesPending = &next
-	}
-	base.EfficiencyHosts = next.efficiency
-	base.ContactEvidence, base.LastWorkerContact = next.contacts, next.lastWorkerContact
+	base.EfficiencyHosts = stored.efficiency
 	return base
-}
-
-// Any active session can extend the restart service window. Save new sessions
-// and allowance increases with their accepted reports, and save the latest
-// matching contact when an attempt acquires custody or starts. Timestamp-only
-// heartbeats still use the independent periodic checkpoint.
-func (q *Queue) checkpointRecoveryContacts() map[string]contactEvidence {
-	var next map[string]contactEvidence
-	save := func(id, session string, acquired bool) {
-		live, ok := q.s.ContactEvidence[id]
-		if !ok || live.Session != session {
-			return
-		}
-		if stored, ok := q.histories.contacts[id]; ok && stored.Session == session {
-			if !acquired && live.Allowance <= stored.Allowance && live.ArrivalAllowance <= stored.ArrivalAllowance {
-				return
-			}
-			live.Allowance = max(live.Allowance, stored.Allowance)
-			live.ArrivalAllowance = max(live.ArrivalAllowance, stored.ArrivalAllowance)
-		}
-		if next == nil {
-			next = make(map[string]contactEvidence, len(q.histories.contacts)+1)
-			maps.Copy(next, q.histories.contacts)
-		}
-		next[id] = live
-	}
-	for id := range q.records.machines {
-		if m := q.s.Machines[id]; m != nil && !m.Gone {
-			save(id, m.Session, false)
-		}
-	}
-	for id, before := range q.records.jobs {
-		j := q.s.Jobs[id]
-		if j == nil || j.State != "running" && j.State != "stopping" {
-			continue
-		}
-		if before == nil || before.Machine != j.Machine || before.Session != j.Session ||
-			before.Attempt != j.Attempt || before.State != "running" && before.State != "stopping" ||
-			before.StartedAt == nil && j.StartedAt != nil {
-			save(j.Machine, j.Session, true)
-		}
-	}
-	return next
 }
 
 // Called after the SQLite commit that wrote the staged snapshot.
@@ -110,8 +53,7 @@ func (q *Queue) flushHistories() error {
 	if q.db == nil || q.simulation || q.persisted == nil || q.histories == nil || q.records == nil {
 		return nil
 	}
-	if !efficiencyNeedsWrite(q.histories.efficiency, q.s.EfficiencyHosts, time.Time{}) &&
-		q.histories.lastWorkerContact.Equal(q.s.LastWorkerContact) && maps.Equal(q.histories.contacts, q.s.ContactEvidence) {
+	if !efficiencyNeedsWrite(q.histories.efficiency, q.s.EfficiencyHosts, time.Time{}) {
 		return nil
 	}
 	q.flushHistoriesNow = true
