@@ -1430,6 +1430,10 @@ func (q *Queue) fleetQuiet(now time.Time, includePending bool) bool {
 // Run time/custody fences before offering work. Later mutations close only
 // affected relations; the transaction settles them again before persistence.
 func (q *Queue) maintain() {
+	q.maintainControl(true)
+}
+
+func (q *Queue) maintainControl(refreshStartReasons bool) {
 	if q.stopping.Load() {
 		return
 	}
@@ -1569,6 +1573,13 @@ func (q *Queue) maintain() {
 	q.refreshHostMemory()
 	q.maintainModels()
 	q.settleMaintenance()
+	q.admissionWaitPending = true
+	if refreshStartReasons {
+		q.refreshStartReasons()
+	}
+}
+
+func (q *Queue) refreshStartReasons() {
 	// Only display reasons change in this final read-only planning pass.
 	// Share memory evidence across the backlog, then discard it before the
 	// next mutation. Subsequent decisions settle only affected relations.
@@ -1577,7 +1588,6 @@ func (q *Queue) maintain() {
 	defer func() { q.memoryPlanning = previous }()
 	scan := q.placementScan()
 	scan.memory = q.memoryPlanning
-	q.admissionWaitPending = true
 	for _, j := range q.liveJobs() {
 		if q.startupPending(j) || q.startCapacityPaused(j) {
 			reason := q.startStatusReason(j, scan)
@@ -1982,7 +1992,9 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		q.quarantineDeviceAttempts(&m)
 		body.next("checkin_maintain")
 		q.observeRestartService(c.contact)
-		q.maintain()
+		// The periodic tick refreshes compact startup explanations. Detailed
+		// reads project their own explanation from the latest committed state.
+		q.maintainControl(false)
 		body.next("checkin_attempts")
 		reply.FleetInstructionProtocol, reply.FleetInstructionWaiting = fleetInstructionProtocol, q.fleetInstructionWaiting(hostID(&m))
 		reply.CustodianProtocol = custodianProtocol

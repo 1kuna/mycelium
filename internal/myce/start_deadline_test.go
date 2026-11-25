@@ -111,6 +111,47 @@ func TestProductionStartDeadlineBlockers(t *testing.T) {
 	}
 }
 
+func TestCheckinDefersStartupReasonsButEnforcesDeadline(t *testing.T) {
+	q, clock := fixture(t)
+	m := machine("worker", "cpu")
+	check(t, q, m, nil)
+	s := spec("production")
+	s.AllowedMachines = []string{"absent"}
+	deadline := clock.Now().Add(10 * time.Second)
+	s.StartBy = &deadline
+	j := submit(t, q, s)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	stored := func() Job {
+		q.mu.RLock()
+		defer q.mu.RUnlock()
+		return *q.s.Jobs[j.ID]
+	}
+	if reason := stored().Reason; !strings.Contains(reason, "10s left to start") {
+		t.Fatalf("initial compact reason %q", reason)
+	}
+	clock.Advance(time.Second)
+	check(t, q, m, nil)
+	if reason := stored().Reason; !strings.Contains(reason, "10s left to start") {
+		t.Fatalf("check-in rebuilt compact startup advice: %q", reason)
+	}
+	if detail, err := q.jobSnapshot(j.ID); err != nil || !strings.Contains(detail.Reason, "9s left to start") {
+		t.Fatalf("detailed status did not project the current startup budget: %+v %v", detail, err)
+	}
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if reason := stored().Reason; !strings.Contains(reason, "9s left to start") {
+		t.Fatalf("tick did not refresh compact startup advice: %q", reason)
+	}
+	clock.Advance(9 * time.Second)
+	check(t, q, m, nil)
+	if got := stored(); got.State != "failed" || got.Attempt != 0 || got.FinishedAt == nil || !got.FinishedAt.Equal(deadline) {
+		t.Fatalf("check-in failed to enforce the exact startup deadline: %+v", got)
+	}
+}
+
 func TestProductionStartDeadlinePermit(t *testing.T) {
 	for _, timely := range []bool{true, false} {
 		t.Run(fmt.Sprintf("timely=%t", timely), func(t *testing.T) {
