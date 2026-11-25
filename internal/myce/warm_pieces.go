@@ -76,6 +76,7 @@ type WarmPieceProgress struct {
 	Failures            map[string]Execution `json:"failures,omitempty"` // Zero execution means the job ended before the item settled.
 	LastSettledAt       *time.Time           `json:"last_settled_at,omitempty"`
 	StartupSeconds      float64              `json:"startup_seconds,omitempty"`
+	Loads               int                  `json:"loads,omitempty"` // Attempts whose startup is included above.
 	ItemSeconds         float64              `json:"item_seconds,omitempty"`
 	BetweenItemsSeconds float64              `json:"between_items_seconds,omitempty"`
 }
@@ -134,7 +135,7 @@ func (q *Queue) warmPieceResult(r warmPieceRequest) (*Job, bool, error) {
 		return nil, false, ErrStale
 	}
 	if j.ReleaseConfirmed || wallTimeExpired(j, q.clock.Now()) || !warmPieceMatches(j, r) || j.FanOut.Warm.Delivery.StartedAt == nil ||
-		(j.State != "running" && !(j.State == "stopping" && r.Op == "success" && r.BeforeStop && plannedPriorityStop(j))) {
+		(j.State != "running" && !(j.State == "stopping" && r.BeforeStop && plannedPriorityStop(j))) {
 		return nil, false, ErrStale
 	}
 	return j, false, nil
@@ -187,6 +188,7 @@ func (q *Queue) warmPiece(ctx context.Context, r warmPieceRequest) (reply warmPi
 			progress := j.FanOut.Warm
 			if !warmSettledOnAttempt(j) {
 				progress.StartupSeconds += max(0, now.Sub(*j.StartedAt).Seconds())
+				progress.Loads++
 			} else if progress.LastSettledAt != nil {
 				progress.BetweenItemsSeconds += max(0, now.Sub(*progress.LastSettledAt).Seconds())
 			}
@@ -308,6 +310,23 @@ func warmSettledOnAttempt(j *Job) bool {
 	return j.FanOut.Results[key].Execution.Attempt == j.Attempt || j.FanOut.Warm.Failures[key].Attempt == j.Attempt
 }
 
+// Mean measured seconds from Started to the first offer, or zero without a
+// measurement.
+func warmLoadSeconds(p *WarmPieceProgress) float64 {
+	if p.Loads == 0 {
+		return 0
+	}
+	return p.StartupSeconds / float64(p.Loads)
+}
+
+// A same-tier turn yields only after the attempt has done at least one
+// measured load's worth of item work, so each reload is repaid by at least as
+// much item time (MY-34). Without a measurement the turn yields as before.
+// Higher tiers are not delayed.
+func (q *Queue) warmLoadRepaid(j *Job) bool {
+	return q.clock.Now().Sub(*j.StartedAt).Seconds() >= 2*warmLoadSeconds(j.FanOut.Warm)
+}
+
 // Compare ready work only at an item boundary after this attempt has done
 // work. A contender must actually need this attempt's resources and be able
 // to use them after exact release. The projection grants no real capacity.
@@ -315,6 +334,7 @@ func (q *Queue) warmPieceYields(j *Job) bool {
 	if !warmSettledOnAttempt(j) {
 		return false
 	}
+	repaid := q.warmLoadRepaid(j)
 	scan := q.placementScan()
 	owner := q.s.Machines[j.Machine]
 	if owner == nil || owner.Session != j.Session {
@@ -369,7 +389,7 @@ func (q *Queue) warmPieceYields(j *Job) bool {
 				if q.immediateCandidate(candidate, m) != nil && q.batchSlotFree(m, candidate) {
 					continue
 				}
-				if set.before(candidate, &continuation) {
+				if set.before(candidate, &continuation) && (repaid || q.comparePriority(candidate.Spec, j.Spec) != 0) {
 					return true
 				}
 			}

@@ -592,6 +592,30 @@ func TestWarmPiecesSuccessObservedBeforePriorityStopDelivery(t *testing.T) {
 	}
 }
 
+// Review round 3, P1: an item failure reported before stop delivery follows
+// the same planned-stop rule as success, so the stop race cannot fail it.
+func TestWarmPiecesFailureObservedBeforePriorityStopDelivery(t *testing.T) {
+	q, _, m, s := warmFixture(t)
+	j := submit(t, q, s)
+	run := warmStart(t, q, m, j.ID)
+	a := warmNext(t, q, run, "a")
+	submit(t, q, spec("production"))
+	r := warmRequest(run, "failure", a)
+	if _, err := q.warmPiece(t.Context(), r); !errors.Is(err, ErrStale) {
+		t.Fatalf("failure without prerelease evidence returned %v", err)
+	}
+	r.BeforeStop = true
+	warmCall(t, q, r)
+	warmCall(t, q, r) // A lost reply replays the same settlement.
+	if err := q.Complete(result(run, true)); err != nil {
+		t.Fatal(err)
+	}
+	got := job(t, q, j.ID)
+	if got.State != "queued" || got.FanOut.Next != 1 || got.FanOut.Warm.Failures["a"] != r.Execution || got.InfrastructureRetries != 0 {
+		t.Fatalf("stop race changed the item failure: %s (%s) %+v", got.State, got.Reason, got.FanOut.Warm)
+	}
+}
+
 func TestWarmPiecesCleanPressureStopRequeues(t *testing.T) {
 	q, _, m, s := warmFixture(t)
 	parent := submit(t, q, s)
@@ -721,5 +745,69 @@ func TestWarmPiecesFileCheckpointWithoutNAS(t *testing.T) {
 	workerReason := (Worker{Machine: m}).storageRootReason(parent)
 	if got := check(t, q, m, nil).Job; got == nil || got.ID != parent.ID || workerReason != "" {
 		t.Fatalf("file-store checkpoint required the NAS: assigned=%t worker reason=%q", got != nil, workerReason)
+	}
+}
+
+// Review round 3, P2: two same-tier warm jobs from different projects that
+// contend for one CPU worker. Each attempt loads for ten seconds and each
+// item takes two. Yielding at every boundary paid one load per item.
+func TestWarmPiecesSameTierContentionAmortizesLoads(t *testing.T) {
+	q, clock, _, s := warmFixture(t)
+	m := cpuMachine("cpu-worker", "cpu-host", "cpu", 2, 8)
+	m.Capabilities = append(m.Capabilities, warmPiecesCapability)
+	check(t, q, m, nil)
+	s.Needs = ResourceNeeds{CPUCores: 2, HostMemoryGB: 1}
+	s.AllowedMachines = []string{m.ID}
+	s.FanOut = &FanOut{}
+	for _, key := range []string{"1", "2", "3", "4", "5", "6"} {
+		s.FanOut.Pieces = append(s.FanOut.Pieces, FanOutPiece{Key: key})
+	}
+	jobs := map[string]string{}
+	for _, project := range []string{"first-project", "second-project"} {
+		js := s
+		js.Project, js.SubmissionKey = project, "warm-contention-"+project
+		jobs[submit(t, q, js).ID] = project
+	}
+	const load, item = 10 * time.Second, 2 * time.Second
+	loads := map[string]int{}
+	var turns []string
+	for round := 0; round < 40; round++ {
+		run := check(t, q, m, nil).Job
+		if run == nil {
+			break
+		}
+		if err := q.Started(result(run, true)); err != nil {
+			t.Fatal(err)
+		}
+		loads[run.ID]++
+		turns = append(turns, jobs[run.ID])
+		clock.Advance(load)
+		for {
+			reply := warmCall(t, q, warmRequest(run, "next", nil))
+			if reply.End {
+				break
+			}
+			d := warmCall(t, q, warmRequest(run, "start", reply.Delivery)).Delivery
+			clock.Advance(item)
+			warmSuccess(t, q, run, d)
+		}
+		if err := q.Complete(result(run, true)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	total := 0
+	for id := range jobs {
+		got := job(t, q, id)
+		if got.State != "succeeded" || len(got.FanOut.Results) != 6 {
+			t.Fatalf("%s ended %s (%s) with %d results; turns=%v", jobs[id], got.State, got.Reason, len(got.FanOut.Results), turns)
+		}
+		total += loads[id]
+	}
+	t.Logf("loads=%d turns=%v", total, turns)
+	// Neither job waits for the other's whole list: the second project runs
+	// before the first finishes, and each yield follows at least one load's
+	// worth of item work.
+	if total > 4 || len(turns) < 3 || turns[0] == turns[1] {
+		t.Fatalf("contended replay used %d loads for 12 items; turns=%v", total, turns)
 	}
 }

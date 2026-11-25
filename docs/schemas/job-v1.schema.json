@@ -7360,6 +7360,9 @@
           "format": "date-time",
           "type": "string"
         },
+        "loads": {
+          "type": "integer"
+        },
         "startup_seconds": {
           "type": "number"
         }

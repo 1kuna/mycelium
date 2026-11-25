@@ -328,7 +328,15 @@ func (w Worker) publishFileCheckpointContext(ctx context.Context, j Job, parent 
 		}
 	}
 	p := checkpointPublication{Result: Result{Machine: w.Machine.ID, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, Checkpoint: save, Piece: key, Sequence: sequence}
-	if err = w.Client.Call(ctx, "POST", "/api/files/checkpoint", p, nil); err != nil {
+	post := func(ctx context.Context, c Client) error { return c.Call(ctx, "POST", "/api/files/checkpoint", p, nil) }
+	if j.Spec.warmPieces() {
+		// Main waits on this call mid-item. The queue accepts an identical
+		// generation again, so a replay after a lost or refused reply is safe.
+		err = w.Client.RetryTransient(ctx, post, nil)
+	} else {
+		err = post(ctx, w.Client)
+	}
+	if err != nil {
 		return 0, err
 	}
 	if j.Spec.localFirst() {

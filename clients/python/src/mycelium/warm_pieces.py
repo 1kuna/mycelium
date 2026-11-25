@@ -78,22 +78,37 @@ class WarmPieces:
             checkpoint_dir=Path(checkpoint) if checkpoint else None,
         )
 
-    def checkpoint(self):
-        """Publish a complete ordinary checkpoint for the active item."""
+    def checkpoint(self) -> bool:
+        """Publish a complete ordinary checkpoint for the active item.
+
+        Returns False when the worker could not publish this save. Keep
+        working: a later checkpoint or the worker's final save can publish it.
+        """
         if not self._active:
             raise RuntimeError("warm piece checkpoint requires an active item")
-        self._call(b"C")
+        return not self._call(b"C").get("pending", False)
 
-    def success(self):
-        """Wait for verification and durable acceptance of declared outputs."""
-        self._settle(b"S")
+    def success(self) -> bool:
+        """Wait for verification and durable acceptance of declared outputs.
 
-    def failure(self):
-        """Settle an application error and allow the remaining items to run."""
-        self._settle(b"F")
+        Returns False when a stop left the item unsettled. The queue reruns it
+        later, and next() then returns None so main can exit.
+        """
+        return self._settle(b"S")
+
+    def failure(self) -> bool:
+        """Settle an application error and allow the remaining items to run.
+
+        Returns False when a stop left the item unsettled, as for success().
+        """
+        return self._settle(b"F")
 
     def _settle(self, operation):
         if not self._active:
             raise RuntimeError("warm piece report requires an active item")
-        self._call(operation)
+        response = self._call(operation)
         self._active = False
+        if response.get("end"):
+            self._ended = True
+            return False
+        return True

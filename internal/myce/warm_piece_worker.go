@@ -23,6 +23,8 @@ const (
 	warmBootstrapFD = 5 // The native launcher reserves 3 and 4 for start receipts.
 	// The peer is executing a synchronous call once it starts a frame. Bound
 	// partial headers and unread replies independently of model and item time.
+	// Socket deadlines are kernel wall-clock instants, so they use real time
+	// rather than the worker's injected clock.
 	warmFrameTimeout = 5 * time.Second
 	warmReplyLimit   = 4 << 20
 )
@@ -38,6 +40,12 @@ type warmPieceItem struct {
 type warmHelperReply struct {
 	Item  *warmPieceItem `json:"item,omitempty"`
 	Error string         `json:"error,omitempty"`
+	// End answers a settle that a stop or queue fence refused. The item stays
+	// unsettled for the queue's stop decision, and main has no more work.
+	End bool `json:"end,omitempty"`
+	// Pending answers a checkpoint the worker could not publish. Main keeps
+	// running; a later checkpoint or the final save can still publish.
+	Pending bool `json:"pending,omitempty"`
 }
 
 func newWarmPieceChannel() (*net.UnixConn, *os.File, error) {
@@ -77,14 +85,14 @@ func (g *nativeGroup) warmCall(ctx context.Context, req warmPieceRequest) (warmP
 
 // Read ordinary stream bytes only, so the kernel never installs ancillary
 // descriptors in the worker. The complete request body is one operation byte.
-func readWarmRequest(conn *net.UnixConn, clock Clock) (byte, error) {
+func readWarmRequest(conn *net.UnixConn) (byte, error) {
 	var frame [5]byte
 	// Between requests main can be loading or running an item. The channel
 	// goroutine can wait here until attempt cancellation closes the socket.
 	if _, err := io.ReadFull(conn, frame[:1]); err != nil {
 		return 0, err
 	}
-	if err := conn.SetReadDeadline(clock.Now().Add(warmFrameTimeout)); err != nil {
+	if err := conn.SetReadDeadline(time.Now().Add(warmFrameTimeout)); err != nil {
 		return 0, err
 	}
 	if _, err := io.ReadFull(conn, frame[1:4]); err != nil {
@@ -99,7 +107,7 @@ func readWarmRequest(conn *net.UnixConn, clock Clock) (byte, error) {
 	return frame[4], conn.SetReadDeadline(time.Time{})
 }
 
-func writeWarmReply(conn *net.UnixConn, clock Clock, reply warmHelperReply) error {
+func writeWarmReply(conn *net.UnixConn, reply warmHelperReply) error {
 	data, err := json.Marshal(reply)
 	if err != nil {
 		return err
@@ -107,7 +115,7 @@ func writeWarmReply(conn *net.UnixConn, clock Clock, reply warmHelperReply) erro
 	if len(data) > warmReplyLimit {
 		return errors.New("warm reply exceeds frame size limit")
 	}
-	if err := conn.SetWriteDeadline(clock.Now().Add(warmFrameTimeout)); err != nil {
+	if err := conn.SetWriteDeadline(time.Now().Add(warmFrameTimeout)); err != nil {
 		return err
 	}
 	var header [4]byte
@@ -125,8 +133,10 @@ func (g *nativeGroup) serveWarmPieces(ctx context.Context, conn *net.UnixConn, j
 	defer stop()
 	var delivery *WarmPieceDelivery
 	var item *warmPieceItem
+	var fenced bool
+	var accepted int64 // Generation last accepted for the current delivery.
 	for {
-		op, err := readWarmRequest(conn, g.worker.Clock)
+		op, err := readWarmRequest(conn)
 		if err != nil || ctx.Err() != nil {
 			return nil // Transport failure ends just this channel.
 		}
@@ -134,16 +144,20 @@ func (g *nativeGroup) serveWarmPieces(ctx context.Context, conn *net.UnixConn, j
 		var response warmHelperReply
 		switch op {
 		case 'N':
+			if fenced {
+				response.End = true
+				break
+			}
 			if delivery != nil {
 				return nil
 			}
 			delivery, item, end, err = g.beginWarmItem(ctx, j)
-			response.Item = item
+			response.Item, accepted = item, 0
 		case 'C':
 			if item == nil || item.CheckpointDir == "" {
 				return nil
 			}
-			_, err = g.worker.publishFileCheckpointContext(ctx, j, g.dir)
+			response.Pending = !g.publishWarmCheckpoint(ctx, j, item.CheckpointDir, &accepted)
 		case 'S', 'F':
 			if delivery == nil {
 				return nil
@@ -152,6 +166,12 @@ func (g *nativeGroup) serveWarmPieces(ctx context.Context, conn *net.UnixConn, j
 			if err == nil {
 				g.retireWarmItem(j, *delivery, *item)
 				delivery, item = nil, nil
+			} else if errors.Is(err, ErrStale) || stale(err) {
+				// A stop or queue fence decides this item. Keep its files and
+				// checkpoint marker for the final save and attempt retention,
+				// and let main exit cleanly instead of failing the attempt.
+				delivery, item, fenced, err = nil, nil, true, nil
+				response.End = true
 			}
 		default:
 			return nil
@@ -161,10 +181,10 @@ func (g *nativeGroup) serveWarmPieces(ctx context.Context, conn *net.UnixConn, j
 		}
 		if err != nil {
 			// Keep worker and queue internals outside the authored payload.
-			_ = writeWarmReply(conn, g.worker.Clock, warmHelperReply{Error: "warm piece operation refused"})
+			_ = writeWarmReply(conn, warmHelperReply{Error: "warm piece operation refused"})
 			return err
 		}
-		if err := writeWarmReply(conn, g.worker.Clock, response); err != nil || end {
+		if err := writeWarmReply(conn, response); err != nil || end {
 			return nil
 		}
 	}
@@ -229,17 +249,37 @@ func prepareWarmItem(j Job, d *WarmPieceDelivery) (*warmPieceItem, error) {
 	return item, nil
 }
 
+// Publication retries a transient error within its own bound. Any remaining
+// error leaves main running, so one failed save never fails the attempt.
+// Repeated calls at the accepted generation capture and publish nothing.
+func (g *nativeGroup) publishWarmCheckpoint(ctx context.Context, j Job, dir string, accepted *int64) bool {
+	if *accepted > 0 {
+		generation, err := scanCheckpointProgressContext(ctx, dir, false, filepath.WalkDir, true)
+		if err == nil && generation == *accepted {
+			return true
+		}
+	}
+	published, err := g.worker.publishFileCheckpointContext(ctx, j, g.dir)
+	if err != nil {
+		return false
+	}
+	if published > 0 {
+		*accepted = published
+	}
+	return true
+}
+
 func (g *nativeGroup) settleWarmItem(ctx context.Context, j Job, d WarmPieceDelivery, item warmPieceItem, success bool) error {
 	req := warmPieceRequest{Op: "failure", Key: d.Key, Sequence: d.Sequence}
+	g.p.mu.Lock()
+	// A report that reached this gate before stop delivery can still win
+	// against a priority stop that is in transit from the queue.
+	req.BeforeStop = !g.p.stopped && !g.p.killed && !g.p.userCancel
+	g.p.mu.Unlock()
+	if !req.BeforeStop {
+		return ErrStale
+	}
 	if success {
-		g.p.mu.Lock()
-		// A report that reached this gate before stop delivery can still win
-		// against a priority stop that is in transit from the queue.
-		req.BeforeStop = !g.p.stopped && !g.p.killed && !g.p.userCancel
-		g.p.mu.Unlock()
-		if !req.BeforeStop {
-			return ErrStale
-		}
 		j.Spec.Run.Workdir = item.OutputDir
 		j.Spec.Files = nil // This delivery directory contains only its own outputs.
 		step, name := "", ""

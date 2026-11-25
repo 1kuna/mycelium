@@ -1445,7 +1445,9 @@ attempt and holds its CPU, accelerator and memory reservations for the
 life of the group. Native sidecars stay with main. Each accepted result
 appears under the original piece key in `fan_out.results`. The parent
 can release the group at an item boundary when competing work wins the
-same resources.
+same resources. A higher tier wins at the next boundary. A same-tier
+contender wins only after the attempt has done at least one measured load
+time of item work, so each reload is repaid by at least as much item time.
 
 This adapter entry uses the [Python example](../clients/python/examples/warm_score.py)
 as its main command. Include the script in the source snapshot and make
@@ -1471,7 +1473,9 @@ model, then calls `next()` until it returns `None` at completion or a
 planned stop. Main exits when it receives `None`. Each item supplies
 its key, arguments, absolute input paths and an output directory. Write
 each declared output in that directory and call `success()` to verify and
-accept it, or call `failure()` to record an item error and continue. The
+accept it, or call `failure()` to record an item error and continue. Either
+call returns `False` when a stop left the item unsettled. The queue
+reruns that item later, and the next `next()` returns `None`. The
 worker gives the helper descriptor to main. Main may deliberately pass
 it to a descendant acting for the same job. Keep one caller at a time
 on the stream. Sidecars receive no helper descriptor.
@@ -1483,7 +1487,10 @@ first unsettled key. Use repeatable operations for each key because a
 worker can lose an item before accepting its receipt. With `resumable: true`
 and file-store checkpoints, write a complete generation to
 `item.checkpoint_dir` and call `checkpoint()` to publish it while main is
-active. The worker also tries to publish a complete final save before
+active. The worker retries a transient error and skips a generation it
+already published for this item. `checkpoint()` returns `False` when the
+save could not be published; keep working, since a later save can still
+publish. The worker also tries to publish a complete final save before
 acknowledging release and retries a transient publication error while the
 attempt remains current. If the final save is invalid, the worker records
 the reason and releases the attempt. The next attempt restores the last

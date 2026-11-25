@@ -264,7 +264,9 @@ project. If the planner would give contested resources to another job, the
 warm job cooperatively ends its segment and requeues unfinished pieces
 with receipts intact. Record a boundary yield as a planned requeue with
 no failure or loss penalty. An active same-tier item keeps its usual
-protection.
+protection. A same-tier boundary turn also waits until the attempt has
+done at least its measured load time of item work, so recent-usage
+ordering cannot reload the model for every item.
 There is no periodic time slice. Finite pieces and boundary turns prevent
 one long warm batch from buying indefinite priority with a single admission.
 
