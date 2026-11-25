@@ -95,5 +95,8 @@ else
     esac
   done < "$selection"
 fi
+# Parallel worktrees grew the shared build cache by ~55 GB in three hours
+# (2026-11-25). Keep it bounded; trimming never changes the gate result.
+python3 scripts/trim-go-cache.py "$shared_build" || true
 printf 'gate %s: exit=%s\n' "$mode" "$status"
 exit "$status"
