@@ -49,9 +49,13 @@ Each run writes a JSON and a Markdown report to `--out` and exits nonzero when a
 check fails. `--condition` and `--volume` take generic labels such as `idle`,
 `bulk-same-volume`, `busy` or `quiet`.
 
-**What it writes.** Only the `myce_qualification` schema. It refuses a database
-that already has a shared queue authority (`public.myce_coordinator_v1`) and a
-server with `fsync` or `full_page_writes` off.
+**What it writes.** Only the `myce_qualification` schema, which it creates with
+an ownership comment. It runs only in a database whose name starts with
+`qualif`, such as `qualify` from the compose sketch below, so a production
+connection string fails even before the catalog checks. It refuses a database
+that holds any `myce_*` table in any schema, because stage 2 creates its tables
+unqualified on the `search_path`. It also refuses a `myce_qualification` schema
+it did not create, and a server with `fsync` or `full_page_writes` off.
 
 **Write shape.** `commit` copies the stage 2 authority SQL from
 `internal/myce/shared_queue_postgres.go` (`e5d9287a`, [#2107](https://github.com/1kuna/mycelium/pull/2107)).
@@ -81,7 +85,9 @@ PostgreSQL's own WAL rate. For comparison, SQLite's WAL was about 300 kB/s after
 | Logs | `json-file`, `max-size: 10m`, `max-file: 3` | Bounds log growth on the NAS |
 | Health | `pg_isready` every 10 s | Lets the NAS UI show readiness |
 
-The qualification role can be the container's `POSTGRES_USER` superuser. The
+The qualification role can be the container's `POSTGRES_USER` superuser. With
+`POSTGRES_USER: qualify` the image's default database is also `qualify`, which
+meets the harness's database-name rule. The
 cluster is disposable, and that role can read `pg_control_system()`, whose
 system identifier proves that the same data directory came back. Take its
 password from the storage owner's secret store into `POSTGRES_PASSWORD_FILE`. It
@@ -149,18 +155,22 @@ The busy-volume condition needs realistic bulk traffic. Use either source.
   NAS monitor next to the report. This adds no load.
 - **Synthetic, only with the storage owner's consent for that window.** Run
   `queue-qualify load` from one or two fleet machines into a dedicated folder on
-  the target volume through SMB. It creates `myce-qual-load-*` with a marker file
-  and writes random 512 MiB files, fsyncing each. It reads each file back once
-  and deletes the oldest files as it goes. It removes everything on exit,
-  including after Ctrl-C or SIGTERM. It stops at the first of these limits:
+  the target volume through SMB. It creates `myce-qual-load-*` with a manifest
+  and writes random 512 MiB files, fsyncing each. Each file is listed in the
+  manifest before it exists. It reads each file back once and deletes the
+  oldest files as it goes. On exit, including after Ctrl-C or SIGTERM, it
+  removes the files its manifest lists and then the empty directory. Writers
+  reserve each file's bytes against the working set and free space before
+  creating it, so the bounds hold across all writers together. It stops at the
+  first of these limits:
 
 | Bound | Default | Hard limit |
 | --- | --- | --- |
 | Total written | 32 GiB | any value you pass |
-| On disk at once | 4 GiB | |
+| On disk at once, including files being written | 4 GiB | |
 | Duration | 10 min | 1 h |
 | Writers | 2 | 8 |
-| Free-space floor | the larger of 100 GiB and 10% of the volume, checked before every file | refuses to start below floor + working set |
+| Free-space floor | the larger of 100 GiB and 10% of the volume. Each file needs room for itself and every unwritten byte of the others. Free space is also checked every 250 ms during writes, and the run stops and removes its files once other work leaves too little. | refuses to start below floor + working set |
 | Rate | none | `--rate-mib` caps it |
 
 Ramp in steps: `--rate-mib 50`, then `100`, then uncapped. Run `commit` during
@@ -171,8 +181,13 @@ Ctrl-C if any of these happens:
 - the NAS UI or SMB stops responding;
 - production work reports I/O errors.
 
-`queue-qualify cleanup --skip-db --load-dir DIR` removes marked leftovers after
-a hard kill. Running the Linux binary in a temporary container on the NAS loads
+`queue-qualify cleanup --skip-db --load-dir DIR` removes a hard-killed run's
+leftovers: only the files each manifest lists, and the directory only once it is
+empty. It keeps and reports a directory without this tool's manifest, a file
+the manifest doesn't list, and a snapshot whose ownership record doesn't match
+its first bytes. Free space reported over SMB can lag the client's write cache
+by up to one file per writer, so keep the floor far above writers × file size.
+The defaults give 100 GiB against 4 GiB. Running the Linux binary in a temporary container on the NAS loads
 the disk without the network limit. That load can exceed what SMB clients
 produce, so use it only if the storage owner wants a harsher test, starting at
 `--rate-mib 50`.
@@ -194,7 +209,7 @@ Each step's report goes to `.reports/` on the measuring side.
 | 6 | O | `info`, then `commit --condition idle --volume quiet` | Commit checks |
 | 7 | O, SO | `commit --condition bulk-other-volume --volume quiet` while bulk load runs on the **busy** volume. This is the production pairing. If backups run on a schedule, also run once during a backup. | Commit checks |
 | 8 | O, SO | `summarize` the commit reports and choose a volume (rule below). The SO stops the other container. | |
-| 9 | O, SO | On the chosen volume: `durability-write --duration 15m`, then `docker restart` mid-run, then `durability-verify` | Durability checks |
+| 9 | O, SO | On the chosen volume: `durability-write --duration 15m`, then `docker restart` mid-run, then `durability-verify` | Durability checks. Verify fails unless the server's start time is later than when writing began, so a missed restart can't pass. |
 | 10 | O, SO | Repeat with `docker kill`, which is a crash. | Durability checks |
 | 11 | O, SO | Repeat across a NAS reboot. Use `--max-outage 30m` and `--duration 45m`. | Durability checks. The container returns with no admin action. |
 | 12 | O, SO | At the next NAS OS update, run `durability-write --duration 2h --max-outage 60m` across it, then verify. Compare `docker inspect --format '{{.Image}}'` before and after. | Durability checks. Same image digest. No admin action except the update itself. |
@@ -279,6 +294,23 @@ profile at 11.6/s.
 | `catchup` | Pass. 6,960 changes (78 MB) replayed in 5.1 s, 117× the live rate. The 1 GiB snapshot copy ran from a warm local cache, so it is no network measure. |
 | `commit --watch` with no fault | Incomplete, as designed: no unresponsive window, so the isolation check is `not-exercised` |
 
+After the review fixes, a shorter rerun on the same laptop, with a fresh cluster
+and 30 s commit runs, gave these results:
+
+- `commit` idle passed: append p50/p99/max 0.72 / 3.94 / 4.30 ms.
+- `commit` during an eight-writer `load` passed: 0.72 / 4.12 / 5.47 ms. The
+  load stopped at its 4 GiB cap and removed its directory.
+- `durability-write` across `pg_ctl restart -m immediate`, then verify,
+  passed with 0 of 260 rows missing.
+- A verify after a write with no restart failed on the restart check, as
+  designed.
+- `catchup` of 2,000 changes passed.
+- `cleanup` with an outside view on a harness table dropped nothing and named
+  the view. After the view was removed, it dropped the schema. It kept an
+  unowned `myce-qual-snapshot-*` file and an unmanifested `myce-qual-load-*`
+  directory.
+- A connection to the `postgres` database was refused.
+
 ## Rollback and cleanup
 
 Any step can stop at once. Ctrl-C stops the harness, and the load generator
@@ -288,8 +320,11 @@ component uses these databases, so stopping one has no fleet effect.
 Afterwards:
 
 - **O:** `queue-qualify cleanup --dsn-file F --load-dir <qualification folder>`
-  on each cluster that still runs. This drops `myce_qualification` and removes
-  marked load folders and snapshot test files. Delete the binaries, connection
+  on each cluster that still runs. This drops the harness's four tables and
+  then `myce_qualification`, in one transaction and never with `CASCADE`. If
+  anything else is in the schema or depends on those tables, it drops nothing
+  and names the objects. It also removes the files the load manifests and
+  snapshot ownership records list. Delete the binaries, connection
   files and ledgers from the measuring machines.
 - **SO:** Remove both containers and their data folders on both volumes. Remove
   the qualification secret, any firewall rule, and optionally the image. Confirm

@@ -9,11 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -28,6 +28,63 @@ const liveDatabaseBytes = 8_157_110_272
 const replayBatch = 64
 
 const snapshotPrefix = "myce-qual-snapshot"
+
+// A snapshot this tool creates gets an ownership record beside it, written
+// before the snapshot exists. The record holds the snapshot's first bytes,
+// which come from a fresh random seed, so cleanup removes a snapshot only
+// when its content proves this tool wrote it.
+const (
+	snapshotOwnerSuffix = ".queue-qualify-owner"
+	snapshotOwnerHeader = "queue-qualify snapshot "
+	snapshotTokenBytes  = 32
+)
+
+// snapshotToken is the first bytes writeLoadFile produces from this seed.
+func snapshotToken(seed uint64) []byte {
+	rng := rand.New(rand.NewPCG(seed, 5))
+	token := make([]byte, 0, snapshotTokenBytes)
+	for len(token) < snapshotTokenBytes {
+		v := rng.Uint64()
+		for i := 0; i < 8; i++ {
+			token = append(token, byte(v>>(8*i)))
+		}
+	}
+	return token
+}
+
+// removeSnapshot deletes a snapshot and its ownership record when the record
+// names it and its first bytes match. It reports false for anything else.
+func removeSnapshot(path string) (bool, error) {
+	owner := path + snapshotOwnerSuffix
+	record, err := os.ReadFile(owner)
+	if err != nil {
+		return false, nil
+	}
+	fields := strings.Fields(strings.TrimPrefix(string(record), snapshotOwnerHeader))
+	if !strings.HasPrefix(string(record), snapshotOwnerHeader) || len(fields) != 2 || fields[0] != filepath.Base(path) {
+		return false, nil
+	}
+	token, err := hex.DecodeString(fields[1])
+	if err != nil || len(token) != snapshotTokenBytes {
+		return false, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	head := make([]byte, snapshotTokenBytes)
+	n, _ := io.ReadFull(f, head)
+	f.Close()
+	// A run killed before its first block leaves an empty file; that file was
+	// still created by the run that wrote the record.
+	if string(head[:n]) != string(token[:n]) {
+		return false, nil
+	}
+	if err := os.Remove(path); err != nil {
+		return false, err
+	}
+	return true, os.Remove(owner)
+}
 
 type snapshotResults struct {
 	Bytes          int64   `json:"bytes"`
@@ -148,10 +205,26 @@ func ensureSnapshot(ctx context.Context, path string, size int64, floor uint64) 
 		return false, fmt.Errorf("refusing: %.1f GiB free, need %.1f GiB above a %.1f GiB floor",
 			float64(avail)/(1<<30), float64(size)/(1<<30), float64(floor)/(1<<30))
 	}
-	var written atomic.Int64
-	err = writeLoadFile(ctx, path, size, make([]byte, loadBlock), rand.New(rand.NewPCG(3, 5)), newRateLimiter(0), &written)
+	seed := rand.Uint64()
+	owner := path + snapshotOwnerSuffix
+	record, err := os.OpenFile(owner, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
-		os.Remove(path)
+		return false, probeErr(err)
+	}
+	_, err = fmt.Fprintf(record, "%s%s %s\n", snapshotOwnerHeader, filepath.Base(path), hex.EncodeToString(snapshotToken(seed)))
+	if err == nil {
+		err = record.Sync()
+	}
+	record.Close()
+	if err == nil {
+		err = writeLoadFile(ctx, path, size, make([]byte, loadBlock), rand.New(rand.NewPCG(seed, 5)), newRateLimiter(0), func(int64) {})
+		// O_EXCL failing means someone else's file appeared; never remove it.
+		if err != nil && !errors.Is(err, fs.ErrExist) {
+			os.Remove(path)
+		}
+	}
+	if err != nil {
+		os.Remove(owner)
 		return false, probeErr(err)
 	}
 	return true, nil

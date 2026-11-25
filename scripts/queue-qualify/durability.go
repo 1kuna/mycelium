@@ -23,10 +23,15 @@ import (
 // line is written and synced only after COMMIT returns, so "A" means the
 // server acknowledged the row and "U" means COMMIT failed with an unknown
 // outcome. "F" means the transaction failed before COMMIT and cannot exist.
+//
+// The header records the server's postmaster start time when writing began.
+// Verify requires a later one: a verify against a server that never
+// restarted finds every row in memory and proves nothing about durability.
 type ledgerHeader struct {
 	Run              string    `json:"run"`
 	Started          time.Time `json:"started"`
 	SystemIdentifier string    `json:"system_identifier,omitempty"`
+	ServerStarted    time.Time `json:"server_started,omitzero"`
 }
 
 type outage struct {
@@ -130,7 +135,7 @@ func durabilityWrite(ctx context.Context, t *target, ledger *os.File, run string
 		return nil, nil, err
 	}
 	w := bufio.NewWriter(ledger)
-	header, _ := json.Marshal(ledgerHeader{Run: run, Started: time.Now().UTC(), SystemIdentifier: info.SystemIdentifier})
+	header, _ := json.Marshal(ledgerHeader{Run: run, Started: time.Now().UTC(), SystemIdentifier: info.SystemIdentifier, ServerStarted: info.StartedAt})
 	if err := writeLedger(w, ledger, "H "+string(header)); err != nil {
 		return nil, nil, err
 	}
@@ -315,6 +320,10 @@ type verifyResults struct {
 	UncertainAbsent     int     `json:"uncertain_absent"`
 	Unlisted            int     `json:"present_not_in_ledger"`
 	IdentityMatches     *bool   `json:"system_identifier_matches,omitempty"`
+	// Postmaster start times when the write began and at verify.
+	StartedAtWrite  time.Time `json:"server_started_at_write,omitzero"`
+	StartedAtVerify time.Time `json:"server_started_at_verify"`
+	Restarted       bool      `json:"server_restarted_since_write"`
 }
 
 func cmdDurabilityVerify(ctx context.Context, args []string, out io.Writer) error {
@@ -345,7 +354,7 @@ func cmdDurabilityVerify(ctx context.Context, args []string, out io.Writer) erro
 	if err != nil {
 		return err
 	}
-	res, err := verifyLedger(ctx, conn, h, entries, info.SystemIdentifier)
+	res, err := verifyLedger(ctx, conn, h, entries, info)
 	if err != nil {
 		return err
 	}
@@ -361,10 +370,11 @@ func cmdDurabilityVerify(ctx context.Context, args []string, out io.Writer) erro
 	return r.finish(out)
 }
 
-func verifyLedger(ctx context.Context, conn *pgx.Conn, h ledgerHeader, entries map[int64]ledgerEntry, identity string) (*verifyResults, error) {
-	res := &verifyResults{Run: h.Run}
-	if h.SystemIdentifier != "" && identity != "" {
-		same := h.SystemIdentifier == identity
+func verifyLedger(ctx context.Context, conn *pgx.Conn, h ledgerHeader, entries map[int64]ledgerEntry, now *serverInfo) (*verifyResults, error) {
+	res := &verifyResults{Run: h.Run, StartedAtWrite: h.ServerStarted, StartedAtVerify: now.StartedAt}
+	res.Restarted = !h.ServerStarted.IsZero() && now.StartedAt.After(h.ServerStarted)
+	if h.SystemIdentifier != "" && now.SystemIdentifier != "" {
+		same := h.SystemIdentifier == now.SystemIdentifier
 		res.IdentityMatches = &same
 	}
 	rows, err := conn.Query(ctx, "SELECT seq, encode(sha256(payload),'hex'), encode(sha,'hex') FROM myce_qualification.durability_v1 WHERE run=$1", h.Run)
@@ -423,7 +433,14 @@ func verifyChecks(res *verifyResults) []check {
 		}
 		return statusFail
 	}
+	restart := fmt.Sprintf("started %s, at verify %s", res.StartedAtWrite.UTC().Format(time.RFC3339Nano), res.StartedAtVerify.UTC().Format(time.RFC3339Nano))
+	if res.StartedAtWrite.IsZero() {
+		restart = "the ledger has no server start time"
+	}
 	cs := []check{
+		{Name: "server restarted since the write began", Status: status(res.Restarted), Measured: restart,
+			Limit:    "a later pg_postmaster_start_time at verify than when writing began",
+			Prevents: "a pass that read rows from a server that never went down, which says nothing about losing them"},
 		{Name: "every acknowledged write survived", Status: status(res.Acknowledged > 0 && len(res.MissingAcknowledged) == 0),
 			Measured: fmt.Sprintf("%d of %d missing", len(res.MissingAcknowledged), res.Acknowledged), Limit: "0 missing, at least 1 acknowledged",
 			Prevents: "losing an acknowledged assignment, start or result, which the design promises survives any one machine: duplicate execution or a lost result"},

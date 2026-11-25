@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -18,14 +19,21 @@ import (
 
 // The load generator stands in for bulk job I/O on one volume. Every bound
 // is explicit: total bytes, bytes on disk at once, duration, a free-space
-// floor and a rate cap. It writes only inside a new, marked directory and
-// removes it on exit, including on interrupt.
+// floor and a rate cap. Writers reserve a file's bytes before creating it, so
+// the working set and the floor hold across all writers together, and a
+// watcher stops the run when other work fills the volume mid-file. It writes
+// only inside a new directory whose manifest lists every file it creates,
+// and removes exactly those on exit, including on interrupt.
 const (
 	loadDirPrefix  = "myce-qual-load-"
 	loadMarker     = "MYCE-QUALIFY-LOAD"
 	loadBlock      = 4 << 20
 	maxLoadRuntime = time.Hour
 	maxLoadWriters = 8
+	// freeWatchEvery bounds how long other work can fill the volume before a
+	// running file notices: at 1 GiB/s that is 256 MiB, far below any floor.
+	// One statfs per interval costs the share almost nothing.
+	freeWatchEvery = 250 * time.Millisecond
 )
 
 type loadOptions struct {
@@ -184,30 +192,21 @@ func runLoad(ctx context.Context, opt loadOptions) (*loadResults, error) {
 		return nil, fmt.Errorf("refusing: %.1f GiB free, need %.1f GiB working set above a %.1f GiB floor",
 			float64(avail)/(1<<30), float64(opt.workingSet)/(1<<30), float64(floor)/(1<<30))
 	}
-	runDir, err := os.MkdirTemp(opt.dir, loadDirPrefix)
+	run, err := newLoadRun(opt.dir, opt.duration)
 	if err != nil {
 		return nil, probeErr(err)
 	}
 	res := &loadResults{FreeAtStart: avail, FreeMinimum: avail, FloorBytes: floor}
 	defer func() {
-		res.CleanedUp = os.RemoveAll(runDir) == nil
-		if _, err := os.Stat(runDir); err == nil {
-			res.CleanedUp = false
-		}
+		_, err := run.remove()
+		res.CleanedUp = err == nil
 	}()
-	marker := fmt.Sprintf("queue-qualify bulk load test data, safe to delete. Started %s, ends by %s.\n",
-		time.Now().UTC().Format(time.RFC3339), time.Now().Add(opt.duration).UTC().Format(time.RFC3339))
-	if err := os.WriteFile(filepath.Join(runDir, loadMarker), []byte(marker), 0o644); err != nil {
-		return res, probeErr(err)
-	}
 
 	runCtx, stop := context.WithTimeout(ctx, opt.duration)
 	defer stop()
 	var (
 		written, read atomic.Int64
 		mu            sync.Mutex
-		files         []string
-		onDisk        int64
 		fileLat       []float64
 		stopReason    string
 		firstErr      error
@@ -220,8 +219,30 @@ func runLoad(ctx context.Context, opt loadOptions) (*loadResults, error) {
 		mu.Unlock()
 		stop()
 	}
+	budget := &loadBudget{opt: opt, run: run, freeMin: avail}
 	limiter := newRateLimiter(opt.rateMiBps * (1 << 20))
 	start := time.Now()
+
+	// The watcher catches other work filling the volume while files are
+	// being written; reservations alone check only between files.
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		tick := time.NewTicker(freeWatchEvery)
+		defer tick.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-tick.C:
+			}
+			if reason, err := budget.check(); reason != "" {
+				halt(reason, err)
+				return
+			}
+		}
+	}()
+
 	var wg sync.WaitGroup
 	for w := 0; w < opt.writers; w++ {
 		wg.Add(1)
@@ -234,43 +255,30 @@ func runLoad(ctx context.Context, opt loadOptions) (*loadResults, error) {
 					halt("max-bytes", nil)
 					return
 				}
-				avail, total, err := opt.free(opt.dir)
-				if err != nil {
-					halt("statfs-error", err)
+				name := fmt.Sprintf("w%d-%06d.bin", w, n)
+				if reason, err := budget.reserve(name); reason != "" {
+					halt(reason, err)
 					return
 				}
-				mu.Lock()
-				res.FreeMinimum = min(res.FreeMinimum, avail)
-				mu.Unlock()
-				if avail < opt.floor(total)+uint64(opt.fileSize) {
-					halt("free-space-floor", nil)
-					return
-				}
-				path := filepath.Join(runDir, fmt.Sprintf("w%d-%06d.bin", w, n))
+				path := filepath.Join(run.dir, name)
 				began := time.Now()
-				err = writeLoadFile(runCtx, path, opt.fileSize, buf, rng, limiter, &written)
-				if runCtx.Err() != nil {
-					os.Remove(path)
-					return
-				}
-				if err != nil {
-					halt("write-error", err)
+				var done int64
+				err := writeLoadFile(runCtx, path, opt.fileSize, buf, rng, limiter, func(n int64) {
+					written.Add(n)
+					budget.unwritten.Add(-n)
+					done += n
+				})
+				if runCtx.Err() != nil || err != nil {
+					budget.abandon(name, opt.fileSize-done)
+					if runCtx.Err() == nil {
+						halt("write-error", err)
+					}
 					return
 				}
 				mu.Lock()
 				fileLat = append(fileLat, ms(time.Since(began)))
-				files = append(files, path)
-				onDisk += opt.fileSize
-				var evict []string
-				for onDisk > opt.workingSet && len(files) > 0 {
-					evict = append(evict, files[0])
-					files = files[1:]
-					onDisk -= opt.fileSize
-				}
 				mu.Unlock()
-				for _, p := range evict {
-					os.Remove(p)
-				}
+				budget.complete(name)
 				if opt.readBack {
 					if err := readLoadFile(runCtx, path, buf, &read); err != nil && runCtx.Err() == nil && !errors.Is(err, os.ErrNotExist) {
 						halt("read-error", err)
@@ -281,7 +289,10 @@ func runLoad(ctx context.Context, opt loadOptions) (*loadResults, error) {
 		}(w)
 	}
 	wg.Wait()
+	stop()
+	<-watchDone
 	res.Seconds = time.Since(start).Seconds()
+	res.FreeMinimum = min(res.FreeMinimum, budget.minimum())
 	// The last files are still on disk here, so this is the run's low point.
 	if avail, _, err := opt.free(opt.dir); err == nil {
 		res.FreeMinimum = min(res.FreeMinimum, avail)
@@ -306,7 +317,96 @@ func runLoad(ctx context.Context, opt loadOptions) (*loadResults, error) {
 	return res, nil
 }
 
-func writeLoadFile(ctx context.Context, path string, size int64, buf []byte, rng *rand.Rand, limiter *rateLimiter, written *atomic.Int64) error {
+// loadBudget is the one reservation every writer takes before creating a
+// file. held counts files on disk and files being written at their full
+// size, so it never exceeds the working set. unwritten counts the bytes
+// in-flight files have still to write, which free space must also cover.
+type loadBudget struct {
+	opt       loadOptions
+	run       *loadRun
+	mu        sync.Mutex
+	done      []string // finished files, oldest first
+	held      int64
+	unwritten atomic.Int64
+	freeMin   uint64
+}
+
+// reserve makes room for one more file or names why the run must stop. It
+// evicts the oldest finished files for the working set, then requires free
+// space for this file and every unwritten byte of the others above the floor.
+// It holds the lock across statfs so two writers never claim the same room.
+func (b *loadBudget) reserve(name string) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	size := b.opt.fileSize
+	for b.held+size > b.opt.workingSet && len(b.done) > 0 {
+		if err := os.Remove(filepath.Join(b.run.dir, b.done[0])); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "evict-error", err
+		}
+		b.done = b.done[1:]
+		b.held -= size
+	}
+	if b.held+size > b.opt.workingSet {
+		// validate keeps one file per writer inside the working set.
+		return "working-set", errors.New("no room in the working set")
+	}
+	avail, total, err := b.opt.free(b.opt.dir)
+	if err != nil {
+		return "statfs-error", err
+	}
+	b.freeMin = min(b.freeMin, avail)
+	if avail < b.opt.floor(total)+uint64(max(b.unwritten.Load(), 0)+size) {
+		return "free-space-floor", nil
+	}
+	// The manifest names the file before it exists, so cleanup after a hard
+	// kill can find it.
+	if err := b.run.add(name); err != nil {
+		return "manifest-error", err
+	}
+	b.held += size
+	b.unwritten.Add(size)
+	return "", nil
+}
+
+// check is the watcher's test between reservations: stop once free space
+// cannot cover the bytes still to be written above the floor. Our own writes
+// lower free space and unwritten together, so only other work trips it.
+func (b *loadBudget) check() (string, error) {
+	avail, total, err := b.opt.free(b.opt.dir)
+	if err != nil {
+		return "statfs-error", err
+	}
+	b.mu.Lock()
+	b.freeMin = min(b.freeMin, avail)
+	b.mu.Unlock()
+	if avail < b.opt.floor(total)+uint64(max(b.unwritten.Load(), 0)) {
+		return "free-space-floor", nil
+	}
+	return "", nil
+}
+
+func (b *loadBudget) complete(name string) {
+	b.mu.Lock()
+	b.done = append(b.done, name)
+	b.mu.Unlock()
+}
+
+// abandon removes a file that will not finish and releases its reservation.
+func (b *loadBudget) abandon(name string, unwritten int64) {
+	os.Remove(filepath.Join(b.run.dir, name))
+	b.unwritten.Add(-unwritten)
+	b.mu.Lock()
+	b.held -= b.opt.fileSize
+	b.mu.Unlock()
+}
+
+func (b *loadBudget) minimum() uint64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.freeMin
+}
+
+func writeLoadFile(ctx context.Context, path string, size int64, buf []byte, rng *rand.Rand, limiter *rateLimiter, wrote func(int64)) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -329,7 +429,7 @@ func writeLoadFile(ctx context.Context, path string, size int64, buf []byte, rng
 		if _, err := f.Write(buf[:n]); err != nil {
 			return err
 		}
-		written.Add(n)
+		wrote(n)
 		left -= n
 	}
 	// Sync forces the bytes to the server's disk rather than the client cache.
@@ -387,33 +487,155 @@ func (l *rateLimiter) wait(ctx context.Context, n int64) bool {
 	return sleepUntil(ctx, now.Add(time.Duration(-debt/l.rate*float64(time.Second))))
 }
 
-// removeLoadLeftovers deletes only what this tool created: directories with
-// the load prefix and a marker inside, and snapshot test files.
-func removeLoadLeftovers(parent string) ([]string, error) {
-	entries, err := os.ReadDir(parent)
+// A load run's manifest is its marker file. Its first line names the run's
+// own directory, and each later line names one file the run created, written
+// and synced before the file exists. Cleanup trusts nothing else: it removes
+// the listed files, the manifest and then the directory only if it is empty.
+const manifestHeader = "queue-qualify load run "
+
+type loadRun struct {
+	dir      string
+	manifest *os.File
+	mu       sync.Mutex
+	files    []string
+}
+
+func newLoadRun(parent string, duration time.Duration) (*loadRun, error) {
+	dir, err := os.MkdirTemp(parent, loadDirPrefix)
 	if err != nil {
-		return nil, probeErr(err)
+		return nil, err
+	}
+	f, err := os.OpenFile(filepath.Join(dir, loadMarker), os.O_CREATE|os.O_EXCL|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		os.Remove(dir)
+		return nil, err
+	}
+	r := &loadRun{dir: dir, manifest: f}
+	head := fmt.Sprintf("%s%s\nbulk load test data, safe to delete. Started %s, ends by %s.\n", manifestHeader, filepath.Base(dir),
+		time.Now().UTC().Format(time.RFC3339), time.Now().Add(duration).UTC().Format(time.RFC3339))
+	if err := r.append(head); err != nil {
+		r.remove()
+		return nil, err
+	}
+	return r, nil
+}
+
+func (r *loadRun) append(text string) error {
+	if _, err := r.manifest.WriteString(text); err != nil {
+		return err
+	}
+	return r.manifest.Sync()
+}
+
+func (r *loadRun) add(name string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.append("file " + name + "\n"); err != nil {
+		return err
+	}
+	r.files = append(r.files, name)
+	return nil
+}
+
+// remove deletes this run's files and directory, as cleanup would.
+func (r *loadRun) remove() ([]string, error) {
+	r.manifest.Close()
+	return removeLoadRun(r.dir)
+}
+
+// readManifest returns the files a run directory's manifest lists, or false
+// when the directory has no manifest this tool wrote for it.
+func readManifest(dir string) ([]string, bool) {
+	b, err := os.ReadFile(filepath.Join(dir, loadMarker))
+	if err != nil {
+		return nil, false
+	}
+	lines := strings.Split(string(b), "\n")
+	if lines[0] != manifestHeader+filepath.Base(dir) {
+		return nil, false
+	}
+	var files []string
+	for _, line := range lines[1:] {
+		name, ok := strings.CutPrefix(line, "file ")
+		// Only names this tool generates; never a path out of the directory.
+		if ok && strings.HasSuffix(name, ".bin") && name == filepath.Base(name) && !strings.HasPrefix(name, ".") {
+			files = append(files, name)
+		}
+	}
+	return files, true
+}
+
+func removeLoadRun(dir string) ([]string, error) {
+	files, ok := readManifest(dir)
+	if !ok {
+		return nil, fmt.Errorf("%s has no manifest from this tool; left alone", filepath.Base(dir))
 	}
 	var removed []string
+	for _, name := range files {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return removed, err
+		}
+		removed = append(removed, name)
+	}
+	if entries, err := os.ReadDir(dir); err != nil {
+		return removed, err
+	} else if len(entries) > 1 {
+		return removed, fmt.Errorf("%s holds %d files this tool did not create; left them and the directory", filepath.Base(dir), len(entries)-1)
+	}
+	if err := os.Remove(filepath.Join(dir, loadMarker)); err != nil {
+		return removed, err
+	}
+	return removed, os.Remove(dir)
+}
+
+// removeLoadLeftovers deletes only what this tool created under parent: run
+// directories through their manifests, and snapshot files whose ownership
+// record still matches them. Anything else with a matching name is reported
+// and left alone.
+func removeLoadLeftovers(parent string) (removed, kept []string, err error) {
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return nil, nil, probeErr(err)
+	}
+	var errs []error
 	for _, e := range entries {
-		if e.Type().IsRegular() && strings.HasPrefix(e.Name(), snapshotPrefix) {
-			if err := os.Remove(filepath.Join(parent, e.Name())); err != nil {
-				return removed, probeErr(err)
+		path := filepath.Join(parent, e.Name())
+		switch {
+		case e.Type().IsRegular() && strings.HasPrefix(e.Name(), snapshotPrefix) && !strings.HasSuffix(e.Name(), snapshotOwnerSuffix):
+			ok, err := removeSnapshot(path)
+			switch {
+			case err != nil:
+				errs = append(errs, fmt.Errorf("%s: %w", e.Name(), pathless(err)))
+			case ok:
+				removed = append(removed, e.Name())
+			default:
+				kept = append(kept, e.Name()+" (no matching ownership record)")
+			}
+		case e.IsDir() && strings.HasPrefix(e.Name(), loadDirPrefix):
+			if _, ok := readManifest(path); !ok {
+				kept = append(kept, e.Name()+" (no manifest from this tool)")
+				continue
+			}
+			files, err := removeLoadRun(path)
+			for _, f := range files {
+				removed = append(removed, filepath.Join(e.Name(), f))
+			}
+			if err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", e.Name(), pathless(err)))
+				continue
 			}
 			removed = append(removed, e.Name())
-			continue
 		}
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), loadDirPrefix) {
-			continue
-		}
-		dir := filepath.Join(parent, e.Name())
-		if _, err := os.Stat(filepath.Join(dir, loadMarker)); err != nil {
-			continue
-		}
-		if err := os.RemoveAll(dir); err != nil {
-			return removed, probeErr(err)
-		}
-		removed = append(removed, e.Name())
 	}
-	return removed, nil
+	return removed, kept, errors.Join(errs...)
+}
+
+// pathless drops the path from a file error, which can name a private share,
+// and keeps this tool's own messages, which name only run directories.
+func pathless(err error) error {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err
+	}
+	return err
 }

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // The qualification tables live in their own schema. The coordinator and
@@ -21,8 +22,19 @@ import (
 // branch at e5d9287a) so the measured writes match the real ones.
 const qualSchema = "myce_qualification"
 
+// prepare creates the schema with an ownership comment and refuses a schema
+// of that name without it; cleanup drops only qualTables and then the schema,
+// never with CASCADE, so anything else in or depending on them stops it.
+const qualSchemaComment = "created by queue-qualify; cleanup drops only its own tables"
+
+var qualTables = []string{"myce_coordinator_v1", "myce_changes_v1", "catchup_changes_v1", "durability_v1"}
+
+// The harness runs only in a database whose name starts with this, such as
+// the plan's default "qualify". A production queue database never does, so
+// a mistaken connection string fails here even if every catalog check passed.
+const qualDatabasePrefix = "qualif"
+
 const qualDDL = `
-CREATE SCHEMA IF NOT EXISTS myce_qualification;
 CREATE TABLE IF NOT EXISTS myce_qualification.myce_coordinator_v1 (
 	id integer PRIMARY KEY CHECK (id = 1),
 	identity text NOT NULL,
@@ -184,15 +196,61 @@ func (t *target) connect(ctx context.Context) (*pgx.Conn, error) {
 	return conn, nil
 }
 
-// prepare refuses a database that holds a real shared-queue authority or
-// lacks durable writes, then creates the qualification tables.
-func prepare(ctx context.Context, conn *pgx.Conn) error {
-	var live bool
-	if err := conn.QueryRow(ctx, "SELECT to_regclass('public.myce_coordinator_v1') IS NOT NULL").Scan(&live); err != nil {
+// requireDedicated refuses a database not named for qualification.
+func requireDedicated(ctx context.Context, conn *pgx.Conn) error {
+	var name string
+	if err := conn.QueryRow(ctx, "SELECT current_database()").Scan(&name); err != nil {
 		return err
 	}
-	if live {
-		return errors.New("this database holds a shared queue authority (public.myce_coordinator_v1); qualify on a dedicated database")
+	if !strings.HasPrefix(strings.ToLower(name), qualDatabasePrefix) {
+		return fmt.Errorf("the connected database is not a dedicated qualification database: its name must start with %q, as in the plan's compose sketch", qualDatabasePrefix)
+	}
+	return nil
+}
+
+// qualSchemaState reports whether the qualification schema exists and
+// whether this tool created it.
+func qualSchemaState(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}) (exists, ours bool, err error) {
+	var comment *string
+	err = q.QueryRow(ctx, "SELECT obj_description(oid, 'pg_namespace') FROM pg_namespace WHERE nspname = $1", qualSchema).Scan(&comment)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	return true, comment != nil && *comment == qualSchemaComment, nil
+}
+
+// prepare refuses a database that is not a dedicated qualification
+// database, holds shared-queue tables in any schema, or lacks durable writes,
+// then creates the qualification tables.
+func prepare(ctx context.Context, conn *pgx.Conn) error {
+	if err := requireDedicated(ctx, conn); err != nil {
+		return err
+	}
+	// Stage 2 creates its tables unqualified, so they land in whatever schema
+	// leads the search_path. pg_class lists relations in every schema whatever
+	// the role's privileges. Every queue table is named myce_*.
+	rows, err := conn.Query(ctx, `SELECT n.nspname || '.' || c.relname FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.relname LIKE 'myce\_%' AND n.nspname <> $1 ORDER BY 1 LIMIT 5`, qualSchema)
+	if err != nil {
+		return err
+	}
+	found, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return err
+	}
+	if len(found) > 0 {
+		return fmt.Errorf("this database holds shared queue tables (%s); qualify on a dedicated database", strings.Join(found, ", "))
+	}
+	if exists, ours, err := qualSchemaState(ctx, conn); err != nil {
+		return err
+	} else if exists && !ours {
+		return fmt.Errorf("schema %s exists but queue-qualify did not create it; qualify on a dedicated database", qualSchema)
 	}
 	var durable bool
 	if err := conn.QueryRow(ctx, "SELECT current_setting('fsync')::boolean AND current_setting('full_page_writes')::boolean").Scan(&durable); err != nil {
@@ -209,10 +267,66 @@ func prepare(ctx context.Context, conn *pgx.Conn) error {
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", ddlLockKey); err != nil {
 		return err
 	}
+	exists, ours, err := qualSchemaState(ctx, tx)
+	switch {
+	case err != nil:
+		return err
+	case exists && !ours:
+		return fmt.Errorf("schema %s exists but queue-qualify did not create it", qualSchema)
+	case !exists:
+		if _, err := tx.Exec(ctx, "CREATE SCHEMA "+qualSchema+"; COMMENT ON SCHEMA "+qualSchema+" IS '"+qualSchemaComment+"'"); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.Exec(ctx, qualDDL); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// dropQualification drops the tables prepare created and then the schema,
+// in one transaction and without CASCADE. If anything else lives in the
+// schema or depends on those tables, nothing is dropped and the error names
+// what is in the way.
+func dropQualification(ctx context.Context, conn *pgx.Conn) (bool, error) {
+	if err := requireDedicated(ctx, conn); err != nil {
+		return false, err
+	}
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", ddlLockKey); err != nil {
+		return false, err
+	}
+	exists, ours, err := qualSchemaState(ctx, tx)
+	switch {
+	case err != nil:
+		return false, err
+	case !exists:
+		return false, nil
+	case !ours:
+		return false, fmt.Errorf("schema %s was not created by queue-qualify; left alone", qualSchema)
+	}
+	for _, table := range qualTables {
+		if _, err := tx.Exec(ctx, "DROP TABLE IF EXISTS "+qualSchema+"."+table+" RESTRICT"); err != nil {
+			return false, blocked(err)
+		}
+	}
+	if _, err := tx.Exec(ctx, "DROP SCHEMA "+qualSchema+" RESTRICT"); err != nil {
+		return false, blocked(err)
+	}
+	return true, tx.Commit(ctx)
+}
+
+// blocked explains a refused DROP with PostgreSQL's list of dependents.
+func blocked(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Detail != "" {
+		return fmt.Errorf("cleanup dropped nothing: %s (%s); remove or move those objects first", pgErr.Message, strings.ReplaceAll(pgErr.Detail, "\n", "; "))
+	}
+	return fmt.Errorf("cleanup dropped nothing: %w", err)
 }
 
 type serverInfo struct {
@@ -342,32 +456,48 @@ func cmdInfo(ctx context.Context, args []string, out io.Writer) error {
 func cmdCleanup(ctx context.Context, args []string, out io.Writer) error {
 	fs := newFlags("cleanup", out)
 	cf := addConnFlags(fs)
-	loadDir := fs.String("load-dir", "", "also remove leftover load directories (marked myce-qual-load-*) under this directory")
+	loadDir := fs.String("load-dir", "", "also remove leftover load runs and snapshots this tool created under this directory (listed in their manifests)")
 	skipDB := fs.Bool("skip-db", false, "do not connect; only remove load directories")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	// The database and the files are separate; a refusal in one still
+	// cleans the other, and both failures are returned.
+	var dbErr error
 	if !*skipDB {
-		t, err := cf.load()
-		if err != nil {
-			return err
-		}
-		conn, err := t.connect(ctx)
-		if err != nil {
-			return err
-		}
-		defer conn.Close(context.Background())
-		if _, err := conn.Exec(ctx, "DROP SCHEMA IF EXISTS "+qualSchema+" CASCADE"); err != nil {
-			return err
-		}
-		fmt.Fprintln(out, "dropped schema", qualSchema)
+		dbErr = cleanupDatabase(ctx, cf, out)
 	}
-	if *loadDir != "" {
-		removed, err := removeLoadLeftovers(*loadDir)
-		for _, r := range removed {
-			fmt.Fprintln(out, "removed", r)
-		}
+	if *loadDir == "" {
+		return dbErr
+	}
+	removed, kept, err := removeLoadLeftovers(*loadDir)
+	for _, r := range removed {
+		fmt.Fprintln(out, "removed", r)
+	}
+	for _, k := range kept {
+		fmt.Fprintln(out, "kept", k)
+	}
+	return errors.Join(dbErr, err)
+}
+
+func cleanupDatabase(ctx context.Context, cf *connFlags, out io.Writer) error {
+	t, err := cf.load()
+	if err != nil {
 		return err
+	}
+	conn, err := t.connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close(context.Background())
+	dropped, err := dropQualification(ctx, conn)
+	if err != nil {
+		return err
+	}
+	if dropped {
+		fmt.Fprintln(out, "dropped schema", qualSchema, "and its", len(qualTables), "tables")
+	} else {
+		fmt.Fprintln(out, "no schema", qualSchema)
 	}
 	return nil
 }

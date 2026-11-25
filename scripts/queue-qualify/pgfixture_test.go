@@ -12,6 +12,8 @@ import (
 // disposablePostgres starts a private cluster with its own data directory,
 // socket directory and port, like the stage 2 fixture. It never touches an
 // installed PostgreSQL service. Tests skip when no initdb is available.
+const fixtureDB = "qualify"
+
 type disposablePostgres struct {
 	bin, data, sockets, log string
 	port                    int
@@ -64,6 +66,12 @@ func startPostgres(t *testing.T) *disposablePostgres {
 	if err := pg.ctl("start"); err != nil {
 		t.Fatal(err)
 	}
+	// The harness runs only in a dedicated qualification database, as in the
+	// plan's compose sketch, whose default database is named for its role.
+	out, err = exec.Command(filepath.Join(bin, "createdb"), "-h", root, "-p", fmt.Sprint(port), "-U", "qualify", fixtureDB).CombinedOutput()
+	if err != nil {
+		t.Fatalf("createdb: %v\n%s", err, out)
+	}
 	return pg
 }
 
@@ -78,7 +86,7 @@ func (pg *disposablePostgres) ctl(args ...string) error {
 }
 
 func (pg *disposablePostgres) dsn() string {
-	return fmt.Sprintf("postgres://qualify@127.0.0.1:%d/postgres?sslmode=disable", pg.port)
+	return fmt.Sprintf("postgres://qualify@127.0.0.1:%d/%s?sslmode=disable", pg.port, fixtureDB)
 }
 
 // target returns a connection target read from an environment variable, the

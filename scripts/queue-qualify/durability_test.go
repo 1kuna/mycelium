@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -71,7 +73,7 @@ func TestDurabilityAcrossCrashRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v, err := verifyLedger(ctx, conn, h, entries, info.SystemIdentifier)
+	v, err := verifyLedger(ctx, conn, h, entries, info)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,11 +83,39 @@ func TestDurabilityAcrossCrashRestart(t *testing.T) {
 	if _, err := conn.Exec(ctx, "DELETE FROM myce_qualification.durability_v1 WHERE run='crash' AND seq=(SELECT min(seq) FROM myce_qualification.durability_v1 WHERE run='crash')"); err != nil {
 		t.Fatal(err)
 	}
-	v, err = verifyLedger(ctx, conn, h, entries, info.SystemIdentifier)
+	v, err = verifyLedger(ctx, conn, h, entries, info)
 	if err != nil || len(v.MissingAcknowledged) != 1 || verdict(verifyChecks(v)) != statusFail {
 		t.Fatalf("a lost row must fail: %+v %v", v, err)
 	}
-	if v, _ := verifyLedger(ctx, conn, h, entries, "other"); verdict(verifyChecks(v)) != statusFail || *v.IdentityMatches {
+	other := *info
+	other.SystemIdentifier = "other"
+	if v, _ := verifyLedger(ctx, conn, h, entries, &other); verdict(verifyChecks(v)) != statusFail || *v.IdentityMatches {
 		t.Fatal("a replaced data directory must fail")
+	}
+}
+
+// A verify that finds every row proves nothing unless the server restarted
+// between the write and the verify.
+func TestDurabilityVerifyFailsWithoutARestart(t *testing.T) {
+	pg := startPostgres(t)
+	pg.target(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	ledger := filepath.Join(dir, "ledger")
+	var out strings.Builder
+	if err := cmdDurabilityWrite(ctx, []string{"--dsn-env", "QQ_TEST_DSN", "--out", dir, "--ledger", ledger,
+		"--duration", "1s", "--rate", "40"}, &out); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	err := cmdDurabilityVerify(ctx, []string{"--dsn-env", "QQ_TEST_DSN", "--out", dir, "--ledger", ledger}, &out)
+	if !errors.Is(err, errChecksFailed) || !strings.Contains(out.String(), "restart") {
+		t.Fatalf("verify without a restart: %v\n%s", err, out.String())
+	}
+	if err := pg.ctl("restart", "-m", "fast"); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := cmdDurabilityVerify(ctx, []string{"--dsn-env", "QQ_TEST_DSN", "--out", dir, "--ledger", ledger}, &out); err != nil {
+		t.Fatalf("verify after a restart: %v\n%s", err, out.String())
 	}
 }

@@ -87,3 +87,85 @@ func TestInfoAndPrepareAgainstDisposablePostgres(t *testing.T) {
 		t.Fatalf("cleanup: qualification schema %v, unrelated table kept %v", schema, kept)
 	}
 }
+
+// Stage 2 creates its tables unqualified, so a real authority can sit in any
+// schema on the search_path. The harness must find it there, and must run
+// only in a database named for qualification.
+func TestPrepareRefusesAQueueInAnySchemaOrAnUndedicatedDatabase(t *testing.T) {
+	pg := startPostgres(t)
+	ctx := context.Background()
+	conn, err := pg.target(t).connect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	if _, err := conn.Exec(ctx, "CREATE SCHEMA queue; CREATE TABLE queue.myce_changes_v1(sequence bigint PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepare(ctx, conn); err == nil || !strings.Contains(err.Error(), "queue.myce_changes_v1") {
+		t.Fatalf("a queue table in schema queue was not refused: %v", err)
+	}
+	var made bool
+	conn.QueryRow(ctx, "SELECT to_regnamespace('myce_qualification') IS NOT NULL").Scan(&made)
+	if made {
+		t.Fatal("prepare wrote to a database holding a queue")
+	}
+	// The cluster's default database is not a dedicated qualification database.
+	t.Setenv("QQ_OTHER_DSN", strings.Replace(pg.dsn(), "/"+fixtureDB+"?", "/postgres?", 1))
+	other, err := (&connFlags{env: "QQ_OTHER_DSN"}).load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oconn, err := other.connect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer oconn.Close(ctx)
+	if err := prepare(ctx, oconn); err == nil || !strings.Contains(err.Error(), "dedicated") {
+		t.Fatalf("database postgres was not refused: %v", err)
+	}
+}
+
+// cleanup drops only what prepare created. An object someone else made that
+// depends on those tables, or sits in the schema, stays, and cleanup fails.
+func TestCleanupLeavesForeignDatabaseObjectsAndFails(t *testing.T) {
+	pg := startPostgres(t)
+	ctx := context.Background()
+	conn, err := pg.target(t).connect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	cleanup := func() error {
+		var out strings.Builder
+		return cmdCleanup(ctx, []string{"--dsn-env", "QQ_TEST_DSN"}, &out)
+	}
+	exists := func(rel string) bool {
+		var ok bool
+		conn.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", rel).Scan(&ok)
+		return ok
+	}
+	for _, foreign := range []struct{ create, rel string }{
+		{"CREATE VIEW public.their_view AS SELECT run FROM myce_qualification.durability_v1", "public.their_view"},
+		{"CREATE TABLE myce_qualification.their_table(id int)", "myce_qualification.their_table"},
+	} {
+		if err := prepare(ctx, conn); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.Exec(ctx, foreign.create); err != nil {
+			t.Fatal(err)
+		}
+		if err := cleanup(); err == nil {
+			t.Fatalf("cleanup succeeded with %s in the way", foreign.rel)
+		}
+		if !exists(foreign.rel) || !exists("myce_qualification.durability_v1") {
+			t.Fatalf("cleanup removed %s or the tables it depends on", foreign.rel)
+		}
+		if _, err := conn.Exec(ctx, "DROP TABLE IF EXISTS myce_qualification.their_table; DROP VIEW IF EXISTS public.their_view"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := cleanup(); err != nil || exists("myce_qualification.durability_v1") {
+		t.Fatalf("cleanup of the harness's own objects: %v", err)
+	}
+}
