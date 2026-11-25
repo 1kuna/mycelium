@@ -1208,6 +1208,7 @@ Use the physical host ID shared by all device workers:
 myce host drain HOST --wait --timeout 30s
 myce host disable HOST --stop --wait --timeout 30s
 myce host status HOST
+myce host budget HOST --dry-run
 myce host budget HOST --memory-budget-gb GiB
 myce host placement HOST --last-resort=true
 myce host placement HOST --last-resort=false
@@ -1218,6 +1219,20 @@ myce host resume HOST
 The role (MY-45) selects how host RAM capacity is measured; see
 [host roles](reference/host-capacity.md#host-ram-admission-and-ceilings). It
 defaults to `node`, applies while the host stays enabled, and keeps any drain.
+
+Use `myce host budget HOST --dry-run` before draining to preview the RAM
+allowance that `--memory-budget-measured=true` would send to a worker with the
+same evidence. The JSON reports `suggested_gb` and its derivation, including the
+role, physical RAM, qualified seven-day idle percentiles and maximum, and
+reserve. A dedicated services host uses idle p95, and a dedicated node uses idle
+p50. Idle physical usage includes any queue running on the host, so its
+overhead is already accounted for in the baseline. Without qualified evidence,
+the preview reports the existing positive authored fallback and the reason.
+With multiple fresh workers, it shows the lowest suggestion and identifies its
+worker. The command reads queue status without changing policy or requiring a
+drain. Live RAM and worker acknowledgements can further limit admission.
+The former preview-only flags `--headroom-gb` and `--queue-overhead-gb` have
+been removed. The preview uses the same configured reserve as measured mode.
 
 ### Set a queued job's host RAM charge and limit
 

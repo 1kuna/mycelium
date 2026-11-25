@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -219,43 +220,95 @@ func TestHostMaintenanceInstalledAuthority(t *testing.T) {
 }
 
 func TestHostMaintenanceBudgetDryRun(t *testing.T) {
-	q, clock, _, _ := waitQueue(t)
-	m := maintenanceCLIWorker("worker")
-	m.HostMemoryBudgetGB = 6.5
-	m.MemoryObservation = &myce.HostMemoryObservation{TotalGB: 32, UsedGB: 12, MyceliumGB: 2}
-	if _, err := currentCLICheckin(q, clock, myce.Checkin{Machine: m}); err != nil {
-		t.Fatal(err)
-	}
-	before, err := q.HostMaintenanceStatus("host")
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer((myce.API{Queue: q, Token: "test-only"}).Handler())
-	defer server.Close()
-	t.Setenv("MYCE_TOKEN", "test-only")
-	var out bytes.Buffer
-	if err = hostMaintenanceCommand(context.Background(), []string{"budget", "host", "--dry-run", "--queue", server.URL, "--queue-overhead-gb", "2"}, &out); err != nil {
-		t.Fatal(err)
-	}
-	var s myce.HostBudgetSuggestion
-	// Both accepted legacy arrivals carry a real memory observation.
-	if err = json.Unmarshal(out.Bytes(), &s); err != nil || s.SuggestedGB != 20 || s.HeadroomGB != 0 || !s.DryRun || s.History.Samples != 2 {
-		t.Fatal(out.String(), err)
-	}
-	after, err := q.HostMaintenanceStatus("host")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after.Policy.MemoryBudget.GiB != before.Policy.MemoryBudget.GiB || after.Policy.Mode != before.Policy.Mode || !after.Policy.UpdatedAt.Equal(before.Policy.UpdatedAt) {
-		t.Fatal("dry-run changed policy", before, after)
-	}
-	snapshot, err := q.Snapshot()
-	if err != nil || snapshot.Machines[0].ExternalMemory.Week.MaxGB != 10 {
-		t.Fatal("status missing history", snapshot, err)
-	}
-	output, _, err := captureUsageOutput(t, []string{"status", "--history", "--queue", server.URL, "--token", "test-only"})
-	if err != nil || !strings.Contains(output, "non-Mycelium RAM 24h=7d p50/p95/max") {
-		t.Fatal(output, err)
+	for _, tc := range []struct {
+		role                string
+		baseline, allowance float64
+	}{
+		{role: "node", baseline: 4, allowance: 22},
+		{role: "services", baseline: 8, allowance: 18},
+	} {
+		t.Run(tc.role, func(t *testing.T) {
+			q, clock, _, _ := waitQueue(t)
+			m := maintenanceCLIWorker("worker")
+			m.HostMemoryBudgetGB = 6.5
+			m.MemoryObservation = &myce.HostMemoryObservation{
+				TotalGB: 32, UsedGB: 4, MyceliumGB: 2, ReserveGB: 6,
+				BaselineVersion: 1, Quiescent: true,
+			}
+			checkin := func() myce.Reply {
+				t.Helper()
+				reply, err := currentCLICheckin(q, clock, myce.Checkin{Machine: m})
+				if err != nil {
+					t.Fatal(err)
+				}
+				clock.advance(time.Second)
+				return reply
+			}
+			for range 10 {
+				checkin()
+			}
+			m.MemoryObservation.UsedGB = 8
+			checkin()
+
+			server := httptest.NewServer((myce.API{Queue: q, Token: "test-only"}).Handler())
+			defer server.Close()
+			t.Setenv("MYCE_TOKEN", "test-only")
+			run := func(args ...string) *bytes.Buffer {
+				t.Helper()
+				out := new(bytes.Buffer)
+				if err := hostMaintenanceCommand(t.Context(), append(args, "--queue", server.URL), out); err != nil {
+					t.Fatal(err)
+				}
+				return out
+			}
+			if tc.role == "services" {
+				run("role", "host", "--role", tc.role)
+			}
+			before, err := q.HostMaintenanceStatus("host")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if before.ExternalMemory == nil || before.ExternalMemory.Week.MaxGB != 6 {
+				t.Fatal("host status missing legacy history", before.ExternalMemory)
+			}
+			out := run("budget", "host", "--dry-run")
+			var preview struct {
+				myce.HostMemoryDerivation
+				SuggestedGB   float64 `json:"suggested_gb"`
+				QueueOverhead string  `json:"queue_overhead"`
+				DryRun        bool    `json:"dry_run"`
+			}
+			if err := json.Unmarshal(out.Bytes(), &preview); err != nil {
+				t.Fatal(out.String(), err)
+			}
+			if !preview.DryRun || preview.SuggestedGB != tc.allowance || preview.Role != tc.role ||
+				preview.Source != "quiescent_v1" || preview.TotalGB != 32 || preview.BaselineQuantileGB != tc.baseline ||
+				preview.ReserveGB != 6 || preview.ReserveSource != "explicit_reserve" ||
+				preview.QueueOverhead != "included_in_idle_baseline" ||
+				preview.History.P50GB != 4 || preview.History.P95GB != 8 || preview.History.MaxGB != 8 {
+				t.Fatal(out.String())
+			}
+			after, err := q.HostMaintenanceStatus("host")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(after.Policy, before.Policy) || !reflect.DeepEqual(after.ExternalMemory, before.ExternalMemory) {
+				t.Fatal("dry-run changed policy or history", before, after)
+			}
+
+			run("drain", "host")
+			run("budget", "host", "--memory-budget-measured=true")
+			m.MemoryObservation.Quiescent = false // Compare against the same idle history.
+			measured := checkin().HostMemoryBudget
+			if measured == nil || !measured.Measured || measured.GiB != preview.SuggestedGB {
+				t.Fatalf("measured check-in allowance %+v differs from dry run %g", measured, preview.SuggestedGB)
+			}
+
+			output, _, err := captureUsageOutput(t, []string{"status", "--history", "--queue", server.URL, "--token", "test-only"})
+			if err != nil || !strings.Contains(output, "non-Mycelium RAM 24h=7d p50/p95/max") {
+				t.Fatal(output, err)
+			}
+		})
 	}
 }
 
@@ -300,15 +353,23 @@ func TestHostMaintenanceSharedProfileCLI(t *testing.T) {
 }
 
 func TestHostMaintenanceMeasuredMemoryCLI(t *testing.T) {
-	q, _, _, _ := waitQueue(t)
+	q, clock, _, _ := waitQueue(t)
 	m := maintenanceCLIWorker("worker")
 	m.HostMemoryBudgetGB = 12
-	if _, err := fixtureQueueCheckin(q, myce.Checkin{Machine: m}); err != nil {
+	if _, err := currentCLICheckin(q, clock, myce.Checkin{Machine: m}); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer((myce.API{Queue: q, Token: "test-only"}).Handler())
 	defer server.Close()
 	t.Setenv("MYCE_TOKEN", "test-only")
+	var out bytes.Buffer
+	if err := hostMaintenanceCommand(t.Context(), []string{"budget", "host", "--dry-run", "--queue", server.URL}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var preview myce.HostBudgetSuggestion
+	if err := json.Unmarshal(out.Bytes(), &preview); err != nil || preview.Source != "authored_fallback" || preview.Reason == "" || preview.SuggestedGB != 12 {
+		t.Fatal(out.String(), err)
+	}
 	for _, args := range [][]string{{"drain", "host"}, {"budget", "host", "--memory-budget-measured=true"}} {
 		if err := hostMaintenanceCommand(t.Context(), append(args, "--queue", server.URL), &bytes.Buffer{}); err != nil {
 			t.Fatal(err)

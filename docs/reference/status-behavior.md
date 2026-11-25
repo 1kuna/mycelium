@@ -186,13 +186,13 @@ It subtracts no RSS. Its `24h`/`7d` sample and `windows` counts expose actual
 learning opportunities; legacy history has no such provenance, so cannot tell
 how many idle windows occurred. Missing qualified history remains unknown.
 Machine `host_memory_derivation` names the opt-in allowance's evidence or authored
-fallback. See [measured host allowances](../reference/host-capacity.md#host-ram-admission-and-ceilings).
-The legacy suggestion below continues to be a diagnostic estimate; it does not
-activate measured policy or convert residual peaks into qualified baselines.
+fallback. Preview that same derivation before a drain with the command below.
+See [queue maintenance](../operations.md#queue-maintenance) for the output and
+[measured host allowances](../reference/host-capacity.md#host-ram-admission-and-ceilings)
+for the role-specific calculation.
 
 ```sh
 myce host budget HOST --dry-run
-myce host budget HOST --dry-run --headroom-gb 4 --queue-overhead-gb 2
 ```
 
 ### Shared interactive profile

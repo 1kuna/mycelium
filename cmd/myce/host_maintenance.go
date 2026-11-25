@@ -33,8 +33,6 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 	budget := f.Float64("memory-budget-gb", 0, "queue-owned host RAM allowance; requires drained/disabled host")
 	measured := f.Bool("memory-budget-measured", false, "derive RAM allowance from qualified idle observations; retain authored fallback")
 	dryRun := f.Bool("dry-run", false, "suggest a measured RAM budget without changing policy")
-	headroom := f.Float64("headroom-gb", 0, "extra RAM headroom for future external peaks (GiB)")
-	queueOverhead := f.Float64("queue-overhead-gb", 0, "additional queue RAM reserve, if not already included in measurements (GiB)")
 	shared := f.Bool("shared", false, "use shared interactive host profile (profile action)")
 	reserve := f.Float64("interactive-reserve-gb", 0, "measured additional interactive RAM reserve; required with --shared=true")
 	lastResort := f.Bool("last-resort", false, "prefer ordinary admissible hosts before this host; use --last-resort=false to clear")
@@ -46,7 +44,7 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 			flags = append(flags, arg)
 			key := strings.TrimLeft(arg, "-")
 			switch key {
-			case "interactive-reserve-gb", "headroom-gb", "queue-overhead-gb", "config", "joining-file", "queue", "token", "timeout", "memory-budget-gb", "cpu-budget-cores", "role", "reason", "expected-return":
+			case "interactive-reserve-gb", "config", "joining-file", "queue", "token", "timeout", "memory-budget-gb", "cpu-budget-cores", "role", "reason", "expected-return":
 				if i+1 >= len(args) {
 					break
 				}
@@ -169,13 +167,7 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 		return err
 	}
 	if *dryRun {
-		var total float64
-		for _, worker := range status.Workers {
-			if worker.Machine.MemoryObservation != nil && worker.Fresh {
-				total = max(total, worker.Machine.MemoryObservation.TotalGB)
-			}
-		}
-		suggestion, e := myce.SuggestHostBudget(total, *headroom, *queueOverhead, status.ExternalMemory)
+		suggestion, e := status.MeasuredBudgetSuggestion()
 		if e != nil {
 			return fmt.Errorf("budget suggestion: %w", e)
 		}

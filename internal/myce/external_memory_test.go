@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func TestExternalMemoryBucketingRetentionAndSuggestion(t *testing.T) {
+func TestExternalMemoryBucketingAndRetention(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}
 	q := &Queue{clock: clock}
 	m := Machine{ID: "worker", HostID: "host", MemoryObservation: &HostMemoryObservation{TotalGB: 24, UsedGB: 12, MyceliumGB: 2}}
@@ -20,10 +20,6 @@ func TestExternalMemoryBucketingRetentionAndSuggestion(t *testing.T) {
 	h := q.externalMemoryStatus("host")
 	if h.Day.Samples != 100 || h.Day.Buckets != 1 || h.Day.MaxGB != 10 || !h.Day.PeakAt.Equal(peak) || h.Day.P50GB < 4 || h.Day.P50GB > 4.8 || h.Day.P95GB != h.Day.P50GB {
 		t.Fatalf("wrong summary: %+v", h)
-	}
-	suggestion, err := SuggestHostBudget(24, 4, 2, h)
-	if err != nil || suggestion.SuggestedGB != 6 || !suggestion.DryRun {
-		t.Fatalf("suggestion %+v %v", suggestion, err)
 	}
 	clock.now = peak.Add(24*time.Hour + externalBucketWidth)
 	h = q.externalMemoryStatus("host")
@@ -46,9 +42,6 @@ func TestExternalMemoryBucketingRetentionAndSuggestion(t *testing.T) {
 	if h.Week.Samples != 0 {
 		t.Fatal("offline samples did not expire", h)
 	}
-	if _, err = SuggestHostBudget(24, 4, 0, h); err == nil {
-		t.Fatal("suggested without evidence")
-	}
 }
 
 func TestExternalMemoryRejectsInvalidAndUsesCurrentRSS(t *testing.T) {
@@ -68,21 +61,6 @@ func TestExternalMemoryRejectsInvalidAndUsesCurrentRSS(t *testing.T) {
 	}
 	if _, err = workerTreeRSS([]byte("1 0 1\n"), 10); err == nil {
 		t.Fatal("missing worker accepted")
-	}
-}
-
-func TestExternalMemorySuggestionGuardAndClamp(t *testing.T) {
-	h := &ExternalMemoryHistory{Week: ExternalMemoryWindow{Samples: 1, MaxGB: 20}}
-	s, err := SuggestHostBudget(32, 4, 1, h)
-	if err != nil || s.HeadroomGB != 4 || s.SuggestedGB != 7 {
-		t.Fatal(s, err)
-	}
-	s, err = SuggestHostBudget(16, 4, 0, h)
-	if err != nil || s.SuggestedGB != 0 {
-		t.Fatal(s, err)
-	}
-	if _, err = SuggestHostBudget(16, math.NaN(), 0, h); err == nil {
-		t.Fatal("invalid headroom accepted")
 	}
 }
 

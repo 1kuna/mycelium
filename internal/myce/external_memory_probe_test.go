@@ -56,8 +56,4 @@ func TestExternalMemoryProbeRetainsPressureBeforeRecovery(t *testing.T) {
 	if h.Week.Samples != 2 || h.Week.MaxGB != 14 {
 		t.Fatal("pressure peak omitted", h)
 	}
-	s, err := SuggestHostBudget(16, 4, 0, h)
-	if err != nil || s.SuggestedGB != 0 {
-		t.Fatal("pressure peak did not limit suggestion", s, err)
-	}
 }
