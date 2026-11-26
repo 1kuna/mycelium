@@ -1932,6 +1932,23 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			return errors.New("invalid machine report")
 		}
 		old := q.s.Machines[m.ID]
+		if m.HostRAMGate != nil && !m.HostRAMGate.valid() {
+			m.HostRAMGate = nil
+		}
+		m.hostRAMGateOrder, m.hostRAMGateSeen = healthReportOrder, nil
+		if m.HostRAMGate != nil {
+			// The worker snapshots its attempts before the RAM probe, and drops
+			// an attempt only after the queue acknowledges its result.
+			m.hostRAMGateSeen = make(map[attemptKey]bool, len(c.Attempts))
+			for _, a := range c.Attempts {
+				m.hostRAMGateSeen[attemptKey{a.ID, a.Attempt, a.Session}] = true
+			}
+		}
+		if old != nil && old.Session == m.Session && healthReportOrder < old.hostRAMGateOrder {
+			// Preparation runs outside q.mu: an earlier arrival can commit
+			// later. Keep the gate of the later arrival.
+			m.HostRAMGate, m.hostRAMGateOrder, m.hostRAMGateSeen = old.HostRAMGate, old.hostRAMGateOrder, old.hostRAMGateSeen
+		}
 		if old != nil && m.ModelConfigHash == "" && q.catalogStale(old) {
 			return errors.New("worker model config does not match queue")
 		}

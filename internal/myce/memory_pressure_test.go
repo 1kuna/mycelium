@@ -150,3 +150,115 @@ func TestMemoryPoolKernelBackstopAndImpossibleRetry(t *testing.T) {
 		t.Fatalf("impossible retry lacked typed capacity failure: %s %s", got.State, got.Reason)
 	}
 }
+
+func TestMemoryPoolPressureProjectsPhysicalLoss(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		age  float64
+		lost bool
+	}{
+		{name: "growth beyond reservation"},
+		{name: "old cgroup sample with unrelated physical loss followed by worker loss", age: 7, lost: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertPressureProjectsPhysicalLoss(t, tc.age, tc.lost)
+		})
+	}
+}
+
+func assertPressureProjectsPhysicalLoss(t *testing.T, age float64, lost bool) {
+	t.Helper()
+	q, clock := fixture(t)
+	m := sharedUnifiedMachine()
+	m.HostMemoryBudgetGB = 121
+	m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
+	const total, keep = 121.0, 4.0
+	setReading := func(free float64) {
+		m.MemoryObservation = &HostMemoryObservation{TotalGB: total, UsedGB: total - free, ReserveGB: keep}
+		m.HostAvailableMemoryGB = free - keep
+	}
+	s := sharedSpec("experiment", 35)
+	s.Needs.HostMemoryGB = 25
+	queued := submit(t, q, s)
+	setReading(73.6)
+	run := assignedJob(machineCheck(t, q, m))
+	if run == nil || run.ID != queued.ID || run.Memory.RAM.ChargeGB != 60 {
+		t.Fatal("expected the canary's 60 GiB charge", run)
+	}
+	if err := q.Started(result(run, true)); err != nil {
+		t.Fatal(err)
+	}
+	// Model initialization takes minutes. During the final loading burst,
+	// two samples show 15 GiB of attributed growth per 8 seconds. Physical
+	// room is still 26 GiB at the 43.6 GiB peak. Extrapolating unchanged
+	// through the 18s stop horizon predicts 33.75 GiB of loss.
+	clock.Advance(3 * time.Minute)
+	for i, used := range []float64{13.6, 28.6, 43.6} {
+		setReading(73.6 - used)
+		c := Checkin{Machine: m, period: 8 * time.Second, AttemptProtocol: keyedAttemptProtocol,
+			Attempts: []AttemptReport{{Execution: Execution{ID: run.ID, Attempt: run.Attempt}, Session: run.Session, Started: true,
+				CurrentHostMemory: &CurrentHostMemory{SampleID: int64(i + 1), NonreclaimableGB: used, AgeSeconds: age}}}}
+		if _, err := q.Checkin(c); err != nil {
+			t.Fatal(err)
+		}
+		if i < 2 {
+			requireState(t, q, run.ID, "running")
+		}
+		clock.Advance(8 * time.Second)
+	}
+	got := job(t, q, run.ID)
+	if got.State != "stopping" {
+		t.Fatalf("still running with 26 GiB above reserve and 33.75 GiB projected loss: %s", got.State)
+	}
+	stop := priorityStop(got)
+	if stop == nil || stop.MemoryPool == nil || stop.MemoryPool.Trigger != "stop_grace" ||
+		stop.MemoryPool.GraceLossGB < 33.74 || stop.MemoryPool.GraceLossGB > 33.76 {
+		t.Fatalf("stop lost the uncapped comparison: %+v", stop)
+	}
+	if lost {
+		clock.Advance(q.machineLossTimeout(m.ID))
+		machineCheck(t, q, cpuMachine("neighbor", "neighbor", "cpu", 8, 96))
+	} else {
+		finishInterrupted(t, q, run)
+	}
+	got = job(t, q, run.ID)
+	if got.State != "queued" {
+		t.Fatalf("pressure victim did not requeue: %s %s", got.State, got.Reason)
+	}
+	if len(got.AttemptHistory) != 1 || got.AttemptHistory[0].PriorityStop == nil ||
+		got.AttemptHistory[0].PriorityStop.MemoryPool == nil || *got.AttemptHistory[0].PriorityStop.MemoryPool != *stop.MemoryPool {
+		t.Fatalf("attempt history lost the pressure decision: %+v", got.AttemptHistory)
+	}
+}
+
+func TestMemoryPoolDeviceStopRecordsComparison(t *testing.T) {
+	q, clock := fixture(t)
+	m := m3Machine()
+	m.Devices = m.Devices[:1]
+	s := spec("experiment")
+	s.Needs.MemoryGB = 4
+	j := submit(t, q, s)
+	run := assignedJob(machineCheck(t, q, m))
+	if run == nil || run.ID != j.ID {
+		t.Fatal("expected assigned attempt", run)
+	}
+	if err := q.Started(result(run, true)); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	used := 9.0
+	c := Checkin{Machine: m, period: time.Second, AttemptProtocol: keyedAttemptProtocol,
+		Attempts: []AttemptReport{{Execution: Execution{ID: run.ID, Attempt: run.Attempt}, Session: run.Session, Started: true,
+			CurrentHostMemory: &CurrentHostMemory{DeviceGB: &used}}}}
+	if _, err := q.Checkin(c); err != nil {
+		t.Fatal(err)
+	}
+	got := job(t, q, run.ID)
+	stop := priorityStop(got)
+	if got.State != "stopping" || stop == nil || stop.DevicePool == nil {
+		t.Fatalf("missing device pool stop: %s %+v", got.State, stop)
+	}
+	if d := stop.DevicePool; d.Trigger != "over_budget" || d.BudgetGB != 8 || d.UsedGB != used || d.OverageGB != used-deviceShareGB(run) {
+		t.Fatalf("device pool stop lost the decision-time comparison: %+v", d)
+	}
+}

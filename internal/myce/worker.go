@@ -1438,6 +1438,7 @@ func (w Worker) Run(stop context.Context) error {
 	w.Client.faultWire = &atomic.Bool{}
 	w.Client.stagingWire = &atomic.Bool{}
 	w.Client.launchTimingWire = &atomic.Bool{}
+	w.Client.hostRAMGateWire = &atomic.Bool{}
 	w.launchCtx = stop
 	if w.ServiceConfig != nil {
 		w.serviceStop = stop
@@ -1720,6 +1721,5 @@ func (w Worker) checkJobRAMWithReservations(ctx context.Context, j Job, held, pe
 		_, raw, err := w.sampleHostMemory(ctx)
 		free, known = raw, err == nil && validMemoryValue(raw)
 	}
-	free = memoryWithinAllowance(&w.Machine, free, pools.KeepGB, held, pending)
-	return checkMemoryPool(pools.RAM.TypicalGB, free, pools.KeepGB, pending, known)
+	return (HostRAMGate{RawGB: free, HeldGB: held, PendingGB: pending}).check(&w.Machine, pools, known)
 }

@@ -775,6 +775,13 @@ type Machine struct {
 
 	ModelApprovalStates retiredField `json:"model_approval_states,omitzero"`
 
+	HostRAMGate *HostRAMGate `json:"host_ram_gate,omitempty"`
+	// Queue ingress order of the gate's check-in; in memory only.
+	hostRAMGateOrder uint64
+	// Attempts reported with the gate's check-in; the gate counted only these.
+	// Nil after a queue restart until the worker's next check-in.
+	hostRAMGateSeen map[attemptKey]bool
+
 	// A card group is one placement view of several cards on this host (#105).
 	// The worker sets group alone: the device IDs bound to one attempt.
 	group        []string

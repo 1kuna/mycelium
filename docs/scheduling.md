@@ -63,6 +63,31 @@ Live free-memory checks, operator budgets and reservations still apply. Unknown
 native profile sizes wait; explicitly fake resources use their configured
 allowance. Workers must report the current protocol and a capability profile; unknown capacity withholds admission.
 
+### Unified host RAM admission and pressure
+
+The queue checks its host ledger and the worker's physical reading with the
+worker's pending growth and allowance, plus the charge of any assignment the
+worker had not reported with that reading. The worker repeats the same comparison
+at launch with current inputs. When the worker's reading is short, the shortfall
+enters ordinary release planning, which can stop lower-tier work. Native helpers
+receive no credit against the full launch requirement. If room falls between the
+first native member and a later member's refusal, subsequent offers on that route
+budget for the portion of the loss supported by measured growth in the attempt's
+cgroup. That startup loss delays the re-offer but never stops other work.
+
+A worker reading counts for a job only once the worker no longer reports any
+attempt of that job. The worker lists its attempts before it reads RAM, and
+drops an attempt only after the queue acknowledges its result. An earlier
+reading can still include the job's own charge or predate its refusal. After
+a RAM refusal, the route needs exact release and such a later reading that fits
+the full launch demand. No clock or sample number is involved. Workers send
+the reading and the native startup fields only to a queue that advertises
+`host-ram-gate-v1`, so workers can upgrade before the queue.
+
+The host pressure forecast projects physical loss through the next sample and
+sustained physical loss through the stop grace. The attempt history records the
+[comparison that triggered a pool stop](reference/status-behavior.md#reading-myce-status).
+
 ### Typed memory is a limit, not a reservation
 
 A typed `host_memory_gb` (or CPU `memory_gb`) is the job's enforced limit and

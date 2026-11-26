@@ -82,6 +82,12 @@ destination, sanitized underlying error and `command_exit_code: 0` when known.
 transport error is included. Retryable publication errors remain pending and
 retain local results; their typed cause clears after successful publication.
 
+For a host memory-pool stop, `attempt_history[].priority_stop.memory_pool`
+holds the queue's decision-time availability, reserve, physical growth rates,
+forecast losses and trigger. For a discrete device pool stop, `device_pool`
+in the same stop record contains the budget, measured usage, available memory,
+victim overage and trigger. `stop_observation` is the later outcome reading.
+
 ## Automatic host health (#834)
 
 Machine `host_health` contains a typed `drain_reason`, recent `history`, the

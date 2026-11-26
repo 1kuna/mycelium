@@ -88,6 +88,9 @@
         "required": {
           "type": "number"
         },
+        "startup_gb": {
+          "type": "number"
+        },
         "subcheck": {
           "type": "string"
         },
@@ -1765,6 +1768,42 @@
       ],
       "type": "object"
     },
+    "DevicePoolStop": {
+      "properties": {
+        "budget_gb": {
+          "type": "number"
+        },
+        "free_gb": {
+          "type": "number"
+        },
+        "memory_measured": {
+          "type": "boolean"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "overage_gb": {
+          "type": "number"
+        },
+        "trigger": {
+          "type": "string"
+        },
+        "used_gb": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "observed_at",
+        "budget_gb",
+        "used_gb",
+        "free_gb",
+        "memory_measured",
+        "overage_gb",
+        "trigger"
+      ],
+      "type": "object"
+    },
     "DiagnosticReport": {
       "properties": {
         "format": {
@@ -3250,6 +3289,12 @@
           "type": "string"
         },
         "machine": {
+          "type": "string"
+        },
+        "native_resident_gb": {
+          "type": "number"
+        },
+        "native_startup": {
           "type": "string"
         },
         "priority_stop": {
@@ -4880,6 +4925,57 @@
       ],
       "type": "object"
     },
+    "MemoryPoolStop": {
+      "properties": {
+        "available_gb": {
+          "type": "number"
+        },
+        "grace_loss_gb": {
+          "type": "number"
+        },
+        "grace_seconds": {
+          "type": "number"
+        },
+        "growth_gb_per_second": {
+          "type": "number"
+        },
+        "host_pressure": {
+          "type": "number"
+        },
+        "next_loss_gb": {
+          "type": "number"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "reserve_gb": {
+          "type": "number"
+        },
+        "sample_seconds": {
+          "type": "number"
+        },
+        "sustained_growth_gb_per_second": {
+          "type": "number"
+        },
+        "trigger": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "observed_at",
+        "available_gb",
+        "reserve_gb",
+        "growth_gb_per_second",
+        "sustained_growth_gb_per_second",
+        "next_loss_gb",
+        "grace_loss_gb",
+        "sample_seconds",
+        "grace_seconds",
+        "trigger"
+      ],
+      "type": "object"
+    },
     "MemoryPools": {
       "properties": {
         "card": {
@@ -5754,6 +5850,12 @@
         },
         "demand": {
           "type": "string"
+        },
+        "device_pool": {
+          "$ref": "#/$defs/DevicePoolStop"
+        },
+        "memory_pool": {
+          "$ref": "#/$defs/MemoryPoolStop"
         },
         "policy": {
           "$ref": "#/$defs/PriorityMatch"

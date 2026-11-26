@@ -1117,6 +1117,11 @@ func (rt *modelRuntime) hostChargesExcept(key attemptKey) (charge, pending float
 // Queue authorization can outlast preparation or any sensor read. Revalidate
 // the exact local reservation after those reads and before releasing a batch.
 
+type nativeStartupMemory struct {
+	physicalRoomGB float64
+	residentGB     float64
+}
+
 func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostLaunch) error {
 	attempt, err := strconv.Atoi(launch.Attempt)
 	key := attemptKey{launch.Key, attempt, launch.Session}
@@ -1147,8 +1152,25 @@ func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostL
 		}
 	}
 	held, pending := rt.hostChargesExcept(key)
-	free = memoryWithinAllowance(&rt.memoryMachine, free, pools.KeepGB, held, pending)
-	return checkMemoryPool(pools.RAM.TypicalGB, free, pools.KeepGB, pending, known)
+	gate := HostRAMGate{RawGB: free, HeldGB: held, PendingGB: pending}
+	refusal := gate.check(&rt.memoryMachine, pools, known)
+	resident := launch.NativeResidentGB
+	measured := resident != nil && validMemoryValue(*resident)
+	room := gate.physicalRoom(pools.KeepGB)
+	if launch.NativeStartup == "first_member" {
+		actor.nativeStartupRAM = nil
+		if refusal == nil && measured {
+			actor.nativeStartupRAM = &nativeStartupMemory{physicalRoomGB: room, residentGB: *resident}
+		}
+	}
+	if d, ok := refusal.(*admissionError); ok && known && measured && launch.NativeStartup == "continuation" &&
+		actor.nativeStartupRAM != nil && pools.RAM.TypicalGB > room {
+		// Charge only startup growth supported by both the exact cgroup
+		// and the decline in physical room after pending peer growth.
+		first := actor.nativeStartupRAM
+		d.detail.StartupGB = max(0, min(first.physicalRoomGB-room, *resident-first.residentGB))
+	}
+	return refusal
 }
 
 func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerModel) error {

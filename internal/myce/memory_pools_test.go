@@ -28,6 +28,26 @@ func seedPoolReplay(q *Queue, job *Job, m *Machine, pool string, typical, charge
 	q.memoryEvidence = e
 }
 
+func TestMemoryPoolExplicitLimitBoundsCharge(t *testing.T) {
+	for _, limit := range []float64{2, 64, 120} {
+		q, _ := fixture(t)
+		m := cpuMachine("worker", "host", "cpu", 8, 96)
+		m.Devices = []MachineDevice{}
+		m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
+		m.HostMemoryBudgetGB = 96
+		s := cpuSpec(1, 4)
+		s.MemoryLimitGB = &limit
+		j := submit(t, q, s)
+		run := assignedJob(machineCheck(t, q, m))
+		if run == nil || run.ID != j.ID || run.Memory == nil {
+			t.Fatalf("job with limit %.0f GiB was not admitted: %s", limit, job(t, q, j.ID).Reason)
+		}
+		if want := min(4, limit); run.Memory.RAM.ChargeGB != want || run.Memory.LimitGB != limit {
+			t.Fatalf("limit %.0f GiB: got charge %.0f and limit %.0f GiB, want charge %.0f GiB", limit, run.Memory.RAM.ChargeGB, run.Memory.LimitGB, want)
+		}
+	}
+}
+
 func TestMemoryPoolChargeAboveAllowance(t *testing.T) {
 	for _, tc := range []struct {
 		name, backend           string

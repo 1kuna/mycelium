@@ -182,9 +182,13 @@ func (s *candidateSet) before(a, b *Job) bool {
 // Within-project order is immutable during a read-only pass. Sort it once
 // instead of comparing every remaining job again for each exclusion.
 func (s *candidateSet) pick(excluded map[string]bool, immediate ...bool) *Job {
-	skipSharing := len(immediate) != 0 && immediate[0] && len(s.sharingBlockers) != 0
+	live := len(immediate) != 0 && immediate[0]
+	skipSharing := live && len(s.sharingBlockers) != 0
 	eligible := func(j *Job) bool {
 		if excluded[j.ID] {
+			return false
+		}
+		if live && !s.q.admissionGate(j, s.m, s.q.workerRAMGate(j, s.m) == nil, predicateLaunchCapacity) {
 			return false
 		}
 		if skipSharing {

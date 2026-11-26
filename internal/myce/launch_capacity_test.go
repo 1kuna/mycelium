@@ -339,3 +339,387 @@ func TestLaunchCapacityKnownRefusalQuarantine(t *testing.T) {
 
 // Startup waiting resolves the generated-deadline backlog without rescanning
 // retained attempts per job/target or retaining evidence across mutations.
+
+func TestLaunchCapacityUnifiedWorkerGateAndNativeStartup(t *testing.T) {
+	q, clock := fixture(t)
+	m := sharedUnifiedMachine()
+	m.HostMemoryBudgetGB = 96
+	m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
+	const held, pending, keep = 60.0, 59.906, 4.0
+	report := func(raw float64) {
+		m.HostAvailableMemoryGB = raw - keep
+		m.MemoryObservation = &HostMemoryObservation{TotalGB: 128, UsedGB: 128 - raw, ReserveGB: keep}
+		m.HostRAMGate = &HostRAMGate{RawGB: raw, HeldGB: held, PendingGB: pending}
+	}
+	s := sharedSpec("experiment", 24)
+	s.Needs.HostMemoryGB = 12
+	j := submit(t, q, s)
+	for i := range 25 {
+		report(93.435 + float64(i%2)*0.1)
+		if got := assignedJob(machineCheck(t, q, m)); got != nil {
+			t.Fatalf("poll %d offered %s against %.3f GiB worker room", i, got.ID, m.HostRAMGate.physicalRoom(keep))
+		}
+		clock.Advance(26 * time.Second)
+	}
+
+	// Actual room recovers at the first helper and drops during startup.
+	report(102)
+	run := assignedJob(machineCheck(t, q, m))
+	if run == nil || run.ID != j.ID || run.Attempt != 1 {
+		t.Fatal("fresh matching worker and queue readings did not admit", run)
+	}
+	if err := q.Started(result(run, true)); err != nil {
+		t.Fatal(err)
+	}
+	raw := 102.0
+	actor := &attemptSupervisor{job: *run}
+	rt := &modelRuntime{machine: m.ID, memoryMachine: m, clock: clock,
+		batchSupervisors:     map[attemptKey]*attemptSupervisor{jobKey(*run): actor},
+		poolHostMemorySource: func(context.Context) (float64, error) { return raw, nil }}
+	rt.hostLedger.Store(&hostLedger{charge: held, pending: pending})
+	firstResident, laterResident := 0.0, 8.565
+	stage := HostLaunch{Machine: m.ID, Session: run.Session, Kind: "batch", Key: run.ID, Attempt: "1",
+		NativeStartup: "first_member", NativeResidentGB: &firstResident}
+	if err := rt.checkBatchLaunchMemory(t.Context(), stage); err != nil {
+		t.Fatal(err)
+	}
+	stage.NativeStartup, stage.NativeResidentGB, raw = "continuation", &laterResident, 93.435
+	err := rt.checkBatchLaunchMemory(t.Context(), stage)
+	d := admissionDetail(err, *run)
+	if d == nil || d.Required != 36 || d.HeldGB != pending || d.KeepGB != keep || d.StartupGB < 8.56 || d.StartupGB > 8.57 {
+		t.Fatalf("full native check lost its startup comparison: %v, %+v", err, d)
+	}
+	r := capacityResult(run, true)
+	r.ExecutionCause.Admission = d
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	other := m
+	other.ID, other.HostID, other.Session = "other-worker", "other-host", "other-session"
+	other.HostRAMGate = &HostRAMGate{RawGB: 110}
+	if next := assignedJob(machineCheck(t, q, other)); next != nil {
+		t.Fatal("native teardown allowed an offer on another host", next.ID)
+	}
+	other.Leaving = true
+	machineCheck(t, q, other)
+	r.ReleaseOnly, r.ReleasePending = true, false
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	// A heartbeat whose attempt snapshot still held the refused attempt read
+	// RAM before the worker released it, even if its reading would now fit.
+	report(116)
+	if next := assignedJob(machineCheck(t, q, m, run)); next != nil {
+		t.Fatal("heartbeat read before the release returned an offer", next.ID)
+	}
+	for i := range 25 {
+		report(102 + float64(i%2)*0.1)
+		if next := assignedJob(machineCheck(t, q, m)); next != nil {
+			t.Fatalf("poll %d re-offered the startup deficit", i)
+		}
+		clock.Advance(26 * time.Second)
+	}
+	report(110)
+	if next := assignedJob(machineCheck(t, q, m)); next == nil || next.ID != j.ID || next.Attempt != 2 {
+		t.Fatal("room for the full demand and measured startup loss did not unblock dispatch", next)
+	}
+}
+
+func TestLaunchCapacityNativeHelperNeverDiscountsFullDemand(t *testing.T) {
+	for _, reacquire := range []bool{false, true} {
+		_, clock := fixture(t)
+		m := unifiedCUDAAdmissionMachine()
+		j := Job{ID: "job", Attempt: 1, Session: m.Session, Memory: &MemoryPools{RAM: memoryPoolEstimate{TypicalGB: 36, ChargeGB: 36}, KeepGB: 4}}
+		actor := &attemptSupervisor{job: j, nativeStartupRAM: &nativeStartupMemory{physicalRoomGB: 40, residentGB: 8}}
+		helper := 8.0
+		resident := helper
+		rt := &modelRuntime{machine: m.ID, memoryMachine: m, clock: clock,
+			batchSupervisors: map[attemptKey]*attemptSupervisor{jobKey(j): actor},
+			poolHostMemorySource: func(context.Context) (float64, error) {
+				helper = 0
+				raw := 34 - helper
+				if reacquire {
+					helper = 8
+				}
+				return raw, nil
+			}}
+		launch := HostLaunch{Machine: m.ID, Session: m.Session, Kind: "batch", Key: j.ID, Attempt: "1",
+			NativeStartup: "continuation", NativeResidentGB: &resident}
+		err := rt.checkBatchLaunchMemory(t.Context(), launch)
+		d := admissionDetail(err, j)
+		if d == nil || d.Required != 36 || d.StartupGB != 0 || !strings.Contains(err.Error(), "30.000 GiB net room") {
+			t.Fatalf("helper reacquire=%t changed the final full requirement: %v (%+v)", reacquire, err, d)
+		}
+	}
+}
+
+func lowerTierUnderWorkerGate(t *testing.T, victimGB, demandGB float64) (*Queue, *fakeClock, Machine, *Job, *Job) {
+	t.Helper()
+	q, clock := fixture(t)
+	m := cpuMachine("worker", "host", "cpu", 8, 32)
+	m.Devices = []MachineDevice{}
+	m.HostMemoryBudgetGB = 32
+	m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
+	low := submit(t, q, cpuSpec(1, victimGB))
+	victim := assignedJob(machineCheck(t, q, m))
+	if victim == nil || victim.ID != low.ID {
+		t.Fatal("expected an existing lower-tier execution", victim)
+	}
+	if err := q.Started(result(victim, true)); err != nil {
+		t.Fatal(err)
+	}
+	demand := cpuSpec(1, demandGB)
+	demand.Priority = "production"
+	return q, clock, m, victim, submit(t, q, demand)
+}
+
+// Only the worker sees the shortage: its gate has 11 GiB raw with 8 GiB of
+// the lower-tier job's growth pending, 3 GiB for a 4 GiB production job.
+func TestLaunchCapacityWorkerGateShortfallReclaimsLowerTier(t *testing.T) {
+	q, clock, m, victim, queued := lowerTierUnderWorkerGate(t, 8, 4)
+	m.HostRAMGate = &HostRAMGate{RawGB: 11, HeldGB: 8, PendingGB: 8}
+	if next := assignedJob(machineCheck(t, q, m, victim)); next != nil {
+		t.Fatal("offered into the worker's measured shortfall", next.ID)
+	}
+	requireState(t, q, victim.ID, "stopping")
+	if err := q.Complete(Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: victim.ID, Attempt: victim.Attempt}, Interrupted: true}); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	m.HostRAMGate = &HostRAMGate{RawGB: 19}
+	if next := assignedJob(machineCheck(t, q, m)); next == nil || next.ID != queued.ID {
+		t.Fatal("production did not start after the lower-tier release", next)
+	}
+}
+
+// When the queue and the worker both see the same 2 GiB debt for a 4 GiB
+// demand, a 7 GiB lower-tier release covers it: -2 + 7 = 5 GiB.
+func TestLaunchCapacityWorkerGateDebtCountsOnce(t *testing.T) {
+	q, _, m, victim, queued := lowerTierUnderWorkerGate(t, 7, 4)
+	queueRoom := func() float64 {
+		t.Helper()
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		view := q.s.Machines[m.ID]
+		return view.FreeHostMemoryGB - view.hostReservationDebtGB
+	}
+	m.HostAvailableMemoryGB = 32 - 2 - queueRoom()                  // Live RAM short by the same 2 GiB.
+	m.HostRAMGate = &HostRAMGate{RawGB: 5, HeldGB: 7, PendingGB: 7} // 5 - 7 = -2 GiB.
+	if next := assignedJob(machineCheck(t, q, m, victim)); next != nil {
+		t.Fatal("offered into the shared shortfall", next.ID)
+	}
+	if room := queueRoom(); room > -1.9 || room < -2.1 {
+		t.Fatalf("fixture queue room %.3f GiB, want -2", room)
+	}
+	requireState(t, q, victim.ID, "stopping")
+	requireState(t, q, queued.ID, "queued")
+}
+
+// The measured native startup loss is repeated before re-offering, but it
+// alone never stops other work, including when release planning runs on a
+// gate read while the worker still held the refused attempt.
+func TestLaunchCapacityStartupRepeatDoesNotReclaim(t *testing.T) {
+	q, clock, m, victim, queued := lowerTierUnderWorkerGate(t, 8, 4)
+	m.HostRAMGate = &HostRAMGate{RawGB: 16, HeldGB: 8, PendingGB: 8}
+	offer := assignedJob(machineCheck(t, q, m, victim))
+	if offer == nil || offer.ID != queued.ID {
+		t.Fatal("both jobs should fit the worker gate", offer)
+	}
+	if err := q.Started(result(offer, true)); err != nil {
+		t.Fatal(err)
+	}
+	// This heartbeat's gate still carries the offer's own 4 GiB pending charge.
+	m.HostRAMGate = &HostRAMGate{RawGB: 14, HeldGB: 12, PendingGB: 12}
+	machineCheck(t, q, m, victim, offer)
+	r := capacityResult(offer, false)
+	d := admissionDetail((HostRAMGate{RawGB: 11, HeldGB: 8, PendingGB: 8}).check(&m, *offer.Memory, true), *offer)
+	d.StartupGB = 3
+	r.ExecutionCause.Admission = d
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	requireState(t, q, victim.ID, "running")
+	clock.Advance(time.Second)
+	m.HostRAMGate = &HostRAMGate{RawGB: 14, HeldGB: 8, PendingGB: 8}
+	if next := assignedJob(machineCheck(t, q, m, victim)); next != nil {
+		t.Fatal("re-offered without room for the measured startup loss", next)
+	}
+	requireState(t, q, victim.ID, "running")
+	clock.Advance(time.Second)
+	m.HostRAMGate = &HostRAMGate{RawGB: 15, HeldGB: 8, PendingGB: 8}
+	if next := assignedJob(machineCheck(t, q, m, victim)); next == nil || next.ID != queued.ID {
+		t.Fatal("room for the demand and startup loss did not reopen the route", next)
+	}
+	requireState(t, q, victim.ID, "running")
+}
+
+// A gate sampled before the worker took job A has no charge for A.
+func TestLaunchCapacityGateCountsUnacknowledgedAssignments(t *testing.T) {
+	q, _ := fixture(t)
+	m := cpuMachine("worker", "host", "cpu", 8, 64)
+	m.Devices = []MachineDevice{}
+	m.HostMemoryBudgetGB = 64
+	m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
+	submit(t, q, cpuSpec(1, 12))
+	submit(t, q, cpuSpec(1, 12))
+	m.HostRAMGate = &HostRAMGate{RawGB: 20}
+	a := assignedJob(machineCheck(t, q, m))
+	if a == nil {
+		t.Fatal("expected one offer within the worker gate")
+	}
+	for _, offer := range machineCheck(t, q, m).Attempts {
+		if offer.Job != nil && offer.Job.ID != a.ID {
+			t.Fatal("offered B against a gate that predates A", offer.Job.ID)
+		}
+	}
+	// Once the worker reports A, its own gate carries A's charge.
+	m.HostRAMGate = &HostRAMGate{RawGB: 20, HeldGB: 12, PendingGB: 12}
+	if next := assignedJob(machineCheck(t, q, m, a)); next != nil && next.ID != a.ID {
+		t.Fatal("offered B beside A's pending growth", next.ID)
+	}
+	m.HostRAMGate = &HostRAMGate{RawGB: 32, HeldGB: 12, PendingGB: 12}
+	if next := assignedJob(machineCheck(t, q, m, a)); next == nil || next.ID == a.ID {
+		t.Fatal("room for both jobs did not admit B", next)
+	}
+}
+
+// The fence uses the worker's attempt snapshot, never a clock. The detached
+// custodian refuses, the host clock then steps back an hour, and the worker's
+// next heartbeat after the release reopens the route.
+func TestLaunchCapacityRefusalFenceIgnoresClockStep(t *testing.T) {
+	q, clock := fixture(t)
+	m := unifiedCUDAAdmissionMachine()
+	m.HostRAMGate = &HostRAMGate{RawGB: 110}
+	queued := submit(t, q, sharedSpec("experiment", 36))
+	run := assignedJob(machineCheck(t, q, m))
+	if run == nil || run.ID != queued.ID {
+		t.Fatal("expected initial offer", run)
+	}
+	raw := 20.0
+	probe := func(context.Context) (float64, error) { return raw, nil }
+	custodian := Worker{Machine: m, Clock: clock, Custodian: ID(), hostRawMemorySource: probe}
+	d := admissionDetail(custodian.checkJobRAM(t.Context(), *run), *run)
+	if d == nil || d.Subcheck != memoryWaitReason {
+		t.Fatal("expected a RAM refusal", d)
+	}
+	r := capacityResult(run, false)
+	r.ExecutionCause.Admission = d
+	r.ExecutionEvidence = unstartedExecution(run.Attempt)
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	behind := &fakeClock{now: clock.Now().Add(-time.Hour)}
+	worker := Worker{Machine: m, Clock: behind, hostRawMemorySource: probe}
+	heartbeat := func(held ...*Job) Reply {
+		t.Helper()
+		clock.Advance(time.Second)
+		behind.Advance(time.Second)
+		gate := worker.sampleHeartbeatMemory(t.Context(), &Machine{}, nil, nil)
+		m.HostRAMGate = &gate
+		return machineCheck(t, q, m, held...)
+	}
+	raw = 110
+	if next := assignedJob(heartbeat(run)); next != nil {
+		t.Fatal("a heartbeat that still held the refused attempt reopened the route", next.ID)
+	}
+	for i := range 3 {
+		raw = 20
+		if next := assignedJob(heartbeat()); next != nil {
+			t.Fatalf("poll %d offered into the reported shortage", i)
+		}
+	}
+	raw = 110
+	if next := assignedJob(heartbeat()); next == nil || next.ID != queued.ID || next.Attempt != 2 {
+		t.Fatal("a fitting heartbeat after the release did not reopen the route", next)
+	}
+}
+
+func TestLaunchCapacityDelayedHeartbeatAfterPreflight(t *testing.T) {
+	t.Run("worker", func(t *testing.T) { assertLaunchCapacityDelayedHeartbeatAfterPreflight(t, false) })
+	t.Run("detached custodian", func(t *testing.T) { assertLaunchCapacityDelayedHeartbeatAfterPreflight(t, true) })
+}
+
+func assertLaunchCapacityDelayedHeartbeatAfterPreflight(t *testing.T, detached bool) {
+	t.Helper()
+	q, clock := fixture(t)
+	m := unifiedCUDAAdmissionMachine()
+	m.HostRAMGate = &HostRAMGate{RawGB: 110}
+	s := sharedSpec("experiment", 36)
+	queued := submit(t, q, s)
+	run := assignedJob(machineCheck(t, q, m))
+	if run == nil || run.ID != queued.ID {
+		t.Fatal("expected initial offer", run)
+	}
+	w := Worker{Machine: m, Clock: clock, hostRawMemorySource: func(context.Context) (float64, error) { return 20, nil }}
+	var err error
+	if detached {
+		w.Custodian = ID()
+		err = w.checkJobRAM(t.Context(), *run)
+	} else {
+		err = localAttemptAdmission(w, nil, *run, nil)
+	}
+	d := admissionDetail(err, *run)
+	if d == nil || d.Subcheck != memoryWaitReason {
+		t.Fatalf("expected local preflight RAM refusal: %v", err)
+	}
+	r := capacityResult(run, false)
+	r.ExecutionCause.Admission = d
+	r.ExecutionEvidence = unstartedExecution(run.Attempt)
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	// Its attempt snapshot still held the refused attempt, so its RAM read
+	// can predate the refusal.
+	m.HostRAMGate = &HostRAMGate{RawGB: 109}
+	if next := assignedJob(machineCheck(t, q, m, run)); next != nil {
+		t.Fatal("preflight reopened with a heartbeat sampled before refusal", next.ID)
+	}
+	m.HostRAMGate = &HostRAMGate{RawGB: 110}
+	if next := assignedJob(machineCheck(t, q, m)); next == nil || next.ID != queued.ID || next.Attempt != 2 {
+		t.Fatal("fitting sample after the preflight refusal did not reopen the route", next)
+	}
+}
+
+func TestLaunchCapacityInvalidGateDoesNotRejectCheckin(t *testing.T) {
+	q, clock := fixture(t)
+	m := unifiedCUDAAdmissionMachine()
+	m.HostRAMGate = &HostRAMGate{RawGB: 20}
+	j := submit(t, q, sharedSpec("experiment", 36))
+	if next := assignedJob(machineCheck(t, q, m)); next != nil {
+		t.Fatal("offered a job against the reported shortage", next.ID)
+	}
+	clock.Advance(time.Second)
+	m.HostRAMGate = &HostRAMGate{RawGB: 20, HeldGB: 4, PendingGB: 5}
+	if next := assignedJob(machineCheck(t, q, m)); next == nil || next.ID != j.ID {
+		t.Fatal("check-in did not fall back to ordinary queue admission", next)
+	}
+	q.mu.Lock()
+	gate := q.s.Machines[m.ID].HostRAMGate
+	q.mu.Unlock()
+	if gate != nil {
+		t.Fatalf("check-in retained a gate after invalid input: %+v", gate)
+	}
+}
+
+// Check-in preparation is outside q.mu. A request that reached the queue
+// earlier can commit after a later one; the later arrival's gate stands.
+func TestLaunchCapacityGateUsesIngressOrderAcrossCheckinPreparation(t *testing.T) {
+	q, _ := fixture(t)
+	m := unifiedCUDAAdmissionMachine()
+	earlier := q.hostHealthReports.Add(1)
+	m.HostRAMGate = &HostRAMGate{RawGB: 20}
+	machineCheck(t, q, m)
+	m.HostRAMGate = &HostRAMGate{RawGB: 110}
+	c := Checkin{Machine: m, period: time.Second, AttemptProtocol: keyedAttemptProtocol}
+	if _, err := q.processCheckinContext(t.Context(), c, earlier, q.clock.Now(), nil); err != nil {
+		t.Fatal(err)
+	}
+	q.mu.Lock()
+	gate := *q.s.Machines[m.ID].HostRAMGate
+	q.mu.Unlock()
+	if gate.RawGB != 20 {
+		t.Fatalf("an earlier arrival replaced the later gate: %+v", gate)
+	}
+}

@@ -45,6 +45,9 @@ func (q *Queue) launchCapacityEvidence(j *Job, m *Machine) string {
 	if m.CapabilityProfile != nil {
 		parts = append(parts, fmt.Sprint(m.CapabilityProfile.LogicalCPUs))
 	}
+	if gate := m.HostRAMGate; gate != nil {
+		parts = append(parts, fmt.Sprintf("ram-gate/%g/%g/%g", gate.RawGB, gate.HeldGB, gate.PendingGB))
+	}
 	for _, o := range q.hostObligations(hostID(m)) {
 		if o.Result.ID == j.ID {
 			continue
@@ -124,6 +127,12 @@ func (q *Queue) launchCapacityBlocked(j *Job, m *Machine) bool {
 	if !ok {
 		return false
 	}
+	if worker := q.s.Machines[m.ID]; worker != nil && worker.HostRAMGate != nil && h.Admission != nil &&
+		h.Admission.Subcheck == memoryWaitReason && h.Session == m.Session && worker.Session == m.Session {
+		// Only a RAM read taken after the worker released the refused attempt
+		// can reopen the route. Placement still requires the full demand to fit.
+		return !hostRAMGateAfter(worker, j)
+	}
 	if h.Evidence == "" {
 		// Refused before the first post-restart report. Only a committed
 		// pass after that report records the baseline; views stay blocked.
@@ -192,7 +201,7 @@ func (q *Queue) queuedCapacityStatus(j *Job, scans ...*placementScan) (waiting, 
 			if !fitsResources(c, &room, room.TotalMemoryGB) {
 				continue
 			}
-			if drained || !hostFits(m, c.Spec.Needs.MemoryGB, c.Spec.Needs.HostMemoryGB) || !cpuFits(c, m) || !q.batchSlotFree(m, c) || m.FreeMemoryGB < c.Spec.Needs.MemoryGB || !q.poolCustodyAllows(c, m) {
+			if drained || !hostFits(m, c.Spec.Needs.MemoryGB, c.Spec.Needs.HostMemoryGB) || !cpuFits(c, m) || !q.batchSlotFree(m, c) || m.FreeMemoryGB < c.Spec.Needs.MemoryGB || !q.poolCustodyAllows(c, m) || q.workerRAMGate(c, m) != nil {
 				waiting = true
 			} else if pooledMemory(c) && !q.hostBackfillAllows(c, m, q.hostBackfillFences(scan)[hostID(m)]) {
 				waiting = true
@@ -209,23 +218,42 @@ func (q *Queue) queuedCapacityStatus(j *Job, scans ...*placementScan) (waiting, 
 // planner chooses lower tiers; same-tier work remains protected. Exact releases
 // and a changed capacity snapshot are still required by dispatch.
 func (q *Queue) launchCapacityProjection(j *Job, m *Machine) *Machine {
+	if short := q.workerRAMShortfall(j, m); short > 0 {
+		// The worker's gate refuses before any offer, so its shortfall stands
+		// in for the refusal detail an older worker would have returned.
+		return withHostRoom(m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)-short)
+	}
 	h, ok := j.LaunchCapacityWait[targetKey(m)]
 	if !ok || h.Evidence != q.launchCapacityEvidence(j, m) || h.Admission == nil {
 		return m
 	}
 	d := h.Admission
+	if d.Subcheck == memoryWaitReason && m.HostRAMGate != nil {
+		// The current gate supersedes the refusal's reading, whose room can
+		// include measured native startup loss. That loss never reclaims.
+		return m
+	}
 	if d.Unavailable || d.Available == nil || d.Required+d.HeldGB+d.KeepGB <= *d.Available {
 		return m
 	}
-	copy := *m
 	deficit := d.Required + d.HeldGB + d.KeepGB - *d.Available
 	switch d.Subcheck {
 	case memoryWaitReason, "live_host_ram", "live_host_growth", "aggregate_host_allowance", "configured_host_allowance":
-		copy.FreeHostMemoryGB = min(copy.FreeHostMemoryGB, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)-deficit)
+		return withHostRoom(m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)-deficit)
 	case "aggregate_cpu_allowance":
+		copy := *m
 		copy.EffectiveCPUCores -= max(0, copy.FreeCPUCores-j.Spec.Needs.cores()+int(deficit))
-	default:
-		return m
+		return &copy
 	}
+	return m
+}
+
+// withHostRoom lowers m's signed host room to the worker's view. The worker's
+// shortfall already contains any debt the queue also sees, so the planner must
+// repay the smaller room once, not the queue's debt on top of it.
+func withHostRoom(m *Machine, room float64) *Machine {
+	copy := *m
+	room = min(room, m.FreeHostMemoryGB-m.hostReservationDebtGB)
+	copy.FreeHostMemoryGB, copy.hostReservationDebtGB = max(0, room), max(0, -room)
 	return &copy
 }

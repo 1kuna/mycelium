@@ -521,6 +521,7 @@ func (w Worker) runCustodian(stop context.Context) error {
 	w.initInventoryProbe()
 	w.Client.Clock = w.Clock
 	w.Client.launchTimingWire = &atomic.Bool{}
+	w.Client.hostRAMGateWire = &atomic.Bool{}
 	w.rootMonitor = &workerRootMonitor{expected: map[string]string{}}
 	// Linux adoption requires the delegated worker leaf. Refuse before the first
 	// snapshot if setup fails, so a helper can never wait at an unserviceable gate.
