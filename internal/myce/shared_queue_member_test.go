@@ -56,6 +56,22 @@ func TestSharedQueueProofProcess(t *testing.T) {
 			}
 			return http.DefaultTransport.RoundTrip(r)
 		}),
+		verifyBundles: func(ctx context.Context, store *FileStore, refs map[FileRef]bool) error {
+			// A hung mount ignores cancellation, so the hold does too.
+			hold := filepath.Join(dir, filepath.Base(filepath.Dir(path)))
+			if _, err := os.Stat(hold + ".hang-store"); err == nil {
+				if err := os.WriteFile(hold+".store-blocked", nil, 0600); err != nil {
+					return err
+				}
+				for {
+					if _, err := os.Stat(hold + ".hang-store"); errors.Is(err, os.ErrNotExist) {
+						break
+					}
+					time.Sleep(25 * time.Millisecond)
+				}
+			}
+			return verifyFrozenBundleFiles(ctx, store, refs)
+		},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -29,6 +29,8 @@ type SharedQueueProofConfig struct {
 	// Fixtures may shorten the turn and route through a partitionable link.
 	lease, interval time.Duration
 	peerTransport   http.RoundTripper
+	// Fixtures may stand in for a hung store read during bundle verification.
+	verifyBundles func(context.Context, *FileStore, map[FileRef]bool) error
 }
 
 type sharedQueueMember struct {
@@ -72,6 +74,9 @@ func ServeSharedQueueProof(ctx context.Context, listener net.Listener, cfg Share
 	}
 	if cfg.lease < 3*cfg.interval || cfg.interval <= 0 {
 		return errors.New("the shared queue turn must span at least three renewal intervals")
+	}
+	if cfg.verifyBundles == nil {
+		cfg.verifyBundles = verifyFrozenBundleFiles
 	}
 	if cfg.peerTransport == nil {
 		transport := &http.Transport{} // Direct connections to loopback peers.
@@ -342,7 +347,7 @@ func (m *sharedQueueMember) prepareStorageOnce(ctx context.Context, q *Queue) *F
 	q.mu.RLock()
 	refs, err := q.frozenBundleFiles()
 	q.mu.RUnlock()
-	if err != nil || verifyFrozenBundleFiles(ctx, store, refs) != nil {
+	if err != nil || m.cfg.verifyBundles(ctx, store, refs) != nil {
 		return nil
 	}
 	q.fileLifecycle.Lock()
