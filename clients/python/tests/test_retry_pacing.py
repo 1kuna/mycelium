@@ -78,6 +78,8 @@ class RetryPacingTests(unittest.TestCase):
                             if len(attempts) <= 19:
                                 signal = (len(attempts) - 1) % 13 + 1 if signaled else 0
                                 delay = (signal or 1.0) * 1.5  # RFC 6298 without a signal.
+                                if operation == "upload" and signal:
+                                    delay = signal  # Upload backoff honours Retry-After exactly (#2164).
                                 expected.append(min(delay, max(0, 17 - clock.now)) if bounded else delay)
                                 not_before = clock.now + signal
                                 raise HTTPError(request.full_url, 429, "busy",
