@@ -82,6 +82,8 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/pci_inventory.go'] = (
 
 # Contact/loss and outage decisions have fake-clock coverage in the clock tests.
 SUPPLEMENTAL_CONSUMERS['internal/myce/queue_contact.go'] = ('control_clock_test.go',)
+SUPPLEMENTAL_CONSUMERS['internal/myce/history_persistence.go'] = (
+    'control_clock_test.go', 'efficiency_test.go', 'queue_write_test.go')
 
 # Actual check-in admission decisions are exercised by the admission wait tests.
 SUPPLEMENTAL_CONSUMERS['internal/myce/admission_decision.go'] = ('admission_wait_test.go',)
@@ -162,6 +164,12 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/xe_activity_other.go'] = (
     'xe_activity_linux_test.go', 'device_telemetry_test.go', 'discrete_fanout_sharing_test.go')
 
 
+# The shared writer's row capture and turn fencing have no exported symbols;
+# the PostgreSQL proof fixtures exercise them.
+SUPPLEMENTAL_CONSUMERS['internal/myce/shared_queue_rows.go'] = (
+    'shared_queue_postgres_test.go', 'shared_queue_fencing_test.go')
+
+
 # Installer manager helpers are private; exercise transaction restoration and
 # launchd lifecycle behavior through the existing injected-manager fixtures.
 SUPPLEMENTAL_CONSUMERS['internal/myce/install_manager.go'] = (
@@ -177,6 +185,12 @@ for source in ('worker_custodian', 'worker_custodian_darwin',
 for source in ('fleet_adoption', 'fleet_handover'):
     SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = (
         'fleet_normal_test.go', 'fleet_critical_test.go')
+
+
+# Warm item transport and checkpoints share queue and dev coverage.
+for source in ('warm_piece_checkpoint', 'warm_piece_worker'):
+    SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = (
+        'warm_pieces_test.go', 'warm_pieces_dev_test.go')
 
 
 PYTHON_CLIENT = ('@python-client', 'test_client.DevTests.test_consumer_skill_examples')

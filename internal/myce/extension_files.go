@@ -55,7 +55,7 @@ func copyJobFileContentsContext(ctx context.Context, src, dst string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	f, err := os.Open(src)
+	f, err := os.OpenFile(src, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return err
 	}

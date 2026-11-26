@@ -276,7 +276,7 @@ func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[ba
 	if !q.admissionPass(j, m, q.preemptionPlacementAllows(j, m), predicatePreemptionPlacement) || !q.admissionPass(j, m, q.yieldPlacementAllows(j, m), predicateYieldPlacement) {
 		return nil
 	}
-	if j.Spec.FanOut != nil {
+	if j.Spec.childFanOut() {
 		return q.fanOutCandidateWithResources(j, m, resources)
 	}
 	if j.State != "queued" || len(m.groupMembers) > 0 && !q.admissionPass(j, m, q.mayNeedCards(j, m), predicateCardGroup) || !q.placementAllowed(j, m) || !q.admissionPass(j, m, q.checkpointReady(j, m), predicateCheckpoint) {

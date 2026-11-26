@@ -2,6 +2,7 @@ package myce
 
 import (
 	"cmp"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -116,7 +117,7 @@ func (e *memoryEvidence) write(key memoryEvidenceRowKey, value any) {
 	}
 }
 
-func (e *memoryEvidence) persist(tx *sql.Tx) error {
+func (e *memoryEvidence) prepareWrite(batch *queueWriteBatch) error {
 	if e == nil {
 		return nil
 	}
@@ -133,10 +134,8 @@ func (e *memoryEvidence) persist(tx *sql.Tx) error {
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`INSERT INTO memory_evidence(kind,key,data) VALUES(?,?,?)
-			ON CONFLICT(kind,key) DO UPDATE SET data=excluded.data`, row.kind, string(encodedKey), encodedValue); err != nil {
-			return err
-		}
+		batch.add(`INSERT INTO memory_evidence(kind,key,data) VALUES(?,?,?)
+			ON CONFLICT(kind,key) DO UPDATE SET data=excluded.data`, row.kind, string(encodedKey), encodedValue)
 	}
 	for key, history := range e.gpuSharingWrites {
 		encodedKey, err := json.Marshal(key)
@@ -147,10 +146,8 @@ func (e *memoryEvidence) persist(tx *sql.Tx) error {
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`INSERT INTO gpu_sharing_evidence(key,data) VALUES(?,?)
-			ON CONFLICT(key) DO UPDATE SET data=excluded.data`, string(encodedKey), data); err != nil {
-			return err
-		}
+		batch.add(`INSERT INTO gpu_sharing_evidence(key,data) VALUES(?,?)
+			ON CONFLICT(key) DO UPDATE SET data=excluded.data`, string(encodedKey), data)
 	}
 	return nil
 }
@@ -158,6 +155,11 @@ func (e *memoryEvidence) persist(tx *sql.Tx) error {
 // Load or project before the queue begins serving requests. The projection
 // marker commits with its rows, so an interrupted upgrade can safely retry.
 func loadMemoryEvidence(db *sql.DB, s state) (*memoryEvidence, error) {
+	return (queueSQLiteWriter{db: db}).loadMemoryEvidence(s)
+}
+
+func (w queueSQLiteWriter) loadMemoryEvidence(s state) (*memoryEvidence, error) {
+	db := w.db
 	if _, err := db.Exec(memoryEvidenceSchema); err != nil {
 		return nil, err
 	}
@@ -169,6 +171,9 @@ func loadMemoryEvidence(db *sql.DB, s state) (*memoryEvidence, error) {
 		if err := evidence.readGPUSharing(db); err != nil {
 			return nil, err
 		}
+		if w.shared != nil {
+			return w.repairMemoryEvidence(evidence, s)
+		}
 		return repairMemoryEvidence(db, evidence, s)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -178,18 +183,12 @@ func loadMemoryEvidence(db *sql.DB, s state) (*memoryEvidence, error) {
 	for _, point := range projectMemoryEvidence(s.WorkObservations) {
 		evidence.observe(point)
 	}
-	tx, err := db.Begin()
-	if err != nil {
+	var batch queueWriteBatch
+	if err := evidence.prepareWrite(&batch); err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
-	if err := evidence.persist(tx); err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(`INSERT INTO memory_evidence(kind,key,data) VALUES ('projection','v1','true'), ('projection','v2','true'), ('projection','v3','true')`); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
+	batch.add(`INSERT INTO memory_evidence(kind,key,data) VALUES ('projection','v1','true'), ('projection','v2','true'), ('projection','v3','true')`)
+	if err := w.apply(context.Background(), &batch, nil, nil); err != nil {
 		return nil, err
 	}
 	evidence.writes = nil

@@ -63,7 +63,8 @@ func logQueueHold(duration time.Duration, operation string, fn func() error, pha
 	detail := ""
 	if len(phases) != 0 {
 		p := phases[0]
-		detail = fmt.Sprintf(" records_snapshot_ms=%.3f fn_body_ms=%.3f persist_commit_ms=%.3f usage_accounting_ms=%.3f notify_ms=%.3f", holdMS(p.phases[holdRecords]), holdMS(p.phases[holdBody]), holdMS(p.phases[holdPersist]), holdMS(p.phases[holdUsage]), holdMS(p.phases[holdNotify]))
+		detail = fmt.Sprintf(" mutex_hold_ms=%.3f off_lock_write_ms=%.3f", holdMS(p.mutexHold()), holdMS(p.offLock))
+		detail += fmt.Sprintf(" records_snapshot_ms=%.3f fn_body_ms=%.3f persist_commit_ms=%.3f usage_accounting_ms=%.3f notify_ms=%.3f", holdMS(p.phases[holdRecords]), holdMS(p.phases[holdBody]), holdMS(p.phases[holdPersist]), holdMS(p.phases[holdUsage]), holdMS(p.phases[holdNotify]))
 		detail += fmt.Sprintf(" persist_marshal_ms=%.3f persist_sql_ms=%.3f persist_sync_commit_ms=%.3f persist_payload_bytes=%d persist_records=%d", holdMS(p.persistence.Marshal), holdMS(p.persistence.SQL), holdMS(p.persistence.Commit), p.persistence.Bytes, p.persistence.Records)
 		if p.checkinBody {
 			for i, name := range queueBodyPhaseNames {
@@ -173,6 +174,7 @@ type queueHoldPhases struct {
 	persistence   queuePersistenceTiming
 	clock         Clock
 	started, last time.Time
+	offLock       time.Duration
 	active        int
 	phases        [5]time.Duration
 	checkinBody   bool
@@ -264,8 +266,25 @@ func (p *queueHoldPhases) finish() time.Duration {
 		return 0
 	}
 	p.next(p.active)
-	return p.last.Sub(p.started)
+	return p.duration()
 }
+
+func (p *queueHoldPhases) pause() { p.next(p.active) }
+
+func (p *queueHoldPhases) resume() {
+	if !p.started.IsZero() {
+		now := holdNow(p.clock)
+		p.offLock += now.Sub(p.last)
+		p.last = now
+	}
+}
+
+// The writer turn includes an off-lock SQLite write: every other writer still
+// waits for it, so slow-hold logging and request service time count it.
+func (p *queueHoldPhases) duration() time.Duration { return p.last.Sub(p.started) }
+
+// Physical mutex hold only; readers of committed views can overlap the rest.
+func (p *queueHoldPhases) mutexHold() time.Duration { return p.duration() - p.offLock }
 
 // Body timers run inside a transaction or an explicitly observed diagnostic
 // fixture. Only the existing slow-hold logger emits them, after unlocking.

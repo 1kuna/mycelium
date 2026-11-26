@@ -294,6 +294,8 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	debugListen := f.String("debug-listen", "", "optional loopback-only queue profiling address (disabled by default)")
 	address := f.String("listen", "127.0.0.1:7331", "queue listen address")
 	db := f.String("db", "myce-state/myce.db", "SQLite database file")
+	sharedQueueProof := f.Bool("shared-queue-proof", false, "opt in to the loopback PostgreSQL laptop proof (queue or join)")
+	queueCommitUnderLock := f.Bool("queue-commit-under-lock", false, "temporarily commit queue state under the lock")
 	uploadSpoolDir := f.String("upload-spool-dir", "", "queue model-upload directory (default private directory beside DB)")
 	logRetention := f.Duration("log-retention", myce.DefaultLogRetention, "retention of completed batch and inactive model-server logs")
 	uploadSpoolBytes := f.Int64("upload-spool-bytes", myce.DefaultUploadSpoolBytes, "total model-upload bytes (-1: measured free disk capacity)")
@@ -469,6 +471,48 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if *sharedQueueProof {
+		if args[0] != "queue" && args[0] != "join" {
+			return errors.New("--shared-queue-proof requires queue or join")
+		}
+		var explicitToken, explicitDB, explicitCheckpoints bool
+		var unsupported string
+		f.Visit(func(option *flag.Flag) {
+			switch option.Name {
+			case "token":
+				explicitToken = true
+			case "db":
+				explicitDB = true
+			case "checkpoints":
+				explicitCheckpoints = true
+			case "shared-queue-proof", "listen", "file-store":
+			default:
+				unsupported = option.Name
+			}
+		})
+		if !explicitToken || *token == "" || *serviceConfigPath != "" || *joiningFile != "" {
+			return errors.New("shared queue proof requires an explicit disposable --token and no installed configuration")
+		}
+		if args[0] == "queue" {
+			if unsupported != "" || f.NArg() != 0 || !explicitDB || !explicitCheckpoints || *fileStore == "" {
+				return errors.New("shared queue proof uses only --listen, --db, --checkpoints, --file-store and --token, with explicit disposable paths")
+			}
+			listener, err := net.Listen("tcp", *address)
+			if err != nil {
+				return err
+			}
+			defer listener.Close()
+			return myce.ServeSharedQueueProof(ctx, listener, myce.SharedQueueProofConfig{
+				Postgres: os.Getenv("MYCE_SHARED_QUEUE_PG_DSN"),
+				Database: *db, Checkpoints: *checkpoint, FileStore: *fileStore,
+				Token: *token, Clock: myce.RealClock{},
+			})
+		}
+		endpoint, err := neturl.Parse(*url)
+		if err != nil || endpoint.Scheme != "http" || !net.ParseIP(endpoint.Hostname()).IsLoopback() || *stateDir == "" {
+			return errors.New("shared queue proof worker requires a loopback queue URL and a disposable --state-dir")
+		}
+	}
 	var client myce.Client
 	var invitation *myce.Invitation
 	if installedClient {
@@ -499,7 +543,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if *token == "" {
 			return errors.New("set MYCE_TOKEN to the shared fleet token (dev defaults to dev-token)")
 		}
-		client = myce.Client{URL: *url, Token: *token}
+		client = myce.Client{URL: *url, Token: *token, SharedQueueProof: *sharedQueueProof}
 		if invitation != nil && args[0] != "join" {
 			explicit := ""
 			f.Visit(func(v *flag.Flag) {
@@ -604,7 +648,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if *checkpointExpiryGrace <= 0 {
 			return errors.New("checkpoint-expiry-grace must be positive")
 		}
-		q, err := myce.Open(*db, *checkpoint, myce.RealClock{}, myce.WithStartupTrace(queueStartupTrace(myce.RealClock{}, log.Printf)), myce.WithCheckpointShards(), myce.WithFileStoreProductionReserve(*fileStoreProductionReserve), myce.WithFileStore(*fileStore, *fileStoreLimit, !nasConfigured), myce.WithOutputDeliveryRoot(*outputDeliveryRoot), myce.WithHealthStorageDelay(*healthStorageDelay), myce.WithCheckpointExpiryGrace(*checkpointExpiryGrace))
+		q, err := myce.Open(*db, *checkpoint, myce.RealClock{}, myce.WithStartupTrace(queueStartupTrace(myce.RealClock{}, log.Printf)), myce.WithQueueCommitUnderLock(*queueCommitUnderLock), myce.WithCheckpointShards(), myce.WithFileStoreProductionReserve(*fileStoreProductionReserve), myce.WithFileStore(*fileStore, *fileStoreLimit, !nasConfigured), myce.WithOutputDeliveryRoot(*outputDeliveryRoot), myce.WithHealthStorageDelay(*healthStorageDelay), myce.WithCheckpointExpiryGrace(*checkpointExpiryGrace))
 		if err != nil {
 			return err
 		}

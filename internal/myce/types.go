@@ -145,7 +145,8 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
-	Resident *retiredField `json:"resident,omitempty" yaml:"resident,omitempty"`
+	WarmPieces string        `json:"warm_pieces,omitempty" yaml:"-"`
+	Resident   *retiredField `json:"resident,omitempty" yaml:"resident,omitempty"`
 	// Supersedes explicitly replaces this same-project job for completion delivery.
 	Supersedes       string `json:"supersedes,omitempty" yaml:"supersedes,omitempty"`
 	CheckpointPolicy string `json:"checkpoint_policy,omitempty" yaml:"-"`
@@ -236,6 +237,9 @@ func (s Spec) Validate() error {
 		if limit, err := memoryBytes(*s.MemoryLimitGB); err != nil || limit <= 0 {
 			return errors.New("advanced.memory_limit_gb must specify a positive memory limit representable in bytes")
 		}
+	}
+	if err := validateWarmPieces(s); err != nil {
+		return rejectFieldRule("job_files_invalid", err)
 	}
 	if err := validateWorkerData(s); err != nil {
 		return reject("job_worker_data_unsupported", err)
@@ -356,7 +360,7 @@ func (s Spec) Validate() error {
 	if s.extensionJob() {
 		return rejectIf("job_program_invalid", validateExtensionJob(s))
 	}
-	if s.Kind == "" && !s.ephemeral() && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && len(s.Files) == 0 && !sharedReaders(s) && s.After == nil && s.OutputDelivery == "" && s.StorageProtocol == "") || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
+	if s.Kind == "" && !s.ephemeral() && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && len(s.Files) == 0 && !sharedReaders(s) && s.After == nil && s.OutputDelivery == "" && s.StorageProtocol == "" && !s.warmPieces()) || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
 		return reject("job_program_invalid", errors.New("inputs, outputs, args and size_hint require a kind/program job"))
 	}
 	// A missing figure is estimated by the queue, not a
@@ -860,6 +864,7 @@ type Reply struct {
 	HostMemoryBudget  *HostMemoryBudget   `json:"host_memory_budget,omitempty"`
 	FileCheckpoints   bool                `json:"file_checkpoints,omitempty"`
 	AdmissionBlocked  bool                `json:"admission_blocked,omitempty"`
+	FilePlansDeferred bool                `json:"file_plans_deferred,omitempty"`
 	EnvironmentPlan   []EnvironmentRecipe `json:"environment_plan,omitempty"`
 	CopyPlan          retiredField        `json:"copy_plan,omitzero"`
 	CacheUsage        retiredField        `json:"cache_usage,omitzero"`

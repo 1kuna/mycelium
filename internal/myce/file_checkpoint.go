@@ -19,6 +19,8 @@ type FileCheckpoint struct {
 type checkpointPublication struct {
 	Result
 	Checkpoint FileCheckpoint `json:"checkpoint"`
+	Piece      string         `json:"piece,omitempty"`
+	Sequence   int            `json:"sequence,omitempty"`
 }
 
 func bestFileCheckpoint(j *Job) *FileCheckpoint {
@@ -37,14 +39,23 @@ func (q *Queue) verifyManifest(ctx context.Context, m FileManifest) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if q.files == nil {
+	if q.sharedWriter != nil && len(m) == 0 {
+		return nil // An execution without artifacts needs only the queue.
+	}
+	unlock := requestReadLock(ctx, &q.mu)
+	store, ready := q.files, q.sharedFilesReady()
+	unlock()
+	if !ready {
+		return queueStopping()
+	}
+	if store == nil {
 		return errors.New("file store unavailable")
 	}
 	if err := m.validate(); err != nil {
 		return err
 	}
 	for _, ref := range m {
-		if err := q.files.verify(ctx, ref); err != nil {
+		if err := store.verify(ctx, ref); err != nil {
 			return errors.New("manifest file unavailable or corrupt")
 		}
 	}
@@ -53,7 +64,7 @@ func (q *Queue) verifyManifest(ctx context.Context, m FileManifest) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := q.files.syncDir(filepath.Join(q.files.root, "blobs")); err != nil {
+	if err := store.syncDir(filepath.Join(store.root, "blobs")); err != nil {
 		return err
 	}
 	return ctx.Err()
@@ -96,7 +107,7 @@ func (q *Queue) publishCheckpoint(ctx context.Context, p checkpointPublication) 
 				if json.Unmarshal(save["myce_checkpoint"], &meta) == nil && meta.Generation != nil {
 					var g int64
 					if json.Unmarshal(meta.Generation, &g) != nil || g <= 0 {
-						return errors.New("invalid checkpoint generation")
+						return errInvalidCheckpointGeneration
 					}
 					generation = max(generation, g)
 				}
@@ -115,6 +126,9 @@ func (q *Queue) publishCheckpoint(ctx context.Context, p checkpointPublication) 
 			return ErrStale
 		}
 		if local && (j.Attempt != p.Attempt || j.Machine != p.Machine || j.Session != p.Session || (j.State != "running" && j.State != "stopping")) {
+			return ErrStale
+		}
+		if !q.warmCheckpointAllowed(j, p) {
 			return ErrStale
 		}
 		allowed := false
@@ -151,6 +165,9 @@ func (q *Queue) publishCheckpoint(ctx context.Context, p checkpointPublication) 
 			}
 		}
 		j.FileCheckpoints[p.Attempt] = p.Checkpoint
+		if j.Spec.warmPieces() {
+			j.Progress = p.Checkpoint.Generation
+		}
 		noteCheckpointTarget(j, allocationMachine(q.s.Machines[p.Machine], devices), p.Attempt, p.Checkpoint.Generation)
 		return nil
 	}, nil)
@@ -167,7 +184,14 @@ func (a API) checkpointHandler(w http.ResponseWriter, r *http.Request) {
 // Generations and content are checked again after the copy to reject concurrent
 // replacements. Writers use immutable payloads plus one atomic JSON manifest.
 func captureCheckpoint(root, parent string, observers ...*storageObserver) (string, FileCheckpoint, error) {
-	before, err := checkpointProgress(root)
+	return captureCheckpointContext(context.Background(), root, parent, false, observers...)
+}
+
+func captureCheckpointContext(ctx context.Context, root, parent string, boundedJSON bool, observers ...*storageObserver) (string, FileCheckpoint, error) {
+	progress := func(dir string) (int64, error) {
+		return scanCheckpointProgressContext(ctx, dir, false, filepath.WalkDir, boundedJSON)
+	}
+	before, err := progress(root)
 	if err != nil {
 		return "", FileCheckpoint{}, err
 	}
@@ -193,6 +217,9 @@ func captureCheckpoint(root, parent string, observers ...*storageObserver) (stri
 		if e != nil {
 			return e
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if strings.HasSuffix(d.Name(), ".tmp") {
 			if d.IsDir() {
 				return filepath.SkipDir
@@ -202,6 +229,9 @@ func captureCheckpoint(root, parent string, observers ...*storageObserver) (stri
 		if d.IsDir() {
 			return nil
 		}
+		if !d.Type().IsRegular() {
+			return errors.New("job input/output must be a regular file")
+		}
 		if len(manifest) >= 1024 {
 			return errors.New("checkpoint exceeds 1024-file manifest limit")
 		}
@@ -210,10 +240,10 @@ func captureCheckpoint(root, parent string, observers ...*storageObserver) (stri
 			return e
 		}
 		target := filepath.Join(stage, rel)
-		if e = copyJobFile(p, target); e != nil {
+		if e = copyJobFileContext(ctx, p, target); e != nil {
 			return e
 		}
-		ref, e := IdentifyFile(target)
+		ref, e := identifyFileContext(ctx, target)
 		if e != nil {
 			return e
 		}
@@ -224,7 +254,7 @@ func captureCheckpoint(root, parent string, observers ...*storageObserver) (stri
 		err = manifest.validate()
 	}
 	if err == nil {
-		after, e := checkpointProgress(root)
+		after, e := progress(root)
 		if e != nil {
 			err = e
 		} else if after != before {
@@ -232,7 +262,7 @@ func captureCheckpoint(root, parent string, observers ...*storageObserver) (stri
 		}
 	}
 	if err == nil {
-		copied, e := checkpointProgress(stage)
+		copied, e := progress(stage)
 		if e != nil {
 			err = e
 		} else if copied != before {
@@ -241,8 +271,11 @@ func captureCheckpoint(root, parent string, observers ...*storageObserver) (stri
 	}
 	if err == nil {
 		for name, ref := range manifest {
-			if e := verifyFile(context.Background(), filepath.Join(root, name), ref); e != nil {
-				err = errors.New("checkpoint changed during capture; retry")
+			if e := verifyFile(ctx, filepath.Join(root, name), ref); e != nil {
+				err = ctx.Err()
+				if err == nil {
+					err = errors.New("checkpoint changed during capture; retry")
+				}
 				break
 			}
 		}
@@ -253,6 +286,10 @@ func captureCheckpoint(root, parent string, observers ...*storageObserver) (stri
 	return stage, FileCheckpoint{before, manifest}, nil
 }
 func (w Worker) publishFileCheckpoint(j Job, parent string) (int64, error) {
+	return w.publishFileCheckpointContext(context.Background(), j, parent)
+}
+
+func (w Worker) publishFileCheckpointContext(ctx context.Context, j Job, parent string) (int64, error) {
 	if !j.FileTransport || !j.Spec.Resumable {
 		return 0, nil
 	}
@@ -262,11 +299,25 @@ func (w Worker) publishFileCheckpoint(j Job, parent string) (int64, error) {
 	if err := os.MkdirAll(stagingRoot, 0700); err != nil {
 		return 0, err
 	}
-	capture := captureCheckpoint
-	if j.Spec.localFirst() {
-		capture = captureLocalFirst
+	checkpoint := attemptCheckpoint(j)
+	var key string
+	var sequence int
+	if j.Spec.warmPieces() {
+		var err error
+		key, sequence, err = warmCheckpointDelivery(j, parent)
+		if err != nil || sequence == 0 {
+			return 0, err
+		}
+		checkpoint = warmCheckpointPath(j, key)
 	}
-	stage, save, err := capture(attemptCheckpoint(j), stagingRoot, w.storageObserver)
+	var stage string
+	var save FileCheckpoint
+	var err error
+	if j.Spec.localFirst() {
+		stage, save, err = captureLocalFirst(checkpoint, stagingRoot, w.storageObserver)
+	} else {
+		stage, save, err = captureCheckpointContext(ctx, checkpoint, stagingRoot, j.Spec.warmPieces(), w.storageObserver)
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -277,7 +328,7 @@ func (w Worker) publishFileCheckpoint(j Job, parent string) (int64, error) {
 		w.storageObserver.sample()
 		_ = os.RemoveAll(stage)
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	ctx = withFileStoreAttempt(ctx, j)
 	for name, ref := range save.Files {
@@ -285,8 +336,16 @@ func (w Worker) publishFileCheckpoint(j Job, parent string) (int64, error) {
 			return 0, err
 		}
 	}
-	p := checkpointPublication{Result: Result{Machine: w.Machine.ID, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, Checkpoint: save}
-	if err = w.Client.Call(ctx, "POST", "/api/files/checkpoint", p, nil); err != nil {
+	p := checkpointPublication{Result: Result{Machine: w.Machine.ID, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, Checkpoint: save, Piece: key, Sequence: sequence}
+	post := func(ctx context.Context, c Client) error { return c.Call(ctx, "POST", "/api/files/checkpoint", p, nil) }
+	if j.Spec.warmPieces() {
+		// Main waits on this call mid-item. The queue accepts an identical
+		// generation again, so a replay after a lost or refused reply is safe.
+		err = w.Client.RetryTransient(ctx, post, nil)
+	} else {
+		err = post(ctx, w.Client)
+	}
+	if err != nil {
 		return 0, err
 	}
 	if j.Spec.localFirst() {
@@ -320,12 +379,19 @@ func (w Worker) prepareFileCheckpoint(j Job, stateDir string) (string, error) {
 		if err = j.ResumeFiles.Files.validate(); err != nil {
 			return "", err
 		}
+		resumeDir := stage
+		if j.Spec.warmPieces() {
+			if j.FanOut.Next == len(j.Spec.FanOut.Pieces) {
+				return "", errors.New("settled warm pieces cannot have an item checkpoint")
+			}
+			resumeDir = filepath.Join(stage, j.Spec.FanOut.Pieces[j.FanOut.Next].Key)
+		}
 		for name, ref := range j.ResumeFiles.Files {
-			if err = w.fileCache.copyTo(ctx, ref, filepath.Join(stage, name)); err != nil {
+			if err = w.fileCache.copyTo(ctx, ref, filepath.Join(resumeDir, name)); err != nil {
 				return "", err
 			}
 		}
-		generation, e := checkpointProgress(stage)
+		generation, e := checkpointProgress(resumeDir)
 		if e != nil || generation != j.ResumeFiles.Generation {
 			return "", errors.New("resume checkpoint generation mismatch")
 		}
@@ -371,10 +437,21 @@ func (w Worker) finishFileResultContext(ctx context.Context, j Job, result Resul
 			finished.StoragePeak = w.storageObserver.snapshot()
 		}()
 	}
-	generation, err := w.publishFileCheckpoint(j, parent)
+	var generation int64
+	// A saved discard diagnostic also fences retries after a lost result reply.
+	if !j.Spec.warmPieces() || result.CleanupCause == nil || result.CleanupCause.Finalization == nil ||
+		result.CleanupCause.Finalization.Step != step {
+		generation, err = w.publishFileCheckpointContext(ctx, j, parent)
+	}
 	done()
 	if err != nil && !stale(err) {
-		return result, err
+		if !j.Spec.warmPieces() || result.ReleasePending || retryTransient(err) ||
+			errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return result, err
+		}
+		// The exited attempt cannot repair its save. Preserve the queue's last
+		// accepted generation and report the discard with exact completion.
+		result.CleanupCause = runtimeDiagnostic(finalizationErrorFor(step, "", err))
 	}
 	if scarceYieldStop(result.PriorityStop) && j.Spec.Resumable && !result.ReleasePending {
 		if !j.FileTransport {
@@ -385,7 +462,7 @@ func (w Worker) finishFileResultContext(ctx context.Context, j Job, result Resul
 		}
 		result.FinalCheckpointGeneration = &generation
 	}
-	if !result.Success || result.Interrupted || len(j.Spec.Outputs) == 0 || !j.storedFileResults() {
+	if j.Spec.warmPieces() || !result.Success || result.Interrupted || len(j.Spec.Outputs) == 0 || !j.storedFileResults() {
 		return result, nil
 	}
 	if j.Spec.OutputDelivery == asyncNAS {

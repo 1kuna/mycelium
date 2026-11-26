@@ -1,8 +1,11 @@
 // Replace OS calls with fixtures. No SMB or mount syscall runs in these tests.
 #include <time.h>
 #include <unistd.h>
+@class NSString;
+static NSString *root;
 time_t fixtureTime(time_t *result);
 static int fixtureFsync(int fd);
+#define NETFS_MOUNT_PARENT root
 #define main remountMain
 #define getmntinfo fixtureMountInventory
 #define NetFSMountURLSync fixtureNetFSMount
@@ -30,7 +33,7 @@ static const char *expectedURL = "smb://operator@nas.example.test/disposable";
 static const char *expectedSource = "//operator@nas.example.test/disposable";
 static const char *mountedSource;
 static const char *mountedPath;
-static NSString *root;
+static const char *reportedPath;
 static NSString *point;
 static NSString *stateDirectory;
 static NSString *hold;
@@ -92,7 +95,15 @@ int fixtureNetFSMount(CFURLRef url, CFURLRef mountpath, CFStringRef user, CFStri
     assert([(__bridge NSString *)CFURLGetString(url) isEqualToString:@(args[1])]);
     assert(user == NULL && password == NULL);
     assert(CFEqual(CFDictionaryGetValue(session, kNAUIOptionKey), kNAUIOptionNoUI));
-    assert(CFEqual(CFDictionaryGetValue(options, kNetFSMountAtMountDirKey), kCFBooleanTrue));
+    struct stat target;
+    if (lstat(args[2], &target) == 0) {
+        assert(mountpath != NULL);
+        assert(strcmp([(__bridge NSURL *)mountpath fileSystemRepresentation], args[2]) == 0);
+        assert(CFEqual(CFDictionaryGetValue(options, kNetFSMountAtMountDirKey), kCFBooleanTrue));
+    } else {
+        assert(errno == ENOENT && mountpath == NULL);
+        assert(CFDictionaryGetValue(options, kNetFSMountAtMountDirKey) == NULL);
+    }
     mountCalls++;
     struct stat state;
     holdPresentAtCall = lstat(hold.fileSystemRepresentation, &state) == 0;
@@ -102,8 +113,12 @@ int fixtureNetFSMount(CFURLRef url, CFURLRef mountpath, CFStringRef user, CFStri
     }
     *mounted = NULL;
     if (mountStatus == 0 && publishMount) {
-        setEntry(1, "smbfs", mountedPath ?: [(__bridge NSURL *)mountpath fileSystemRepresentation],
-                 mountedSource ?: expectedSource);
+        const char *path = mountedPath ?: args[2];
+        if (mountpath == NULL) {
+            assert(mkdir(path, 0700) == 0);
+        }
+        setEntry(1, "smbfs", path, mountedSource ?: expectedSource);
+        *mounted = CFBridgingRetain(@[@(reportedPath ?: path)]);
         entries = 2;
     }
     return mountStatus;
@@ -141,7 +156,7 @@ static void resetFixture(void) {
     publishMount = holdPresentAtCall = NO;
     syncCalls = failSyncAt = 0;
     now = 10000;
-    mountedSource = mountedPath = NULL;
+    mountedSource = mountedPath = reportedPath = NULL;
     beforeMount = duringMount = NULL;
 }
 
@@ -176,6 +191,10 @@ static void replaceTarget(void) {
 static void restoreTarget(void) {
     assert(rmdir(point.fileSystemRepresentation) == 0);
     assert(rename(movedPoint.fileSystemRepresentation, point.fileSystemRepresentation) == 0);
+}
+
+static void createTarget(void) {
+    assert(mkdir(point.fileSystemRepresentation, 0700) == 0);
 }
 
 static void inventoryAndCredentialOptions(void) {
@@ -361,6 +380,8 @@ static void rejectsAncestorSymlink(void) {
     NSString *aliasedPoint = [alias stringByAppendingPathComponent:@"target"];
     args[2] = aliasedPoint.fileSystemRepresentation;
     assert(runRemount() == EX_CONFIG);
+    assert(rmdir(point.fileSystemRepresentation) == 0);
+    assert(runRemount() == EX_CONFIG);
     assert(mountCalls == 0);
     assert(unlink(alias.fileSystemRepresentation) == 0);
 }
@@ -380,6 +401,13 @@ static void retriesAfterTargetChangesBeforeNetFS(void) {
     assert(runRemount() == EX_CONFIG && mountCalls == 1);
     restoreTarget();
     assertNoHold();
+
+    inventoryCalls = 0;
+    assert(rmdir(point.fileSystemRepresentation) == 0);
+    beforeMount = createTarget;
+    assert(runRemount() == EX_CONFIG && mountCalls == 1);
+    assertNoHold();
+    assert(runRemount() == EX_OK && mountCalls == 2);
 }
 
 static void loseInventory(void) {
@@ -407,42 +435,85 @@ static void assertPersistentRefusal(void) {
 static void rejectsChangesDuringNetFSAndUnexpectedMount(void) {
     publishMount = YES;
     duringMount = addLocalFile;
-    assert(runRemount() == EX_CONFIG);
+    assert(runRemount() == 79);
     assert(unlink(localFile.fileSystemRepresentation) == 0);
     assertPersistentRefusal(); // The exact mount is visible but was refused.
     assert(runCheck() == EX_OK);
 
     entries = 1;
     duringMount = replaceTarget;
-    assert(runRemount() == EX_CONFIG);
+    assert(runRemount() == 79);
     restoreTarget();
     assertPersistentRefusal();
 
     entries = 1;
     duringMount = NULL;
     mountedSource = "//operator@nas.example.test/other";
-    assert(runRemount() == EX_CONFIG);
+    assert(runRemount() == 79);
     assertPersistentRefusal();
 
     entries = 1;
     mountedSource = NULL;
-    mountedPath = "/elsewhere";
-    assert(runRemount() == EX_CONFIG);
-    assertPersistentRefusal();
-
-    entries = 1;
     publishMount = NO;
-    assert(runRemount() == EX_CONFIG); // NetFS OK alone proves nothing.
+    assert(runRemount() == 79); // NetFS OK alone proves nothing.
     assertPersistentRefusal();
-    assert(mountCalls == 5);
+    assert(mountCalls == 4);
 }
 
-static void installCheckRequiresSurvivingEmptyTarget(void) {
+static void recreatesTargetRemovedByUnmount(void) {
+    entries = 2;
+    setEntry(1, "smbfs", args[2], expectedSource);
+    assert(runRemount() == EX_OK && mountCalls == 0);
+
+    entries = 1;
     assert(rmdir(point.fileSystemRepresentation) == 0);
+    assert(runCheck() == EX_UNAVAILABLE && mountCalls == 0);
+    publishMount = YES;
+    assert(runRemount() == EX_OK && mountCalls == 1);
+    assert(holdPresentAtCall);
+    assert(runCheck() == EX_OK);
+    assertNoHold();
+}
+
+static void refusesAlternateDefaultMount(void) {
+    assert(rmdir(point.fileSystemRepresentation) == 0);
+    NSString *alternate = [point stringByAppendingString:@"-1"];
+    mountedPath = alternate.fileSystemRepresentation;
+    publishMount = YES;
+    assert(runRemount() == 79 && mountCalls == 1);
+    assert(runCheck() == 79 && runRemount() == 79 && mountCalls == 1);
+    // The unexpected mount is still present at the path selected by NetFS.
+    assert(checkMount(mountedPath, expectedSource) == EX_OK);
+    assert(rmdir(mountedPath) == 0);
+    assertNoHold();
+}
+
+static void refusesMismatchedNetFSPaths(void) {
+    assert(rmdir(point.fileSystemRepresentation) == 0);
+    reportedPath = movedPoint.fileSystemRepresentation;
+    publishMount = YES;
+    assert(runRemount() == 79 && mountCalls == 1);
+    assert(checkMount(args[2], expectedSource) == EX_OK);
+    assertPersistentRefusal();
+}
+
+static void refusesOccupiedTargetBeforeNetFS(void) {
+    assert(rmdir(point.fileSystemRepresentation) == 0);
+    int fd = open(point.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    assert(fd >= 0 && close(fd) == 0);
     assert(runCheck() == EX_CONFIG);
+    assert(runRemount() == EX_CONFIG);
+    assert(unlink(point.fileSystemRepresentation) == 0);
+
+    assert(symlink(movedPoint.fileSystemRepresentation, point.fileSystemRepresentation) == 0);
+    assert(runCheck() == EX_CONFIG);
+    assert(runRemount() == EX_CONFIG);
+    assert(unlink(point.fileSystemRepresentation) == 0);
+
     assert(mkdir(point.fileSystemRepresentation, 0700) == 0);
     addLocalFile();
     assert(runCheck() == EX_CONFIG);
+    assert(runRemount() == EX_CONFIG);
     assert(unlink(localFile.fileSystemRepresentation) == 0);
     assert(runCheck() == EX_UNAVAILABLE);
     assert(mountCalls == 0);
@@ -468,7 +539,10 @@ int main(int argc, const char *argv[]) {
             {"retriesAfterTargetChangesBeforeNetFS", retriesAfterTargetChangesBeforeNetFS},
             {"retriesAfterSecondInventoryReadFails", retriesAfterSecondInventoryReadFails},
             {"rejectsChangesDuringNetFSAndUnexpectedMount", rejectsChangesDuringNetFSAndUnexpectedMount},
-            {"installCheckRequiresSurvivingEmptyTarget", installCheckRequiresSurvivingEmptyTarget},
+            {"recreatesTargetRemovedByUnmount", recreatesTargetRemovedByUnmount},
+            {"refusesAlternateDefaultMount", refusesAlternateDefaultMount},
+            {"refusesMismatchedNetFSPaths", refusesMismatchedNetFSPaths},
+            {"refusesOccupiedTargetBeforeNetFS", refusesOccupiedTargetBeforeNetFS},
         };
         for (size_t i = 0; i < sizeof(fixtures) / sizeof(fixtures[0]); i++) {
             if (argc == 1 || (argc == 2 && strcmp(fixtures[i].name, argv[1]) == 0)) {

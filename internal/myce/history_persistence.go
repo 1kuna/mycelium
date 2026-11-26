@@ -58,16 +58,12 @@ func (q *Queue) flushHistories() error {
 	}
 	q.flushHistoriesNow = true
 	defer func() { q.flushHistoriesNow, q.historiesPending = false, nil }()
-	tx, err := q.db.Begin()
+	var batch queueWriteBatch
+	next, err := q.prepareStateWrite(&batch, &queuePersistenceTiming{}, false)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
-	next, err := q.persistState(tx, &queuePersistenceTiming{})
-	if err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
+	if err := q.writeQueue(&batch, nil, nil, queueWriteLocked); err != nil {
 		return err
 	}
 	q.commitPersistenceRoot(next)

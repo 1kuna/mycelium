@@ -312,17 +312,20 @@ func (c Client) DownloadResult(ctx context.Context, id, name, dest string) error
 	if j.FilesExpired {
 		return resultExpired()
 	}
-	if j.State != "succeeded" {
+	ref, ok := j.OutputRefs[name]
+	if j.State != "succeeded" && !(j.FanOut != nil && j.FanOut.Warm != nil && ok) {
 		return &HTTPError{Status: 409, Code: "request_stale", Message: fmt.Sprintf("job is %s, no accepted result", j.State)}
 	}
-	ref, ok := j.OutputRefs[name]
 	if !ok {
 		return &HTTPError{Status: 404, Code: "artifact_unknown", Message: "accepted artifact not found"}
 	}
 	if err := c.downloadResultFile(ctx, ref, dest); err != nil {
 		return err
 	}
-	return c.CollectCompletion(ctx, j)
+	if j.State == "succeeded" {
+		return c.CollectCompletion(ctx, j)
+	}
+	return nil
 }
 
 func (c Client) downloadResultFile(ctx context.Context, ref FileRef, dest string) error {

@@ -494,6 +494,14 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		allowed, err := a.Queue.authorizeYieldStop(r.Context(), c)
 		respondOperation(w, map[string]bool{"allowed": allowed}, err, "worker_yield_invalid")
 	})
+	mux.HandleFunc("POST /api/workers/warm-piece", func(w http.ResponseWriter, r *http.Request) {
+		var request warmPieceRequest
+		if !decode(w, r, &request) {
+			return
+		}
+		reply, err := a.Queue.warmPiece(r.Context(), request)
+		respondOperation(w, reply, err, "worker_complete_invalid")
+	})
 	mux.HandleFunc("POST /api/workers/complete", func(w http.ResponseWriter, r *http.Request) {
 		var c Result
 		if !decode(w, r, &c) {
@@ -664,6 +672,10 @@ func respond(w http.ResponseWriter, v any, err error) {
 	}
 	if err != nil {
 		status := http.StatusBadRequest
+		var writeFailure queueWriteError
+		if errors.As(err, &writeFailure) {
+			status = http.StatusServiceUnavailable
+		}
 		if errors.Is(err, ErrStale) {
 			status = http.StatusConflict
 		}
@@ -739,7 +751,10 @@ func (q *Queue) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-t.C:
-			if err := q.Tick(); err != nil {
+			if err := q.TickContext(ctx); err != nil {
+				if ctx.Err() != nil {
+					return nil
+				}
 				return err
 			}
 		}
@@ -751,6 +766,9 @@ func (q *Queue) Run(ctx context.Context) error {
 var clientTransport = &http.Transport{Proxy: http.ProxyFromEnvironment}
 
 type Client struct {
+	// SharedQueueProof requires durable acceptance of worker control decisions
+	// through the worker's local member.
+	SharedQueueProof bool
 	publication      *publicationProgress
 	publicationWire  *atomic.Bool
 	inventoryWire    *atomic.Bool
@@ -855,6 +873,10 @@ func requestDecodeRefused(err error) bool {
 var replaySafePost = map[string]bool{"/api/resolve": true, "/api/files/preflight": true, "/api/extensions": true}
 
 func (c Client) callOnce(ctx context.Context, method, path string, in, out any) error {
+	return c.callOnceShared(ctx, method, path, in, out, "")
+}
+
+func (c Client) callOnceShared(ctx context.Context, method, path string, in, out any, handover string) error {
 	checkin, workerCheckin := in.(Checkin)
 	workerCheckin = workerCheckin && path == "/api/workers/checkin"
 	if workerCheckin && checkin.Machine.EphemeralRefusal != "" {
@@ -898,6 +920,15 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	if workerProtocolEndpoint(path) {
 		req.Header.Set("X-Myce-Start-Gate", startGateProtocol)
 	}
+	proposal, mutation := sharedWorkerControl(path)
+	proposal, mutation = c.SharedQueueProof && proposal, c.SharedQueueProof && mutation
+	confirm := c.SharedQueueProof && method == http.MethodPost && path == sharedTurnPath
+	if proposal || mutation || confirm {
+		req.Header.Set(sharedVerifyHeader, sharedControlProtocol)
+	}
+	if handover != "" {
+		req.Header.Set(sharedTurnHeader, handover)
+	}
 	hc := c.HTTP
 	if hc == nil {
 		hc = &http.Client{Transport: clientTransport}
@@ -907,13 +938,14 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 		return err
 	}
 	defer res.Body.Close()
-	if c.stagingWire != nil && workerProtocolEndpoint(path) {
+	advertisesWorkerProtocol := workerProtocolEndpoint(path) && !(mutation && handover == "")
+	if c.stagingWire != nil && advertisesWorkerProtocol {
 		c.stagingWire.Store(res.Header.Get(stagingPhasesHeader) == stagingPhasesProtocol)
 	}
-	if c.launchTimingWire != nil && workerProtocolEndpoint(path) {
+	if c.launchTimingWire != nil && advertisesWorkerProtocol {
 		c.launchTimingWire.Store(res.Header.Get(launchTimingsHeader) == launchTimingsWire)
 	}
-	if c.faultWire != nil && workerProtocolEndpoint(path) {
+	if c.faultWire != nil && advertisesWorkerProtocol {
 		c.faultWire.Store(res.Header.Get(faultEvidenceHeader) == faultEvidenceProtocol)
 	}
 	if c.hostRAMGateWire != nil && workerProtocolEndpoint(path) {
@@ -946,12 +978,59 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 		}
 		return e
 	}
+	turn := res.Header.Get(sharedTurnHeader)
+	if confirm {
+		if res.StatusCode != http.StatusNoContent || turn != handover {
+			return queueStopping()
+		}
+		return nil
+	}
+	if proposal || mutation {
+		if number, err := strconv.ParseUint(turn, 10, 63); err != nil || number == 0 {
+			return queueStopping()
+		}
+	}
+	if mutation {
+		if handover == "" {
+			if res.StatusCode != http.StatusNoContent {
+				return queueStopping()
+			}
+			return c.callOnceShared(ctx, method, path, in, out, turn)
+		}
+		if turn != handover || res.StatusCode == http.StatusNoContent {
+			return queueStopping()
+		}
+	}
+	if proposal {
+		if out == nil {
+			// Discard-only callers do not act on a directive.
+			_, err = io.Copy(io.Discard, res.Body)
+			return err
+		}
+		dest := reflect.ValueOf(out)
+		if dest.Kind() != reflect.Pointer || dest.IsNil() {
+			return errors.New("shared queue control requires a response pointer")
+		}
+		next := reflect.New(dest.Elem().Type())
+		if err := json.NewDecoder(res.Body).Decode(next.Interface()); err != nil {
+			return err
+		}
+		if _, err := io.Copy(io.Discard, res.Body); err != nil {
+			return err
+		}
+		// A delayed proposal cannot spend a newer turn. Expose it only
+		// after a fresh read confirms the original turn in PostgreSQL.
+		if err := c.callOnceShared(ctx, http.MethodPost, sharedTurnPath, nil, nil, turn); err != nil {
+			return err
+		}
+		dest.Elem().Set(next.Elem())
+		return nil
+	}
 	if out != nil {
 		if stream, ok := out.(io.Writer); ok {
 			return copyJSONDocument(stream, res.Body)
 		}
-		// A truncated reply must not leave fields that leak into the retry's
-		// complete reply when the replacement omits them.
+		// Keep a truncated reply from contaminating a retry's destination.
 		dest := reflect.ValueOf(out)
 		if dest.Kind() == reflect.Pointer && !dest.IsNil() {
 			next := reflect.New(dest.Elem().Type())
@@ -1043,7 +1122,8 @@ func workerProtocolEndpoint(path string) bool {
 func respondOperation(w http.ResponseWriter, v any, err error, code string) {
 	var rule *rejectionError
 	var api *HTTPError
-	if err != nil && !errors.Is(err, ErrStale) && !errors.As(err, &rule) && !errors.As(err, &api) {
+	var writeFailure queueWriteError
+	if err != nil && !errors.Is(err, ErrStale) && !errors.As(err, &rule) && !errors.As(err, &api) && !errors.As(err, &writeFailure) {
 		err = reject(code, err)
 	}
 	respond(w, v, err)

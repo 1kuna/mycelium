@@ -489,7 +489,10 @@ func retryTransient(err error) bool {
 	var api *HTTPError
 	if errors.As(err, &api) {
 		// Typed storage, integrity and configuration refusals need owner repair.
-		if api.Code != "" && api.Code != "request_failed" && api.Code != "queue_stopping" && api.Code != "client_rate_limited" && api.Code != "observation_shed_control_pressure" {
+		switch api.Code {
+		case "", "request_failed", "queue_stopping", "client_rate_limited", "observation_shed_control_pressure",
+			"shared_queue_control_retry", "shared_file_store_unready":
+		default:
 			return false
 		}
 		return api.Status == 408 || api.Status == 429 || api.Status == 500 || api.Status == 502 || api.Status == 503 || api.Status == 504

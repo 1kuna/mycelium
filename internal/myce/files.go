@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/tus/tusd/v2/pkg/filelocker"
@@ -79,7 +80,7 @@ func identifyFileContext(ctx context.Context, path string) (FileRef, error) {
 	if err = noModelSymlinks(path, false); err != nil {
 		return FileRef{}, err
 	}
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return FileRef{}, err
 	}
@@ -172,7 +173,7 @@ type fileStoreConfiguration struct {
 // Stored inputs and their results use the queue file store independently of
 // checkpoint mode. FileTransport continues to select file-store checkpoints.
 func (j Job) storedFileResults() bool {
-	if j.Spec.ephemeral() || j.Spec.OutputDelivery == asyncNAS || j.FileTransport || len(jobInputFiles(&j))+len(j.Spec.ModelSnapshots) > 0 {
+	if j.Spec.warmPieces() || j.Spec.ephemeral() || j.Spec.OutputDelivery == asyncNAS || j.FileTransport || len(jobInputFiles(&j))+len(j.Spec.ModelSnapshots) > 0 {
 		return true
 	}
 	for _, input := range j.Spec.SharedInputs {
@@ -183,37 +184,34 @@ func (j Job) storedFileResults() bool {
 	return false
 }
 
-func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) error {
-	if q.fileStoreProductionReserve < 0 || q.fileStoreProductionReserve > limit {
-		return errors.New("file store production reserve must be between zero and the store limit")
+func (q *Queue) prepareFileStore(root string, limit int64, reserve uint64, controlFiles controlStorageFiles) (*FileStore, error) {
+	if limit > 0 && reserve > uint64(limit) {
+		return nil, errors.New("file store production reserve must be between zero and the store limit")
 	}
 	if limit <= 0 {
-		return errors.New("file store limit must be positive")
+		return nil, errors.New("file store limit must be positive")
 	}
 	root, err := filepath.Abs(root)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err = PrepareStateRoots(root); err != nil {
-		return err
+		return nil, err
 	}
 	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err = noModelSymlinks(root, false); err != nil {
-		return err
+		return nil, err
 	}
 	for _, dir := range []string{root, filepath.Join(root, "blobs"), filepath.Join(root, "uploads")} {
 		if err = os.MkdirAll(dir, 0700); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	s := &FileStore{inputClaim: q.inputClaimContext, checkAttempt: q.checkFileStoreAttempt, productionReserve: uint64(q.fileStoreProductionReserve), admit: q.admitFileUpload, admitCreation: q.admitFileCreation, explainRefusal: q.explainFileStoreRefusal, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
-	if q.lock != nil {
-		database := strings.TrimSuffix(q.lock.Name(), ".lock")
-		s.controlFiles = controlStorageFiles{database: database, wal: database + "-wal", shared: database + "-shm"}
-	}
+	s := &FileStore{inputClaim: q.inputClaimContext, checkAttempt: q.checkFileStoreAttempt, productionReserve: reserve, admit: q.admitFileUpload, admitCreation: q.admitFileCreation, explainRefusal: q.explainFileStoreRefusal, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
+	s.controlFiles = controlFiles
 	fs := filestore.New(filepath.Join(root, "uploads"))
 	fs.DirModePerm = 0700
 	fs.FileModePerm = 0600
@@ -233,22 +231,42 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 				return tus.HTTPResponse{}, tus.FileInfoChanges{}, errors.New("invalid file upload identity")
 			}
 			if err := s.recordUpload(ref.SHA256, e.Upload.MetaData["purpose"], true, ctx); err != nil {
-				return tus.HTTPResponse{}, tus.FileInfoChanges{}, uploadFailure(ctx, "upload_creation_commit", err)
+				return tus.HTTPResponse{}, tus.FileInfoChanges{}, uploadCallbackError(ctx, uploadFailure(ctx, "upload_creation_commit", err))
 			}
 			if err := ctx.Err(); err != nil {
-				return tus.HTTPResponse{}, tus.FileInfoChanges{}, err
+				return tus.HTTPResponse{}, tus.FileInfoChanges{}, uploadCallbackError(ctx, err)
 			}
 			return tus.HTTPResponse{}, tus.FileInfoChanges{ID: ref.SHA256}, nil
 		},
 		PreFinishResponseCallback: func(e tus.HookEvent) (tus.HTTPResponse, error) {
 			ctx := creationContext(e.Context)
-			return tus.HTTPResponse{}, s.finishUpload(ctx, e.Upload)
+			return tus.HTTPResponse{}, uploadCallbackError(ctx, s.finishUpload(ctx, e.Upload))
 		},
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	s.handler = http.StripPrefix("/api/files/uploads/", h)
+	return s, nil
+}
+
+func (q *Queue) controlStorageFiles() controlStorageFiles {
+	if q.lock == nil {
+		return controlStorageFiles{}
+	}
+	database := strings.TrimSuffix(q.lock.Name(), ".lock")
+	return controlStorageFiles{database: database, wal: database + "-wal", shared: database + "-shm"}
+}
+
+func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) error {
+	if q.fileStoreProductionReserve < 0 {
+		return errors.New("file store production reserve must be between zero and the store limit")
+	}
+	s, err := q.prepareFileStore(root, limit, uint64(q.fileStoreProductionReserve), q.controlStorageFiles())
+	if err != nil {
+		return err
+	}
+	root = s.root
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
 	q.mu.Lock()
@@ -726,7 +744,7 @@ func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request, metadata b
 }
 func (a API) registerFiles(mux *requestMux) {
 	mux.HandleFunc("GET /api/files/config", func(w http.ResponseWriter, r *http.Request) { respond(w, FileConfig{a.Queue.fileCheckpoints}, nil) })
-	if a.Queue.files == nil {
+	if a.Queue.files == nil && a.Queue.sharedWriter == nil {
 		return
 	}
 	mux.HandleFunc("POST /api/files/input-claims", func(w http.ResponseWriter, r *http.Request) {
@@ -1256,7 +1274,7 @@ func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpos
 	if err := verifyFile(ctx, path, ref); err != nil {
 		return err
 	}
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return err
 	}

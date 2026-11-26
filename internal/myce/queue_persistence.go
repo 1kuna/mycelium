@@ -178,27 +178,16 @@ func (q *Queue) commitPersistenceRoot(next *queuePersistenceUpdate) {
 
 // Immutable history stays in SQLite but is not rewritten by each heartbeat.
 // Encode only journaled decisions; SQLite sees only changed logical records.
-func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (*queuePersistenceUpdate, error) {
-	return q.persistStateChanges(tx, measured, false)
-}
-
-func (q *Queue) persistStateChanges(tx *sql.Tx, measured *queuePersistenceTiming, observationOnly bool) (*queuePersistenceUpdate, error) {
+func (q *Queue) prepareStateWrite(batch *queueWriteBatch, measured *queuePersistenceTiming, observationOnly bool) (*queuePersistenceUpdate, error) {
 	if q.persistencePageBytes <= 0 {
 		return nil, fmt.Errorf("queue persistence page size is not initialized")
 	}
 	update := &queuePersistenceUpdate{records: map[string][]byte{}}
 	next := update.records
-	exec := func(query string, args ...any) (sql.Result, error) {
-		started := holdNow(q.holdClock)
-		result, err := tx.Exec(query, args...)
-		measured.SQL += holdNow(q.holdClock).Sub(started)
-		return result, err
-	}
-	putCompact := func(key string, data []byte) error {
+	putCompact := func(key string, data []byte) {
 		measured.Bytes += int64(len(data))
 		measured.Records++
-		_, err := exec("INSERT INTO queue_state(key,data) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET data=excluded.data", key, data)
-		return err
+		batch.add(upsertQueueState, key, data)
 	}
 	putData := func(key string, data []byte) error {
 		old := q.persisted[key]
@@ -215,9 +204,10 @@ func (q *Queue) persistStateChanges(tx *sql.Tx, measured *queuePersistenceTiming
 		// No fragment preparation or extra B-tree keys are needed for them.
 		compact := len(data) <= q.persistencePageBytes && len(old) <= q.persistencePageBytes && !wasCold
 		if splitPersistenceKey(key) && !compact {
-			return q.writeFields(key, old, data, measured, exec, nil)
+			return q.writeFields(key, old, data, measured, batch, nil)
 		}
-		return putCompact(key, data)
+		putCompact(key, data)
+		return nil
 	}
 	put := func(key string, value any) error {
 		started := holdNow(q.holdClock)
@@ -230,12 +220,8 @@ func (q *Queue) persistStateChanges(tx *sql.Tx, measured *queuePersistenceTiming
 	}
 
 	if q.persisted == nil {
-		if _, err := exec("CREATE TABLE IF NOT EXISTS queue_state (key TEXT PRIMARY KEY, data BLOB NOT NULL)"); err != nil {
-			return nil, err
-		}
-		if _, err := exec("DELETE FROM queue_state"); err != nil {
-			return nil, err
-		}
+		batch.add("CREATE TABLE IF NOT EXISTS queue_state (key TEXT PRIMARY KEY, data BLOB NOT NULL)")
+		batch.add("DELETE FROM queue_state")
 	}
 	if observationOnly {
 		update.stateSize, update.stateFields = q.persistedStateSize, q.persistedStateFields
@@ -261,11 +247,11 @@ func (q *Queue) persistStateChanges(tx *sql.Tx, measured *queuePersistenceTiming
 		// detached fields and logical size in the same pending commit instead.
 		next["state"] = stateData
 		if len(update.stateFields) > 1 || len(q.persistedStateFields) > 1 {
-			err = q.writeFields("state", q.persisted["state"], stateData, measured, exec, update.stateFields)
+			err = q.writeFields("state", q.persisted["state"], stateData, measured, batch, update.stateFields)
 		} else if bytes.Equal(stateData, q.persisted["state"]) {
 			next["state"] = q.persisted["state"]
 		} else {
-			err = putCompact("state", stateData)
+			putCompact("state", stateData)
 		}
 		if err != nil {
 			return nil, err
@@ -282,9 +268,7 @@ func (q *Queue) persistStateChanges(tx *sql.Tx, measured *queuePersistenceTiming
 		key := "machines/" + id
 		if m == nil {
 			next[key] = nil
-			if _, err := exec("DELETE FROM queue_state WHERE key=?", key); err != nil {
-				return nil, err
-			}
+			batch.add("DELETE FROM queue_state WHERE key=?", key)
 		} else if err := put(key, durableMachine(m)); err != nil {
 			return nil, err
 		}
@@ -300,12 +284,8 @@ func (q *Queue) persistStateChanges(tx *sql.Tx, measured *queuePersistenceTiming
 	for key, value := range jobs {
 		if value == nil {
 			next["jobs/"+key] = nil
-			if err := deleteFields("jobs/"+key, exec); err != nil {
-				return nil, err
-			}
-			if _, err := exec("DELETE FROM queue_state WHERE key=?", "jobs/"+key); err != nil {
-				return nil, err
-			}
+			batch.deleteFields("jobs/" + key)
+			batch.add("DELETE FROM queue_state WHERE key=?", "jobs/"+key)
 			continue
 		}
 		if err := put("jobs/"+key, value); err != nil {
@@ -351,9 +331,7 @@ func (q *Queue) persistStateChanges(tx *sql.Tx, measured *queuePersistenceTiming
 		value, exists := q.catalogValue(key)
 		if !exists {
 			next[key] = nil
-			if _, err := exec("DELETE FROM queue_state WHERE key=?", key); err != nil {
-				return nil, err
-			}
+			batch.add("DELETE FROM queue_state WHERE key=?", key)
 			continue
 		}
 		if point, ok := value.(WorkObservation); ok {
@@ -384,15 +362,11 @@ func (q *Queue) persistStateChanges(tx *sql.Tx, measured *queuePersistenceTiming
 			break
 		}
 		next[key] = nil
-		if _, err := exec("DELETE FROM queue_state WHERE key=?", key); err != nil {
-			return nil, err
-		}
+		batch.add("DELETE FROM queue_state WHERE key=?", key)
 	}
 	// A fresh database publishes its first full state and marker atomically.
 	if q.persisted == nil {
-		if _, err := exec("INSERT INTO queue(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data", normalizedQueueMarker); err != nil {
-			return nil, err
-		}
+		batch.add("INSERT INTO queue(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data", normalizedQueueMarker)
 	}
 	return update, nil
 }
@@ -552,14 +526,13 @@ func splitPersistenceFields(object map[string]json.RawMessage, pageBytes int) (m
 	return out, nil
 }
 
-type persistenceExec func(string, ...any) (sql.Result, error)
+const upsertQueueState = "INSERT INTO queue_state(key,data) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET data=excluded.data"
 
-func deleteFields(key string, exec persistenceExec) error {
+func (b *queueWriteBatch) deleteFields(key string) {
 	// Base64url contains no GLOB metacharacters.
-	_, err := exec("DELETE FROM queue_state WHERE key GLOB ?", fieldPrefix(key)+"*")
-	return err
+	b.add("DELETE FROM queue_state WHERE key GLOB ?", fieldPrefix(key)+"*")
 }
-func (q *Queue) writeFields(key string, old, data []byte, measured *queuePersistenceTiming, exec persistenceExec, next map[string]json.RawMessage) error {
+func (q *Queue) writeFields(key string, old, data []byte, measured *queuePersistenceTiming, batch *queueWriteBatch, next map[string]json.RawMessage) error {
 	started := holdNow(q.holdClock)
 	var err error
 	if next == nil {
@@ -584,21 +557,17 @@ func (q *Queue) writeFields(key string, old, data []byte, measured *queuePersist
 	if len(next) == 1 {
 		// There is no multi-page field to isolate. Keep the ordinary logical row,
 		// including when a formerly large field shrinks or is removed.
-		if err := deleteFields(key, exec); err != nil {
-			return err
-		}
+		batch.deleteFields(key)
 		measured.Bytes += int64(len(data))
 		measured.Records++
-		_, err := exec("INSERT INTO queue_state(key,data) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET data=excluded.data", key, data)
-		return err
+		batch.add(upsertQueueState, key, data)
+		return nil
 	}
 	// A one-piece old encoding lived in the ordinary logical row, so none of
 	// these field rows exists yet. Publish the root along with its large fields.
 	cold := q.coldRecords[key]
 	if len(before) <= 1 && len(cold.fields) == 0 {
-		if _, err := exec("DELETE FROM queue_state WHERE key=?", key); err != nil {
-			return err
-		}
+		batch.add("DELETE FROM queue_state WHERE key=?", key)
 	}
 	if len(before) == 1 {
 		before = nil
@@ -610,24 +579,18 @@ func (q *Queue) writeFields(key string, old, data []byte, measured *queuePersist
 		}
 		measured.Bytes += int64(len(value))
 		measured.Records++
-		if _, err := exec("INSERT INTO queue_state(key,data) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET data=excluded.data", prefix+field, value); err != nil {
-			return err
-		}
+		batch.add(upsertQueueState, prefix+field, value)
 	}
 	for field := range before {
 		if _, ok := next[field]; !ok {
 			measured.Records++
-			if _, err := exec("DELETE FROM queue_state WHERE key=?", prefix+field); err != nil {
-				return err
-			}
+			batch.add("DELETE FROM queue_state WHERE key=?", prefix+field)
 		}
 	}
 	for field := range cold.fields {
 		if _, ok := next[field]; !ok {
 			measured.Records++
-			if _, err := exec("DELETE FROM queue_state WHERE key=?", prefix+field); err != nil {
-				return err
-			}
+			batch.add("DELETE FROM queue_state WHERE key=?", prefix+field)
 		}
 	}
 	return nil

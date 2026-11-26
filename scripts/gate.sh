@@ -49,6 +49,8 @@ export UV_OFFLINE=1 UV_PYTHON_DOWNLOADS=never UV_CACHE_DIR="$scratch/uv" PIXI_HO
 # Fixtures explicitly join helper processes, so omit the race runtime's
 # one-second exit delay for every child.
 export GORACE=atexit_sleep_ms=0
+# A selected shared-queue proof must exercise a real disposable database.
+export MYCE_GATE_REQUIRE_POSTGRES=1
 
 status=0
 step() {
@@ -65,7 +67,14 @@ step() {
   fi
 }
 go_tests() {
-  go test -race -count=1 -timeout=1h -p=1 -json "$@" | python3 scripts/gate-test-output.py
+  go test -race -count=1 -timeout=1h -p=1 -json "$@" | python3 "$repo/scripts/gate-test-output.py"
+}
+# A directory with its own go.mod (scripts/queue-qualify) is a separate
+# module that ./... at the root skips; vet and test it from inside.
+module_tests() {
+  local dir=$1
+  shift
+  (cd "$dir" && go vet ./... && go_tests -vet=off "$@" ./...)
 }
 python_tests() {
   PYTHONPATH="$repo/clients/python/src:$repo/clients/python/tests" "$python_client" -m unittest "$@"
@@ -78,6 +87,9 @@ step build go build -o /dev/null ./cmd/myce
 step vet go vet ./...
 if [[ $mode == full ]]; then
   step go-tests go_tests -vet=off ./...
+  while IFS= read -r module; do
+    step "go-tests ${module%/go.mod}" module_tests "${module%/go.mod}"
+  done < <(find scripts -name go.mod -mindepth 2 | sort)
   step python-client python_tests discover -s clients/python/tests
   step upgrade-compat-regressions python3 scripts/test-upgrade-compat.py
   step upgrade-compat-prepare python3 scripts/upgrade-compat.py prepare
@@ -90,10 +102,17 @@ else
         step python-client python_tests "$pattern"
         ;;
       *)
-        step "quick $package $pattern" go_tests -vet=off -run "$pattern" "./$package"
+        if [[ -f $package/go.mod ]]; then
+          step "quick $package $pattern" module_tests "$package" -run "$pattern"
+        else
+          step "quick $package $pattern" go_tests -vet=off -run "$pattern" "./$package"
+        fi
         ;;
     esac
   done < "$selection"
 fi
+# Parallel worktrees grew the shared build cache by ~55 GB in three hours
+# (2026-11-25). Keep it bounded; trimming never changes the gate result.
+python3 scripts/trim-go-cache.py "$shared_build" || true
 printf 'gate %s: exit=%s\n' "$mode" "$status"
 exit "$status"

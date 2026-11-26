@@ -106,7 +106,8 @@ type Worker struct {
 	memoryCeilings          *memoryCeilings
 	sharedExecutionCeilings *memoryCeilings
 	sharedCPUDev            bool
-	devEnvironmentSizing    bool // Dev session: size the environment cache from need (#1540).
+	devEnvironmentSizing    bool          // Dev session: size the environment cache from need (#1540).
+	warmSettleBound         time.Duration // Tests shorten the settle retry bound; zero uses the default.
 	SharedPressureSource    func(context.Context) (SharedHostPressure, error)
 	processMemory           *processMemoryProbe                   // Without cgroups only.
 	cudaMemoryQuery         func(context.Context) ([]byte, error) // Nil queries the driver; tests inject readings.
@@ -794,7 +795,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		return nil, err
 	}
 	timing.enter(launchCommandSetup)
-	group := len(j.Spec.Run.Sidecars) > 0 || j.Spec.Run.MemoryGB > 0
+	group := j.Spec.warmPieces() || len(j.Spec.Run.Sidecars) > 0 || j.Spec.Run.MemoryGB > 0
 	reservation := nativeLaunchCustody{ProcessID: ID(), Phase: "reserved"}
 	reservation.CustodyID = reservation.ProcessID
 	if group {

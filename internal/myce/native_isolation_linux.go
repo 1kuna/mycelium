@@ -26,6 +26,7 @@ type nativeLinuxPolicy struct {
 	Env                            []string
 	Ports                          []uint16
 	Namespace                      bool
+	WarmPieceFD                    bool // Trusted allowlist entry for the main member.
 	// Mount visibility only. Landlock still grants exact acquired paths above.
 	InputMountRoots []string
 	// Plain withholds only Deny from an unsandboxed job; Read lists the
@@ -137,8 +138,14 @@ func nativeCanonical(path string) (string, error) {
 	return filepath.EvalSymlinks(path)
 }
 
+func nativeMainHasWarmFD(cmd *exec.Cmd) bool {
+	index := warmBootstrapFD - 3
+	return len(cmd.Args) > 3 && cmd.Args[3] == "myce-member-main" &&
+		len(cmd.ExtraFiles) > index && cmd.ExtraFiles[index] != nil
+}
+
 func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[string]string, ports []string) (nativeLinuxPolicy, error) {
-	p := nativeLinuxPolicy{Ephemeral: w.nativeEphemeral, Env: environmentList(env), MetricCgroups: slices.Clone(w.nativeMetricCgroups)}
+	p := nativeLinuxPolicy{Ephemeral: w.nativeEphemeral, Env: environmentList(env), MetricCgroups: slices.Clone(w.nativeMetricCgroups), WarmPieceFD: nativeMainHasWarmFD(cmd)}
 	work, err := nativeCanonical(work)
 	if err != nil {
 		return p, err

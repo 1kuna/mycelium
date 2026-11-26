@@ -191,7 +191,12 @@ func TestM3StopEventsCoverMachineSession(t *testing.T) {
 			t.Fatal("missing concurrent attempts")
 		}
 		demand := &Job{ID: "event-production", Spec: spec("production")}
-		q.stopBatchFor(q.s.Jobs[a.ID], demand)
+		if err := q.update(func() error {
+			q.stopBatchFor(q.s.Jobs[a.ID], demand)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
 		if err := q.Cancel(b.ID); err != nil {
 			t.Fatal(err)
 		}

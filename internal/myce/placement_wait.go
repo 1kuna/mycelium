@@ -10,7 +10,7 @@ import (
 // resolved envelopes as placement. Network and preparation failures are useful
 // diagnostics; unrelated platforms, devices and qualifications are not.
 func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
-	if j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next < len(j.Spec.FanOut.Pieces) {
+	if j.Spec.childFanOut() && j.FanOut != nil && j.FanOut.Next < len(j.Spec.FanOut.Pieces) {
 		// Dispatch adds the piece arguments before looking up its exact estimate.
 		piece := *j
 		piece.Spec.Args = append(slices.Clone(j.Spec.Args), j.Spec.FanOut.Pieces[j.FanOut.Next].Args...)
@@ -199,7 +199,7 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 // A fully dispatched parent is an aggregate. Its pieces own any remaining
 // placement waits, including when one of them holds an accelerator card.
 func fanOutDispatchedHold(j *Job) *Hold {
-	if j.Spec.FanOut == nil || j.FanOut == nil || len(j.FanOut.Children) == 0 || j.FanOut.Next < len(j.Spec.FanOut.Pieces) {
+	if !j.Spec.childFanOut() || j.FanOut == nil || len(j.FanOut.Children) == 0 || j.FanOut.Next < len(j.Spec.FanOut.Pieces) {
 		return nil
 	}
 	detail := fmt.Sprintf("%d/%d pieces accepted", len(j.FanOut.Results), len(j.Spec.FanOut.Pieces))
@@ -264,7 +264,7 @@ func (q *Queue) maintainDeadEndWaits() {
 	now := q.clock.Now()
 	for _, j := range q.liveJobs() {
 		// A fan-out parent is the placement unit until its first piece exists.
-		started := j.Spec.FanOut != nil && j.FanOut != nil && len(j.FanOut.Children) > 0
+		started := j.Spec.childFanOut() && j.FanOut != nil && len(j.FanOut.Children) > 0
 		if j.State != "queued" || cancelled(j) || started || j.Batch != nil || !dependencyReady(j) || j.Attempt > 0 && !j.ReleaseConfirmed {
 			continue
 		}

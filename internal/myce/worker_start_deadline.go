@@ -69,6 +69,8 @@ func (w Worker) controlHandshake(path string, in, out any) (time.Time, error) {
 		}
 		started := c.clock().Now()
 		var body json.RawMessage
+		// In shared mode each retry probes a fresh turn. The mutation
+		// remains exact-custody and idempotent if its prior reply was lost.
 		err := c.Call(ctx, "POST", path, in, &body)
 		measured := latency.observe(path, c.clock().Now().Sub(started))
 		if ctx.Err() != nil {
@@ -132,7 +134,12 @@ func (w Worker) authorizeStartWithCustody(j Job, session string, custody *native
 		NativeLaunch             string   `json:"native_launch_protocol"`
 	}
 	done := timing.within(launchStartedRPC)
-	request := workerStartedRequest{Result: Result{LaunchTimings: timing.snapshot(), InputsStagedAt: j.InputsStagedAt, StagingTimings: j.StagingTimings, Machine: w.Machine.ID, Session: session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, Custody: custody}
+	result := Result{LaunchTimings: timing.snapshot(), InputsStagedAt: j.InputsStagedAt, StagingTimings: j.StagingTimings, Machine: w.Machine.ID, Session: session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
+	// The client negotiates optional timing fields on the legacy Result type.
+	var request any = result
+	if custody != nil {
+		request = workerStartedRequest{Result: result, Custody: custody}
+	}
 	requested, err := w.controlHandshake("/api/workers/started", request, &reply)
 	done()
 	if err != nil {

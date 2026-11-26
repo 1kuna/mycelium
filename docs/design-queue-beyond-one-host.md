@@ -183,7 +183,8 @@ handover timing from measured commit, network and start latency.
    status and worker/client reconnect using more than one endpoint. On the
    real NAS, qualify service support, restart and flush durability, and
    measure latency during file I/O. Verify a broken Mac mount does not block
-   queue writes or other machines. No new shared authority serves clients yet.
+   queue writes or other machines ([qualification plan](shared-queue-nas-qualification.md)).
+   No new shared authority serves clients yet.
 3. **Stage 3, switch authority once and prove the upgrade path.** Briefly
    hold old queue writes, settle committed work and import the final
    consistent state. Fence the old writer before enabling the shared mode.
