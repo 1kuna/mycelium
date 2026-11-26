@@ -622,7 +622,7 @@ func TestWarmPiecesCleanPressureStopRequeues(t *testing.T) {
 	run := warmStart(t, q, m, parent.ID)
 	receipt := warmSuccess(t, q, run, warmNext(t, q, run, "a"))
 	if err := q.updateRequest(t.Context(), func() error {
-		q.stopForPoolPressure(q.s.Jobs[parent.ID], "fixture demand")
+		q.stopForPoolPressure(q.s.Jobs[parent.ID], PriorityPreemption{Demand: "fixture demand"})
 		return nil
 	}, nil); err != nil {
 		t.Fatal(err)
@@ -648,7 +648,7 @@ func TestWarmPiecesCleanPressureStopReportsFullResult(t *testing.T) {
 	run := warmStart(t, q, m, parent.ID)
 	warmSuccess(t, q, run, warmNext(t, q, run, "a"))
 	if err := q.updateRequest(t.Context(), func() error {
-		q.stopForPoolPressure(q.s.Jobs[parent.ID], "fixture demand")
+		q.stopForPoolPressure(q.s.Jobs[parent.ID], PriorityPreemption{Demand: "fixture demand"})
 		return nil
 	}, nil); err != nil {
 		t.Fatal(err)
