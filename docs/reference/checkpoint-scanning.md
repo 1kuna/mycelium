@@ -89,8 +89,12 @@ waits at least ten times its measured whole-sequence cost. Cost: an otherwise
 idle failed share may remain cached for five minutes. Actual I/O failures and
 local OS mount inventory still fence immediately; metadata success cannot clear
 a data-read fault. Pending calls retain one owner and the existing 30s
-no-operation-progress fence. Failed mount probes back off from at least five
-minutes. These admission/host-health checks never inspect job progress.
+no-operation-progress fence. While a root is withheld, probes are spaced by
+their observed cost, not the idle period: failed retries start at one probe
+cost and double up to one 30s stall allowance, and each recovery confirmation
+follows one cost after the previous fresh success. A host returns to
+storage-backed work within about one stall allowance of storage returning
+(#2132). These admission/host-health checks never inspect job progress.
 
 | Path / consumer | #1671 | This change / remaining rate |
 | --- | --- | --- |

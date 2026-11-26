@@ -204,9 +204,10 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 		limit = max(time.Nanosecond, time.Duration(hi*float64(time.Second)))
 	}
 	completed := false
+	var r hostMountResult
 	if p.pending != nil {
 		select {
-		case r := <-p.pending:
+		case r = <-p.pending:
 			p.pending, completed = nil, true
 			if p.storage != nil && !p.storage.storageResult(p, r, now) {
 				completed = false
@@ -222,16 +223,8 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 				if errors.As(r.err, &recovery) {
 					p.last.Reason = string(recovery)
 				}
-				// Failed attempts spread retries by their observed cost and repeated
-				// failure spacing. No universal mount-recovery deadline is assumed.
-				p.retryDelay = max(p.period, max(limit, max(r.latency, p.retryDelay*2)))
-				p.nextProbe = now.Add(p.retryDelay)
 			} else {
 				p.failure = nil
-				p.retryDelay, p.nextProbe = 0, time.Time{}
-				if p.period > 0 {
-					p.nextProbe = now.Add(max(p.period, 10*r.latency))
-				}
 			}
 		default:
 		}
@@ -271,6 +264,18 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 	if completed && len(base) >= hostHealthWarmup && result.LatencySeconds > limit.Seconds() && result.Reason == "" {
 		result.Reason = "mount_probe_slow"
 	}
+	if !completed && result.LatencySeconds == 0 && result.Reason == "" {
+		result.Reason = "mount_probe_pending"
+	}
+	if !completed && result.Reason == "" {
+		// A cached success is not fresh recovery evidence.
+		result.Reason = p.reason
+	} else {
+		result = p.confirm(result, completed)
+	}
+	if completed {
+		p.schedule(now, r, limit)
+	}
 	if !now.Before(p.nextProbe) {
 		p.pending, p.started = make(chan hostMountResult, 1), now
 		p.progressed.Store(&now)
@@ -307,15 +312,60 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 			done <- hostMountResult{latency: time.Since(started), err: err, generation: generation, dataProof: data}
 		}()
 	}
-	if !completed && result.LatencySeconds == 0 && result.Reason == "" {
-		result.Reason = "mount_probe_pending"
+	return result
+}
+
+// schedule spaces the next access after a completed one. It runs after
+// confirm, so it sees whether this result finished a recovery.
+//
+// While withheld (a failed or stalled episode, or an active storage fault this
+// probe owns), spacing comes from the observed probe cost, never the healthy
+// idle period: a five-minute idle period times the consecutive confirmations
+// kept recovered hosts out of storage-backed work for over ten minutes after
+// the NAS returned. Waiting at least one probe cost keeps a probe's duty cycle
+// at or below one half while withheld. Confirmations are still separate fresh
+// completions, any failure still resets them, and one request stays
+// outstanding at a time, so a stalled kernel call is never duplicated.
+//
+// Failed retries start at that cost and double, so an outage costs
+// logarithmically many failed attempts. The doubling stops at the per-operation
+// stall allowance, which already bounds how long a NAS operation may go
+// without progress (#234). Storage that has returned is therefore retried
+// within one allowance, or one failed attempt's own cost if that is longer.
+func (p *hostMountProbe) schedule(now time.Time, r hostMountResult, limit time.Duration) {
+	cost := max(limit, r.latency)
+	if r.err != nil {
+		p.retryDelay = max(cost, min(2*p.retryDelay, checkpointAvailabilityStallBudget))
+		p.nextProbe = now.Add(p.retryDelay)
+		return
 	}
-	// A cached success is not fresh recovery evidence.
-	if !completed && result.Reason == "" {
-		result.Reason = p.reason
-		return result
+	healthy := time.Time{}
+	if p.period > 0 {
+		healthy = now.Add(max(p.period, 10*r.latency))
 	}
-	return p.confirm(result, completed)
+	if p.withheld() {
+		// Space a confirmation from the success's completion, not from the
+		// sampling tick that noticed it, so each one costs one tick, not two.
+		// It is never later than a healthy root's next access.
+		finished := p.started.Add(r.latency)
+		if finished.After(now) {
+			finished = now
+		}
+		p.nextProbe = finished.Add(cost)
+		if healthy.Before(p.nextProbe) {
+			p.nextProbe = healthy
+		}
+		return
+	}
+	p.retryDelay, p.nextProbe = 0, healthy
+}
+
+func (p *hostMountProbe) withheld() bool {
+	if mountHealthWithholds(p.reason) {
+		return true
+	}
+	state := p.backingFault()
+	return state != nil && state.fault.Active && state.owner == p.root
 }
 
 func mountHealthWithholds(reason string) bool {
