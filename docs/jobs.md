@@ -506,11 +506,11 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `queue --shared-authority-password-file` | empty | Private file (mode 600) holding the authority password |
 | `queue --file-store` | `DB.files` | Authoritative file store; every shared-queue member uses the same one (`myce install queue --file-store` saves it) |
 | `queue --checkpoints` | `./checkpoints` | Shared root; create on mounted NAS first |
-| `queue --restart-grace` | `3m` | Worker reconciliation after queue restart |
+| `queue --restart-grace` | `3m` | Worker reconciliation after queue restart; also how long an announced worker restart holds its attempts |
 | `queue --production-infrastructure-retries` | `2` | Maximum production infrastructure requeues (clamped to 2; zero disables) |
-| `queue --production-loss-timeout` | `5s` | Production loss detection |
-| `queue --deadline-loss-timeout` | `20s` | Deadline loss detection |
-| `queue --experiment-loss-timeout` | `60s` | Experiment loss detection |
+| `queue --production-loss-timeout` | `0` | Minimum production loss allowance; zero learns it from check-in timing |
+| `queue --deadline-loss-timeout` | `0` | Minimum deadline loss allowance; zero learns it from check-in timing |
+| `queue --experiment-loss-timeout` | `0` | Minimum experiment loss allowance; zero learns it from check-in timing |
 | `join --name` | Hostname | Unique stable worker name |
 | `join --host-id` | OS hostname | Physical host identity; every per-card worker on the same machine must use the same stable value |
 | `host placement HOST --last-resort=true\|false` | `false` | Queue-owned placement policy; ordinary admissible hosts first, unchanged MY-18 order within each group, immediate fallback without waiting or reservation; may change while enabled. For model calls, a ready or loading engine on a last-resort host beats a cold ordinary host (readiness before value). |
@@ -618,8 +618,10 @@ acknowledgements. See [submission/cancellation](design-proposal.md#submission-id
 and [examples](jobs.md#keyed-submission-and-cancellation).
 
 `GET /api/status`, `GET /api/jobs/ID`, `POST /api/jobs` (JSON job spec),
-`POST /api/jobs/ID/cancel`, `GET /api/jobs/ID/logs?after=SEQ`, and
-`POST /api/workers/NAME/leave` (`{"now":false}` or `true`) require bearer auth.
+`POST /api/jobs/ID/cancel`, `GET /api/jobs/ID/logs?after=SEQ`,
+`POST /api/workers/NAME/leave` (`{"now":false}` or `true`) and
+`POST /api/workers/NAME/restart` (`{"session":"..."}`, sent by a stopping
+worker) require bearer auth.
 The read-only HTML status page also requires authentication: use HTTP Basic
 username `myce` with the fleet token as the password.
 

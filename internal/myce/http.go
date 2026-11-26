@@ -532,6 +532,15 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		setLogRequestEvidence(r, batch.Chunks)
 		respondOperation(w, map[string]bool{"ok": true}, a.Queue.appendLogBatch(batch, r.Context()), "worker_log_invalid")
 	})
+	mux.HandleFunc("POST /api/workers/{id}"+workerRestartPath, func(w http.ResponseWriter, r *http.Request) {
+		var c struct {
+			Session string `json:"session"`
+		}
+		if !decode(w, r, &c) {
+			return
+		}
+		respondOperation(w, map[string]bool{"ok": true}, a.Queue.AnnounceRestart(r.PathValue("id"), c.Session, r.Context()), "worker_restart_invalid")
+	})
 	mux.HandleFunc("POST /api/workers/{id}/leave", func(w http.ResponseWriter, r *http.Request) {
 		var c struct {
 			Now bool `json:"now"`

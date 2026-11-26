@@ -475,7 +475,11 @@ on this server, plus the body's transfer time at the slowest measured
 throughput, raised by server `Retry-After` signals. A route with no answer yet
 uses the server's other upload route. The server also measures its own create
 and chunk service and sends it to new clients in an HTTP 102 hint, so a slow
-store's first request from a new job is not abandoned. With no evidence at all,
+store's first request from a new job is not abandoned. The final PATCH also
+reports each completed publication step (sync, rename, unlink) as HTTP 102
+progress, as it does verification reads, so slow publication on a busy share
+extends its wait while a step that hangs still runs out the window (#2171).
+Publication time stays part of that route's learned latency. With no evidence at all,
 the window is RFC 6298's one-second initial timer (sections 2.1/2.4). An
 abandoned response is not a latency sample: each consecutive abandonment
 doubles that route's window, up to RFC 6298's 60-second maximum without new

@@ -150,10 +150,18 @@ preparation/result I/O remain independent; bulk I/O never holds the queue lock.
 
 Worker TERM is a restart, not a leave. Installed workers, and foreground
 `myce join` on SIGTERM, stop commands, cut off result uploads at once and keep
-every unpublished result in the attempt spool. They send no leave, so the
-queue's ordinary loss timeouts still apply. The restarted worker keeps the same
-session, replays those results and resumes each upload at the queue's accepted
-tus offset (#2166). Ctrl-C on a foreground worker remains the planned leave.
+every unpublished result in the attempt spool. They send no leave. Instead
+they send `POST /api/workers/NAME/restart` with their session, waiting at most
+two check-in periods (at least one second) for it. The queue then holds that
+session's attempts for the queue's `--restart-grace` (3 minutes by default)
+instead of the learned loss allowance of about two check-in periods, which any
+service restart outlasts (#2172). The restarted worker's first check-in ends
+the hold, and the restart gap is not learned as check-in cadence. A worker
+whose notice did not arrive, or that dies without one, is still lost at the
+learned allowance; one that announced and never returns is lost when the grace
+runs out. The restarted worker keeps the same session, replays those results
+and resumes each upload at the queue's accepted tus offset (#2166). Ctrl-C on a
+foreground worker remains the planned leave.
 
 Spool reopen reconciles every saved attempt and buffered result before new
 admission. `recovering: true` blocks batch, model and preparation admission at
