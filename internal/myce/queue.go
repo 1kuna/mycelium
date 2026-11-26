@@ -135,6 +135,7 @@ type state struct {
 type Queue struct {
 	sharedWriter            *sharedQueueWriter // Set only for an active shared-queue proof turn.
 	uploadLocks             tus.Locker         // A shared member's in-memory tus locks; nil uses lock files.
+	configureUploads        func(*tus.Config)  // Tests shorten tusd's socket timeouts; nil keeps its defaults.
 	diskHost                string             // Physical hostname for co-located disk relief.
 	startupTrace            func(string)       // Startup only; controlled phase names, no state values.
 	startupReadWorkers      int

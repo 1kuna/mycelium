@@ -34,8 +34,9 @@ func (q *Queue) initShutdown() {
 func (q *Queue) shutdownRequests(next http.Handler) http.Handler {
 	q.initShutdown()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		closeCancelledConnection(w, r)
 		if q.stopping.Load() {
-			respond(w, nil, queueStopping())
+			respond(w, nil, queueStoppingBecause("queue_shutdown"))
 			return
 		}
 		ctx, cancel := context.WithCancel(r.Context())
@@ -64,7 +65,7 @@ func (q *Queue) shutdownRequests(next http.Handler) http.Handler {
 		}()
 		// Shutdown can race registration; do not begin work after its fence.
 		if q.stopping.Load() {
-			respond(w, nil, queueStopping())
+			respond(w, nil, queueStoppingBecause("queue_shutdown"))
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -73,6 +74,23 @@ func (q *Queue) shutdownRequests(next http.Handler) http.Handler {
 
 func queueStopping() error {
 	return &HTTPError{Status: 503, Code: "queue_stopping", Message: "queue is shutting down; retry the request"}
+}
+
+// The reason is logged with the rejection so a refusal in the field names
+// its cause; clients still see only queue_stopping.
+func queueStoppingBecause(reason string) error {
+	return &HTTPError{Status: 503, Code: "queue_stopping", Message: "queue is shutting down; retry the request", reason: reason}
+}
+
+// net/http derives each request's context from its connection's, and a read
+// error on the socket cancels the connection's for good, even when the
+// connection stays open (a timed-out background read). Every later request
+// on it then starts cancelled. Close such a connection after this reply so
+// the client's retry opens a fresh one (#2156).
+func closeCancelledConnection(w http.ResponseWriter, r *http.Request) {
+	if r.Context().Err() != nil {
+		w.Header().Set("Connection", "close")
+	}
 }
 
 // ShutdownServers drains every queue API transport concurrently within the
