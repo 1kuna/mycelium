@@ -210,6 +210,9 @@ func TestEfficiencyWastedAttemptsSplitByOutcome(t *testing.T) {
 	if retained.Attempts["lost"] != 2 || !retained.Since.Equal(now.Add(-10*24*time.Hour)) || retained.BurnedSeconds != 3*3600 {
 		t.Fatalf("retained=%+v", retained)
 	}
+	if got := wastedWindows(nil, now)[1].words(); got != "none retained" {
+		t.Fatal(got)
+	}
 	r := &EfficiencyReport{At: now, Wasted: rows, WastedWindows: windows}
 	text := strings.Join(r.Lines(), "\n")
 	if !strings.Contains(text, "3 stopped attempts that may have burned run time in the last 7 days") || !strings.Contains(text, "wasted 7d: 5 stopped attempts") || !strings.Contains(text, "2.0 attempt-hours burned") {

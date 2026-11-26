@@ -1118,6 +1118,9 @@ func (w WastedWindow) words() string {
 	if len(parts) > 0 {
 		detail = strings.Join(parts, ", ")
 	}
+	if w.Since.IsZero() {
+		return "none retained"
+	}
 	return fmt.Sprintf("%d stopped attempts %s to %s (%s); %.1f attempt-hours burned, %d with unknown burn", total, w.Since.UTC().Format(time.RFC3339), w.Through.UTC().Format(time.RFC3339), detail, w.BurnedSeconds/3600, w.UnknownBurn)
 }
 
