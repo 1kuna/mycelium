@@ -185,10 +185,6 @@ type ServiceConfig struct {
 	Queue                  string    `json:"queue"`
 	Listen                 string    `json:"listen"`
 	DiscoveryListen        string    `json:"discovery_listen,omitempty"`
-	// A queue with a shared authority runs as a shared-queue member. The
-	// password stays in its own private file, never in this config or argv.
-	SharedAuthority             string `json:"shared_authority,omitempty"`
-	SharedAuthorityPasswordFile string `json:"shared_authority_password_file,omitempty"`
 	NAS                    string    `json:"nas"`
 	Checkpoints            string    `json:"checkpoint_root"`
 	ModelRoot              string    `json:"model_root"`
@@ -208,6 +204,11 @@ type ServiceConfig struct {
 	Credentials            string    `json:"credentials"`
 	Service                string    `json:"service"`
 	Config                 string    `json:"config"`
+
+	// A queue with a shared authority runs as a shared-queue member. The
+	// password stays in its own private file, never in this config or argv.
+	SharedAuthority             string `json:"shared_authority,omitempty"`
+	SharedAuthorityPasswordFile string `json:"shared_authority_password_file,omitempty"`
 }
 
 // PlanInstall is pure. The command boundary supplies the OS account; omitted

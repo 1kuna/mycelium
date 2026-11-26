@@ -145,6 +145,7 @@ func TestJoiningAuthenticatesBeforeSendingCredential(t *testing.T) {
 		t.Fatal("credential leaked to impersonating endpoint")
 	}
 }
+
 // A worker repointed at its own host's member keeps using it, even when
 // discovery lists other members that serve the same fleet identity.
 func TestJoiningPrefersSavedLocalMember(t *testing.T) {
