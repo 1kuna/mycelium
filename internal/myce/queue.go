@@ -202,7 +202,8 @@ type Queue struct {
 
 	fileReferenceRevision      uint64
 	environmentRevision        uint64
-	fileLifecycle              sync.RWMutex // Reference publication versus unlink; acquire before q.mu.
+	fileLifecycle              sync.RWMutex // Reference publication versus collection; acquire before q.mu.
+	fileCollection             sync.Mutex   // One job-file collection pass at a time; never held by requests.
 	fileRetention              time.Duration
 	fileCollectionDeferred     bool // q.mu; warn once per contiguous deferred streak.
 	files                      *FileStore

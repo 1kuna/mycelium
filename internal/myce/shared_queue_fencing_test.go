@@ -737,56 +737,83 @@ func proofOpenSharedQueue(t *testing.T, a *sharedQueueAuthority, dir, name strin
 	return q, turn
 }
 
-// Shared mode has no unlink path. Another coordinator turn may have verified
-// these bytes for a reference it has yet to commit, and no member's local
-// lifecycle lock can fence that turn.
-func TestSharedQueuePostgresNeverUnlinksJobFiles(t *testing.T) {
+// A stale collector's move can land after a successor commits a reference to
+// the same bytes. The move only hides them: a reader restores them, and the
+// successor's pass purges unreferenced bytes and drops the duplicate entry.
+func TestSharedQueuePostgresReclaimRestoresLateMove(t *testing.T) {
 	pg := startProofPostgres(t)
 	a := pg.authority(t)
 	dir := t.TempDir()
+	ctx := t.Context()
 	clock := proofClock()
 	old, first := proofOpenSharedQueue(t, a, dir, "old", clock)
-	body := []byte("shared custody fixture")
-	ref := FileRef{SHA256: fmt.Sprintf("%x", sha256.Sum256(body)), SizeBytes: int64(len(body))}
-	path := old.files.blob(ref)
-	if err := os.WriteFile(path, body, 0600); err != nil {
+	if err := a.renew(ctx, first, time.Minute, true); err != nil {
 		t.Fatal(err)
 	}
-	// Single-queue retention collects this unreferenced upload now.
+	// Both uploads are past retention and publication grace.
 	at := clock.Now().Add(-2 * DefaultFileRetention)
-	if err := os.Chtimes(path, at, at); err != nil {
-		t.Fatal(err)
+	write := func(content string) FileRef {
+		body := []byte(content)
+		ref := FileRef{SHA256: fmt.Sprintf("%x", sha256.Sum256(body)), SizeBytes: int64(len(body))}
+		if err := os.WriteFile(old.files.blob(ref), body, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(old.files.blob(ref), at, at); err != nil {
+			t.Fatal(err)
+		}
+		return ref
 	}
+	unreferenced, kept := write("unreferenced shared bytes"), write("shared custody fixture")
 	if err := old.update(func() error {
-		old.s.JobInputUploads = map[string]time.Time{ref.SHA256: at}
+		old.s.JobInputUploads = map[string]time.Time{unreferenced.SHA256: at, kept.SHA256: at}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := old.reclaimJobFilesContext(t.Context()); err != nil {
+	moving, land := make(chan struct{}), make(chan struct{})
+	old.files.beforeTrash = func(entry string) {
+		if strings.HasPrefix(filepath.Base(entry), kept.SHA256) {
+			close(moving)
+			<-land
+		}
+	}
+	done := make(chan error, 1)
+	go func() { done <- old.reclaimJobFilesContext(context.Background()) }()
+	<-moving
+	// The old turn ends while its move is stalled, and the successor commits
+	// a reference to the bytes the move is about to hide.
+	if err := a.renew(ctx, first, 0, false); err != nil {
 		t.Fatal(err)
 	}
-	if old.reclaimForAdmission(t.Context(), uint64(len(body))) {
-		t.Error("capacity relief reported freed bytes")
-	}
-	if err := old.files.verify(t.Context(), ref); err != nil {
-		t.Fatalf("the current turn unlinked eligible bytes: %v", err)
-	}
-	// The old turn's collector runs after the successor verified and
-	// committed a reference to the same bytes.
-	if err := a.renew(t.Context(), first, 0, false); err != nil {
+	next, second := proofOpenSharedQueue(t, a, dir, "next", clock)
+	if err := a.renew(ctx, second, time.Minute, true); err != nil {
 		t.Fatal(err)
 	}
-	next, _ := proofOpenSharedQueue(t, a, dir, "next", clock)
 	s := proofSpec("keeper")
-	s.Files = FileManifest{"input": ref}
+	s.Files = FileManifest{"input": kept}
 	if _, err := next.Submit(s); err != nil {
 		t.Fatal(err)
 	}
-	if err := old.reclaimJobFilesContext(t.Context()); err != nil {
+	close(land)
+	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if err := next.files.verify(t.Context(), ref); err != nil {
-		t.Fatalf("the successor's committed input lost its bytes: %v", err)
+	if _, err := os.Stat(next.files.blob(kept)); !os.IsNotExist(err) {
+		t.Fatalf("the late move did not land: %v", err)
+	}
+	if err := next.files.verify(ctx, kept); err != nil {
+		t.Fatalf("a reader did not restore the committed input: %v", err)
+	}
+	if err := next.reclaimJobFilesContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(next.files.blob(unreferenced)); !os.IsNotExist(err) {
+		t.Fatalf("unreferenced bytes were not purged: %v", err)
+	}
+	if entries, err := next.files.trashEntries(); err != nil || len(entries) != 0 {
+		t.Fatalf("trash entries remain: %v %v", entries, err)
+	}
+	if err := next.files.verify(ctx, kept); err != nil {
+		t.Fatalf("the committed input lost its bytes: %v", err)
 	}
 }

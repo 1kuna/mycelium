@@ -140,11 +140,13 @@ retryable refusal for new submissions that need file verification or
 publication. Plain work can continue. The local upload spool stays with its
 member across coordinator turns, so retired handlers can drain independently.
 
-Shared mode never deletes job file bytes. Expiry still updates records, but
-published blobs and interrupted uploads stay on the file store. Another
-coordinator turn may have verified the same bytes for a reference it has
-not yet committed, and one member's lock cannot fence that. Reclaim across
-turns is Stage 3 work.
+Shared mode collects job files online like the single queue
+([trash and restore](files.md#see-and-release-project-file-holdings)). A former
+coordinator's move or unlink can still land after its turn ends. Moves only
+hide bytes, which readers and the next pass restore. Only the current turn
+holder deletes a trash entry, after checking its turn in PostgreSQL. Each
+deletion targets a unique trash name, or an interrupted upload, never a
+published blob path.
 
 PostgreSQL stores an ordered versioned row log. Each replica commits the cursor
 with the applied rows. The proof starts from sequence zero or an already bound

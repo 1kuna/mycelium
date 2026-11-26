@@ -153,6 +153,7 @@ type FileStore struct {
 	handler                     http.Handler
 	uploadLocker                tus.Locker
 	syncDir                     func(string) error // Durability failure injection.
+	beforeTrash                 func(string)       // Fixtures may block a collector's move.
 	expired                     func(string, ...context.Context) bool
 	lifecycle                   *sync.RWMutex
 	clock                       Clock
@@ -205,7 +206,7 @@ func (q *Queue) prepareFileStore(root string, limit int64, reserve uint64, contr
 	if err = noModelSymlinks(root, false); err != nil {
 		return nil, err
 	}
-	for _, dir := range []string{root, filepath.Join(root, "blobs"), filepath.Join(root, "uploads")} {
+	for _, dir := range []string{root, filepath.Join(root, "blobs"), filepath.Join(root, "uploads"), filepath.Join(root, "trash")} {
 		if err = os.MkdirAll(dir, 0700); err != nil {
 			return nil, err
 		}
@@ -287,9 +288,6 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 	return nil
 }
 func (s *FileStore) blob(ref FileRef) string { return filepath.Join(s.root, "blobs", ref.SHA256) }
-func (s *FileStore) verify(ctx context.Context, ref FileRef) error {
-	return verifyFile(ctx, s.blob(ref), ref)
-}
 
 // Publication/HEAD callers hold lifecycle.RLock. Refresh even deduplicated
 // bytes: they may be about to acquire a new job or attempt reference.
@@ -662,6 +660,7 @@ func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request, metadata b
 		}
 	}
 	path := filepath.Join(s.root, "blobs", hash)
+	s.restoreMissing(hash)
 	if err := noModelSymlinks(path, false); err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			failure("store_resolve", err)

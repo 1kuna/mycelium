@@ -320,6 +320,7 @@ func publishOutputDelivery(j Job, store *FileStore, path string, callbacks ...fu
 				return err
 			}
 			progress()
+			store.restoreMissing(files[name].SHA256)
 			src, err := os.Open(store.blob(files[name]))
 			if err != nil {
 				return err
