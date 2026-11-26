@@ -96,6 +96,7 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 				return e
 			}
 		}
+		s.changed(next.SHA256) // Inside the fence, like the allocation.
 		s.noteAllocation(next.SHA256, uint64(next.SizeBytes))
 	}
 	if err = s.verify(context.Background(), next); err != nil {

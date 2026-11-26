@@ -29,6 +29,7 @@ func (s *FileStore) trashBlob(hash string) (string, error) {
 	if s.beforeTrash != nil {
 		s.beforeTrash(entry)
 	}
+	defer s.changed(hash)
 	return entry, os.Rename(s.blob(FileRef{SHA256: hash}), entry)
 }
 
@@ -91,6 +92,7 @@ func (s *FileStore) restoreFrom(hash, entry string) error {
 		return err
 	}
 	defer in.Close()
+	defer s.changed(hash)
 	tmp, err := os.CreateTemp(filepath.Join(s.root, "uploads"), ".restore-")
 	if err != nil {
 		return err

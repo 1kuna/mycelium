@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tus/tusd/v2/pkg/filestore"
 	tus "github.com/tus/tusd/v2/pkg/handler"
 )
 
@@ -100,8 +99,10 @@ type storedPayload struct {
 	jobInput     bool
 }
 
-// Caller fences file-pair creation and internal bundle writes.
+// Caller fences file-pair creation and internal bundle writes, or is the
+// background re-walk, whose window currentInventory re-reads.
 func (s *FileStore) inventoryUnlocked(ctx context.Context) (map[string]storedPayload, error) {
+	s.inventoryWalks.Add(1)
 	out := map[string]storedPayload{}
 	for _, dir := range []string{"blobs", "uploads"} {
 		entries, err := os.ReadDir(filepath.Join(s.root, dir))
@@ -127,63 +128,69 @@ func (s *FileStore) inventoryUnlocked(ctx context.Context) (map[string]storedPay
 			if _, ok := out[hash]; ok {
 				continue
 			}
-			p := storedPayload{size: uint64(st.Size()), length: uint64(st.Size()), modified: st.ModTime(), upload: dir == "uploads"}
-			if p.upload {
-				if _, err := os.Lstat(filepath.Join(s.root, dir, hash+".info")); os.IsNotExist(err) {
-					if blob, e := os.Lstat(s.blob(FileRef{SHA256: hash})); e == nil && blob.Mode().IsRegular() {
-						p = storedPayload{size: uint64(blob.Size()), length: uint64(blob.Size()), modified: blob.ModTime()}
-					}
-					out[hash] = p
-					continue
-				} else if err != nil {
-					return nil, err
-				}
-				upload, err := filestore.New(filepath.Join(s.root, dir)).GetUpload(ctx, hash)
-				if err == nil {
-					info, err := upload.GetInfo(ctx)
-					if err != nil {
-						return nil, err
-					}
-					if info.Size < st.Size() {
-						return nil, errors.New("invalid upload length")
-					}
-					p.length = uint64(info.Size)
-					p.jobInput = jobInputUpload(info, hash)
-					meta, err := os.Lstat(filepath.Join(s.root, dir, hash+".info"))
-					if os.IsNotExist(err) {
-						if blob, e := os.Lstat(s.blob(FileRef{SHA256: hash})); e == nil && blob.Mode().IsRegular() {
-							out[hash] = storedPayload{size: uint64(blob.Size()), length: uint64(blob.Size()), modified: blob.ModTime()}
-							continue
-						}
-					}
-					if err != nil {
-						return nil, err
-					}
-					if !meta.Mode().IsRegular() {
-						return nil, errors.New("invalid upload metadata")
-					}
-					if meta.ModTime().After(p.modified) {
-						p.modified = meta.ModTime()
-					}
-				} else if !os.IsNotExist(err) {
-					// Publication may have removed the tus paths after the directory
-					// snapshot. Its authoritative blob must exist before that removal.
-					if errors.Is(err, tus.ErrNotFound) {
-						blob, statErr := os.Lstat(s.blob(FileRef{SHA256: hash}))
-						if statErr == nil && blob.Mode().IsRegular() {
-							p = storedPayload{size: uint64(blob.Size()), length: uint64(blob.Size()), modified: blob.ModTime()}
-						} else {
-							return nil, err
-						}
-					} else {
-						return nil, err
-					}
-				}
+			p, err := s.storedPayloadAt(ctx, dir, hash, st)
+			if err != nil {
+				return nil, err
 			}
 			out[hash] = p
 		}
 	}
 	return out, nil
+}
+
+// st is the regular file dir/hash.
+func (s *FileStore) storedPayloadAt(ctx context.Context, dir, hash string, st os.FileInfo) (storedPayload, error) {
+	p := storedPayload{size: uint64(st.Size()), length: uint64(st.Size()), modified: st.ModTime(), upload: dir == "uploads"}
+	if !p.upload {
+		return p, nil
+	}
+	if _, err := os.Lstat(filepath.Join(s.root, dir, hash+".info")); os.IsNotExist(err) {
+		if blob, e := os.Lstat(s.blob(FileRef{SHA256: hash})); e == nil && blob.Mode().IsRegular() {
+			p = storedPayload{size: uint64(blob.Size()), length: uint64(blob.Size()), modified: blob.ModTime()}
+		}
+		return p, nil
+	} else if err != nil {
+		return p, err
+	}
+	upload, err := s.getUpload(ctx, hash)
+	if err == nil {
+		info, err := upload.GetInfo(ctx)
+		if err != nil {
+			return p, err
+		}
+		if info.Size < st.Size() {
+			return p, errors.New("invalid upload length")
+		}
+		p.length = uint64(info.Size)
+		p.jobInput = jobInputUpload(info, hash)
+		meta, err := os.Lstat(filepath.Join(s.root, dir, hash+".info"))
+		if os.IsNotExist(err) {
+			if blob, e := os.Lstat(s.blob(FileRef{SHA256: hash})); e == nil && blob.Mode().IsRegular() {
+				return storedPayload{size: uint64(blob.Size()), length: uint64(blob.Size()), modified: blob.ModTime()}, nil
+			}
+		}
+		if err != nil {
+			return p, err
+		}
+		if !meta.Mode().IsRegular() {
+			return p, errors.New("invalid upload metadata")
+		}
+		if meta.ModTime().After(p.modified) {
+			p.modified = meta.ModTime()
+		}
+	} else if !os.IsNotExist(err) {
+		// Publication may have removed the tus paths after the directory
+		// snapshot. Its authoritative blob must exist before that removal.
+		if !errors.Is(err, tus.ErrNotFound) {
+			return p, err
+		}
+		blob, statErr := os.Lstat(s.blob(FileRef{SHA256: hash}))
+		if statErr != nil || !blob.Mode().IsRegular() {
+			return p, err
+		}
+		p = storedPayload{size: uint64(blob.Size()), length: uint64(blob.Size()), modified: blob.ModTime()}
+	}
+	return p, nil
 }
 
 func (s *FileStore) diskCapacity(ctx context.Context) (FileStoreStatus, map[string]storedPayload, error) {
@@ -195,7 +202,7 @@ func (s *FileStore) diskCapacity(ctx context.Context) (FileStoreStatus, map[stri
 	}
 	defer s.uploadFilesMu.RUnlock()
 	status := FileStoreStatus{Store: "queue-file-store", LimitBytes: uint64(s.limit), ProductionReserveBytes: s.productionReserve, UnidentifiedWritesMayUseReserve: s.productionReserve > 0, UnidentifiedReserveAdmittedBytes: s.unidentifiedReserveAdmitted.Load()}
-	payloads, err := s.inventoryUnlocked(ctx)
+	payloads, err := s.currentInventory(ctx)
 	if err != nil {
 		return status, nil, err
 	}
@@ -596,7 +603,7 @@ func (q *Queue) reclaimInterruptedUpload(ctx context.Context, store *FileStore, 
 		}
 	}
 	if !marked {
-		upload, err := filestore.New(filepath.Dir(path)).GetUpload(ctx, hash)
+		upload, err := store.getUpload(ctx, hash)
 		if errors.Is(err, tus.ErrNotFound) {
 			return nil
 		}
@@ -623,6 +630,7 @@ func (q *Queue) reclaimInterruptedUpload(ctx context.Context, store *FileStore, 
 		}
 	}
 	// Remove metadata first so leftover data cannot be resumed or refreshed.
+	defer store.changed(hash)
 	for _, suffix := range []string{".info", ""} {
 		if err := os.Remove(path + suffix); err != nil && !os.IsNotExist(err) {
 			return err
