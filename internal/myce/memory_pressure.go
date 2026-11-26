@@ -1,6 +1,9 @@
 package myce
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 const memoryPressureCause = "memory_pressure"
 
@@ -165,6 +168,62 @@ func (q *Queue) poolPressureBefore(a, b *Job) bool {
 		return a.StartedAt == nil
 	}
 	return a.ID < b.ID
+}
+
+// A memory_pressure stop shows the job's charge did not protect the pool
+// beside its peers. Later attempts run alone on the pool rather than restart
+// at the same charge beside the same contention (#2091). A clean completion
+// ends the job; its exact peak sizes later runs of the workload as usual.
+func pressureStoppedBefore(j *Job, attempt int) bool {
+	for _, h := range j.AttemptHistory {
+		if h.Attempt < attempt && (h.PriorityStop != nil && h.PriorityStop.Cause == memoryPressureCause ||
+			h.ExecutionCause != nil && h.ExecutionCause.Class == memoryPressureCause) {
+			return true
+		}
+	}
+	return false
+}
+
+// An attempt that already ran alone after a pressure stop met pressure with no
+// Mycelium peer to blame. Running it alone again would meet the same pressure,
+// so hold it for its owner with the measured peak and the stop comparison.
+func (q *Queue) holdAlonePressure(j *Job) bool {
+	if cancelled(j) || wallTimeStopped(j) || yieldMatches(j) || !pooledMemory(j) || !memoryPools(j).RAM.Alone || !pressureStoppedBefore(j, j.Attempt) {
+		return false
+	}
+	reason := q.alonePressureReason(j)
+	q.requeue(j, reason, false)
+	if j.State == "queued" {
+		q.pauseJob(j, JobPause{Reason: reason})
+	}
+	return true
+}
+
+func (q *Queue) alonePressureReason(j *Job) string {
+	gb := func(v *float64) string {
+		if v == nil {
+			return "unmeasured"
+		}
+		return fmt.Sprintf("%.3f GiB", *v)
+	}
+	var peak AttemptMemoryPeak
+	for _, f := range j.MemoryAttempts {
+		if f.Attempt == j.Attempt && f.Machine == j.Machine && f.Session == j.Session && f.MemoryPeak != nil {
+			peak = *f.MemoryPeak
+		}
+	}
+	reason := fmt.Sprintf("memory_capacity: attempt %d was stopped for memory_pressure while running alone; measured peak host %s, cgroup %s, device %s; charge %.3f GiB",
+		j.Attempt, gb(peak.HostGB), gb(peak.CgroupGB), gb(peak.DeviceGB), memoryPools(j).RAM.ChargeGB)
+	if m := q.s.Machines[j.Machine]; m != nil {
+		reason += fmt.Sprintf(" of a %.3f GiB pool allowance", q.poolAllowance(m))
+	}
+	if stop := priorityStop(j); stop != nil && stop.MemoryPool != nil {
+		d := stop.MemoryPool
+		reason += fmt.Sprintf("; queue trigger %s with %.3f GiB available, %.3f GiB reserve, %.3f GiB forecast loss", d.Trigger, d.AvailableGB, d.ReserveGB, max(d.NextLossGB, d.GraceLossGB))
+	} else {
+		reason += "; kernel memory kill outside the attempt's own limit"
+	}
+	return reason + "; resume runs it alone again"
 }
 
 func (q *Queue) stopForPoolPressure(victim *Job, stop PriorityPreemption) {

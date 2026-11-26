@@ -204,6 +204,9 @@ func (q *Queue) resolvePooledSize(j *Job, m *Machine) pooledCandidateSize {
 		pools.RAM.TypicalGB = max(pools.RAM.TypicalGB, minimumHostMemoryGB)
 		pools.RAM.ChargeGB = max(pools.RAM.ChargeGB, pools.RAM.TypicalGB)
 	}
+	if pressureStoppedBefore(j, j.Attempt+1) {
+		pools.RAM.Alone = true // The charge itself is unchanged (#2091).
+	}
 	if j.Spec.MemoryLimitGB != nil {
 		pools.LimitGB = *j.Spec.MemoryLimitGB
 		pools.RAM.TypicalGB = min(pools.RAM.TypicalGB, pools.LimitGB)
@@ -582,6 +585,9 @@ func pooledSampleLimited(p *AttemptMemoryPeak) bool {
 }
 
 func (q *Queue) requeueMemoryPressure(j *Job) {
+	if q.holdAlonePressure(j) {
+		return
+	}
 	e := q.memoryEvidencePending
 	if e == nil {
 		e = q.memoryEvidence
