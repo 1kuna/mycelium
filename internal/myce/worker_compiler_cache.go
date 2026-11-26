@@ -84,13 +84,16 @@ func (c *workerCompilerCache) budgetCandidates(ctx context.Context) ([]diskBudge
 		return nil, nil
 	}
 	return []diskBudgetCandidate{{path: path, used: info.ModTime(), trim: func(ctx context.Context, enough func() (bool, error), limit uint64) error {
+		now := c.cache.Clock.Now()
 		lock, err := c.cache.tryLock(key + ".use")
-		if err != nil || lock == nil {
+		if err != nil {
 			return err
 		}
-		defer unlockEnvironment(lock)
-		pinned, err := sharedInputPinned(c.cache.Root, key)
-		if err != nil || pinned {
+		if lock != nil {
+			defer unlockEnvironment(lock)
+		}
+		cutoff, err := compilerTrimCutoff(c.cache.Root, key, now, lock == nil)
+		if err != nil {
 			return err
 		}
 		current, err := os.Lstat(path)
@@ -100,13 +103,51 @@ func (c *workerCompilerCache) budgetCandidates(ctx context.Context) ([]diskBudge
 		if !os.SameFile(info, current) || !info.ModTime().Equal(current.ModTime()) {
 			return nil
 		}
-		return trimCompilerObjects(ctx, path, current, enough, limit)
+		return trimCompilerObjects(ctx, path, current, enough, limit, cutoff)
 	}}}, nil
+}
+
+// compilerCacheGrace keeps what the latest builds just wrote, as the gate's own
+// cache trim does. goCacheUseRefresh is Go's mtimeInterval: a cache lookup
+// refreshes an entry's mtime only when it is older than an hour.
+const (
+	compilerCacheGrace = 10 * time.Minute
+	goCacheUseRefresh  = time.Hour
+)
+
+// Objects modified before the returned time may go. An idle cache (exclusive
+// use lock held, no pins) keeps only the grace period. While attempts hold the
+// cache, every object one of them looked up has an mtime no older than the
+// oldest pin's creation minus Go's refresh interval, so older objects are ones
+// no current attempt has used. Go's own cache trim relies on the same mtime
+// refresh while other go commands run. A long attempt therefore protects only
+// what it could have touched, not the whole cache. A holder that has locked but
+// not yet pinned started now. Unreadable pins protect everything.
+func compilerTrimCutoff(root, key string, now time.Time, locked bool) (time.Time, error) {
+	since, inUse := now, locked
+	entries, err := os.ReadDir(filepath.Join(root, "pins", key))
+	if err != nil && !os.IsNotExist(err) {
+		return time.Time{}, err
+	}
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			return time.Time{}, err
+		}
+		inUse = true
+		if info.ModTime().Before(since) {
+			since = info.ModTime()
+		}
+	}
+	if inUse {
+		since = since.Add(-goCacheUseRefresh)
+	}
+	return since.Add(-compilerCacheGrace), nil
 }
 
 // Go stores independent action and data files in 256 hex shards. Trim only
 // known regular objects. Gate tooling can keep auxiliary state beside them.
-func trimCompilerObjects(ctx context.Context, path string, info fs.FileInfo, enough func() (bool, error), limit uint64) error {
+func trimCompilerObjects(ctx context.Context, path string, info fs.FileInfo, enough func() (bool, error), limit uint64, cutoff time.Time) error {
 	root, err := os.OpenRoot(path)
 	if err != nil {
 		return err
@@ -154,14 +195,17 @@ func trimCompilerObjects(ctx context.Context, path string, info fs.FileInfo, eno
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if !entry.used.Before(cutoff) {
+			return nil // Oldest first: every remaining object is newer.
+		}
 		if enough, err := enough(); enough || err != nil {
 			return err
 		}
+		info, err := root.Lstat(entry.path)
+		if err != nil || !os.SameFile(entry.info, info) || !info.ModTime().Equal(entry.used) {
+			continue // A lookup refreshed it since the scan.
+		}
 		if limit > 0 {
-			info, err := root.Lstat(entry.path)
-			if err != nil || !os.SameFile(entry.info, info) || !info.ModTime().Equal(entry.used) {
-				continue
-			}
 			stat := info.Sys().(*syscall.Stat_t)
 			if stat.Nlink != 1 || stat.Blocks <= 0 {
 				continue

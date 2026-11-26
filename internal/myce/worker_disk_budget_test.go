@@ -465,6 +465,11 @@ func TestWorkerCompilerCacheCustodyAndPublicBudget(t *testing.T) {
 		}
 		clock.Advance(time.Second)
 	}
+	// Past the trim grace period but younger than Go's use-refresh interval,
+	// so a holder of the cache may still be using it; recent stays in grace.
+	if err := os.Chtimes(old, clock.Now().Add(-compilerCacheGrace-time.Minute), clock.Now().Add(-compilerCacheGrace-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
 	assertPresent := func(file string) {
 		t.Helper()
 		if _, err := os.Stat(file); err != nil {
