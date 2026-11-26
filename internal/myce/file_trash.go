@@ -106,7 +106,7 @@ func (s *FileStore) restoreFrom(hash, entry string) error {
 	if hex.EncodeToString(sum.Sum(nil)) != hash {
 		return errors.New("trash entry does not match its digest")
 	}
-	if err := os.Link(tmp.Name(), blob); err != nil && !os.IsExist(err) {
+	if err := s.linkBlob(tmp.Name(), blob, hash); err != nil && !os.IsExist(err) {
 		return err
 	}
 	return s.syncDir(filepath.Dir(blob))
