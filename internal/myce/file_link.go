@@ -20,6 +20,24 @@ import (
 // under a blob name. The temporary name is new for every call, so a trash
 // entry is never renamed back into blobs (#2125).
 func (s *FileStore) linkBlob(src, dst, hash string) error {
+	return s.placeBlob(src, dst, hash, copyBlob)
+}
+
+// moveBlob places a verified upload, which publication unlinks next anyway.
+// Where links are refused it renames the upload into place rather than
+// copying it: a copy reads and writes the whole file, which on a share
+// outlasted the final PATCH's response window (#2155). Only a rename across
+// devices copies.
+func (s *FileStore) moveBlob(src, dst, hash string) error {
+	return s.placeBlob(src, dst, hash, func(src, dst, hash string) error {
+		if err := os.Rename(src, dst); !errors.Is(err, syscall.EXDEV) {
+			return err
+		}
+		return copyBlob(src, dst, hash)
+	})
+}
+
+func (s *FileStore) placeBlob(src, dst, hash string, fallback func(src, dst, hash string) error) error {
 	link := os.Link
 	if s.link != nil {
 		link = s.link
@@ -28,10 +46,11 @@ func (s *FileStore) linkBlob(src, dst, hash string) error {
 	if err == nil || !linkUnsupported(err) {
 		return err
 	}
+	// Recheck just before the fallback, as copyBlob does before its rename.
 	if _, e := os.Lstat(dst); e == nil {
 		return &os.LinkError{Op: "link", Old: src, New: dst, Err: os.ErrExist}
 	}
-	return copyBlob(src, dst, hash)
+	return fallback(src, dst, hash)
 }
 
 func linkUnsupported(err error) bool {

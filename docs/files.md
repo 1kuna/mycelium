@@ -453,6 +453,21 @@ tail and total size. A changed source fails even when another uploader published
 the original blob, including when the source is restored before its 404 arrives.
 Keep input files unchanged until the upload finishes.
 
+From the release containing #2155, the queue hashes each upload as its PATCHes
+write it. After each PATCH's bytes are synced, it records the running SHA-256
+beside the upload in the store. That way a restart, or a successor coordinator
+mounting the store elsewhere, continues the same record. The final PATCH
+compares digests and publishes without reading the file back. Where the
+filesystem refuses hard links, it renames the upload into place instead of
+copying it. Some uploads fall back to the full SHA-256 read on the final PATCH,
+as before:
+- the record is missing, damaged or more than 16 MiB behind the upload, for
+  example an upload in flight across this upgrade;
+- a writer rewrote bytes the record had already covered;
+- the recorded digest does not match.
+A blob HEAD or GET still rechecks the stored bytes before certifying or
+serving them.
+
 File transfers have no default whole-request deadline. The per-socket progress
 window learns byte service time and gaps. Upload PATCH windows additionally use
 the upload's observed request round-trip/service time (four service periods of

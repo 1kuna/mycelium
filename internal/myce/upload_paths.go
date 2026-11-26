@@ -34,6 +34,11 @@ func (s *FileStore) getUpload(ctx context.Context, id string) (tus.Upload, error
 }
 
 func (s rootedUploads) NewUpload(ctx context.Context, info tus.FileInfo) (tus.Upload, error) {
+	// A digest record left by an earlier upload of these bytes must never
+	// vouch for this one's (upload_digest.go).
+	if err := os.Remove(filepath.Join(s.Path, info.ID+uploadDigestSuffix)); info.ID != "" && err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
 	upload, err := s.FileStore.NewUpload(ctx, info)
 	if err != nil {
 		return nil, err
@@ -86,13 +91,20 @@ func (u *rootedUpload) GetInfo(context.Context) (tus.FileInfo, error) { return u
 // bytes at each offset. A former coordinator's write that lands after a
 // successor resumed, or even published the upload (a hard link to the same
 // file), repeats bytes already there. An append would add them at the end.
-func (u *rootedUpload) WriteChunk(_ context.Context, offset int64, src io.Reader) (int64, error) {
+// Each write also extends the upload's running SHA-256 (upload_digest.go).
+func (u *rootedUpload) WriteChunk(ctx context.Context, offset int64, src io.Reader) (int64, error) {
 	f, err := os.OpenFile(u.path, os.O_WRONLY, u.perm)
 	if err != nil {
 		return 0, err
 	}
-	n, err := io.Copy(io.NewOffsetWriter(f, offset), src)
+	digest := openUploadDigest(ctx, u.path, offset)
+	var w io.Writer = io.NewOffsetWriter(f, offset)
+	if digest.hash != nil {
+		w = hashingWriter{w, digest.hash}
+	}
+	n, err := io.Copy(w, src)
 	u.info.Offset += n
+	digest.record(f, offset+n, u.perm)
 	if err != nil {
 		f.Close()
 		return n, err
