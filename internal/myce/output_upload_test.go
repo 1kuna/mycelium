@@ -251,15 +251,19 @@ func (c fastHintDeadlineConn) SetReadDeadline(end time.Time) error {
 
 // ResponseRecorder treats the first 1xx as final; a real HTTP transport consumes
 // informational responses and returns the later final response to its caller.
+// reads counts verification reads the 102 reports name; publication steps also
+// report progress (#2171) but read nothing back.
 type outputUploadRecorder struct {
 	*httptest.ResponseRecorder
-	progress int
+	reads int
 }
 
 func (w *outputUploadRecorder) WriteHeader(status int) {
 	if status >= 100 && status < 200 {
 		if status == http.StatusProcessing {
-			w.progress++
+			operations, _ := strconv.Atoi(w.Header().Get("X-Myce-Verification-Reads"))
+			steps, _ := strconv.Atoi(w.Header().Get(publicationStepsHeader))
+			w.reads = max(w.reads, operations-steps)
 		}
 		return
 	}
@@ -313,7 +317,7 @@ func TestOutputUploadCreationAndReconciliation(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			requests, progress := 0, 0
+			requests, reads := 0, 0
 			c := Client{URL: "http://queue.invalid", Clock: q.clock, singleAttempt: true, HTTP: &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
 				requests++
 				w := &outputUploadRecorder{ResponseRecorder: httptest.NewRecorder()}
@@ -330,7 +334,7 @@ func TestOutputUploadCreationAndReconciliation(t *testing.T) {
 				} else {
 					store.serveUpload(w, r)
 				}
-				progress += w.progress
+				reads += w.reads
 				return w.Result(), nil
 			})}}
 			err := c.uploadOutputFile(context.Background(), path, ref)
@@ -347,9 +351,9 @@ func TestOutputUploadCreationAndReconciliation(t *testing.T) {
 				t.Fatal("fresh file request count", requests)
 			}
 			// Publication compares the digest hashed during transfer; it reads
-			// nothing back, so it has no verification progress to report (#2155).
-			if mode == "new" && progress != 0 {
-				t.Fatal("creation-with-upload re-read the file to publish it; verification reports:", progress)
+			// nothing back, so it reports no verification reads (#2155).
+			if mode == "new" && reads != 0 {
+				t.Fatal("creation-with-upload re-read the file to publish it; verification reads:", reads)
 			}
 		})
 	}
