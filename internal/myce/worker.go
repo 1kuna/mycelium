@@ -1439,6 +1439,7 @@ func (w Worker) Run(stop context.Context) error {
 	w.Client.stagingWire = &atomic.Bool{}
 	w.Client.launchTimingWire = &atomic.Bool{}
 	w.Client.hostRAMGateWire = &atomic.Bool{}
+	w.Client.sharedWire = &atomic.Bool{}
 	w.launchCtx = stop
 	if w.ServiceConfig != nil {
 		w.serviceStop = stop

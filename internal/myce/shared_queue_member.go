@@ -482,6 +482,8 @@ func (m *sharedQueueMember) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	proposal, mutation := sharedWorkerControl(r.URL.Path)
 	confirm := r.Method == http.MethodPost && r.URL.Path == sharedTurnPath
 	if (proposal || mutation || confirm) && r.Header.Get(sharedVerifyHeader) != sharedControlProtocol {
+		// Advertise the protocol so a worker can switch after a cutover.
+		w.Header().Set(sharedVerifyHeader, sharedControlProtocol)
 		respond(w, nil, &HTTPError{Status: http.StatusUpgradeRequired, Code: "worker_protocol_mismatch"})
 		return
 	}

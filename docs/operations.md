@@ -1634,6 +1634,148 @@ under the recovery policy and remove only verified rebuildable staging. Keep the
 source service disabled. A cold restore still requires positive source fencing;
 backup age defines possible data loss, not a promise of seamless failover.
 
+## Shared queue cutover and rollback
+
+Stage 3 of the [shared queue design](design-queue-beyond-one-host.md#shortest-path-from-today)
+([#1176](https://github.com/1kuna/mycelium/issues/1176)) moves queue authority
+from the single SQLite queue to the PostgreSQL authority, and back if needed.
+Two commands do it. Both reuse the stage 1 row changes: cutover imports one
+consistent snapshot as ordinary changes, and rollback replays the committed
+changes with the same code every member uses.
+
+```sh
+myce queue cutover  --db DB --checkpoints CHECKPOINT_ROOT --file-store FILE_STORE [--verify-only] [--acknowledge DIGEST]
+myce queue rollback --db NEW_DB --checkpoints CHECKPOINT_ROOT --file-store FILE_STORE [--acknowledge DIGEST]
+```
+
+Both read the authority from `MYCE_SHARED_QUEUE_PG_DSN`, which the operator
+sets from the private credential store; never print it. Shared members still
+run only as the loopback laptop proof (`--shared-queue-proof`, local
+PostgreSQL). The live cutover waits for a release that lifts that limit
+and for NAS qualification (#1176). Rehearse first on
+a laptop with PostgreSQL `initdb` and `pg_ctl` on `PATH`:
+
+```sh
+MYCE_GATE_REQUIRE_POSTGRES=1 go test ./internal/myce -count=1 \
+  -run 'TestSharedQueueCutoverAndRollbackRehearsal|TestSharedQueueCutoverVerifiesFileBytes'
+```
+
+The rehearsal cuts over a single queue running a real CPU attempt, kills the
+original queue process, then proves submit, assignment, wait, cancel,
+checkpoint resume and verified result fetch through two members. It rolls
+back and proves the same six operations on the restored single queue. The
+same attempt keeps its number, session and start time across both switches.
+
+**Before you start.**
+
+- Upgrade every worker first. A worker switches its control protocol on its
+  own when its endpoint starts answering as a shared member, and switches back
+  after rollback. It keeps running attempts and needs no restart.
+- Create a fresh, empty PostgreSQL database for the authority.
+- Use the file store and checkpoint root that every member will mount. If the
+  queue's file store is local today, copy it there first with the
+  [consistent copy](#consistent-copy-and-restore) procedure and pass the copy's
+  path as `--file-store`.
+- [Preserve one complete generation](#preserve-one-complete-generation). The
+  commands do not move the joining identity, configuration, model catalog or
+  the per-host idle history beside the database.
+
+### Preflight without downtime
+
+1. Copy the live database into a new, empty private directory with
+   `sqlite3 DB ".backup 'COPY_DIR/queue.db'"`.
+2. Run `myce queue cutover --verify-only --db COPY_DIR/queue.db --checkpoints
+   CHECKPOINT_ROOT --file-store FILE_STORE`. It hashes every retained input,
+   result, file-store checkpoint, pending delivery and frozen bundle that the
+   database references. It skips worker-local custody and the configured model
+   catalog, whose bytes are not in the store.
+
+Expected output:
+
+```text
+files: checked N references, B bytes, 0 problems
+verify-only: nothing changed
+```
+
+Time this run. The real cutover repeats the same hashing while writes are
+held, so this is the hold estimate. **Abort point:** any `file missing` or
+`file mismatch` line. Restore those bytes from backup and run the preflight
+again. Never delete a reference or a file to make the report clean.
+
+### Cut over
+
+1. Stop and disable the single queue service so its supervisor cannot restart
+   it, and verify the process is gone. This holds writes: running attempts
+   continue and workers retry, while submissions and new starts wait.
+2. Run `myce queue cutover --db DB --checkpoints CHECKPOINT_ROOT --file-store
+   FILE_STORE`. It takes the database lock and refuses with `stop the single
+   queue before cutover` while anything else holds it. It opens the queue once,
+   as a normal restart would, verifies file references as in the preflight, then
+   fences the database and imports it in one PostgreSQL transaction.
+
+   Expected output:
+
+   ```text
+   files: checked N references, B bytes, 0 problems
+   cutover complete: imported sequence 1..K; the single queue database is fenced; start the shared members
+   ```
+
+   **Abort points.**
+   - Exit 3 with problem lines and `--acknowledge DIGEST` means nothing changed.
+     Restore the bytes and rerun, or restart the single queue. Rerun with
+     `--acknowledge DIGEST` only when the listed items are knowingly lost; the
+     digest accepts exactly that report.
+   - `the PostgreSQL authority already holds queue changes` means the database
+     is not fresh.
+   - `a shared member holds the coordinator turn` means a member started too
+     early. Stop it and use a fresh database.
+   - If the command is interrupted, run it again. It finishes the same import,
+     or prints `cutover already complete`.
+3. The original database is now fenced. Single-queue startup refuses it with
+   `this database is a shared queue copy or was cut over to the shared queue`.
+   It stays a valid member copy at sequence K. Keep it; do not delete it.
+4. Start the members with the same file store and checkpoint root, each with
+   its own new local database. The first one replays changes 1..K, takes the
+   coordinator turn and serves. Check that `myce status` through a member shows
+   the expected jobs and that running jobs keep their attempt, session and start
+   time. Point each worker at its local member and give external clients the
+   member endpoints ([client failover](development.md#external-client-failover)).
+   In the rehearsal, the first member listens on the original queue's address.
+
+### Roll back
+
+1. Run `myce queue rollback --db NEW_DB --checkpoints CHECKPOINT_ROOT
+   --file-store FILE_STORE`, where `NEW_DB` does not exist yet. It first takes
+   the coordinator turn permanently. Members stay up but refuse every decision,
+   and a coordinator mid-write cannot commit. It then replays every committed
+   change into a staging copy, verifies file references, and publishes `NEW_DB`
+   by an atomic rename.
+
+   Expected output:
+
+   ```text
+   files: checked N references, B bytes, 0 problems
+   rollback complete: shared writers fenced; restored sequence 1..H into NEW_DB; start the single queue on it
+   ```
+
+   **Abort points.**
+   - `NEW_DB already exists` means you named an existing database, which may be
+     an older one. Choose a new path. The command only restores from the
+     authority's latest commit and never reads a backup.
+   - Exit 3 with problem lines means the fence holds and nothing was published.
+     Fix the bytes or acknowledge the digest, then rerun. A rerun keeps the
+     fence and replays again.
+2. Stop the members. Start the single queue on `NEW_DB` with the preserved
+   identity, configuration, file store and checkpoint root. Workers switch back
+   on their own. Verify jobs, running attempts and worker reconnection before
+   resuming submissions.
+3. **Never start the pre-cutover database or a backup older than the last
+   shared commit.** It would lose acknowledged jobs, results, cancellations and
+   custody. The pre-cutover database refuses single-queue startup for this
+   reason.
+4. A fenced authority never serves again. To cut over later, start from a
+   fresh PostgreSQL database.
+
 ## Monitoring and failures
 
 `myce status`, the HTML page and `GET /api/status` show queue projections with

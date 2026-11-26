@@ -75,7 +75,7 @@ func run(args []string) error {
 	return runWithProbe(args, probe)
 }
 
-const topLevelUsage = "usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|init|run|profile|submit|spec|policy|parity|status|efficiency|logs|ledger|wait|result|cancel|pause|resume|resolve-native|resolve-custodian-startup|dev|version|release|skill|file|extension|env|portability|detect|service|model|telemetry|gpu-telemetry-client|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options."
+const topLevelUsage = "usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|init|run|profile|submit|spec|policy|parity|status|efficiency|logs|ledger|wait|result|cancel|pause|resume|resolve-native|resolve-custodian-startup|dev|version|release|skill|file|extension|env|portability|detect|service|model|telemetry|gpu-telemetry-client|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\n       myce queue cutover|rollback --db DB --checkpoints DIR --file-store DIR\nRun myce COMMAND --help for command options."
 
 func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if len(args) > 0 && args[0] == "_inspect-custodian-handles" {
@@ -246,6 +246,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	if args[0] == "model" {
 		return modelCommand(args[1:])
+	}
+	if args[0] == "queue" && len(args) > 1 && (args[1] == "cutover" || args[1] == "rollback") {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return sharedQueueMigrationCommand(ctx, args[1], args[2:], os.Stdout)
 	}
 	switch args[0] {
 	case "dev", "queue", "join", "submit", "usage", "status", "efficiency", "cancel", "leave", "ledger", "logs":

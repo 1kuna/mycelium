@@ -769,6 +769,10 @@ type Client struct {
 	// SharedQueueProof requires durable acceptance of worker control decisions
 	// through the worker's local member.
 	SharedQueueProof bool
+	// sharedWire lets a worker follow a cutover or rollback without a
+	// restart: a shared member advertises its control protocol on refusal,
+	// and only a single queue answers worker control without a turn.
+	sharedWire       *atomic.Bool
 	publication      *publicationProgress
 	publicationWire  *atomic.Bool
 	inventoryWire    *atomic.Bool
@@ -921,9 +925,10 @@ func (c Client) callOnceShared(ctx context.Context, method, path string, in, out
 	if workerProtocolEndpoint(path) {
 		req.Header.Set("X-Myce-Start-Gate", startGateProtocol)
 	}
-	proposal, mutation := sharedWorkerControl(path)
-	proposal, mutation = c.SharedQueueProof && proposal, c.SharedQueueProof && mutation
-	confirm := c.SharedQueueProof && method == http.MethodPost && path == sharedTurnPath
+	control, effect := sharedWorkerControl(path)
+	shared := c.SharedQueueProof || c.sharedWire != nil && c.sharedWire.Load()
+	proposal, mutation := shared && control, shared && effect
+	confirm := shared && method == http.MethodPost && path == sharedTurnPath
 	if proposal || mutation || confirm {
 		req.Header.Set(sharedVerifyHeader, sharedControlProtocol)
 	}
@@ -942,6 +947,20 @@ func (c Client) callOnceShared(ctx context.Context, method, path string, in, out
 		return err
 	}
 	defer res.Body.Close()
+	if c.sharedWire != nil && !c.SharedQueueProof && (control || effect) {
+		if !shared && res.StatusCode == http.StatusUpgradeRequired && res.Header.Get(sharedVerifyHeader) == sharedControlProtocol {
+			// The endpoint is now a shared member. Repeat under its protocol.
+			c.sharedWire.Store(true)
+			_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
+			return c.callOnceShared(ctx, method, path, in, out, "")
+		}
+		if shared && res.StatusCode < 300 && res.Header.Get(sharedTurnHeader) == "" {
+			// A member always names its turn here; this reply is a single
+			// queue's own decision, so take it as one.
+			c.sharedWire.Store(false)
+			proposal, mutation = false, false
+		}
+	}
 	advertisesWorkerProtocol := workerProtocolEndpoint(path) && !(mutation && handover == "")
 	if c.stagingWire != nil && advertisesWorkerProtocol {
 		c.stagingWire.Store(res.Header.Get(stagingPhasesHeader) == stagingPhasesProtocol)
