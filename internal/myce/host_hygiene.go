@@ -267,7 +267,9 @@ type hostHealthMonitor struct {
 
 // Version the on-disk probe evidence only. The wire shape is unchanged, and
 // other host evidence and historical diagnostics survive an upgraded probe.
-const hostMountProbeVersion = "metadata-idle-v3"
+// v4: the checkpoint probe also fsyncs and reads back past the client cache
+// (#2174), so its latency band is relearned rather than judged by v3's.
+const hostMountProbeVersion = "metadata-idle-v4"
 
 type hostHealthDisk struct {
 	HostHealth

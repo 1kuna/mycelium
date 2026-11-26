@@ -48,8 +48,12 @@ subdirectory of the share, with the model root elsewhere on that share.
 
 Workers reuse the host-hygiene mount probe for each configured checkpoint/NAS
 root. Checkpoint health reuses the existing admission access check: stat the
-root, rewrite one fixed per-host `.myce-probe-<host>-worker` file in place,
-close it and read it back. With a known missing mount, recovery triggers the OS
+root, rewrite one fixed per-host `.myce-probe-<host>-worker` file in place
+with a fresh nonce, fsync and close it, then reopen it, drop the client's
+cached pages and read the nonce back. A failed fsync or different stored bytes
+report the root unavailable: a Linux CIFS client once failed every write-back
+of the probe while serving its read-back from the page cache, so the probe
+passed for 15 hours (#2174). With a known missing mount, recovery triggers the OS
 automount with metadata access and waits for mount inventory before retrying
 the write probe. Probes never delete files: a NAS recycle bin keeps
 every SMB delete, and a create-then-remove probe filled one bin folder until

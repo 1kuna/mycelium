@@ -1438,9 +1438,10 @@ human-action code and an existing health wake; the worker never prompts for or
 stores credentials. See [worker mount recovery](reference/nas-mounts.md#worker-mount-recovery-linux-and-macos)
 for platform ownership, cold-start deadlines and stuck-request behavior.
 
-The worker heartbeat allows 750 ms for its checkpoint-root probe, including
-creating and removing a temporary file; slower or blocked probes report the root
-unavailable. One-shot onboarding allows ten seconds per filesystem operation
+The worker heartbeat waits 750 ms for its checkpoint-root probe (rewrite, fsync
+and cache-bypassed read-back of its fixed file). A slower probe that keeps
+completing operations retains the previous result; one operation stalled for
+30 seconds, or any failed step, reports the root unavailable. One-shot onboarding allows ten seconds per filesystem operation
 and has a cancellable 15-second total validation limit, including mount inventory.
 Standalone mount selection retains its five-second limit, including dry runs.
 Probe failures and recovery are logged on state changes. Worker

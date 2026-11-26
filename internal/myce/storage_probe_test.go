@@ -1,9 +1,14 @@
 package myce
 
 import (
+	"bytes"
 	"errors"
+	"io/fs"
+	"log"
 	"os"
 	"slices"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -93,24 +98,128 @@ func TestInstallProbeNeverRenamesTheWrittenFile(t *testing.T) {
 	}
 }
 
-// Health sampling and check-in admission can probe the same fixed file.
-// Hold a second writer after its truncate while the first reads it back.
-func TestStorageProbeConcurrentTruncateIsNotAnOutage(t *testing.T) {
+// Health sampling and check-in admission probe the worker's one fixed file
+// from the same process. The read-back compares this probe's nonce, so those
+// probes must serialize instead of truncating each other mid-check.
+func TestStorageProbeConcurrentProbesOfOneFileAllPass(t *testing.T) {
+	path := storageProbePath(t.TempDir(), ".myce-probe-", "worker")
+	var wg sync.WaitGroup
+	errs := make(chan error, 40)
+	for range 2 {
+		wg.Go(func() {
+			for range 20 {
+				errs <- probeStorageFile(path, plainStorageProbeOps(nil))
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("overlapping probes of one file reported an outage: %v", err)
+		}
+	}
+}
+
+func captureStorageProbeLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(old) })
+	return &buf
+}
+
+// #2174: a Linux CIFS client accepted every probe write into its page cache,
+// failed each write-back with EBADF and served the read-back from that cache,
+// so the worker probe passed for 15 hours. The worker probe must fsync and
+// report the failed write-back with its typed operation.
+func TestStorageProbeFailsWhenWriteBackFails(t *testing.T) {
+	logs := captureStorageProbeLog(t)
 	path := storageProbePath(t.TempDir(), ".myce-probe-", "worker")
 	ops := plainStorageProbeOps(nil)
 	ops.run = func(operation string, fn func() error) error {
-		if operation == "read" {
-			other, err := openStorageProbe(path)
-			if err != nil {
-				return err
-			}
-			defer other.Close()
-			return fn()
+		if operation == "fsync" {
+			return &os.PathError{Op: "sync", Path: path, Err: syscall.EBADF}
 		}
 		return fn()
 	}
-	if err := probeStorageFile(path, false, ops); err != nil {
-		t.Fatalf("concurrent probe truncate was reported as an outage: %v", err)
+	if err := probeStorageFile(path, ops); !errors.Is(err, syscall.EBADF) {
+		t.Fatalf("probe with failed write-back = %v, want EBADF", err)
+	}
+	if !strings.Contains(logs.String(), "operation=sync errno=9") {
+		t.Fatalf("failed write-back not logged with its operation: %q", logs.String())
+	}
+	if err := probeStorageFile(path, plainStorageProbeOps(nil)); err != nil {
+		t.Fatalf("healthy store failed the probe: %v", err)
+	}
+}
+
+// When the store's copy differs from what the client cached, the read-back
+// must see the store's copy and fail. The read hook stands in for the store:
+// it replaces the file with the server's bytes before the probe reads.
+func TestStorageProbeFailsWhenStoreCopyDiffers(t *testing.T) {
+	for name, server := range map[string]string{
+		"truncated, write lost": "", // #2174: the server file stayed 0 bytes.
+		"earlier probe's bytes": storageProbeRecord(),
+		"partial write":         storageProbePrefix,
+	} {
+		t.Run(name, func(t *testing.T) {
+			logs := captureStorageProbeLog(t)
+			path := storageProbePath(t.TempDir(), ".myce-probe-", "worker")
+			ops := plainStorageProbeOps(nil)
+			ops.run = func(operation string, fn func() error) error {
+				if operation == "read" {
+					if err := os.WriteFile(path, []byte(server), 0600); err != nil {
+						return err
+					}
+				}
+				return fn()
+			}
+			if err := probeStorageFile(path, ops); !errors.Is(err, errStorageProbeMismatch) {
+				t.Fatalf("probe over a differing store copy = %v, want mismatch", err)
+			}
+			if !strings.Contains(logs.String(), "operation=verify errno=0") {
+				t.Fatalf("mismatch not logged as verify: %q", logs.String())
+			}
+		})
+	}
+}
+
+// The read-back drops the client's cached pages for exactly the written range
+// on a fresh descriptor of the probe file, after the writer has closed.
+func TestStorageProbeReadBackBypassesClientCache(t *testing.T) {
+	path := storageProbePath(t.TempDir(), ".myce-probe-", "worker")
+	ops := plainStorageProbeOps(nil)
+	closed, calls := false, 0
+	run := ops.run
+	ops.run = func(operation string, fn func() error) error {
+		err := run(operation, fn)
+		if operation == "close" {
+			closed = true
+		}
+		return err
+	}
+	ops.bypass = func(file fs.File, offset, length int64) error {
+		calls++
+		info, err := file.Stat()
+		if err != nil {
+			return err
+		}
+		if !closed || info.Size() != int64(len(storageProbeRecord())) || offset != 0 || length != info.Size() {
+			t.Errorf("bypass closed=%v size=%d offset=%d length=%d", closed, info.Size(), offset, length)
+		}
+		return storageCacheBypass(file, offset, length)
+	}
+	if err := probeStorageFile(path, ops); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("cache bypass calls = %d, want 1", calls)
+	}
+	ops.bypass = func(fs.File, int64, int64) error { return syscall.EINVAL }
+	if err := probeStorageFile(path, ops); !errors.Is(err, syscall.EINVAL) {
+		t.Fatalf("failed cache bypass = %v, want the error", err)
 	}
 }
 
@@ -143,7 +252,7 @@ func TestStorageProbeFailuresReportUnavailable(t *testing.T) {
 		}
 		return fn()
 	}
-	if probeStorageFile(storageProbePath(t.TempDir(), ".myce-probe-", "queue"), true, readFail) == nil {
+	if probeStorageFile(storageProbePath(t.TempDir(), ".myce-probe-", "queue"), readFail) == nil {
 		t.Fatal("probe reported available after a failed read-back")
 	}
 }
