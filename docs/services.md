@@ -243,10 +243,17 @@ CUDA memory fields are unsupported (`[N/A]` on GB10 systems). Metal uses macOS
 then reduced by `--reserve-memory-gb` (start with 16 GiB on a large unified-memory CUDA worker). Resident models and
 running commands are
 already reflected in that reading; only not-yet-reflected loading reservations
-are subtracted by the queue. XPU/fake and explicit `--memory-mode fixed` use
-a configured budget minus reserve and account for our batch/model reservations
-once. Fixed budgets cannot observe external allocations: choose and maintain a
-conservative allowance. Live probe failures block new work and appear in status;
+are subtracted by the queue. A discrete XPU card offers the allocatable memory
+its Level Zero driver reports (below the physical size the driver keeps for
+itself), minus `--reserve-memory-gb`. An auto-mode `--memory-gb` caps that; a
+`--memory-mode fixed --memory-gb` value is used only for a card that reports no
+size, so a stale install value never undercuts or overstates detection. Set the
+XPU reserve to the card's idle `xpu-smi` memory reading: that figure includes
+`xpu-smi`'s own Level Zero client, the same footprint Mycelium's probes take on
+every card while jobs run. Fake workers and explicit `--memory-mode fixed` on
+other backends use the configured budget minus reserve. These budgets account
+for our batch/model reservations once and cannot observe external allocations:
+choose and maintain a conservative reserve. Live probe failures block new work and appear in status;
 see [memory modes and sources](reference/host-capacity.md#host-ram-admission-and-ceilings).
 Workers recheck before every command or
 model load. Each worker runs at most one batch, alongside models that fit.
@@ -363,8 +370,8 @@ and TERM share `stop_timeout` (default 10 seconds), followed by KILL and group
 verification. Failed unload retains its memory reservation and environment lease.
 
 Use one machine worker for all offered devices. For an XPU example,
-`join --name gpu-host-a --gpu xpu --device 0,1 --memory-mode fixed
---memory-gb REVIEWED_ALLOWANCE` offers two independent cards. Each server execution
+`join --name gpu-host-a --gpu xpu --device 0,1 --reserve-memory-gb
+MEASURED_RESERVE` offers two independent cards, each sized from its driver. Each server execution
 selects at most one. Device selectors apply per execution without changing global
 environment. For XPU, `ZE_AFFINITY_MASK` names physical cards while
 `ONEAPI_DEVICE_SELECTOR` uses indices after that mask: physical device `1`
