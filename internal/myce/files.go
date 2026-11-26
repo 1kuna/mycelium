@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/tus/tusd/v2/pkg/filelocker"
-	"github.com/tus/tusd/v2/pkg/filestore"
 	tus "github.com/tus/tusd/v2/pkg/handler"
 	"golang.org/x/exp/slog"
 )
@@ -144,6 +143,8 @@ type FileStore struct {
 	collection                  FileCollectionStatus
 	pressure                    atomic.Pointer[blockedFileStoreWrite]
 	uploadFilesMu               sync.RWMutex
+	inventory                   *fileInventory // Shared members only; nil walks per snapshot.
+	inventoryWalks              atomic.Uint64
 	creations                   map[string]*uploadCreation
 	allocationGeneration        uint64
 	completedAllocations        map[string]completedAllocation
@@ -213,9 +214,10 @@ func (q *Queue) prepareFileStore(root string, limit int64, reserve uint64, contr
 	}
 	s := &FileStore{inputClaim: q.inputClaimContext, checkAttempt: q.checkFileStoreAttempt, productionReserve: reserve, admit: q.admitFileUpload, admitCreation: q.admitFileCreation, explainRefusal: q.explainFileStoreRefusal, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
 	s.controlFiles = controlFiles
-	fs := filestore.New(filepath.Join(root, "uploads"))
-	fs.DirModePerm = 0700
-	fs.FileModePerm = 0600
+	if q.sharedWriter != nil {
+		s.inventory = &fileInventory{dirty: map[string]bool{}}
+	}
+	fs := s.uploads()
 	composer := tus.NewStoreComposer()
 	fs.UseIn(composer)
 	composer.UseCore(creationDataStore{DataStore: fs, mu: &s.uploadFilesMu, store: s})
@@ -292,6 +294,7 @@ func (s *FileStore) blob(ref FileRef) string { return filepath.Join(s.root, "blo
 // Publication/HEAD callers hold lifecycle.RLock. Refresh even deduplicated
 // bytes: they may be about to acquire a new job or attempt reference.
 func (s *FileStore) refreshBlob(path string) error {
+	defer s.changed(path)
 	now := s.clock.Now()
 	if err := os.Chtimes(path, now, now); err != nil {
 		return err
@@ -307,6 +310,7 @@ func (s *FileStore) publish(ctx context.Context, ref FileRef) error {
 		return uploadFailure(ctx, "upload_verify", err)
 	}
 	source := filepath.Join(s.root, "uploads", ref.SHA256)
+	defer s.changed(ref.SHA256)
 	if err := verifyFile(ctx, source, ref); err != nil {
 		return uploadFailure(ctx, "upload_verify", err)
 	}
@@ -368,7 +372,8 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid upload", 400)
 			return
 		}
-		upload, err := filestore.New(filepath.Join(s.root, "uploads")).GetUpload(r.Context(), id)
+		defer s.changed(id) // After any transfer or publication below.
+		upload, err := s.getUpload(r.Context(), id)
 		if err != nil {
 			if !errors.Is(err, tus.ErrNotFound) {
 				uploadFailure(r.Context(), "upload_metadata", err)
@@ -394,7 +399,11 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 			s.resumeUploadPublication(w, r, id)
 			return
 		}
-		s.handler.ServeHTTP(w, r)
+		if r.Method == http.MethodHead && r.Header.Get("Tus-Resumable") == "1.0.0" {
+			serveUploadHead(w, info)
+		} else {
+			s.handler.ServeHTTP(w, r)
+		}
 		if response.status >= 400 {
 			return
 		}
@@ -472,7 +481,7 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	if st, e := os.Stat(filepath.Join(s.root, "uploads", hash+".info")); e == nil && st.Mode().IsRegular() {
 		// A repeated create must match the immutable stored upload length.
-		upload, e := filestore.New(filepath.Join(s.root, "uploads")).GetUpload(r.Context(), hash)
+		upload, e := s.getUpload(r.Context(), hash)
 		if e != nil {
 			http.Error(w, "upload metadata unavailable", 503)
 			return

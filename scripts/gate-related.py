@@ -176,6 +176,12 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/install_manager.go'] = (
     'install_matrix_test.go', 'install_launchd_wait_test.go')
 
 
+# Upload path resolution and the shared member's store inventory (#2144).
+for source in ('file_inventory', 'upload_paths'):
+    SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = (
+        'shared_store_paths_test.go', 'file_capacity_test.go', 'files_test.go')
+
+
 # Detached custody uses shared platform-independent failure/control tests plus
 # an opt-in native-manager journey. Fleet policy lives in the normal-path tests.
 for source in ('worker_custodian', 'worker_custodian_darwin',

@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/tus/tusd/v2/pkg/filestore"
 	tus "github.com/tus/tusd/v2/pkg/handler"
 )
 
@@ -436,7 +435,7 @@ func (s *FileStore) legacyPartialInput(ctx context.Context, ref FileRef) (bool, 
 	if _, err := os.Lstat(s.blob(ref)); !os.IsNotExist(err) {
 		return false, err
 	}
-	upload, err := filestore.New(filepath.Join(s.root, "uploads")).GetUpload(ctx, ref.SHA256)
+	upload, err := s.getUpload(ctx, ref.SHA256)
 	if errors.Is(err, tus.ErrNotFound) {
 		return false, nil
 	}

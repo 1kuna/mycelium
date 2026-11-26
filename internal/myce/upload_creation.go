@@ -96,6 +96,7 @@ func (s creationDataStore) NewUpload(ctx context.Context, info tus.FileInfo) (tu
 	}
 	defer s.mu.Unlock()
 	upload, err := s.DataStore.NewUpload(ctx, info)
+	s.store.changed(info.ID) // Before readers can take the fence again.
 	if err == nil {
 		s.store.noteAllocation(info.ID, uint64(info.Size))
 	}

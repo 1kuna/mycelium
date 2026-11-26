@@ -476,6 +476,7 @@ func (m *sharedQueueMember) prepareStorageOnce(ctx context.Context, q *Queue) *F
 	if err != nil || m.cfg.verifyBundles(ctx, store, refs) != nil {
 		return nil
 	}
+	store.primeInventory(ctx)
 	q.fileLifecycle.Lock()
 	defer q.fileLifecycle.Unlock()
 	q.mu.Lock()

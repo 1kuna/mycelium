@@ -706,6 +706,12 @@ func TestSharedQueueMemberRetriesControlAfterPostgresTimeout(t *testing.T) {
 
 func proofOpenSharedQueue(t *testing.T, a *sharedQueueAuthority, dir, name string, clock Clock) (*Queue, sharedQueueTurn) {
 	t.Helper()
+	return proofOpenSharedQueueAt(t, a, dir, name, filepath.Join(dir, "store"), clock)
+}
+
+// root is where this member mounts the shared file store.
+func proofOpenSharedQueueAt(t *testing.T, a *sharedQueueAuthority, dir, name, root string, clock Clock) (*Queue, sharedQueueTurn) {
+	t.Helper()
 	path := filepath.Join(dir, name, "queue.db")
 	if err := PrepareStateRoots(filepath.Dir(path)); err != nil {
 		t.Fatal(err)
@@ -732,7 +738,6 @@ func proofOpenSharedQueue(t *testing.T, a *sharedQueueAuthority, dir, name strin
 		t.Fatal(err)
 	}
 	writer := &sharedQueueWriter{authority: a, turn: turn, timeout: m.timeout, sequence: turn.head}
-	root := filepath.Join(dir, "store")
 	q, err := openQueue(path, dir, clock, writer, lock, WithFileStore(root, 1<<30, true))
 	if err != nil {
 		t.Fatal(err)

@@ -8,13 +8,11 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/tus/tusd/v2/pkg/filestore"
 	tus "github.com/tus/tusd/v2/pkg/handler"
 )
 
@@ -230,7 +228,7 @@ func (s *FileStore) resumeUploadPublication(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	defer lock.Unlock()
-	upload, err := filestore.New(filepath.Join(s.root, "uploads")).GetUpload(ctx, id)
+	upload, err := s.getUpload(ctx, id)
 	if err != nil {
 		if errors.Is(err, tus.ErrNotFound) {
 			http.NotFound(w, r)
