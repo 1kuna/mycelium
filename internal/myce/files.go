@@ -221,9 +221,11 @@ func (q *Queue) prepareFileStore(root string, limit int64, reserve uint64, contr
 	composer := tus.NewStoreComposer()
 	fs.UseIn(composer)
 	composer.UseCore(creationDataStore{DataStore: fs, mu: &s.uploadFilesMu, store: s})
-	locker := filelocker.New(fs.Path)
-	s.uploadLocker = locker
-	locker.UseIn(composer)
+	s.uploadLocker = filelocker.New(fs.Path)
+	if q.uploadLocks != nil {
+		s.uploadLocker = q.uploadLocks
+	}
+	composer.UseLocker(s.uploadLocker)
 	h, err := tus.NewHandler(tus.Config{
 		BasePath: "/api/files/uploads/", StoreComposer: composer, DisableDownload: true, DisableTermination: true, DisableConcatenation: true,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -251,6 +253,11 @@ func (q *Queue) prepareFileStore(root string, limit int64, reserve uint64, contr
 	}
 	s.handler = http.StripPrefix("/api/files/uploads/", h)
 	return s, nil
+}
+
+// withUploadLocks gives a shared member's turn the member's upload locks.
+func withUploadLocks(locks tus.Locker) QueueOption {
+	return func(q *Queue) { q.uploadLocks = locks }
 }
 
 func (q *Queue) controlStorageFiles() controlStorageFiles {

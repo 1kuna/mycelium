@@ -19,6 +19,8 @@ import (
 // verbatim, so another member, or the same member after a remount, finds no
 // upload. The data file always sits beside its .info under this store's
 // uploads directory; resolve it there and ignore the recorded path (#2144).
+// Every upload is served as a rootedUpload, which writes at the offset tus
+// checked rather than appending (#2152).
 type rootedUploads struct{ filestore.FileStore }
 
 func (s *FileStore) uploads() rootedUploads {
@@ -29,6 +31,17 @@ func (s *FileStore) uploads() rootedUploads {
 
 func (s *FileStore) getUpload(ctx context.Context, id string) (tus.Upload, error) {
 	return s.uploads().GetUpload(ctx, id)
+}
+
+func (s rootedUploads) NewUpload(ctx context.Context, info tus.FileInfo) (tus.Upload, error) {
+	upload, err := s.FileStore.NewUpload(ctx, info)
+	if err != nil {
+		return nil, err
+	}
+	if info, err = upload.GetInfo(ctx); err != nil {
+		return nil, err
+	}
+	return &rootedUpload{info: info, path: filepath.Join(s.Path, info.ID), perm: s.FileModePerm}, nil
 }
 
 func (s rootedUploads) GetUpload(ctx context.Context, id string) (tus.Upload, error) {
@@ -45,10 +58,6 @@ func (s rootedUploads) GetUpload(ctx context.Context, id string) (tus.Upload, er
 		return nil, err
 	}
 	path := filepath.Join(s.Path, id)
-	if recorded := info.Storage[filestore.StorageKeyPath]; recorded == "" || recorded == path {
-		// Written on this mount: tusd's own upload, exactly as before.
-		return s.FileStore.GetUpload(ctx, id)
-	}
 	st, err := os.Stat(path)
 	if os.IsNotExist(err) {
 		return nil, tus.ErrNotFound
@@ -72,12 +81,17 @@ type rootedUpload struct {
 
 func (u *rootedUpload) GetInfo(context.Context) (tus.FileInfo, error) { return u.info, nil }
 
-func (u *rootedUpload) WriteChunk(_ context.Context, _ int64, src io.Reader) (int64, error) {
-	f, err := os.OpenFile(u.path, os.O_WRONLY|os.O_APPEND, u.perm)
+// WriteChunk writes at offset, where tus found the upload's length under its
+// lock. An upload's ID is its SHA-256, so every correct writer puts the same
+// bytes at each offset. A former coordinator's write that lands after a
+// successor resumed, or even published the upload (a hard link to the same
+// file), repeats bytes already there. An append would add them at the end.
+func (u *rootedUpload) WriteChunk(_ context.Context, offset int64, src io.Reader) (int64, error) {
+	f, err := os.OpenFile(u.path, os.O_WRONLY, u.perm)
 	if err != nil {
 		return 0, err
 	}
-	n, err := io.Copy(f, src)
+	n, err := io.Copy(io.NewOffsetWriter(f, offset), src)
 	u.info.Offset += n
 	if err != nil {
 		f.Close()

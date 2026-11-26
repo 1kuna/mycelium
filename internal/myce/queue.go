@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	tus "github.com/tus/tusd/v2/pkg/handler"
 	_ "modernc.org/sqlite"
 )
 
@@ -133,6 +134,7 @@ type state struct {
 }
 type Queue struct {
 	sharedWriter            *sharedQueueWriter // Set only for an active shared-queue proof turn.
+	uploadLocks             tus.Locker         // A shared member's in-memory tus locks; nil uses lock files.
 	diskHost                string             // Physical hostname for co-located disk relief.
 	startupTrace            func(string)       // Startup only; controlled phase names, no state values.
 	startupReadWorkers      int

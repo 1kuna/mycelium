@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tus/tusd/v2/pkg/memorylocker"
 )
 
 // SharedQueueMemberConfig runs one member of the shared queue. Each member
@@ -64,9 +66,16 @@ type sharedQueueMember struct {
 	timeout   time.Duration
 	closeIdle func()
 
-	spool     *uploadSpool // Owned by the member across all coordinator turns.
-	fileSetup sync.Mutex   // One outstanding setup even if the mount hangs across turns.
-	mu        sync.Mutex   // Protects local handler admission, never held for I/O.
+	spool *uploadSpool // Owned by the member across all coordinator turns.
+	// tus upload locks, in memory and also held across this member's turns
+	// (#2152). tusd's file lock needs hard links that keep one identity,
+	// which SMB shares lack, and trusts PIDs, which mean nothing on another
+	// host. Only the coordinator serves uploads; other members proxy to it.
+	// Retiring a turn interrupts its requests, and a former coordinator's
+	// late positional write repeats bytes already there (rootedUpload).
+	uploads   *memorylocker.MemoryLocker
+	fileSetup sync.Mutex // One outstanding setup even if the mount hangs across turns.
+	mu        sync.Mutex // Protects local handler admission, never held for I/O.
 	leader    *sharedQueueLeader
 }
 
@@ -186,7 +195,7 @@ func OpenSharedQueueMember(ctx context.Context, cfg SharedQueueMemberConfig) (*S
 		return nil, err
 	}
 	m := &sharedQueueMember{
-		cfg: cfg, authority: authority, replica: replica, lock: lock, owner: ID(),
+		cfg: cfg, authority: authority, replica: replica, lock: lock, owner: ID(), uploads: memorylocker.New(),
 		endpoint: strings.TrimRight(cfg.Endpoint, "/"), timeout: cfg.lease / 3, closeIdle: closeIdle,
 	}
 	if err := m.bindReplica(ctx); err != nil {
@@ -350,7 +359,7 @@ func (m *sharedQueueMember) promote(ctx context.Context, turn sharedQueueTurn) s
 	held := make(chan error, 1)
 	go func() { held <- m.holdTurn(hold, turn) }()
 	writer := &sharedQueueWriter{authority: m.authority, turn: turn, sequence: turn.head, timeout: m.timeout, spool: m.spool}
-	options := append([]QueueOption{WithFileStore(m.cfg.FileStore, m.cfg.FileStoreBytes, true)}, m.cfg.Options...)
+	options := append([]QueueOption{WithFileStore(m.cfg.FileStore, m.cfg.FileStoreBytes, true), withUploadLocks(m.uploads)}, m.cfg.Options...)
 	q, err := openQueue(m.cfg.Database, m.cfg.Checkpoints, m.cfg.Clock, writer, m.lock, options...)
 	if err != nil {
 		stopHold()
