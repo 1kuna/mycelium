@@ -612,9 +612,16 @@ func (m *sharedQueueMember) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		m.serveReplica(w, r)
 		return
 	}
+	closeCancelledConnection(w, r)
 	turn, err := m.current(r.Context())
 	if err != nil || !turn.ready {
-		respond(w, nil, queueStopping())
+		reason := "turn_not_ready"
+		if r.Context().Err() != nil {
+			reason = "request_cancelled"
+		} else if err != nil {
+			reason = "turn_unreadable"
+		}
+		respond(w, nil, queueStoppingBecause(reason))
 		return
 	}
 	proposal, mutation := sharedWorkerControl(r.URL.Path)
@@ -647,7 +654,7 @@ func (m *sharedQueueMember) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	expected := r.Header.Get(sharedProxyHeader)
 	if expected != "" && expected != strconv.FormatInt(turn.number, 10) {
-		respond(w, nil, queueStopping())
+		respond(w, nil, queueStoppingBecause("forwarded_turn_changed"))
 		return
 	}
 	m.mu.Lock()
@@ -659,13 +666,13 @@ func (m *sharedQueueMember) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	m.mu.Unlock()
 	if l == nil {
-		respond(w, nil, queueStopping())
+		respond(w, nil, queueStoppingBecause("turn_not_serving"))
 		return
 	}
 	defer l.requests.Done()
 	if r.Method == http.MethodGet && r.URL.Path == sharedTurnPath {
 		// The retired verification protocol can never authorize an effect.
-		respond(w, nil, queueStopping())
+		respond(w, nil, queueStoppingBecause("retired_turn_protocol"))
 		return
 	}
 	if proposal || mutation {
@@ -693,7 +700,7 @@ func (m *sharedQueueMember) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (m *sharedQueueMember) forward(w http.ResponseWriter, r *http.Request, turn sharedQueueTurn) {
 	target, err := url.Parse(turn.endpoint)
 	if err != nil || !validSharedEndpoint(turn.endpoint) || turn.endpoint == m.endpoint || r.Header.Get(sharedProxyHeader) != "" {
-		respond(w, nil, queueStopping())
+		respond(w, nil, queueStoppingBecause("forward_target_invalid"))
 		return
 	}
 	proxy := httputil.ReverseProxy{
@@ -703,7 +710,7 @@ func (m *sharedQueueMember) forward(w http.ResponseWriter, r *http.Request, turn
 			p.Out.Header.Set(sharedProxyHeader, strconv.FormatInt(turn.number, 10))
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
-			respond(w, nil, queueStopping())
+			respond(w, nil, queueStoppingBecause("forward_failed"))
 		},
 	}
 	proxy.ServeHTTP(w, r)
@@ -742,7 +749,7 @@ func (m *sharedQueueMember) serveReplica(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	if err != nil {
-		respond(w, nil, queueStopping())
+		respond(w, nil, queueStoppingBecause("replica_unreadable"))
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")

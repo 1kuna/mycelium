@@ -727,7 +727,11 @@ func respond(w http.ResponseWriter, v any, err error) {
 				body["state"], body["release"], body["acknowledged_at"] = "unknown", nil, nil
 			}
 		}
-		log.Printf("API rejection status=%d code=%s", status, body["code"])
+		if apiError != nil && apiError.reason != "" {
+			log.Printf("API rejection status=%d code=%s reason=%s", status, body["code"], apiError.reason)
+		} else {
+			log.Printf("API rejection status=%d code=%s", status, body["code"])
+		}
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(body)
 		return
@@ -1116,6 +1120,7 @@ type HTTPError struct {
 	Code            string
 	Status          int
 	Message         string
+	reason          string // Server-side only: logged with the rejection, never sent.
 }
 
 func (e *HTTPError) Error() string {

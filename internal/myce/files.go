@@ -227,7 +227,7 @@ func (q *Queue) prepareFileStore(root string, limit int64, reserve uint64, contr
 		s.uploadLocker = q.uploadLocks
 	}
 	composer.UseLocker(s.uploadLocker)
-	h, err := tus.NewHandler(tus.Config{
+	config := tus.Config{
 		BasePath: "/api/files/uploads/", StoreComposer: composer, DisableDownload: true, DisableTermination: true, DisableConcatenation: true,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		PreUploadCreateCallback: func(e tus.HookEvent) (tus.HTTPResponse, tus.FileInfoChanges, error) {
@@ -248,7 +248,11 @@ func (q *Queue) prepareFileStore(root string, limit int64, reserve uint64, contr
 			ctx := creationContext(e.Context)
 			return tus.HTTPResponse{}, uploadCallbackError(ctx, s.finishUpload(ctx, e.Upload))
 		},
-	})
+	}
+	if q.configureUploads != nil {
+		q.configureUploads(&config)
+	}
+	h, err := tus.NewHandler(config)
 	if err != nil {
 		return nil, err
 	}
@@ -354,6 +358,11 @@ func (s *FileStore) publish(ctx context.Context, ref FileRef) error {
 func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	r, diagnostic := uploadRequestDiagnostic(r)
 	response := &uploadResponse{ResponseWriter: w}
+	if r.Body == nil || r.Body == http.NoBody {
+		response.bodyDone.Store(true)
+	} else {
+		r.Body = requestBodyEnd{r.Body, &response.bodyDone}
+	}
 	w = response
 	r = s.uploadVerificationProgress(w, r)
 	defer response.finish()
@@ -560,8 +569,46 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 // through the same public JSON envelope. HEAD carries its code in a header.
 type uploadResponse struct {
 	http.ResponseWriter
-	status int
-	body   bytes.Buffer
+	bodyDone atomic.Bool
+	status   int
+	body     bytes.Buffer
+}
+
+// requestBodyEnd marks the end of the request body for uploadResponse.
+type requestBodyEnd struct {
+	io.ReadCloser
+	done *atomic.Bool
+}
+
+func (b requestBodyEnd) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err == io.EOF {
+		b.done.Store(true)
+	}
+	return n, err
+}
+
+// tusd re-arms its socket deadlines after every body read, including the
+// last, so they keep running through publication. Once the body has ended,
+// net/http's background read is the socket's only reader, and any read error
+// there cancels the connection's context: the publication still running
+// failed with 408 when the deadline passed, and every later request on that
+// keep-alive connection started already cancelled (#2156). The write
+// deadline would likewise drop the small final reply of a publication that
+// outlasts it. Only body transfer is timed; a closed client still cancels
+// through the background read's EOF.
+func (w *uploadResponse) SetReadDeadline(deadline time.Time) error {
+	if w.bodyDone.Load() {
+		deadline = time.Time{}
+	}
+	return http.NewResponseController(w.ResponseWriter).SetReadDeadline(deadline)
+}
+
+func (w *uploadResponse) SetWriteDeadline(deadline time.Time) error {
+	if w.bodyDone.Load() {
+		deadline = time.Time{}
+	}
+	return http.NewResponseController(w.ResponseWriter).SetWriteDeadline(deadline)
 }
 
 func (w *uploadResponse) Unwrap() http.ResponseWriter { return w.ResponseWriter }
