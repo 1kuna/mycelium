@@ -168,33 +168,22 @@ func TestSharedQueueMemberHungStorePromotion(t *testing.T) {
 	old := startProofMember(t, dir, "old", "127.0.0.1:0", pg.dsn)
 	first := proofLeader(t, a, old, 0)
 	extension := fakeExtension(t)
-	path := filepath.Join(dir, "files", "blobs", extension.Digest)
 	proofEventually(t, "initial file store", func() bool {
 		return old.client.Call(t.Context(), http.MethodPost, "/api/extensions", extension, nil) == nil
 	})
-	body, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
 	old.stop(t, syscall.SIGTERM)
-	if err := os.Remove(path); err != nil {
+	// Store reads open non-blocking and refuse non-regular files, so no local
+	// file can hang them. The survivor's verification hook stands in for a
+	// hung mount: it blocks, ignoring cancellation, until the hold is lifted.
+	hold := filepath.Join(dir, "survivor")
+	if err := os.WriteFile(hold+".hang-store", nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := syscall.Mkfifo(path, 0600); err != nil {
-		t.Fatal(err)
-	}
-	// Reopening the retained bundle blocks in the real filesystem reader.
 	survivor := startProofMember(t, dir, "survivor", "127.0.0.1:0", pg.dsn)
-	var fifo *os.File
 	proofEventually(t, "retained bundle verification to reach the blocked read", func() bool {
-		fd, err := syscall.Open(path, syscall.O_WRONLY|syscall.O_NONBLOCK, 0600)
-		if err != nil {
-			return false
-		}
-		fifo = os.NewFile(uintptr(fd), "fixture-bundle")
-		return true
+		_, err := os.Stat(hold + ".store-blocked")
+		return err == nil
 	})
-	defer fifo.Close()
 	second := proofLeader(t, a, survivor, first.number)
 	plain := proofSubmit(t, survivor.client, proofSpec("while-store-blocked"))
 	backedSpec := proofSpec("requires-store")
@@ -223,16 +212,7 @@ func TestSharedQueueMemberHungStorePromotion(t *testing.T) {
 		turn, err := a.current(t.Context())
 		return err == nil && sameSharedTurn(turn, second) && turn.ready && turn.expires.Sub(second.expires) > proofMemberLease
 	})
-	if err := os.Remove(path); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, body, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fifo.Write(body); err != nil {
-		t.Fatal(err)
-	}
-	if err := fifo.Close(); err != nil {
+	if err := os.Remove(hold + ".hang-store"); err != nil {
 		t.Fatal(err)
 	}
 	proofEventually(t, "file-dependent work to resume", func() bool {
