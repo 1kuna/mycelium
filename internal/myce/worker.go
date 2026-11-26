@@ -121,6 +121,11 @@ type Worker struct {
 	Unit               string
 
 	SuperviseProcess bool
+	// Restart ends a foreground worker the way an installed service stop does:
+	// commands stop, result publication stops, and unpublished results stay in
+	// the attempt spool for the restarted worker's same session (#2166). Run's
+	// stop context remains the planned leave (Ctrl-C).
+	Restart context.Context
 
 	checkpointPrepare func(Job) (string, error) // Filesystem fault seam.
 	checkpointRemove  func(string) error        // Refused-copy cleanup fault seam.
@@ -1440,10 +1445,18 @@ func (w Worker) Run(stop context.Context) error {
 	w.Client.launchTimingWire = &atomic.Bool{}
 	w.Client.hostRAMGateWire = &atomic.Bool{}
 	w.Client.sharedWire = &atomic.Bool{}
-	w.launchCtx = stop
 	if w.ServiceConfig != nil {
 		w.serviceStop = stop
+	} else if w.Restart != nil {
+		// serviceStop is done before the merged stop is, so the attempt loop
+		// never mistakes a restart for a leave and sends a leaving check-in.
+		w.serviceStop = w.Restart
+		merged, cancel := context.WithCancel(stop)
+		defer cancel()
+		defer context.AfterFunc(w.Restart, cancel)()
+		stop = merged
 	}
+	w.launchCtx = stop
 	w.controlLatency = &workerControlLatency{}
 	w.toolReport = &workerToolReport{}
 	w.diskBudgetWire = &workerDiskBudgetWire{}

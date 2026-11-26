@@ -148,6 +148,13 @@ Unknown release stays charged; a timeout cannot authorize overlap. A single
 attempt's failure does not mark its neighbors lost. Control/heartbeats and bulk
 preparation/result I/O remain independent; bulk I/O never holds the queue lock.
 
+Worker TERM is a restart, not a leave. Installed workers, and foreground
+`myce join` on SIGTERM, stop commands, cut off result uploads at once and keep
+every unpublished result in the attempt spool. They send no leave, so the
+queue's ordinary loss timeouts still apply. The restarted worker keeps the same
+session, replays those results and resumes each upload at the queue's accepted
+tus offset (#2166). Ctrl-C on a foreground worker remains the planned leave.
+
 Spool reopen reconciles every saved attempt and buffered result before new
 admission. `recovering: true` blocks batch, model and preparation admission at
 planning and launch without allocating an attempt or consuming a retry. Exact
