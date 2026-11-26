@@ -258,7 +258,7 @@ func TestFleetUpgradeScopedKeepsOtherHostsDebt(t *testing.T) {
 		t.Fatal(err)
 	}
 	q.s.FleetUpgrade = &fleetUpgrade{Operation: "old-op", State: "stopped", Revision: 1, Release: *q.s.EnrollmentRelease, Hosts: []*fleetUpgradeHost{
-		{FleetHostStatus: FleetHostStatus{Host: "b", Phase: "worker_start", Failure: "worker_start_failed"}, Machine: b.ID, StartIdentity: "owed", Owned: true, Policy: q.s.HostMaintenance["b"]},
+		{FleetHostStatus: FleetHostStatus{Host: "b", Phase: "deferred", Outcome: FleetHostDeferred, DeferredReason: "host_capacity"}, Machine: b.ID, StartIdentity: "owed", Owned: true, Policy: q.s.HostMaintenance["b"]},
 	}}
 	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{Host: "a"}); err != nil {
 		t.Fatal(err)
@@ -271,6 +271,11 @@ func TestFleetUpgradeScopedKeepsOtherHostsDebt(t *testing.T) {
 	}
 	if p := q.s.HostMaintenance["b"]; p.Mode != "drained" || p.DrainOwner != "old-op" {
 		t.Fatal("scoped operation touched another host's drain", p)
+	}
+	for _, h := range q.fleetUpgradeStatus().Hosts {
+		if h.Host == "b" && (h.Phase != "skipped" || h.Outcome != FleetHostDeferred || h.DeferredReason != "host_capacity") {
+			t.Fatalf("scoped operation hid another host's deferral: %+v", h)
+		}
 	}
 	scoped := q.s.FleetUpgrade.Operation
 	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {

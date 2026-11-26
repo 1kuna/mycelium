@@ -324,8 +324,15 @@ func fleetOutOfScope(h *fleetUpgradeHost, selected string, previous *fleetUpgrad
 		return
 	}
 	for _, old := range previous.Hosts {
-		if old.Host == h.Host && old.StartIdentity != "" && !old.WorkerDone {
+		if old.Host != h.Host {
+			continue
+		}
+		if old.StartIdentity != "" && !old.WorkerDone {
 			h.StartIdentity = old.StartIdentity
+		}
+		// Keep a deferred outcome visible in status until a rollout clears it.
+		if old.Outcome == FleetHostDeferred {
+			h.Outcome, h.DeferredReason, h.FailureCode = old.Outcome, old.DeferredReason, old.FailureCode
 		}
 	}
 }
