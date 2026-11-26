@@ -288,7 +288,7 @@ func (m *sharedQueueMember) step(ctx context.Context) {
 	t, err := m.current(ctx)
 	// A turn this member still owns here has no writer: an acquisition or
 	// release lost its reply. Replace it now rather than idle out its lease.
-	if err != nil || m.pull(ctx, t.head) != nil || t.ready && t.owner != m.owner || m.cfg.AwaitImport && t.number == 0 && t.head == 0 {
+	if err != nil || m.pull(ctx, t) != nil || t.ready && t.owner != m.owner || m.cfg.AwaitImport && t.number == 0 && t.head == 0 {
 		return
 	}
 	call, cancel := context.WithTimeout(ctx, m.timeout)
@@ -303,9 +303,21 @@ func (m *sharedQueueMember) step(ctx context.Context) {
 	}
 }
 
-func (m *sharedQueueMember) pull(ctx context.Context, head int64) error {
+func (m *sharedQueueMember) pull(ctx context.Context, t sharedQueueTurn) error {
+	head := t.head
 	if m.sequence > head {
 		return errSharedHead
+	}
+	if m.sequence < t.floor {
+		// The changes this copy needs were pruned. Replacing it with the
+		// verified snapshot is the only way forward; replay never skips.
+		sequence, err := m.authority.rebuild(ctx, m.replica, m.timeout)
+		if err != nil {
+			m.readCursor()
+			return err
+		}
+		log.Printf("event=shared_queue_replica_rebuilt from=%d snapshot=%d", m.sequence, sequence)
+		m.sequence = sequence
 	}
 	for m.sequence < head {
 		call, cancel := context.WithTimeout(ctx, m.timeout)
@@ -340,7 +352,7 @@ const (
 )
 
 func (m *sharedQueueMember) promote(ctx context.Context, turn sharedQueueTurn) sharedPromotionFailure {
-	if err := m.pull(ctx, turn.head); err != nil {
+	if err := m.pull(ctx, turn); err != nil {
 		if errors.Is(err, errSharedHead) {
 			return promotionHead
 		}
@@ -405,6 +417,7 @@ func (m *sharedQueueMember) promote(ctx context.Context, turn sharedQueueTurn) s
 	m.leader = l
 	m.mu.Unlock()
 	go m.prepareStorage(tickCtx, q)
+	go m.compact(tickCtx, writer)
 	// Best effort: every publication registers again before it checks (#2148).
 	go func() { _ = q.registerDeliveryDestinations() }()
 	go func() {
@@ -417,6 +430,32 @@ func (m *sharedQueueMember) promote(ctx context.Context, turn sharedQueueTurn) s
 		}
 	}()
 	return ""
+}
+
+// compact keeps the change log bounded while this member coordinates. It
+// reads this member's copy through its own SQLite handle, so a long snapshot
+// read never waits on, or holds, the replica handle or q.mu.
+func (m *sharedQueueMember) compact(ctx context.Context, writer *sharedQueueWriter) {
+	source, err := openQueueSQLite(m.cfg.Database)
+	if err != nil {
+		log.Printf("event=shared_queue_compaction_failed reason=local_copy")
+		return
+	}
+	defer source.Close()
+	c := &sharedQueueCompactor{authority: m.authority, source: source, writer: writer}
+	tick := time.NewTicker(m.cfg.interval)
+	defer tick.Stop()
+	for {
+		if err := c.step(ctx); err != nil && ctx.Err() == nil {
+			// PostgreSQL error text can contain connection settings.
+			log.Printf("event=shared_queue_compaction_failed reason=%s", sharedMaintenanceFailure(err))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
 }
 
 // sharedMaintenanceFailure names why a tick ended the turn without logging

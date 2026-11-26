@@ -26,6 +26,9 @@ type sharedQueueTurn struct {
 	number, head    int64
 	expires         time.Time
 	ready           bool
+	// Changes at or below floor may be pruned. A copy behind it rebuilds
+	// from a verified snapshot (shared_queue_snapshot.go).
+	floor int64
 }
 
 type sharedQueueAuthority struct {
@@ -51,6 +54,26 @@ CREATE TABLE IF NOT EXISTS myce_changes_v1 (
 	handover bigint NOT NULL,
 	operation text UNIQUE NOT NULL,
 	payload bytea NOT NULL
+);
+DO $$ BEGIN
+	-- ALTER takes an exclusive table lock even when the column exists.
+	IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+		WHERE table_schema = current_schema() AND table_name = 'myce_coordinator_v1' AND column_name = 'floor') THEN
+		ALTER TABLE myce_coordinator_v1 ADD COLUMN floor bigint NOT NULL DEFAULT 0;
+	END IF;
+END $$;
+CREATE TABLE IF NOT EXISTS myce_snapshots_v1 (
+	sequence bigint PRIMARY KEY,
+	chunks integer NOT NULL,
+	bytes bigint NOT NULL,
+	log_sequence bigint,
+	digest bytea NOT NULL
+);
+CREATE TABLE IF NOT EXISTS myce_snapshot_chunks_v1 (
+	sequence bigint NOT NULL,
+	chunk integer NOT NULL,
+	payload bytea NOT NULL,
+	PRIMARY KEY (sequence, chunk)
 );
 `
 
@@ -165,17 +188,17 @@ func (a *sharedQueueAuthority) begin(ctx context.Context) (*sql.Tx, error) {
 	return tx, nil
 }
 
-const sharedTurnColumns = "owner,endpoint,handover,head,expires,ready"
+const sharedTurnColumns = "owner,endpoint,handover,head,expires,ready,floor"
 
 func scanSharedTurn(row *sql.Row) (sharedQueueTurn, error) {
 	var t sharedQueueTurn
-	err := row.Scan(&t.owner, &t.endpoint, &t.number, &t.head, &t.expires, &t.ready)
+	err := row.Scan(&t.owner, &t.endpoint, &t.number, &t.head, &t.expires, &t.ready, &t.floor)
 	return t, err
 }
 
 func (a *sharedQueueAuthority) current(ctx context.Context) (sharedQueueTurn, error) {
 	return scanSharedTurn(a.db.QueryRowContext(ctx, `SELECT owner,endpoint,handover,head,expires,
-		ready AND expires > clock_timestamp() FROM myce_coordinator_v1 WHERE id=1`))
+		ready AND expires > clock_timestamp(),floor FROM myce_coordinator_v1 WHERE id=1`))
 }
 
 func lockedSharedTurn(ctx context.Context, tx *sql.Tx) (sharedQueueTurn, time.Time, error) {
