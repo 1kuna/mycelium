@@ -625,17 +625,14 @@ func (q *Queue) requeueMemoryPressure(j *Job) {
 // that read. The queue adds its assignments that the gate's check-in did not
 // report, and keeps its independent ledger and exact-release checks.
 type HostRAMGate struct {
-	SampleID        int64   `json:"sample_id,omitempty"`
-	SampleStartedNS int64   `json:"sample_started_ns,omitempty"`
-	RawGB           float64 `json:"raw_gb"`
-	HeldGB          float64 `json:"held_gb"`
-	PendingGB       float64 `json:"pending_gb"`
-	Unavailable     bool    `json:"unavailable,omitempty"`
+	RawGB       float64 `json:"raw_gb"`
+	HeldGB      float64 `json:"held_gb"`
+	PendingGB   float64 `json:"pending_gb"`
+	Unavailable bool    `json:"unavailable,omitempty"`
 }
 
 func (s HostRAMGate) valid() bool {
-	return s.SampleID >= 0 && s.SampleStartedNS >= 0 && validMemoryValue(s.RawGB) && validMemoryValue(s.HeldGB) &&
-		validMemoryValue(s.PendingGB) && s.PendingGB <= s.HeldGB
+	return validMemoryValue(s.RawGB) && validMemoryValue(s.HeldGB) && validMemoryValue(s.PendingGB) && s.PendingGB <= s.HeldGB
 }
 
 func (s HostRAMGate) available(m *Machine, keep float64) float64 {
@@ -646,15 +643,27 @@ func (s HostRAMGate) available(m *Machine, keep float64) float64 {
 }
 
 func (s HostRAMGate) check(m *Machine, pools MemoryPools, known bool) error {
-	err := checkMemoryPool(pools.RAM.TypicalGB, s.available(m, pools.KeepGB), pools.KeepGB, s.PendingGB, known)
-	if refusal, ok := err.(*admissionError); ok {
-		refusal.detail.RAMGateSampleID = s.SampleID
-	}
-	return err
+	return checkMemoryPool(pools.RAM.TypicalGB, s.available(m, pools.KeepGB), pools.KeepGB, s.PendingGB, known)
 }
 
 func (s HostRAMGate) physicalRoom(keep float64) float64 {
 	return s.RawGB - keep - s.PendingGB
+}
+
+// hostRAMGateAfter reports whether the worker's gate was read after it held any
+// attempt of j: the check-in's attempt snapshot precedes its RAM probe, and an
+// attempt leaves that snapshot only after the queue acknowledged its result.
+// An earlier gate can carry j's own charge or predate j's refusal.
+func hostRAMGateAfter(worker *Machine, j *Job) bool {
+	if worker == nil || worker.HostRAMGate == nil || worker.hostRAMGateSeen == nil {
+		return false // Unknown after a queue restart until the next check-in.
+	}
+	for key := range worker.hostRAMGateSeen {
+		if key.job == j.ID {
+			return false
+		}
+	}
+	return true
 }
 
 // workerRAMGateFor is the worker's latest gate for a pooled job, plus the
@@ -664,8 +673,10 @@ func (q *Queue) workerRAMGateFor(j *Job, m *Machine) (worker *Machine, gate Host
 		return nil, gate, false, false
 	}
 	worker = q.s.Machines[m.ID]
-	if worker == nil || worker.HostRAMGate == nil || worker.Session != m.Session {
-		return nil, gate, false, false // Older workers remain subject to the ordinary queue ledger.
+	if worker == nil || worker.Session != m.Session || !hostRAMGateAfter(worker, j) {
+		// Older workers remain subject to the ordinary queue ledger. A gate
+		// read while the worker held j is fenced by launchCapacityBlocked.
+		return nil, gate, false, false
 	}
 	gate = *worker.HostRAMGate
 	for _, o := range q.hostObligations(hostID(worker)) {

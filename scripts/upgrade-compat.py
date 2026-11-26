@@ -374,6 +374,7 @@ def validate_inventory_receipts(rows, allow_additive_retry=False):
         assert error.get("error") in ("body must be one JSON object with known fields and valid field types", 'json: unknown field "inventory_probe"'), error
         if len(rows) > 1:
             assert not rows[1].get("inventory_probe_fields"), "inventory retry retained rejected field"
+            assert not rows[1].get("host_ram_gate_fields"), "inventory retry retained the RAM gate"
             for key in ("session", "attempt_protocol", "hash", "rollback_baseline_sha256", "disk_budget_fields", "checkpoint_expiry_fields"):
                 assert rows[1][key] == rows[0][key], "inventory-only retry changed " + key
         return
@@ -384,13 +385,14 @@ def validate_inventory_receipts(rows, allow_additive_retry=False):
     if allow_additive_retry and refused == [0] and rows[0]["status"] == 400:
         error = json.loads(rows[0].get("error", "{}"))
         fields = ("disk_budget", "scratch", "compiler_warning", "unmanaged_compiler_bytes",
-                  "checkpoint_expiry_protocol", "checkpoint_expiry_reports")
+                  "checkpoint_expiry_protocol", "checkpoint_expiry_reports", "host_ram_gate")
         message = error.get("error", "")
         unknown_fields = (message == "body must be one JSON object with known fields and valid field types"
                           or any('unknown field "' + f + '"' in message for f in fields))
-        if error.get("code") == "request_invalid" and unknown_fields and (rows[0].get("disk_budget_fields") or rows[0].get("checkpoint_expiry_fields")):
+        additive = ("disk_budget_fields", "checkpoint_expiry_fields", "host_ram_gate_fields")
+        if error.get("code") == "request_invalid" and unknown_fields and any(rows[0].get(f) for f in additive):
             if len(rows) > 1:
-                assert not rows[1]["disk_budget_fields"] and not rows[1].get("checkpoint_expiry_fields"), "additive retry retained rejected fields"
+                assert not any(rows[1].get(f) for f in additive), "additive retry retained rejected fields"
                 for key in ("session", "attempt_protocol", "hash", "rollback_baseline_sha256"):
                     assert rows[1][key] == rows[0][key], "additive retry changed " + key
             return

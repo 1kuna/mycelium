@@ -85,12 +85,6 @@
         "memory_room": {
           "$ref": "#/$defs/MemoryRoomDecision"
         },
-        "ram_gate_end_ns": {
-          "type": "integer"
-        },
-        "ram_gate_sample_id": {
-          "type": "integer"
-        },
         "required": {
           "type": "number"
         },
@@ -4645,10 +4639,6 @@
           "type": "number"
         },
         "machine": {
-          "type": "string"
-        },
-        "observed_at": {
-          "format": "date-time",
           "type": "string"
         },
         "session": {

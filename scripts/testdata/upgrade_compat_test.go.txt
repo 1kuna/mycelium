@@ -241,7 +241,7 @@ func upgradeQueue(t *testing.T, ctx context.Context, root string) {
 			errorBody = string(capture.body)
 		}
 		// Fingerprint the complete request after projecting only the additive
-		// disk-budget and checkpoint-expiry fields. The worker removes both
+		// disk-budget, checkpoint-expiry and RAM gate fields. The worker removes
 		// negotiated additions on a strict rollback refusal; inventory, attempts
 		// and every baseline collection field must remain byte-for-byte equal.
 		diskFields := false
@@ -262,13 +262,15 @@ func upgradeQueue(t *testing.T, ctx context.Context, root string) {
 		}
 		inventoryProbeFields := machine["inventory_probe"] != nil
 		delete(machine, "inventory_probe")
+		ramGateFields := machine["host_ram_gate"] != nil
+		delete(machine, "host_ram_gate")
 		baseline, err := json.Marshal(request)
 		if err != nil {
 			t.Fatal(err)
 		}
 		receipts = append(receipts, map[string]any{
 			"error": errorBody, "inventory_probe_fields": inventoryProbeFields,
-			"disk_budget_fields": diskFields, "checkpoint_expiry_fields": expiryFields, "rollback_baseline_sha256": fmt.Sprintf("%x", sha256.Sum256(baseline)),
+			"disk_budget_fields": diskFields, "checkpoint_expiry_fields": expiryFields, "host_ram_gate_fields": ramGateFields, "rollback_baseline_sha256": fmt.Sprintf("%x", sha256.Sum256(baseline)),
 			"status": capture.status, "bytes": len(body), "inventory_keys": len(inventory),
 			"hash": request["tool_inventory_hash"], "version": request["tool_inventory_version"],
 			"session": machine["session"], "attempt_protocol": request["attempt_protocol"],

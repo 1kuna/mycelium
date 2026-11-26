@@ -44,12 +44,14 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	var reply Reply
 	err := w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
 	var refusal *HTTPError
-	if c.Machine.InventoryProbe != nil && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
-		// Rolling upgrades: predecessor queues still consume device reasons.
-		c.Machine.InventoryProbe = nil
-		if w.Client.inventoryWire != nil {
+	if (c.Machine.InventoryProbe != nil || c.Machine.HostRAMGate != nil) && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
+		// Rolling upgrades: predecessor queues still consume device reasons
+		// and the ordinary ledger. The refusal's reply already turned the
+		// negotiated RAM gate off; drop it from this retry too.
+		if c.Machine.InventoryProbe != nil && w.Client.inventoryWire != nil {
 			w.Client.inventoryWire.Store(false)
 		}
+		c.Machine.InventoryProbe, c.Machine.HostRAMGate = nil, nil
 		err = w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
 	}
 	if len(c.Machine.ResultPublications) > 0 && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {

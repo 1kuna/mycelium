@@ -3,19 +3,17 @@ package myce
 import (
 	"fmt"
 	"slices"
-	"time"
 )
 
 // LaunchCapacityWait remembers the evidence behind a refused offer. It is
 // admission policy only; Copies/HostReleases remain the exact custody authority.
 // No timer clears it: an unchanged heartbeat is not new capacity.
 type LaunchCapacityWait struct {
-	Machine    string           `json:"machine"`
-	Session    string           `json:"session"`
-	Attempt    int              `json:"attempt"`
-	Evidence   string           `json:"evidence"`
-	Admission  *AdmissionDetail `json:"admission,omitempty"`
-	ObservedAt time.Time        `json:"observed_at,omitempty,omitzero"`
+	Machine   string           `json:"machine"`
+	Session   string           `json:"session"`
+	Attempt   int              `json:"attempt"`
+	Evidence  string           `json:"evidence"`
+	Admission *AdmissionDetail `json:"admission,omitempty"`
 	// Required surplus above the candidate's charge in the queue's physical
 	// RAM ledger. It can be signed because queue room can already be short.
 	LiveGrowthSurplusGB *float64 `json:"live_growth_surplus_gb,omitempty"`
@@ -78,13 +76,10 @@ func (q *Queue) recordLaunchCapacityWait(j *Job, r Result) {
 	if m != nil {
 		key := targetKey(m)
 		wait := LaunchCapacityWait{Machine: j.Machine, Session: j.Session, Attempt: j.Attempt,
-			Admission: safeAdmissionDetail(r.ExecutionCause.Admission), ObservedAt: q.clock.Now()}
+			Admission: safeAdmissionDetail(r.ExecutionCause.Admission)}
 
 		if prior := j.LaunchCapacityWait[key]; prior.Session == wait.Session && prior.Attempt == wait.Attempt {
 			return // A repeated result must not move the baseline to a newer reading.
-		}
-		if worker := q.s.Machines[j.Machine]; worker != nil && worker.Session == j.Session && wait.Admission != nil {
-			worker.ramGateFloor = max(worker.ramGateFloor, wait.Admission.RAMGateSampleID)
 		}
 		if !q.unreported[m.ID] {
 			wait.Evidence = q.launchCapacityEvidence(j, m)
@@ -132,19 +127,11 @@ func (q *Queue) launchCapacityBlocked(j *Job, m *Machine) bool {
 	if !ok {
 		return false
 	}
-	if worker := q.s.Machines[m.ID]; h.Admission != nil && h.Admission.Subcheck == memoryWaitReason && h.Session == m.Session {
-		if end := h.Admission.RAMGateEndNS; end > 0 {
-			return worker == nil || worker.HostRAMGate == nil || worker.HostRAMGate.SampleStartedNS <= end
-		}
-		if before := h.Admission.RAMGateSampleID; before > 0 {
-			// A missing gate or older probe cannot prove recovery. Placement
-			// independently requires the full demand to fit the newer gate.
-			return worker == nil || worker.HostRAMGate == nil || worker.HostRAMGate.SampleID <= before
-		}
-		// Older workers have no probe identity on a refusal.
-		if worker != nil && worker.HostRAMGate != nil && !h.ObservedAt.IsZero() {
-			return !worker.hostRAMGateAt.After(h.ObservedAt)
-		}
+	if worker := q.s.Machines[m.ID]; worker != nil && worker.HostRAMGate != nil && h.Admission != nil &&
+		h.Admission.Subcheck == memoryWaitReason && h.Session == m.Session && worker.Session == m.Session {
+		// Only a RAM read taken after the worker released the refused attempt
+		// can reopen the route. Placement still requires the full demand to fit.
+		return !hostRAMGateAfter(worker, j)
 	}
 	if h.Evidence == "" {
 		// Refused before the first post-restart report. Only a committed
@@ -234,9 +221,7 @@ func (q *Queue) launchCapacityProjection(j *Job, m *Machine) *Machine {
 	if short := q.workerRAMShortfall(j, m); short > 0 {
 		// The worker's gate refuses before any offer, so its shortfall stands
 		// in for the refusal detail an older worker would have returned.
-		copy := *m
-		copy.FreeHostMemoryGB = min(copy.FreeHostMemoryGB, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)-short)
-		return &copy
+		return withHostRoom(m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)-short)
 	}
 	h, ok := j.LaunchCapacityWait[targetKey(m)]
 	if !ok || h.Evidence != q.launchCapacityEvidence(j, m) || h.Admission == nil {
@@ -251,15 +236,24 @@ func (q *Queue) launchCapacityProjection(j *Job, m *Machine) *Machine {
 	if d.Unavailable || d.Available == nil || d.Required+d.HeldGB+d.KeepGB <= *d.Available {
 		return m
 	}
-	copy := *m
 	deficit := d.Required + d.HeldGB + d.KeepGB - *d.Available
 	switch d.Subcheck {
 	case memoryWaitReason, "live_host_ram", "live_host_growth", "aggregate_host_allowance", "configured_host_allowance":
-		copy.FreeHostMemoryGB = min(copy.FreeHostMemoryGB, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)-deficit)
+		return withHostRoom(m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)-deficit)
 	case "aggregate_cpu_allowance":
+		copy := *m
 		copy.EffectiveCPUCores -= max(0, copy.FreeCPUCores-j.Spec.Needs.cores()+int(deficit))
-	default:
-		return m
+		return &copy
 	}
+	return m
+}
+
+// withHostRoom lowers m's signed host room to the worker's view. The worker's
+// shortfall already contains any debt the queue also sees, so the planner must
+// repay the smaller room once, not the queue's debt on top of it.
+func withHostRoom(m *Machine, room float64) *Machine {
+	copy := *m
+	room = min(room, m.FreeHostMemoryGB-m.hostReservationDebtGB)
+	copy.FreeHostMemoryGB, copy.hostReservationDebtGB = max(0, room), max(0, -room)
 	return &copy
 }

@@ -771,12 +771,12 @@ type Machine struct {
 
 	ModelApprovalStates retiredField `json:"model_approval_states,omitzero"`
 
-	HostRAMGate   *HostRAMGate `json:"host_ram_gate,omitempty"`
-	hostRAMGateAt time.Time
+	HostRAMGate *HostRAMGate `json:"host_ram_gate,omitempty"`
+	// Queue ingress order of the gate's check-in; in memory only.
+	hostRAMGateOrder uint64
 	// Attempts reported with the gate's check-in; the gate counted only these.
+	// Nil after a queue restart until the worker's next check-in.
 	hostRAMGateSeen map[attemptKey]bool
-	// Highest sample ID accepted for this session, gates and refusals alike.
-	ramGateFloor int64
 
 	// A card group is one placement view of several cards on this host (#105).
 	// The worker sets group alone: the device IDs bound to one attempt.
@@ -826,9 +826,6 @@ type Checkin struct {
 	Running                  *Execution               `json:"running,omitempty"`
 }
 type Reply struct {
-	// The worker continues RAM sample IDs above this, across a same-session
-	// restart whose clock reads earlier.
-	RAMGateSampleFloor         int64                        `json:"ram_gate_sample_floor,omitempty"`
 	NativeLaunchProtocol       string                       `json:"native_launch_protocol,omitempty"`
 	DeviceRecoveryProtocol     string                       `json:"device_recovery_protocol,omitempty"`
 	DeviceHealthProtocol       string                       `json:"device_health_protocol,omitempty"`

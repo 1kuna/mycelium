@@ -73,10 +73,16 @@ enters ordinary release planning, which can stop lower-tier work. Native helpers
 receive no credit against the full launch requirement. If room falls between the
 first native member and a later member's refusal, subsequent offers on that route
 budget for the portion of the loss supported by measured growth in the attempt's
-cgroup. That startup loss delays the re-offer but never stops other work. For a
-refusal with a RAM sample
-identity, the same route needs exact release and a worker RAM probe sampled
-after the refusal that fits the full launch demand.
+cgroup. That startup loss delays the re-offer but never stops other work.
+
+A worker reading counts for a job only once the worker no longer reports any
+attempt of that job. The worker lists its attempts before it reads RAM, and
+drops an attempt only after the queue acknowledges its result. An earlier
+reading can still include the job's own charge or predate its refusal. After
+a RAM refusal, the route needs exact release and such a later reading that fits
+the full launch demand. No clock or sample number is involved. Workers send
+the reading and the native startup fields only to a queue that advertises
+`host-ram-gate-v1`, so workers can upgrade before the queue.
 
 The host pressure forecast projects physical loss through the next sample and
 sustained physical loss through the stop grace. The attempt history records the

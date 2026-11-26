@@ -570,6 +570,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			w.Header().Set(faultEvidenceHeader, faultEvidenceProtocol)
 			w.Header().Set(stagingPhasesHeader, stagingPhasesProtocol)
 			w.Header().Set(launchTimingsHeader, launchTimingsWire)
+			w.Header().Set(hostRAMGateHeader, hostRAMGateProtocol)
 		}
 		// Liveness is a fixed-size authenticated response, not a projection.
 		// A progress probe must not wait on the OS memory observation used to
@@ -756,6 +757,7 @@ type Client struct {
 	stagingWire      *atomic.Bool
 	launchTimingWire *atomic.Bool
 	faultWire        *atomic.Bool
+	hostRAMGateWire  *atomic.Bool
 	URL              string
 	Token            string
 	HTTP             *http.Client // Its Timeout bounds API calls; file transfers use progress budgets.
@@ -781,6 +783,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 		started := clock.Now()
 		prepared, stagingFields := stagingWireInput(in, c.stagingWire != nil && c.stagingWire.Load())
 		prepared, launchFields := launchTimingWireInput(prepared, c.launchTimingWire != nil && c.launchTimingWire.Load())
+		prepared, ramFields := hostRAMGateWireInput(prepared, c.hostRAMGateWire != nil && c.hostRAMGateWire.Load())
 		wireIn, faultFields := faultWireInput(prepared, c.faultWire != nil && c.faultWire.Load())
 		err := c.callWatched(ctx, method, path, wireIn, out)
 		if method == http.MethodPost && path == "/api/workers/complete" && requestDecodeRefused(err) {
@@ -789,7 +792,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 				err = c.callWatched(ctx, method, path, wireIn, out)
 			}
 		}
-		if (faultFields || stagingFields || launchFields) && requestDecodeRefused(err) {
+		if (faultFields || stagingFields || launchFields || ramFields) && requestDecodeRefused(err) {
 			// A staging-capable predecessor can reject launch timings alone.
 			launchDowngrade := launchFields && !c.launchTimingWire.Load()
 			keepStaging := launchDowngrade && c.stagingWire != nil && c.stagingWire.Load()
@@ -803,7 +806,11 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 			if c.launchTimingWire != nil {
 				c.launchTimingWire.Store(false)
 			}
-			legacy, _ := faultWireInput(wireIn, keepFaults)
+			if c.hostRAMGateWire != nil {
+				c.hostRAMGateWire.Store(false) // The newest fields go with any refusal.
+			}
+			legacy, _ := hostRAMGateWireInput(wireIn, false)
+			legacy, _ = faultWireInput(legacy, keepFaults)
 			legacy, _ = stagingWireInput(legacy, keepStaging)
 			legacy, _ = launchTimingWireInput(legacy, false)
 			err = c.callWatched(ctx, method, path, legacy, out)
@@ -908,6 +915,9 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	}
 	if c.faultWire != nil && workerProtocolEndpoint(path) {
 		c.faultWire.Store(res.Header.Get(faultEvidenceHeader) == faultEvidenceProtocol)
+	}
+	if c.hostRAMGateWire != nil && workerProtocolEndpoint(path) {
+		c.hostRAMGateWire.Store(res.Header.Get(hostRAMGateHeader) == hostRAMGateProtocol)
 	}
 	if res.StatusCode >= 300 {
 		e := &HTTPError{Status: res.StatusCode, RetryAfter: retryAfter(res.Header.Get("Retry-After"), c.clock().Now()), Message: "request failed"}

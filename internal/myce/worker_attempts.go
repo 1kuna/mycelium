@@ -114,10 +114,7 @@ func (w Worker) sampleHeartbeatMemory(ctx context.Context, m *Machine, reports [
 	}
 	// Sample physical headroom after the attempt counters. Crediting newer
 	// resident memory against older availability would spend its growth twice.
-	sampleID, sampled := w.ramGateSampler.begin(w.Clock)
-	probeStartedNS := max(0, w.Clock.Now().UnixNano())
 	hostFree, rawAvailable, err := w.sampleHostMemory(ctx)
-	sampled()
 	m.HostAvailableMemoryGB = hostFree
 	if err != nil || !validMemoryValue(hostFree) {
 		m.HostAvailableMemoryGB = 0
@@ -129,7 +126,7 @@ func (w Worker) sampleHeartbeatMemory(ctx context.Context, m *Machine, reports [
 		reports[i].ApplicationProgress = reports[i].ApplicationProgress.aged(w.Clock.Now())
 		reports[i].CurrentHostMemory = reports[i].CurrentHostMemory.aged(w.Clock.Now())
 	}
-	gate := HostRAMGate{SampleID: sampleID, SampleStartedNS: probeStartedNS}
+	gate := HostRAMGate{}
 	if m.HostMemoryError != "" || !validMemoryValue(rawAvailable) {
 		gate.Unavailable = true
 	} else {
@@ -959,7 +956,6 @@ func firstDevice(j Job, m Machine) string {
 func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*workerStore, rt *modelRuntime, environments *environmentRuntime, rawMemory MemorySource, requestRetention func(string, time.Time)) error {
 	w.batchAdmission = rt.checkBatchLaunchMemory
 	w.hostChargesExcept = rt.hostChargesExcept
-	w.ramGateSampler = &rt.ramGateSampler
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// Interactive leave can finish work. Installed TERM must not depend on a
@@ -1423,7 +1419,6 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 					log.Printf("enrollment receipt unavailable; will retry")
 				}
 				w.compactNativeLaunch = reply.NativeLaunchProtocol == nativeLaunchProtocol
-				w.ramGateSampler.raise(reply.RAMGateSampleFloor)
 				w.fleet.noteReply(reply)
 				w.inspectNASPaths(reply.NASPathChecks, root.state.CheckpointRoot)
 				if reply.CheckpointExpiryProtocol == checkpointExpiryProtocol {

@@ -508,7 +508,6 @@ type modelRuntime struct {
 	batchHostMemorySamples map[attemptKey]hostMemorySample
 	hostLedger             atomic.Pointer[hostLedger]
 	poolHostMemorySource   MemorySource
-	ramGateSampler         ramGateSampler
 	verifyDevice           func() error
 	deviceEnv              map[string]string
 	authorize              func(context.Context, HostLaunch) error
@@ -1123,50 +1122,18 @@ type nativeStartupMemory struct {
 	residentGB     float64
 }
 
-type ramGateSampler struct {
-	mu   sync.Mutex
-	last int64
-}
-
-func (s *ramGateSampler) begin(clock Clock) (int64, func()) {
-	if s == nil {
-		return 0, func() {} // Standalone worker without a check-in stream.
-	}
-	s.mu.Lock()
-	// Order the physical probes themselves. A replacement process can adopt
-	// the same session: IDs follow its clock and the queue's floor (raise).
-	s.last++
-	if clock != nil {
-		s.last = max(s.last, clock.Now().UnixNano())
-	}
-	return s.last, s.mu.Unlock
-}
-
-// raise continues sample order above what the queue already holds. A
-// replacement whose clock reads earlier would otherwise issue lower IDs.
-func (s *ramGateSampler) raise(floor int64) {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	s.last = max(s.last, floor)
-	s.mu.Unlock()
-}
-
 func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostLaunch) error {
 	attempt, err := strconv.Atoi(launch.Attempt)
 	key := attemptKey{launch.Key, attempt, launch.Session}
 	rt.mu.Lock()
 	actor := rt.batchSupervisors[key]
 	rt.mu.Unlock()
-	sampleID, sampled := rt.ramGateSampler.begin(rt.clock)
 	free, known := 0.0, false
 	if rt.poolHostMemorySource != nil {
 		var probeErr error
 		free, probeErr = rt.poolHostMemorySource(ctx)
 		known = probeErr == nil && validMemoryValue(free)
 	}
-	sampled()
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	rt.admissionMu.Lock()
@@ -1185,7 +1152,7 @@ func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostL
 		}
 	}
 	held, pending := rt.hostChargesExcept(key)
-	gate := HostRAMGate{SampleID: sampleID, RawGB: free, HeldGB: held, PendingGB: pending}
+	gate := HostRAMGate{RawGB: free, HeldGB: held, PendingGB: pending}
 	refusal := gate.check(&rt.memoryMachine, pools, known)
 	resident := launch.NativeResidentGB
 	measured := resident != nil && validMemoryValue(*resident)

@@ -64,6 +64,15 @@ class SupervisorTests(unittest.TestCase):
                 compat.validate_inventory_receipts([probe_refused, dict(probe_accepted, **{field: value})], True)
         with self.assertRaises(RuntimeError):
             compat.validate_inventory_receipts([probe_refused, probe_refused], True)
+        # A rollback refuses the negotiated RAM gate once, alone or with the probe.
+        gate_refused = dict(refused, disk_budget_fields=False, host_ram_gate_fields=True,
+                            error=json.dumps(dict(code="request_invalid", error='json: unknown field "host_ram_gate"')))
+        compat.validate_inventory_receipts([gate_refused, accepted], True)
+        compat.validate_inventory_receipts([dict(probe_refused, host_ram_gate_fields=True), probe_accepted], True)
+        for rows in ([gate_refused, dict(accepted, host_ram_gate_fields=True)],
+                     [dict(probe_refused, host_ram_gate_fields=True), dict(probe_accepted, host_ram_gate_fields=True)]):
+            with self.assertRaises(AssertionError):
+                compat.validate_inventory_receipts(rows, True)
 
     def test_sigterm_reaps_detached_command_before_scratch_cleanup(self):
         with tempfile.TemporaryDirectory() as tmp:
