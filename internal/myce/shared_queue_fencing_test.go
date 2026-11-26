@@ -742,7 +742,7 @@ func proofOpenSharedQueueRoots(t *testing.T, a *sharedQueueAuthority, dir, name,
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := m.pull(t.Context(), turn.head); err != nil {
+	if err := m.pull(t.Context(), turn); err != nil {
 		t.Fatal(err)
 	}
 	writer := &sharedQueueWriter{authority: a, turn: turn, timeout: m.timeout, sequence: turn.head}

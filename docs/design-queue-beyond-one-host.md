@@ -119,7 +119,10 @@ submission and cancellation contract](design-proposal.md#submission-identity-and
 2. **Take over from the committed record.** Reuse stage 1's changed-row
    batches. Define a versioned form with stable IDs, assigned sequences and
    explicit deletes. Stream changes to each machine's local SQLite copy and
-   keep a verified snapshot plus the subsequent changes on the NAS. The NAS
+   keep a verified snapshot plus the subsequent changes on the NAS
+   ([retention](https://github.com/1kuna/mycelium/issues/2157): the
+   coordinator snapshots its copy once the changes since the last snapshot
+   reach that snapshot's size, and prunes below the previous one). The NAS
    commit need not wait for another machine's copy. Before serving decisions,
    the new coordinator applies every committed change through the handover
    point. Local status/history reads can share load. Freshness-sensitive

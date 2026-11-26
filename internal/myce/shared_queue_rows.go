@@ -252,7 +252,8 @@ type sharedQueueWriter struct {
 	authority    *sharedQueueAuthority
 	turn         sharedQueueTurn
 	timeout      time.Duration
-	sequence     int64 // Exclusive stage 1 writer turn.
+	sequence     int64        // Exclusive stage 1 writer turn.
+	appended     atomic.Int64 // Change payload bytes committed, for compaction.
 	disabled     atomic.Bool
 	storageFault atomic.Bool
 	spool        *uploadSpool
@@ -317,6 +318,7 @@ func (w *sharedQueueWriter) apply(ctx context.Context, db *sql.DB, batch *queueW
 		return err
 	}
 	w.sequence = change.sequence
+	w.appended.Add(int64(len(payload)))
 	if w.disabled.Load() {
 		return errSharedTurn
 	}

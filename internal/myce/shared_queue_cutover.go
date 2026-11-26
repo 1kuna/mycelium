@@ -398,7 +398,8 @@ func (a *sharedQueueAuthority) fenceShared(ctx context.Context) (int64, error) {
 	return turn.head, tx.Commit()
 }
 
-// restore builds a single-queue database at path from changes 1..head. While
+// restore builds a single-queue database at path from the newest snapshot,
+// if changes were pruned, and the changes after it through head. While
 // the replica cursor exists, single-queue startup refuses the partial copy.
 func (a *sharedQueueAuthority) restore(ctx context.Context, path string, head int64) error {
 	db, err := openQueueSQLite(path)
@@ -414,7 +415,18 @@ func (a *sharedQueueAuthority) restore(ctx context.Context, path string, head in
 	if _, err := db.ExecContext(ctx, "INSERT INTO myce_shared_cursor(id,identity,sequence) VALUES(1,?,0)", a.identity); err != nil {
 		return err
 	}
-	if err := a.changes(ctx, 0, head, func(c sharedQueueChange) error {
+	// Changes at or below the floor were pruned; start from the snapshot.
+	turn, err := a.current(ctx)
+	if err != nil {
+		return err
+	}
+	var start int64
+	if turn.floor > 0 {
+		if start, err = a.rebuild(ctx, db, 0); err != nil {
+			return err
+		}
+	}
+	if err := a.changes(ctx, start, head, func(c sharedQueueChange) error {
 		return replaySharedQueueChange(ctx, db, c)
 	}); err != nil {
 		return err

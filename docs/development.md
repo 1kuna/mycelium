@@ -87,6 +87,11 @@ a common disposable file store, and an injected scheduling clock. The
 worker executes ordinary CPU commands. The tests exercise planned shutdown,
 process kill and suspension, loss of PostgreSQL, both kinds of network
 partition, and a returning member catching up and starting work alone.
+Retention tests drive sustained changes and check that the coordinator's
+snapshots and pruning keep the change log bounded. They check that copies
+below the floor rebuild from the verified snapshot to the leader's exact
+state, a copy exactly at the floor replays, a corrupt snapshot changes
+nothing, and a crash between snapshot and prune loses nothing.
 The commit-reply loss test discards the response to an actual PostgreSQL
 commit and verifies the original operation and row sequence after restart.
 A direct Go test reports a skip when the PostgreSQL tools or an unprivileged
