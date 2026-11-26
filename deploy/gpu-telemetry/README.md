@@ -28,9 +28,10 @@ selects the render node; clients cannot choose a node or ioctl. Missing device
 access or unsupported counters omit VRAM while preserving mandatory GTT evidence.
 Older kernels require separately qualified accounting privilege for usable VRAM;
 that is an operator policy decision, not an automatic privilege change. A legacy
-GTT-only broker remains compatible but cannot authorize telemetry-dependent
-sharing. Separately install and qualify the updated broker and unit before
-relying on VRAM counters. The worker receives no capability.
+GTT-only broker remains compatible. For cards it reports no VRAM for, the worker
+makes the same query itself and accepts only positive usage, so on older kernels
+that censor usage those cards keep unknown VRAM (#2185). The worker receives no
+capability.
 
 Systemd owns the socket. The persistent broker uses Python's standard-library
 `socketserver.ForkingMixIn` so no interpreter starts per request. Each child gets

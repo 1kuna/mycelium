@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -43,6 +44,57 @@ type custodianRequest struct {
 	Machine             Machine     `json:"machine"`
 	State               workerState `json:"state"`
 	AccountingRoots     []string    `json:"accounting_roots,omitempty"`
+}
+
+// The custodian samples its attempt's card memory from DRM fdinfo and maps the
+// card for isolation, both by PCI address. That address is a local probe fact
+// the queue never receives, so Machine's JSON omits it; without it every
+// detached XPU attempt reported device accounting unsupported (#2185). This
+// same-host handoff carries it, matched to the exact card it was probed for.
+type custodianDevicePCI struct {
+	ID       string `json:"id"`
+	Platform string `json:"platform"`
+	Identity string `json:"identity"`
+	Selector string `json:"selector"`
+	Address  string `json:"address"`
+}
+
+type custodianRequestFields custodianRequest
+
+type custodianRequestWire struct {
+	custodianRequestFields
+	DevicePCI []custodianDevicePCI `json:"device_pci,omitempty"`
+}
+
+func (r custodianRequest) MarshalJSON() ([]byte, error) {
+	wire := custodianRequestWire{custodianRequestFields: custodianRequestFields(r)}
+	for _, d := range r.Machine.Devices {
+		address := d.pciAddress
+		if address == "" && d.pciFact != nil {
+			address = d.pciFact.address
+		}
+		if address != "" {
+			wire.DevicePCI = append(wire.DevicePCI, custodianDevicePCI{ID: d.ID, Platform: d.Platform, Identity: d.Identity, Selector: d.Selector, Address: address})
+		}
+	}
+	return json.Marshal(wire)
+}
+
+func (r *custodianRequest) UnmarshalJSON(b []byte) error {
+	var wire custodianRequestWire
+	if err := json.Unmarshal(b, &wire); err != nil {
+		return err
+	}
+	*r = custodianRequest(wire.custodianRequestFields)
+	for i := range r.Machine.Devices {
+		d := &r.Machine.Devices[i]
+		for _, p := range wire.DevicePCI {
+			if p.ID == d.ID && p.Platform == d.Platform && p.Identity == d.Identity && p.Selector == d.Selector {
+				d.pciAddress = p.Address
+			}
+		}
+	}
+	return nil
 }
 
 func (r custodianRequest) unstartedFor(id string, a attemptRecord) bool {

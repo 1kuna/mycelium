@@ -138,7 +138,16 @@ func (w Worker) sampleXPUTelemetry(ctx context.Context, p MachineProbe, devices 
 			continue
 		}
 		s := &DeviceTelemetry{At: at, Source: "read-only Xe broker VRAM; Xe PMU busiest hardware engine"}
-		if free, ok := freeByPCI[normalizePCIAddress(d.pciAddress)]; ok {
+		free, ok := freeByPCI[normalizePCIAddress(d.pciAddress)]
+		if !ok && p.XeFreeMemory != nil {
+			// A GTT-only or absent broker leaves VRAM unknown (#2185). The same
+			// kernel query reports uncensored usage to the worker itself.
+			if kernel, err := p.XeFreeMemory(ctx, d.pciAddress); err == nil && validMemoryValue(kernel) {
+				free, ok = kernel, true
+				s.Source = "read-only Xe kernel VRAM query; Xe PMU busiest hardware engine"
+			}
+		}
+		if ok {
 			free = max(0, free-d.ReserveMemoryGB)
 			s.FreeGB = &free
 		}
