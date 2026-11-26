@@ -149,7 +149,11 @@ func (q *Queue) maintainStartDeadlines() {
 		if j.Spec.Priority == "production" && !terminal(j.State) && !relativeStartPaused(j) && (j.Spec.StartBy != nil || dependencyReady(j)) {
 			if j.Spec.StartBy == nil || j.StartWindow == 0 {
 				q.touchJob(j.ID)
-				initializeStartDeadline(j, j.Queued)
+				since := j.Queued
+				if warmPieceDependencies(j.Spec) {
+					since = now // The first ready key, at submission or after a requeue.
+				}
+				initializeStartDeadline(j, since)
 			}
 		}
 	}

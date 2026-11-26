@@ -45,11 +45,11 @@ func (q *Queue) maintenanceJob(j *Job) {
 	if q.maintenance == nil || !q.maintenance.ran || j == nil {
 		return
 	}
-	if a := j.Spec.After; a != nil {
-		if q.maintenance.dependents[a.Job] == nil {
-			q.maintenance.dependents[a.Job] = map[string]bool{}
+	for _, parent := range dependencyParents(j.Spec) {
+		if q.maintenance.dependents[parent] == nil {
+			q.maintenance.dependents[parent] = map[string]bool{}
 		}
-		q.maintenance.dependents[a.Job][j.ID] = true
+		q.maintenance.dependents[parent][j.ID] = true
 	}
 	q.enqueueMaintenance(j.ID, false)
 }

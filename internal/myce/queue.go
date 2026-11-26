@@ -193,6 +193,7 @@ type Queue struct {
 
 	// Built once on a read-only cancellation projection, never on the live queue.
 	cancellationMembersByParent map[string][]*Job
+	cancellationWarmByParent    map[string][]*Job // Warm dependents, in the same view.
 
 	requestLatencies                requestLatencies
 	requestHealth                   requestHealth
@@ -1331,7 +1332,8 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 			if s.StartBy != nil {
 				j.StartWindow = s.StartBy.Sub(j.Queued)
 			}
-			if s.After == nil {
+			// A dependent's window starts when its first input is ready.
+			if s.After == nil && !warmPieceDependencies(s) {
 				initializeStartDeadline(j, j.Queued)
 			}
 		}
@@ -1455,7 +1457,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	// Read the stop cause while the attempt identity still names it.
 	maintenance := plannedMaintenanceStop(j)
 	if j.Spec.warmPieces() {
-		j.FanOut.Warm.Delivery = nil
+		j.FanOut.Warm.Delivery, j.FanOut.Warm.IdleSince = nil, nil
 		// Once an interrupted delivery has been fenced, a returning copy
 		// can settle cleanup but cannot adopt the logical job again.
 		for i := range j.Copies {
@@ -3407,7 +3409,13 @@ func (q *Queue) renewRecoveryStartWindow(j *Job) {
 	// Planned leave keeps its original deadline; queue maintenance stops retain
 	// the recovery window for already-started attempts.
 	recovering := j.State == "running" || j.State == "stopping" && plannedStop(j)
-	if j.Spec.Priority == "production" && recovering && j.StartedAt != nil && j.Spec.StartBy != nil {
+	if j.Spec.Priority == "production" && recovering && j.StartedAt != nil && j.Spec.StartBy != nil && warmPieceDependencies(j.Spec) && !absoluteStartBy(j) {
+		// A warm dependent's window starts again at its first ready key.
+		if j.StartWindow == 0 {
+			j.StartWindow = j.Spec.StartBy.Sub(j.Queued)
+		}
+		j.Spec.StartBy, j.StartCapacityBudget = nil, nil
+	} else if j.Spec.Priority == "production" && recovering && j.StartedAt != nil && j.Spec.StartBy != nil {
 		// A started interruption gets the original first-start window, even
 		// when its length came from an explicit first-start cutoff. Waiting
 		// alone never renews an absolute cutoff.
@@ -3650,7 +3658,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	// an uncounted refusal or a recovered older copy never reissues a number.
 	j.Attempt = max(j.Starts+j.AdmissionRequeues, j.Attempt) + 1
 	if j.Spec.warmPieces() {
-		j.FanOut.Warm.Delivery = nil
+		j.FanOut.Warm.Delivery, j.FanOut.Warm.IdleSince = nil, nil
 	}
 	j.Starts = j.Attempt - j.AdmissionRequeues
 	if j.storedFileResults() && !j.Spec.warmPieces() {

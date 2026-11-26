@@ -181,6 +181,13 @@ func (g *nativeGroup) serveWarmPieces(ctx context.Context, conn *net.UnixConn, j
 				return nil
 			}
 			delivery, item, end, err = g.beginWarmItem(ctx, j)
+			if errors.Is(err, errWarmSettleUnavailable) && ctx.Err() == nil {
+				// The offered item could not be staged. Leave it unsettled for
+				// the requeued attempt, as for an unavailable settle.
+				g.warmUnsettled.Store(true)
+				delivery, item, fenced, end, err = nil, nil, true, false, nil
+				response.End = true
+			}
 			response.Item, accepted = item, 0
 		case 'C':
 			if item == nil || item.CheckpointDir == "" {
@@ -225,14 +232,58 @@ func (g *nativeGroup) serveWarmPieces(ctx context.Context, conn *net.UnixConn, j
 }
 
 func (g *nativeGroup) beginWarmItem(ctx context.Context, j Job) (*WarmPieceDelivery, *warmPieceItem, bool, error) {
-	offered, err := g.warmCall(ctx, warmPieceRequest{Op: "next"})
-	if err != nil || offered.End {
-		return nil, nil, offered.End, err
+	var offered warmPieceReply
+	for {
+		var err error
+		offered, err = g.warmCall(ctx, warmPieceRequest{Op: "next"})
+		if err != nil || offered.End {
+			return nil, nil, offered.End, err
+		}
+		if !offered.Wait {
+			break
+		}
+		// No item is ready yet. The queue bounds this idle time by the
+		// attempt's measured load; ask again at the worker's poll cadence.
+		interval := g.worker.Interval
+		if interval <= 0 {
+			interval = defaultWorkerInterval
+		}
+		if err := g.worker.Client.pause(ctx, interval); err != nil {
+			return nil, nil, false, err
+		}
 	}
 	delivery := offered.Delivery
 	item, err := prepareWarmItem(j, delivery)
 	if err != nil {
 		return nil, nil, false, err
+	}
+	// Stage exactly the item's bound dependency inputs, verified by ordinary
+	// transport outside the queue, before start authorizes the item.
+	declared := map[string]string{}
+	if a := j.Spec.FanOut.Pieces[delivery.Sequence-1].After; a != nil {
+		declared = a.Outputs
+	}
+	if len(offered.Files) != len(declared) {
+		return nil, nil, false, errors.New("warm item inputs differ from the frozen declaration")
+	}
+	for local := range offered.Files {
+		if _, ok := declared[local]; !ok {
+			return nil, nil, false, errors.New("warm item inputs differ from the frozen declaration")
+		}
+	}
+	for local, ref := range offered.Files {
+		dest := filepath.Join(warmItemInputDir(j, delivery.Key), local)
+		err := os.MkdirAll(filepath.Dir(dest), 0700)
+		if err == nil {
+			err = g.worker.copyAttemptInput(g.worker.storageIOContext(ctx), j, ref, dest)
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, nil, false, ctx.Err()
+			}
+			return nil, nil, false, fmt.Errorf("%w: stage %s: %w", errWarmSettleUnavailable, local, err)
+		}
+		item.Inputs[local] = dest
 	}
 	started, err := g.warmCall(ctx, warmPieceRequest{Op: "start", Key: delivery.Key, Sequence: delivery.Sequence})
 	if err != nil || started.End {
@@ -261,10 +312,7 @@ func prepareWarmItem(j Job, d *WarmPieceDelivery) (*warmPieceItem, error) {
 	if p.Key != d.Key {
 		return nil, errors.New("warm item differs from the frozen declaration")
 	}
-	work := j.stagedWork
-	if work == "" {
-		work = j.Spec.Run.Workdir
-	}
+	work := warmWork(j)
 	item := &warmPieceItem{Key: p.Key, Args: p.Args, Inputs: map[string]string{}}
 	prefix := PlainPiecePrefix + p.Key + "/"
 	for name := range j.Spec.Files {
@@ -422,10 +470,25 @@ func (g *nativeGroup) settleWarmItem(ctx context.Context, j Job, d WarmPieceDeli
 	return failed, err
 }
 
+func warmWork(j Job) string {
+	if j.stagedWork != "" {
+		return j.stagedWork
+	}
+	return j.Spec.Run.Workdir
+}
+
+// The item's input folder holds its own stored inputs and its staged
+// dependency inputs, and nothing of any other item.
+func warmItemInputDir(j Job, key string) string {
+	return filepath.Join(warmWork(j), PlainPiecePrefix+key)
+}
+
 func (g *nativeGroup) retireWarmItem(j Job, delivery WarmPieceDelivery, item warmPieceItem) {
 	root := attemptPublicationRoot(j, g.dir)
-	// Receipt acknowledgement is the authority to retire only this item.
-	// Any unremoved files are still covered by ordinary attempt retention.
+	// Receipt acknowledgement is the authority to retire only this item,
+	// including its staged inputs. Any unremoved files are still covered by
+	// ordinary attempt retention.
+	_ = os.RemoveAll(warmItemInputDir(j, delivery.Key))
 	_ = os.Remove(filepath.Join(root, "warm-checkpoint.json"))
 	if item.CheckpointDir != "" {
 		_ = os.RemoveAll(item.CheckpointDir)

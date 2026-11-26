@@ -425,8 +425,9 @@ approval and leaves the MY-40 study on its own approval path.
 
 Proposed 2026-11-26 for [#2187](https://github.com/1kuna/mycelium/issues/2187).
 Slice A is built under the approval above, which anticipated extension
-support "when their contracts are exercised". Slices B and C need review
-before they are built. The trust model, settle semantics, recovery rules and
+support "when their contracts are exercised". The orchestrator approved
+slices B and C as written on 2026-11-26 ([#2196](https://github.com/1kuna/mycelium/pull/2196)).
+B is built, and C stays designed only. The trust model, settle semantics, recovery rules and
 fixed reservation above apply unchanged to all three.
 
 **Evidence.** A production consumer's 73-item, four-stage batch submits
@@ -462,10 +463,125 @@ so they need both slice A and slice B.
 - Workers advertise `warm_pieces_extension_v1`. Older workers hold the job
   with a `capability` reason.
 
-### B and C: proposed
+### B. Per-item dependencies (built)
 
-Per-item `after` dependencies (slice B) and in-engine parallel slots
-(slice C) are proposed on [#2187](https://github.com/1kuna/mycelium/issues/2187)
-for review before they are built. Slice A on its own serves a first stage,
-or any stage whose inputs all exist at submission. Most of the 40–55 min
-needs A and B together.
+Each piece may declare its own `after` with the existing grammar. Its local
+names land in that item's input folder:
+
+```yaml
+extension: naming@1
+workload: {input_shape: item-v1, units: 1}
+advanced: {warm_pieces: fixed}
+outputs: {labels.json: results}
+fan_out:
+  pieces:
+    - {key: rec-001, after: {job: UPSTREAM_JOB_ID, piece: rec-001, outputs: {segments.json: segments.json}}}
+    - {key: rec-002, after: {job: OTHER_UPSTREAM_ID, outputs: {segments.json: whole/segments.json}}}
+```
+
+1. **Membership stays frozen.** The approved design rejected live append.
+   Producers must already exist, in the same project, with stored-file
+   results. Each piece may name a different producer, and job-level
+   `after` stays refused.
+2. **Bindings.** The queue keeps one binding per key in `fan_out.warm`,
+   with the same record and metadata-only binding as job-level
+   `dependency`. A producer that ends without accepting that output settles
+   the key as failed with `upstream_failed` (or `result_expired`). The key is
+   never delivered, and the other keys continue. A cancelled producer cancels
+   only that key. Cancelling the parent fences every unsettled key. The
+   producer's `cancellation_scope` lists the warm parent as a dependent.
+3. **Placement.** The parent becomes eligible when at least one unsettled key
+   is ready. A production start window starts at the first ready key, and
+   starts again at the first ready key after each requeue.
+4. **Delivery.** `next` offers the first unsettled ready key in declaration
+   order. The sequence stays the declaration index. A retry resumes with the
+   ready unsettled keys, and settled keys never run again.
+5. **Staging.** A delivery names the binding's immutable references. The
+   worker downloads and verifies them into the item's folder before `start`,
+   through ordinary transport and outside `q.mu`. Retention and claims
+   count them as dependency inputs. An attempt receives only the files its
+   own pieces declare, never a producer's other outputs. The worker removes
+   an item's staged inputs when its receipt is acknowledged, and removes all
+   attempt scratch at attempt end under ordinary cleanup.
+6. **Idle bound.** When no key is ready, `next` returns `wait`. The queue
+   decides this on the injected Clock. The attempt keeps its reservation
+   while two things hold: the idle time since the last settle is under the
+   attempt's measured load time, and `warmPieceYields` finds no contender.
+   Otherwise it ends the segment as a planned requeue, with no failure or
+   loss charge, and is placed again when a key becomes ready.
+   Idling for at most one reload's worth wastes no more than the reload it
+   avoids, so the total cost stays within twice the best choice in hindsight.
+   The bound comes from each attempt's own measurement, not a fixed timer
+   (MY-34).
+
+Implementation notes:
+
+- `next` answers `wait` to the worker, which asks again at its ordinary
+  poll interval. Main's `next()` simply blocks.
+- On acceptance the worker removes the whole item folder, which holds the
+  item's own stored inputs as well as its staged dependency inputs.
+- Workers advertise `warm_pieces_dependencies_v1`. Older workers hold the
+  job with a `capability` reason.
+- A ready binding is final, like a job-level one. A key bound before its
+  producer was cancelled keeps its accepted inputs and still runs.
+- If every remaining key fails upstream while the parent is queued, it is
+  placed once to finalize with an empty list, as after an interrupted
+  finalization.
+
+**Consumer pattern.** Submit one warm parent per stage per group of items.
+The consumer confirmed this fits all four of its stages, with groups of 8–10
+recordings, and gates adoption on byte-identical output against one-shot runs
+of public parity fixtures.
+A first stage's inputs must be uploaded before submission, so it submits a
+group as each set of uploads completes, and each group pays one load.
+A downstream parent names each item's upstream piece or job, and is
+submitted once those producers exist. Matching the group boundaries
+across stages keeps that order free.
+
+### C. In-engine parallel slots (designed only, not planned)
+
+Two LLM-stage processes on one GPU measured 302 s each when overlapped,
+against 139 s solo, so separate processes add nothing. A second lane there
+has to come from one engine serving concurrent requests. The consumer then
+measured two slots in its naming engine on that GPU. Throughput fell 2.45%
+and label agreement got worse: that stage is GPU-bound. Slice C stays
+designed only, for an engine that shows a measured gain.
+
+- An opt-in `advanced.warm_slots: N` (2–8) lets the helper keep up to `k`
+  deliveries outstanding. Each has its own sequence, output folder and
+  receipt, and a stop fences all of them.
+- `k` starts at 1. It rises to `k+1` only after measured aggregate item
+  throughput at `k+1` beats `k` on comparable items, using the overlap
+  learning of #2055 keyed by work and concurrency. It falls back when it
+  doesn't. Two-process measurements never count as slot evidence.
+- The fixed charge is the resident floor plus `k` times the measured per-item
+  increment, taken from peaks observed at that `k`. Without evidence for
+  `k+1`, the queue doesn't offer it. In fixed mode the charge changes only
+  at a new attempt. Growing within an attempt waits for stage 2 (#2086).
+- Build it only for an engine whose canary shows higher items per hour at
+  `k` = 2 than at 1, with output parity.
+
+### Slices and expected gain
+
+| Slice | Content | Adopters | Expected saving |
+| --- | --- | --- | --- |
+| A, built | Extension stages with sidecars, no dependencies | A first stage, or any stage whose inputs exist at submission | Up to about 45 s per additional item on that stage's lane (15.6 s assignment to command, at most 29 s fixed time). Small makespan effect while the CUDA lane bounds the batch. |
+| B, built | Per-item `after`, ready-order delivery, idle bound | Every model stage | 40–55 min of wall time in the #2187 replay |
+| C | In-engine slots | Engines with a measured slot gain | None for the consumer's naming stage: two slots measured 2.45% lower throughput |
+
+The smallest change that delivers most of the 40–55 min is A and B
+together.
+
+### Decisions
+
+The orchestrator approved each recommendation below as written.
+
+1. Approve B: frozen membership, per-piece `after`, delivery in ready order,
+   and the measured idle bound? Recommended. It reuses the dependency and
+   receipt records and adds no live append.
+2. Keep C designed only? Recommended. The one measured engine lost
+   throughput with two slots, and no other consumer has asked for it.
+3. Should a variant declare warm support, so the queue can refuse a warm
+   submission at submit time? Not yet. The submitter opts in, as for plain
+   commands. A variant without the helper fails its first attempt with "main
+   exited before all items settled".

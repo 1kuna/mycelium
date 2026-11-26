@@ -233,9 +233,14 @@ Use `advanced: {warm_pieces: fixed}` with plain-command `pieces:`, or with
 an extension job's `fan_out.pieces` and a one-item `workload`, when one
 main process can load a model once and handle the items serially. Extension
 stages keep their variants, sidecars and qualification; put each item's
-stored inputs under `.myce-pieces/KEY/` and omit `max_concurrency`. Per-item
-`after` dependencies are not supported yet, so a warm stage's items must
-all have their inputs at submission. Submit
+stored inputs under `.myce-pieces/KEY/` and omit `max_concurrency`. A
+downstream stage gives each piece its own `after` (`{key, after: {job,
+piece, outputs: {LOCAL: OUTPUT}}}`, producers already submitted in the
+same project). `next()` then returns items as their inputs are accepted,
+each item receives only its mapped files, and an upstream failure fails
+only that item. With nothing ready, `next()` blocks for at most one
+measured model load, then the attempt requeues without penalty. Submit one
+parent per stage per group. Submit
 normally and keep the parent ID. Main opens the worker helper, loads the
 model, calls `next()` for the key, args and paths, writes the declared
 outputs for that item, and waits for `success()` or reports `failure()`.
