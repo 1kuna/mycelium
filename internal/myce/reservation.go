@@ -229,6 +229,7 @@ func (q *Queue) ReleaseReservation(id string, revision uint64, reason string, co
 const reservationStopCause = "validation_reservation_withdrawal"
 
 func (q *Queue) maintainReservations() {
+	defer q.bodyPhaseFinish("maintain_reservations", q.bodyPhaseStart())
 	now := q.clock.Now()
 	for _, r := range q.s.Reservations {
 		if r.ReleasedAt != nil {

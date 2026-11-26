@@ -1,5 +1,7 @@
 package myce
 
+import "time"
+
 // Owned by one immutable planning pass, shared across its target machines.
 // Never retained across placements, inventory changes, or transaction boundaries.
 type memoryPlanningCache struct {
@@ -9,6 +11,7 @@ type memoryPlanningCache struct {
 	storageFamilies map[string][]StorageObservation
 	storagePrograms map[string]bool
 	hostObligations map[string][]HostObligation
+	lossTimeouts    map[string]time.Duration // Custody part of machineLossTimeout.
 	startTargets    []*Machine
 	startHosts      map[*Job][]string
 	productionGaps  map[productionGapKey]string

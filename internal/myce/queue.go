@@ -610,6 +610,35 @@ func (q *Queue) SetLossTimeouts(production, deadline, experiment time.Duration) 
 	return nil
 }
 func (q *Queue) machineLossTimeout(id string) time.Duration {
+	timeout := q.custodyLossTimeout(id)
+	if timeout < 0 {
+		timeout = q.lossTimeouts[2]
+	}
+	if m := q.s.Machines[id]; m != nil {
+		measured := q.workerLossAllowance(m)
+		if measured == 0 {
+			return time.Duration(1<<63 - 1)
+		}
+		timeout = max(timeout, measured)
+	}
+	if timeout == 0 {
+		// No advertised/observed cadence and no operator minimum: unknown.
+		return time.Duration(1<<63 - 1)
+	}
+	return timeout
+}
+
+// The shortest loss timeout among a machine's live custody, or -1 for none.
+// Placement asks this for every candidate on every target (#2179), so an
+// immutable planning pass scans the live set once per machine, as it does
+// for host obligations over the same custody.
+func (q *Queue) custodyLossTimeout(id string) time.Duration {
+	cache := q.memoryPlanning
+	if cache != nil {
+		if timeout, ok := cache.lossTimeouts[id]; ok {
+			return timeout
+		}
+	}
 	timeout := time.Duration(-1)
 	add := func(priority string) {
 		d := q.lossTimeouts[min(2, legacyRank(priority))]
@@ -632,19 +661,11 @@ func (q *Queue) machineLossTimeout(id string) time.Duration {
 			add(slot.Priority)
 		}
 	}
-	if timeout < 0 {
-		timeout = q.lossTimeouts[2]
-	}
-	if m := q.s.Machines[id]; m != nil {
-		measured := q.workerLossAllowance(m)
-		if measured == 0 {
-			return time.Duration(1<<63 - 1)
+	if cache != nil {
+		if cache.lossTimeouts == nil {
+			cache.lossTimeouts = map[string]time.Duration{}
 		}
-		timeout = max(timeout, measured)
-	}
-	if timeout == 0 {
-		// No advertised/observed cadence and no operator minimum: unknown.
-		return time.Duration(1<<63 - 1)
+		cache.lossTimeouts[id] = timeout
 	}
 	return timeout
 }
@@ -1592,7 +1613,9 @@ func (q *Queue) maintainControl(refreshStartReasons bool) {
 	q.maintainHostMaintenance()
 	q.maintainSharedHosts()
 
+	poolYield := q.bodyPhaseStart()
 	q.yieldPooledMemory()
+	q.bodyPhaseFinish("maintain_pool_yield", poolYield)
 	q.maintainDeviceMaintenance()
 	q.maintainExtensionQualifications()
 	now := q.clock.Now()
