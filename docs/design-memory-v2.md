@@ -11,13 +11,13 @@ possibly be a full redesign instead of constant patching" (#2086).
 1. Today a job's memory is a prediction (the "charge"), and four separate parts of Mycelium each turn that prediction into a different answer.
 2. Every time two of them disagreed we added a special case. There are now about 36 of them, in 8,750 lines.
 3. v2 makes the live reading of free memory the truth, and learns each job's size from what its earlier runs actually used.
-4. A job starts when its expected peak fits in memory nobody else has claimed. A running job claims only what it has proven it uses, plus its expected peak while it is still growing.
+4. A job starts when its expected peak fits in memory nobody else has claimed. Every decision counts a running job the same way: what it uses now plus what it may still grow into.
 5. Memory is counted the same way everywhere. One rule per platform, so the scheduler, the stop logic, the learning and `myce efficiency` agree.
-6. A job is stopped only when memory would really run out before Mycelium can react. A job loading inside its own claim, with room for it, is never stopped.
-7. Over 14 days of real runs, these sizes would have reserved 1.08–1.19× what repeat jobs used. Today's charges reserve 1.41–2.17×.
-8. "Alone" stops being a special state. A job that needs the whole machine just has a size equal to the machine.
-9. The decision code shrinks from about 5,000 lines to about 1,900, in five stages. Each stage ships on its own and is testable on a laptop.
-10. Biggest risk: on the unified-memory CUDA host, GPU memory isn't fenced by the OS. Section 5 says how v2 protects the host and which test proves it.
+6. A job loading inside its own size is never stopped. Where the OS can't fence GPU memory, the worker kills a job that outgrows its size once the machine is into its reserve. That reserve is sized from the fastest growth measured (8 GiB a second) times how long the kill takes.
+7. After any memory stop, the retry gets a larger size measured from that stop, or it waits with a reason that says what is missing. The same attempt never simply repeats.
+8. Over 14 days of real runs, these sizes would have reserved 1.08–1.19× what repeat jobs used. Today's charges reserve 1.41–2.17×. "Alone" becomes a number: the whole pool.
+9. The decision code shrinks from about 4,800 lines to about 2,800, in five stages. Each stage ships on its own and is testable on a laptop. Each hardware-dependent path stays off until its probe passes.
+10. Two safety choices are yours (section 6): killing an oversized job without letting it save, and making production jobs the kernel's preferred victims. The second is a bias, not a guarantee.
 
 ## 1. The root problem
 
@@ -42,25 +42,25 @@ The evidence:
   - device memory on a discrete card;
   - device allocations on unified CUDA, which escape the cgroup (#1044, #2091);
   - a process group on macOS.
-- **F5.** Mycelium needs one sample period plus the stop grace to free memory. On the unified host the approved values are 1 s + 10 s.
+- **F5.** Mycelium acts only on what it has sampled. The worker reads each attempt's cgroup every 200 ms and its device memory every 5 s (`attempt_memory.go:17`, `host_memory.go:443`), and checks in every second. A queue stop also waits for the check-in round trip (9.5 s p50 under load, #2179) and a 10 s grace. The fastest growth measured is 8.06 GiB/s, a unified CUDA load: a 4 GiB reserve lasts 0.5 s. Kill-to-free time is unmeasured (probe 0b-2).
 
 ### Six concepts
 
 | Concept | What it is | Rests on |
 |---|---|---|
 | **Pool** | Host RAM, and each discrete card; a unified host has only RAM. Each pool has one live **free** reading, sampled by the worker: the OS's available memory less keep, or for a card, the driver's free figure. Its **capacity** is the host allowance for RAM, or the card's size. | F1 |
-| **Keep** | What the pool leaves free for the host and its owners. Unchanged: the measured idle burst or the owner reserve. | F2 |
+| **Keep** | What the pool leaves free: the measured idle burst or the owner reserve, unchanged. A pool the kernel doesn't contain adds a **stop term**, its platform's fastest measured growth × the worker's stop time (detection plus kill latency), so growth during an immediate stop (R4) can't reach the owners' part. | F2, F4, F5 |
 | **Footprint** | One number per attempt per pool, from one counting rule per platform (table below). Admission, holds, stops, learning, status and `myce efficiency` all call the same function. | F1 |
-| **Expected peak (E)** | The largest clean footprint among the last 20 runs of this work on this platform family. | F3 |
-| **Hold** | What a running attempt keeps others out of: `max(E, high-water) − footprint`, where high-water is its own peak so far. On a *contained* pool, once the attempt has stopped growing for one reaction time, its hold drops to `high-water − footprint`. | F3, F4, F5 |
-| **Slack (S)** | `free − Σ holds`: memory nobody has claimed. On RAM, S is also capped at `allowance − Σ (footprint + hold)`, so the host allowance still bounds Mycelium's share (MY-45). If every job stays within its E, S doesn't fall. | F1 |
+| **Expected peak (E)** | The largest clean footprint among the last 20 runs of this work on this platform family. A memory stop raises it until the next clean run (R5). | F3 |
+| **Hold** | What a running attempt keeps others out of: `max(E, high-water) − footprint`, where high-water is its own peak so far. On a *contained* pool, once the attempt has stopped growing for one reaction time, its hold drops to `high-water − footprint`. An E raised by a stop is never lent this way. | F3, F4, F5 |
+| **Slack (S)** | `free − Σ holds`: memory nobody has claimed. An attempt's **commitment** is `footprint + hold`, and S rises by exactly that when it ends. On RAM, S is also capped at `allowance − Σ commitments` (MY-45). A pool's **reach**, `S + Σ commitments`, is its slack with nothing running. Every projection below uses these sums. | F1 |
 
 ### Counting rule
 
 | Platform | RAM footprint | Card footprint | RAM pool contained? |
 |---|---|---|---|
 | Linux, CPU work | the attempt cgroup's `anon + shmem + kernel`, excluding page cache | none | yes: the worker slice's `memory.max` |
-| Linux, discrete GPU | the same, plus the driver's per-client system memory where that sits outside the cgroup | per-process device memory, summed: NVML, or DRM fdinfo `drm-resident-vram*` | only after probe 0b shows the driver's memory is inside the cgroup |
+| Linux, discrete GPU | the same, plus the driver's per-client system memory where that sits outside the cgroup | per-process device memory, summed: NVML, or DRM fdinfo `drm-resident-vram*` | only after probe 0b-3 shows the driver's memory is inside the cgroup |
 | Linux, unified CUDA | `anon + shmem + kernel`, plus per-process device memory summed | none: unified | no |
 | macOS | `phys_footprint` summed over the attempt's process tree; Metal buffers count one for one (#1044) | none: unified | no |
 
@@ -72,38 +72,38 @@ A run is **clean** only when every counter in its row was read for the whole run
   - The worker computes S from one sample.
   - The queue uses the worker's S, less the E of every assignment that sample doesn't yet list.
   - The worker's launch check runs the same function.
-- **R2 Production.** When R1 fails for production, check whether production's own holds plus its E fit the pool's capacity. If they do, release lower-tier attempts in stop order until R1 holds, through the existing release path. Production never waits on lower tiers (MY-56), and production is never overcommitted against other production.
-- **R3 Fair waiting.** A pool's **head** is the highest-ranked job that fits the pool's capacity but not S. A job behind the head starts if it fits S and either:
-  - its expected finish comes before the head's earliest start, with unknown durations counted as never finishing; or
-  - it leaves the head's E free at that time.
+- **R2 Production.** When R1 fails for production, release lower-tier attempts in stop order only if releasing all of them would make it fit: `E ≤ S + Σ lower-tier commitments`. Otherwise it waits for other production, never for lower tiers (MY-56), and is never overcommitted against it.
+- **R3 Fair waiting.** A pool's **head** is the highest-ranked job that fits its reach but not S. Its earliest start `t*` is the first time S, plus the commitments of attempts expected to end by then, covers its E. A job behind the head starts if it fits S and either:
+  - it is expected to finish by `t*` (an unknown duration never finishes); or
+  - S at `t*`, less its own E, still covers the head's E.
 
   This is EASY backfill, and it replaces the pool accumulation fences (#2186).
-- **R4 Stop.** The worker forecasts each pool one reaction time ahead, from the same sample.
-  - Each running attempt grows at its own measured rate. While an attempt is within its E, it grows no further than its hold.
+- **R4 Stop.** The queue forecasts each pool one reaction time ahead, from the worker's report.
+  - Each attempt grows at its own measured rate; while it is within its E, no further than its hold.
   - Anything else that uses memory keeps its measured rate: the fall in free memory that the attempts' own growth doesn't explain.
-  - The pool is **short** when that forecast takes free memory below zero.
+  - The pool is **short** when that forecast takes free memory below zero. On macOS, the OS's warning pressure level also counts as short.
+  - Stop one attempt at a time: the lowest tier first, then any attempt over its E (largest overshoot first), then resumable before non-resumable, then the newest.
+  - On a pool the kernel doesn't contain, the worker itself stops any attempt over its E while the pool is below keep: at once, from its own sample, with no checkpoint grace (question 2). A queue round trip can take seconds (F5). The kernel acts the same way at `memory.max`.
 
-  This is today's arithmetic (the sustained rate over the sample period plus the stop grace), split per attempt. A job loading inside its own hold, with room for it, is never stopped. On macOS, the OS's warning pressure level also counts as short.
-  - Stop one attempt at a time, choosing in this order:
-    1. the lowest tier;
-    2. any attempt over its E, largest overshoot first;
-    3. resumable before non-resumable;
-    4. the newest.
-  - On a pool the kernel doesn't contain, an attempt over its E while the pool is below its keep is stopped at once, with no checkpoint grace. That is what the kernel itself does at `memory.max`.
+  A job loading inside its own hold, with room for it, is never stopped.
 - **R5 Learn.**
-  - A clean run adds its peak to the window.
-  - A run that hit a kill limit, or was stopped while over its E, sets the next E to `min(2 × its measured peak, the pool's capacity)`.
-  - A run stopped while within its E changes nothing.
-  - A job fails as `memory_capacity`, with the measured figure, only if it hits the limit while its E is already the whole pool.
+  - A clean run adds its peak to the window, and E returns to the window's maximum.
+  - A pressure stop or a kernel kill raises the next E from what it measured:
+    - over its E, or killed by the kernel (a failed allocation never shows in the peak): `2 × max(peak, E)`;
+    - stopped within its E: `E + shortfall`, where shortfall is how far the stop's forecast took free memory below zero.
+  - A raised E is capped at the largest reach among the job's pools. If the cap leaves it no higher than the measured peak or the old E, a retry can't do better, so the job waits under the existing `memory_capacity` hold. The hold names the peak, the shortfall and each reach, and clears when a reach grows past them. Any job whose E exceeds every reach waits the same way.
+  - A kill at the job's own `memory_limit_gb` still fails it (#1972).
+
+  So each retry has room for what ended the attempt before it, or waits with the reason.
 - **R6 First runs.** With no runs of the exact work, E falls back in order:
   1. this work family's peaks on this platform;
   2. a typed figure or size hint (host plus device on unified memory);
   3. the median first-run peak on this platform family;
-  4. the whole pool, which happens once per platform family per installation.
+  4. the pool's reach, which happens once per platform family per installation.
 
   On a discrete card with no measured device peak, the card's E is the whole card. The reason is physical: a failed allocation can land on a co-tenant. This keeps the 2026-11-23 agent default.
 
-"Alone" is no longer a state. It is just E equal to the whole pool. Whether two jobs that fit one GPU *should* share it is a throughput question, not a memory one. The existing comparison of alone and shared runs answers it (#2037).
+"Alone" is no longer a state. It is just E equal to the pool's reach. Whether two jobs that fit one GPU *should* share it is a throughput question, not a memory one. The existing comparison of alone and shared runs answers it (#2037).
 
 ### Constants (MY-34)
 
@@ -111,59 +111,110 @@ A run is **clean** only when every counter in its row was read for the whole run
 |---|---|---|---|---|
 | Window | 20 clean runs | Old versions of the work setting today's E | A rare large run is forgotten after 20 runs | The maximum of 20 runs covers the next run 95% of the time (order statistics); 94% measured (approved design §2.3) |
 | Overshoot step | × 2 | Repeated near-miss retries (#1484) | Up to 2× hold on one retry | Exponential search |
-| Reaction time | sample period + stop grace | Stopping too late | none new | Existing approved values |
-| Keep | per host | Starving the host and its owners | Idle memory | MY-45, MY-48 |
-| Kernel kill order | lower tiers 1000, production 500, host processes unchanged | The kernel killing a host service, such as the queue, in a host-wide OOM | Production goes before host services | The kernel adds `adj/1000` of RAM to a process's OOM score, so 500 keeps both orderings unless one process holds half the RAM |
+| Reaction time | queue: check-in period + stop grace; worker: detection + kill latency | Stopping too late | none new | Existing values; probe 0b-2 |
+| Keep | per host, plus the stop term on uncontained pools | Starving the host and its owners; a host OOM during an immediate stop | Idle memory: 8.06 GiB per second of stop time on the unified host | MY-45, MY-48; measured rate × measured stop time |
+| Kernel kill order | lower tiers +1000 and production 0 today (`memory_ceiling.go:400`); production +500 if question 3 is yes | The kernel killing a host service, such as the queue, in a host-wide OOM | Production dies before smaller host processes | The score adds `adj/1000` of RAM and swap: +1000 outranks every unadjusted process, +500 only smaller ones (question 3) |
 
 Gone: the confidence target, rule Q, ratio rings, transfer from other platforms, and the platform quantile.
 
 ## 3. The known cases
 
+Unified CUDA rows assume probes 0b-1 and 0b-2 pass, and that keep's stop term there stays under about 15 GiB (a stop time under 1.8 s at 8.06 GiB/s). A longer stop time lowers S one for one.
+
 | Case | What happened | Under v2 |
 |---|---|---|
 | **47 GB holder against a 21 GB peak** (#2086) | Charged 46.95 GiB, which is 2.277 × 20.62 from a ratio ring that mixed runs with and without device readings. Room was 43.6 GiB while the host had 88.8 GiB available. Three jobs waited 3–3.5 h. | E is 20.99 GiB, its clean peak, so its hold is about 0.4 GiB. S is about 69.5 GiB: 96 allowance − 21.0 − 5.5. The 24.4 GiB waiter starts at once. The 60 GiB waiter, sized only by its typed figures, then waits for a holder to finish: a real limit of the allowance. |
-| **FP8 canary loop** (#2091) | Stopped nine times and readmitted at the same 60 GiB each time. On r6.49 the forecast projected 47.75 GiB of loss from a 4.34 GiB/s load against 33.57 GiB of room. #2129 then made retries exclusive and paused a second stop. | Its footprint went past 60; the device counter alone read 79.6. So the stop counts as an over-E stop, and R5 sets E to the whole pool. The next attempt waits for the pool and holds all of it, and its own load doesn't move S. A same-charge retry can't happen: an over-E stop always raises E, and growth within E is stopped only when the host itself has no room for it. If it outgrows the whole pool, it fails `memory_capacity` with the measured peak. #2091 inferred this may be its true outcome. |
-| **In-charge victim stop**, live, 2026-11-26 18:24Z | An 88 GiB-charged model load had used about 63 GiB (device 61.8, host 1.3). The forecast projected 88.7 GiB of loss (8.06 GiB/s × 11 s) against 50.6 GiB of room and stopped it, though the job could grow at most about 25 GiB more inside its own charge. Its retry is now exclusive and waits for the whole pool. | The forecast caps its growth at its 25 GiB hold, which the 50.6 GiB of free memory covers. No stop, and S stays at 8 GiB: the 96 GiB allowance less its 88 GiB. |
-| **In-charge victim stop**, the 87 GiB job (#2091) | Each counter alone sat under its charge (69.0 cgroup, 80.0 device). By host-wide subtraction it held 93–97 GiB. Its retry ran exclusive at the same 87. | The one rule adds the cgroup's non-cache figure to the device counter, so the overshoot shows: a sibling attempt of the same workload read 32.9 + 79.6 GiB. It is stopped first as the over-E attempt, no co-tenant goes before it, and its next E is the whole pool. |
-| **Alone holder blocking 93 waiting jobs** (#2179) | After one pressure stop, the retry's RAM and card pools went `alone`, so every pooled candidate conflicted with it. Maintenance then visited every waiting job: O(waiting × targets × live). Check-in hold rose from 0.7 s to 2.4 s. | There is no alone state. The retry has a number: unchanged if it was a victim, raised if it went over E. The 93 pieces compare E with S like any job, with no custody conflicts and no release planning between same-tier jobs. If the retry's E is the whole pool, it becomes the head, and R3 lets short pieces finish around it. |
+| **FP8 canary loop** (#2091) | Stopped nine times and readmitted at the same 60 GiB each time. On r6.49 the forecast projected 47.75 GiB of loss from a 4.34 GiB/s load against 33.57 GiB of room. #2129 then made retries exclusive and paused a second stop. | Its footprint went past 60; the device counter alone read 79.6. So the stop counts as over E, and R5 raises E to `min(2 × 79.6, 96) = 96`, the host's reach (its allowance). The retry waits for the pool and holds all of it, and its own load doesn't move S. If it outgrows 96 too, the cap can't rise past its peak, so it waits under `memory_capacity` with the measured peak and the 96 GiB reach. That is at most two attempts, not nine. #2091 inferred this may be its true outcome. |
+| **In-charge victim stop**, live, 2026-11-26 18:24Z | An 88 GiB-charged model load had used about 63 GiB (device 61.8, host 1.3). The forecast projected 88.7 GiB of loss (8.06 GiB/s × 11 s) against 50.6 GiB of room and stopped it, though the job could grow at most about 25 GiB more inside its own charge. Its retry is now exclusive and waits for the whole pool. | The forecast caps its growth at its 25 GiB hold, which the 50.6 GiB of free memory covers while keep's stop term stays under 25.6 GiB. No stop, and S is at most 8 GiB: the 96 GiB allowance less its 88 GiB. |
+| **In-charge victim stop**, the 87 GiB job (#2091) | Each counter alone sat under its charge (69.0 cgroup, 80.0 device). By host-wide subtraction it held 93–97 GiB. Its retry ran exclusive at the same 87. | The one rule sums the counters, so the overshoot shows, but the raw sum overstates it: a sibling attempt of the same workload read 32.9 + 79.6 GiB while the host showed about 95. With the overlap corrected (probe 0b-1), its footprint is about its host-wide 93–97 GiB. It is stopped first as the over-E attempt, and no co-tenant of its tier goes before it. R5 caps the raise at the 96 GiB reach: from a 93 GiB peak it retries at 96, and from 97 it waits under `memory_capacity` with that figure. |
+| **Alone holder blocking 93 waiting jobs** (#2179) | After one pressure stop, the retry's RAM and card pools went `alone`, so every pooled candidate conflicted with it. Maintenance then visited every waiting job: O(waiting × targets × live). Check-in hold rose from 0.7 s to 2.4 s. | There is no alone state. The retry has a number: raised by its shortfall if it was a victim, doubled if it went over E, and capped at the reach. The 93 pieces compare E with S like any job, with no custody conflicts and no release planning between same-tier jobs. If the retry's E is the whole reach, it becomes the head, and R3 lets short pieces finish around it. |
 | **About 3.7× over-reservation** | Live at 22:28Z: 261 reserved against 70 measured GiB-hours. That figure covers only the current 8.8 h and 4.6 h windows, and on unified hosts "measured" leaves out device memory. 14-day per-program figures: 2.9× on unified CUDA and 2.1× on the XPU host. The current pool estimate charges about 3× (2.97×) the summed host and device peaks of 126 accepted unified GPU attempts. | Replayed over 14 days of repeat runs, E would reserve: 1.19× on unified CUDA (today's charges: 2.17×), 1.08× on the XPU host (1.46×) and 1.17× on Macs (1.41×). Holds on contained pools also shrink to the proven high-water. `myce efficiency` counts the same footprint as admission. |
 | **One GPU could hold two jobs**, unified (#2037) | Once a production model stage's charge was corrected from 102.6 to 24.4 GiB, two ran together, and each took 8–9.5 min against 162 s alone. | Memory says both fit. The throughput comparison (#2037, merged 2026-11-24) makes that work exclusive on the device. Memory and throughput stay separate decisions. |
-| **One GPU could hold two jobs**, XPU (#2185) | 973 of 973 XPU attempts recorded no device memory. Every card E was the whole card, so no XPU card was ever shared. | v2 needs a card counter as much as today's code does. The DRM fdinfo parser fix is part of stage 2's counting rule. With it, a card's E is its measured peak, and two jobs share a card when both fit. |
-| **Typed 16 GiB holder at a 4.0 GiB peak** (audit) | It held 15.2 GiB as pending growth, which left 1.45 GiB of room for a 9.76 GiB piece. | If probe 0b shows the XPU host's RAM is contained, the hold falls to 3.2 GiB and room rises to about 9.4 GiB. If not, the hold stays at 15.2 GiB until this first run ends, and later runs of the family hold about 3.2 GiB. The 9.76 GiB piece still misses by about 0.3 GiB, because the host has 12.6 GiB free above keep and the holder may return to its 4.0 GiB peak. Smaller jobs fit. The RAM install (#2034) is the real fix. |
-| **90 GiB demand fencing 7 small jobs** (#2186) | The accumulation-fence budget was negative, so nothing backfilled beside 40.6 GiB of room. | Under R3, the small jobs whose learned durations end before the head's earliest start begin now, and so does any job that leaves the head's 90 GiB free at that time. The head isn't delayed. |
+| **One GPU could hold two jobs**, XPU (#2185) | 973 of 973 XPU attempts recorded no device memory. Every card E was the whole card, so no XPU card was ever shared. | v2 needs a card counter as much as today's code does. Stage 2 fixes it after probe 0b-4 names the cause. With it, a card's E is its measured peak, and two jobs share a card when both fit. |
+| **Typed 16 GiB holder at a 4.0 GiB peak** (audit) | It held 15.2 GiB as pending growth, which left 1.45 GiB of room for a 9.76 GiB piece. | If probe 0b-3 shows the XPU host's RAM is contained, the hold falls to 3.2 GiB and room rises to about 9.4 GiB. If not, the hold stays at 15.2 GiB until this first run ends, and later runs of the family hold about 3.2 GiB. At today's keep, the 9.76 GiB piece still misses by about 0.3 GiB, because the host has 12.6 GiB free above keep and the holder may return to its 4.0 GiB peak. Smaller jobs fit. The RAM install (#2034) is the real fix. |
+| **90 GiB demand fencing 7 small jobs** (#2186) | The accumulation-fence budget was negative, so nothing backfilled beside 40.6 GiB of room. | Under R3, the small jobs whose learned durations end before the head's earliest start begin now, and so does any job that leaves S at that time covering the head's 90 GiB. The head isn't delayed. |
 | **Stale inventory around restarts** (audit cause 2) | 137 jobs and 498–612 job-hours, low confidence. Mostly device inventory and worker contact. | There's no ledger to rebuild. A restarted worker's first sample carries free memory and each attempt's footprint and high-water. The queue keeps only each attempt's E. Device inventory is outside this design, and an unknown reading still admits nothing. |
 
 ## 4. What it deletes
 
-The dedicated memory code is 37 files and 8,750 lines today, plus 48 test files with 9,966 lines (Appendix A.1). About 3,800 of those lines sample memory and enforce containment, and they stay. The other 5,000 decide: estimates, ledgers, gates, forecasts, fences and exclusivity. That part drops to about 1,900. Overall that is about 3,350 lines fewer (−38%). An estimated 5,000 test lines go with the mechanisms they test. Of the 36 special cases in Appendix B, 9 rules remain. Appendix B gives each case's fate, and Appendix E gives each stage's tests.
+The dedicated memory code is 37 files and 8,750 lines today, plus 48 test files with 9,966 lines (Appendix A.1). About 3,950 of those lines, in 20 files, sample memory and enforce containment, and they stay. The other 4,800, in 17 files, decide: estimates, ledgers, gates, forecasts, fences and exclusivity. The stages remove about 3,600 of those and add about 1,600, which leaves about 2,800. Overall that is about 2,000 lines fewer (−23%). An estimated 5,000 test lines go with the mechanisms they test. Of the 36 special cases in Appendix B, 9 rules remain. Appendix B gives each case's fate, and Appendix E gives each stage's tests.
 
 | Stage | Changes | Deletes | Removes |
 |---|---|---|---|
-| **0 Shadow** | One footprint function per platform. The worker computes holds and S and reports them. Status and `myce efficiency` show v2 numbers beside today's. Fake-clock replays of every case in section 3. No decision changes. | none | (measures the rest) |
-| **1 Stop on real shortage** | R4's per-attempt forecast replaces the whole-host forecast. The card guard becomes the same check on card pools. Immediate stops for over-E attempts below keep on uncontained pools. The kernel kill order. | Exclusive retry after a pressure stop, the alone-stop pause, the requeue route scan | in-charge victim stops, the same-charge loop |
-| **2 Learn E** | R5, R6 and the counting rule. The XPU card counter (#2185). | Rule Q, ratio rings, confidence feedback, foreign and platform quantiles, evidence repair (after the MY-42 floor check), combined and GPU-host bounds, the bystander test | 2–3× inflation (cause 3), uncounted cards (cause 4) |
+| **0 Shadow** | One footprint function per platform. The worker computes holds, S, reach and each platform's fastest growth, and reports them. Status and `myce efficiency` show v2 numbers beside today's. Fake-clock replays of every case in section 3. No decision changes. | none | (measures the rest) |
+| **1 Stop on real shortage** | R4's per-attempt forecast replaces the whole-host forecast. The card guard becomes the same check on card pools. The worker's immediate stop and keep's stop term on uncontained pools. Production's kill score, if question 3 is yes. | The whole-host forecast and the separate card guard | in-charge victim stops |
+| **2 Learn E** | R5, R6 and the counting rule, with R5 on both result paths. The XPU card counter (#2185). | Rule Q, ratio rings, confidence feedback, foreign and platform quantiles, evidence repair (after the MY-42 floor check), combined and GPU-host bounds, the bystander test. Then the exclusive retry after a pressure stop, the alone-stop pause and the requeue route scan. | 2–3× inflation (cause 3), uncounted cards (cause 4), the same-charge loop |
 | **3 Worker-owned slack** | Holds replace charges. The queue admits on the worker's S. The launch check is the same function. | The two-arm queue ledger, the RAM gate and its fences, launch-capacity waits and startup-loss repeats, retained host charges, sample-identity fences, `fitPoolCharge`, alone custody, the unified CUDA floor | full charge held until the end (cause 1), the launch-refusal loop |
 | **4 Fair waiting** | R3 EASY backfill. | Pool backfill fences; the legacy envelope reader, one release later (MY-42) | fence holds (#2186) |
 
+**Safeguards stay until replaced.** Today's pressure-retry safeguards run on two result paths:
+- the normal one, through `requeueMemoryPressure` (`queue.go:2739` and `:2778`);
+- the release-only one (`queue.go:2577`), which calls `holdAlonePressure` and then `retry`.
+
+Stage 2 deletes them only after R5's raise and hold run on both paths, each with a replay.
+
+**Probe gates.** A path turns on for a platform only after that platform's probe passes. Until then the platform keeps today's path. The probes need release authorization.
+- **0b-1, unified attribution.** Known `cudaMalloc`, `cudaMallocHost`, managed and `malloc` sizes each count once in the footprint, and footprints explain the host's drop within its idle burst. It gates R4's per-attempt split (stage 1) and learning from the summed footprint (stage 2) on unified CUDA.
+- **0b-2, stop time and victim order,** on each uncontained platform. Allocate past free memory at 1, 4 and 10 GiB/s. Record the worker's time from detection to memory freed, whether the device or driver read fits the 200 ms sampler, and which process the kernel kills. It gates the immediate stop and keep's stop term (stage 1). At today's 5 s device period, the stop term alone would exceed 40 GiB on unified CUDA.
+- **0b-3, XPU containment.** Driver system memory against the cgroup's charge. It gates treating that host's RAM as contained, and so lending there (stage 3).
+- **0b-4, XPU card counter** (#2185). One running attempt's DRM fdinfo lines and the selected device's PCI address. The fix may need both the PCI identity and the fdinfo unit parsing, which accepts only bare numbers, `KiB` and `MiB` today. It gates card E from measurement (stage 2).
+
 Stopping comes first, so that the tighter packing in later stages can't create false stops. Each stage is one release, runs under `myce dev` with fake GPU inventory and fake memory readings, and keeps scheduling decisions on the injected clock. It merges on quick plus targeted tests and its incident replays (MY-41, the #1972 rollout ruling). The consumer skill and `docs/jobs.md` change in stage 3, when the job's `memory` fields change.
+
+**Decision lines by stage** (non-test; removals by file in Appendix A.1, additions estimated):
+
+| Stage | Adds | Removes | Decision lines after |
+|---|---:|---:|---:|
+| Today | | | 4,795 |
+| 0 Shadow | 500 | 0 | 5,295 |
+| 1 Stop on real shortage | 250 | 250 | 5,295 |
+| 2 Learn E | 400 | 1,100 | 4,595 |
+| 3 Worker-owned slack | 250 | 1,950 | 2,895 |
+| 4 Fair waiting | 200 | 330 | 2,765 |
+| **Total** | **1,600** | **3,630** | **2,765** |
+
+With the 3,955 lines that stay, the memory code goes from 8,750 to about 6,720 lines.
 
 ## 5. Risks, and the measured check for each
 
+### 5.1 Pools the kernel doesn't contain
+
+The expected peak bounds admission, not allocation. On these pools nothing stops an attempt that outgrows its E except Mycelium, so each one keeps a residual risk.
+
+| Pool | What escapes | Protection | What's left |
+|---|---|---|---|
+| Unified CUDA RAM | device allocations (F4) | The worker stops an attempt over its E once the pool is below keep (question 2). Keep's stop term covers 8.06 GiB/s × the stop time. | Growth faster than any measured, or an owner burst during the same stop. The kernel then picks a victim (question 3). |
+| Discrete-GPU host RAM | the driver's system memory, unless probe 0b-3 shows it inside the cgroup. The queue's own host is one (MY-45). | The same, at that platform's own measured rate | The same. Until stage 0 and probe 0b-2 measure the rate and stop time, the path stays off. |
+| macOS RAM | the whole process tree | The same, and the OS warning level counts as short | The same |
+| A discrete card | one process's device memory | Card E is the whole card until measured (R6) | An overshoot fails an allocation, possibly a co-tenant's. The host is unaffected. |
+
+On a contained pool the kernel kills inside the worker slice, which bounds the host. What's left is a co-tenant killed inside the slice, and R5 gives it a doubled E for one run.
+
+Live check: kernel OOM kills of non-Mycelium processes per week (kernel log) should be zero, beside the count of immediate stops.
+
+Without question 2, an over-E attempt keeps its 10 s grace. At 8.06 GiB/s that is 80 GiB, more than any keep could hold. On these pools v2 would then have to forecast loads within E uncapped, which brings back today's in-charge stops, or leave the host to the kernel.
+
+### 5.2 Other risks
+
 | Risk | Why it could happen | Check that would show it |
 |---|---|---|
-| **Host OOM on unified CUDA** | Device allocations escape the cgroup, and a job can outrun one sample. Mitigations: unified holds are the full E for the whole run, R4 forecasts each attempt's growth at its own rate, an over-E attempt below keep is stopped at once, and the kernel kill order puts every Mycelium attempt ahead of host processes. What's left: an overshoot faster than keep ÷ sample period (4 GiB/s at 4 GiB keep and 1 s sampling) can still reach the kernel, which then kills a Mycelium attempt. | **Probe 0b**, on an idle unified host with release authorization: allocate past free memory at 1, 4 and 10 GiB/s. Record which process the kernel kills, the worker's stop latency, and the queue process's RSS and request latency. **Live:** zero kernel OOM kills of non-Mycelium processes per week (kernel log), and over-E stops per week. |
 | **E too small** | 15% of repeat runs exceeded the largest of their earlier peaks: median overshoot 2%, p90 24–35%, worst 172× (Appendix A.5). Small overshoots use slack. Large ones cost one stop and a doubled E. | Stage 0 shadow: R4 stops per week split into over-E and victim, against today's `memory_pressure` stops. Attempt-hours burned (audit baseline: 45.4 h a week). |
-| **Unified counters overlap** | `anon + shmem + kernel` plus device memory may count pinned or managed pages twice. #2114 found 24 GiB showing as 112 in a five-process case, and a live attempt read 32.9 + 79.6 = 112.5 GiB while the host showed about 95. Because every decision uses the same rule, a constant overlap cancels in holds. E and capacity are absolute, though: overlap inflates E (idle memory) and can push a job to the whole pool early. | Probe 0b: known `cudaMalloc`, `cudaMallocHost`, managed and `malloc` sizes, comparing the cgroup, device and host-drop readings. If pages are counted twice, the rule subtracts the attempt's pinned pages, which the sampler already reads. |
+| **Unified counters overlap** | `anon + shmem + kernel` plus device memory may count pinned or managed pages twice. #2114 found 24 GiB showing as 112 in a five-process case, and a live attempt read 32.9 + 79.6 = 112.5 GiB while the host showed about 95. Because every decision uses the same rule, a constant overlap cancels in holds. E and reach are absolute, though: overlap inflates E (idle memory) and can push a job to the `memory_capacity` hold early. | Probe 0b-1. If pages are counted twice, the rule subtracts the attempt's pinned pages, which the sampler already reads. |
+| **Raised E idles memory** | A raise lasts until the next clean run, and a large shortfall makes a large raise. | Shadow: raises per week and the GiB-hours they hold. |
 | **Lending on contained pools** | A holder that stopped growing and then grows again forces the newest job to stop. | Shadow: count stops whose victim started after the holder stopped growing. Compare that with the waits recovered (audit: 261–767 job-hours a week behind holder charges). |
 | **Queue and worker skew** | The queue admits against a sample taken before its newest assignments. Each unlisted assignment counts at its E, and the launch check is the same function. | Launch refusals with an unchanged S should be zero. #2091 reached 25 for one job. |
 | **EASY delays the head** | A duration estimate that is too short lets a backfill run past the head's start. | Fake-clock tests and live comparison of the head's actual start with its earliest start. |
 | **Mixed versions** | The adjacent release must interoperate (MY-42). The S report is negotiated as a capability, like `host-ram-gate-v1`. | `scripts/upgrade-compat.py` in both directions at every stage. |
-| **XPU or discrete-host RAM not contained** | Driver memory may sit outside the cgroup. Until probe 0b qualifies a platform row, that row's holds stay at the full E. | Probe 0b on the XPU host compares driver system memory with the cgroup's charge. |
 
 ## 6. Questions for the maintainer
 
 1. **Approve the replacement and its five stages?** It supersedes the 2026-11-23 design. It also replaces one agent default: "start at nine in ten", meaning the confidence target that sized charges.
-2. **Host safety on unified memory.** On a host that can't contain GPU memory, a job that outgrows its expected peak while the host is below its reserve gets stopped at once. That includes production, and the job loses unsaved progress. In addition, every Mycelium job ranks ahead of host processes in the kernel's kill order. Recommended: yes. Without it, the kernel picks the victim, and on the queue host that can be the queue itself (MY-45).
+2. **Stop an oversized job without letting it save?** On a host that can't fence GPU or driver memory, a job that grows past its expected peak while the host is below its reserve is killed at once by the worker, with no checkpoint grace. That includes production, which loses unsaved progress. Recommended: yes. Without it, growth during the grace can't be bounded (section 5.1).
+3. **Rank production ahead of host processes in the kernel's kill order?** Lower tiers already rank first (+1000), which holds against every unadjusted process. Production is at 0 today, level with host processes. At +500, the kernel prefers a production job to any host process using less than the job's own counted memory plus half of RAM and swap. That protects small services such as the queue (3.4–3.7 GB RSS, #2179). It is a bias, not a guarantee:
+   - on a 32 GiB host, a production job using 0.5 GiB scores like 16.5 GiB, below an owner process using 20 GiB, so the owner process dies first;
+   - on unified CUDA the kernel may not count GPU memory toward the score at all (probe 0b-2 records it).
+
+   Recommended: yes. It changes nothing until the kernel is already killing.
 
 ---
 
@@ -171,7 +222,15 @@ Stopping comes first, so that the tighter packing in later stages can't create f
 
 ### A.1 Code and churn (origin/main `0b07970c9`, 2026-11-26)
 
-- **37 dedicated non-test files, 8,750 lines.** The largest are `memory_pools` (879), `memory_ceiling` (812), `attempt_memory` (743), `host_memory` (622), `memory_envelope` (416), `priority_preemption` (388), `model_memory` (382), `memory_evidence_repair` (331), `gpu_memory` (316), `host_backfill` (304), `memory_estimator` (292), `rss_guard` (285), `memory_evidence` (277), `launch_capacity` (259), `memory_admission` (247), `external_memory` (246) and `memory_pressure` (244).
+- **37 dedicated non-test files, 8,750 lines.**
+  - **Stay, 20 files, 3,955 lines:** sampling and containment. `memory_ceiling` (812), `attempt_memory` (743), `model_memory` (382), `gpu_memory` (316), `rss_guard` (285), `external_memory` (246), `gpu_host_memory` (187), and 13 smaller sampling files (984).
+  - **Decide, 17 files, 4,795 lines:** `memory_pools` (879), `host_memory` (622), `memory_envelope` (416), `priority_preemption` (388), `memory_evidence_repair` (331), `host_backfill` (304), `memory_estimator` (292), `memory_evidence` (277), `launch_capacity` (259), `memory_admission` (247), `memory_pressure` (244), `memory_room` (181), `memory_learning` (108), and four smaller files (247).
+  - **Removed by stage** (estimates from function sizes):
+    - Stage 1, about 250: the whole-host forecast in `memory_pressure` (~110), `shared_gpu_pressure` (64), and the host forecast helpers in `host_memory` (~75).
+    - Stage 2, about 1,100: `memory_estimator` (292), `memory_evidence_repair` (331), sizing and bounds in `memory_envelope` (~200), pooled sizing and the pressure requeue in `memory_pools` (~220), and the alone-pressure hold in `memory_pressure` (~55).
+    - Stage 3, about 1,950: `memory_admission`, `memory_room`, `launch_capacity`, `host_ram_gate_wire`, `host_memory_budget` and `memory_planning` (870); the ledger, custody and RAM gate in `memory_pools` (~530); and releases, samples and retained charges in `host_memory` (~545).
+    - Stage 4, about 330: the pool fences in `memory_pools` (~130), their part of `host_backfill` (~100), and the legacy envelope reader (~100).
+    - Kept and reused, about 1,170: `priority_preemption` (R2's release path), `memory_evidence` (stores the window), `memory_learning` (mostly storage learning), and the rest of `host_backfill`, `memory_envelope` and `memory_pressure`.
 - **48 dedicated test files, 9,966 lines.** About 84 other functions also branch on memory, inside check-in, completion and worker launch. They aren't counted.
 - **Churn.** Since 2026-11-01, 260 commits and 158 merges to main touched those files: +10,771 / −6,126 lines. In the three days after the 2026-11-23 approval, 23 merges touched them.
 - **Design rounds.**
@@ -248,15 +307,15 @@ On the unified host, the current pool estimate charges 24.2× the host-only peak
 | 4 | Confidence feedback | deleted |
 | 5 | Transfer from other platforms | deleted |
 | 6 | Limited-run floor × 2 | R5 |
-| 7 | `fitPoolCharge` fallback above the allowance | E capped at the pool's capacity |
+| 7 | `fitPoolCharge` fallback above the allowance | E capped at the pool's reach; above every reach, the `memory_capacity` hold |
 | 8 | Cold accelerator: drop alone, then use the CPU prior | R6 |
 | 9 | Typed limit caps typical and charge | an explicit limit caps E where it contains |
 | 10 | Owner resize fixes charge and ceiling | kept |
 | 11 | Card alone without device evidence | E is the whole card |
-| 12 | Exclusive retry after a pressure stop (#2129) | deleted |
-| 13 | Pause on a stop while alone | deleted |
-| 14 | Requeue route scan into `memory_capacity` | R5: only a limit hit at the whole pool |
-| 15 | Bystander test (stopped with peak ≤ charge) | R5: within E changes nothing |
+| 12 | Exclusive retry after a pressure stop (#2129) | R5's raised E, in stage 2, on both result paths |
+| 13 | Pause on a stop while alone | R5's `memory_capacity` hold when the cap can't rise |
+| 14 | Requeue route scan into `memory_capacity` | R5: the same hold, from each pool's reach |
+| 15 | Bystander test (stopped with peak ≤ charge) | R5: a stop within E raises E by its shortfall |
 | 16 | Separate release-only learning path | one record path |
 | 17 | Pool custody conflicts (alone against peers, engines and cards) | deleted |
 | 18 | Head budget, `poolBackfillFits` | R3 |
@@ -267,9 +326,9 @@ On the unified host, the current pool estimate charges 24.2× the host-only peak
 | 23 | Unified live reading unknown without fresh health evidence | freshness of the worker's sample |
 | 24 | Unified CUDA floor | deleted; keep covers it |
 | 25 | Darwin warning-pressure trigger | kept: the warning level counts as short |
-| 26 | `next_sample`, `stop_grace` and `below_reserve` triggers | one R4 forecast per pool, with planned growth capped at holds |
+| 26 | `next_sample`, `stop_grace` and `below_reserve` triggers | one R4 forecast per pool, with planned growth capped at holds, and the worker's immediate stop below keep |
 | 27 | Shared-GPU guard (`device_full`, `over_budget`) | R4 on the card pool |
-| 28 | Production stops only for production, and only if resumable | kept, except R4's immediate stop (question 2) |
+| 28 | Production stops only for production, and only if resumable | kept, except the worker's immediate stop (question 2) |
 | 29 | Four device sources (host delta, unified resident estimate, phys footprint beyond RSS, owned footprint) | one counting rule |
 | 30 | Combined and GPU-host bounds | deleted from decisions |
 | 31 | Sample identity, bootstrap and cached-sample fences | one synchronized sample per check-in |
@@ -287,13 +346,17 @@ On the unified host, the current pool estimate charges 24.2× the host-only peak
   - An attempt over its E holds `high-water − footprint` and ranks as over E in R4.
   - A loaded catalog engine is an attempt with its own E.
 - **The S report.** Each check-in carries, per pool:
-  - free, keep, the sum of holds, S, the unexplained decline rate and the sample time;
+  - free, keep (with its stop term), the sum of holds, S, reach, the unexplained decline rate and the sample time;
   - each attempt's key, footprint, high-water, growth rate and E.
 
   The worker takes the free reading and the attempt footprints in the same pass, so a load burst can't make them disagree. The queue subtracts the E of each assignment the report doesn't list. That is the only fence. An unknown or stale reading admits nothing, as today. The queue's work per check-in is arithmetic over the report, with no storage or bulk reads under `q.mu`.
 - **Launch.** The worker runs R1 again with a fresh sample. A refusal carries that sample, so the next offer uses it. A repeat refusal therefore needs a real change on the host.
-- **R2 release planning.** Stopping attempt *i* frees its footprint plus its hold. After the release is confirmed, the next report decides. This reuses today's release custody and stop path.
-- **R3 earliest start.** The head's earliest start is the time when the pool's capacity, less the holds of running attempts expected to still be running, first fits its E. Durations are the learned durations already used for placement; an unknown duration never ends.
+- **R2 release planning.** Releasing attempt *i* raises S by its commitment. After the release is confirmed, the next report decides. This reuses today's release custody and stop path.
+  - Review case: on a 96 GiB pool, a production attempt at its 80 GiB peak has hold 0 but commitment 80. Another production job with E 40 finds `S + Σ lower-tier commitments` at most 96 − 80 = 16, so nothing is released and it waits for production. The old test compared production's holds (0) plus 40 with 96, and would have released every lower tier for nothing.
+- **R3 earliest start.** `S(t)` is S plus the commitments of attempts expected to end by `t`, and `t*` is the first `t` with `S(t) ≥` the head's E. Durations are the learned durations already used for placement; an unknown duration never ends.
+  - Review case: a 96 GiB pool runs nine 10 GiB jobs at their peaks, so S is 6, and a 90 GiB head waits. `S(t)` first covers 90 when the ninth job ends (6 + 9 × 10 = 96), so `t*` is the last current finish. A new 10 GiB job starts only if it ends by `t*`; otherwise `S(t*) − 10 = 86 < 90` refuses it. The head starts at `t*`. The old projection subtracted holds only, so jobs at their peak (hold 0) looked absent, each staggered job passed, and the head never started.
+- **Immediate stop (R4).** It runs on the worker, from its own attempt sample, against the E each assignment carries. The worker kills the attempt's process group and reports the stop, with its footprint and E, through the same result path as a kill-limit hit. R5 then treats it as over E. Its stop time is the detection period of the slowest counter in the footprint plus the kill latency.
+- **R5 holds.** The queue keeps the uncapped raise with the hold. Once a pool's reach exceeds both the measured peak and the old E, the job is retried at the raise capped at that reach.
 - **Explicit limits.**
   - `memory_limit_gb` is still the opt-in kill limit (#1972): the attempt's own `memory.max` on Linux, or the RSS guard on macOS.
   - It caps E only where it contains everything. On unified CUDA it doesn't contain device memory, so it doesn't cap E there.
@@ -313,7 +376,9 @@ On the unified host, the current pool estimate charges 24.2× the host-only peak
 3. **Interval counting `[L, U]`** (#2114). Rejected. Every consumer had to pick an end, and that multiplied the rules. v2 uses one point figure everywhere and lets the live reading absorb the error.
 4. **Calibrated quantiles.** Rejected. In the replay, the window's maximum averaged 1.08–1.19× the next peak, while today's charges averaged 1.41–2.17×. Tails are handled by containment, R4 and R5, not by reserving for them, which is the approved design's own conclusion.
 5. **Lending production's unused hold to lower tiers.** MY-56 allows it, but it adds churn. Deferred until there is stage 3 data.
-6. **Stop decisions on the worker.** That would shorten the reaction time by the check-in delay. Deferred: the queue keeps tiers and release custody.
+6. **Stop decisions on the worker.** Adopted only for R4's immediate stop, which needs no tier choice: the victim is the over-E attempt itself. Other stops stay on the queue, which keeps tiers and release custody.
+7. **Faster sampling instead of keep's stop term.** Rejected as the protection. Sampling faster shortens detection but not the kill latency, and a queue round trip dominates whenever the queue decides. The sample period is instead one input to the stop time, so the stop term shows what each second costs.
+8. **Uncapped forecasts for loads within E on uncontained pools.** Rejected. That is today's rule, and it stopped the 18:24Z load inside its own reservation.
 
 ## Appendix E. Stages and their tests
 
@@ -328,36 +393,42 @@ On the unified host, the current pool estimate charges 24.2× the host-only peak
     - S never falls under growth within E;
     - the forecast never stops growth that fits inside holds and free memory;
     - holds never go negative;
+    - S rises by exactly an attempt's commitment when it ends;
     - the queue's and the worker's S agree for the same sample.
   - A committed, synthetic replay fixture built like Appendix A.5.
-  - Probes 0b are separate and need release authorization:
-    - unified CUDA counter overlap and OOM victim order;
-    - XPU driver memory against the cgroup;
-    - the XPU fdinfo format.
+  - Probes 0b-1 to 0b-4 (section 4) are separate and need release authorization.
 - **Stage 1.**
   - Replaying the 2026-11-26 18:24Z case doesn't stop the load.
-  - An over-E grower is chosen before a co-tenant within its E.
-  - Below keep on an uncontained pool, the over-E attempt is stopped without grace.
+  - An over-E grower is chosen before a same-tier co-tenant within its E.
+  - Below keep on an uncontained pool, the worker stops the over-E attempt without grace, from its own sample, and reports it through the kill-limit result path.
+  - Keep's stop term equals the platform's fastest growth × its stop time.
   - Production still reclaims.
 - **Stage 2.**
-  - E equals the window's maximum.
-  - The three R5 outcomes.
+  - E equals the window's maximum, and returns to it after a clean run.
+  - R5's raises: over E, a kernel kill, and a stop within E by its shortfall.
+  - The reach cap: on the review's 100 GiB host (9 GiB non-job use, 4 GiB keep, 96 GiB allowance), a raised E is at most 87 GiB, and a larger measured peak waits under `memory_capacity`.
+  - The #2091 replay takes at most two attempts, then the hold with its measured peak.
+  - A recurring external burst stops the same job at most once for each larger shortfall.
+  - The normal and release-only result paths reach the same next E.
   - A missing counter makes a run not clean.
-  - The XPU fdinfo units parse.
+  - The XPU fdinfo units and PCI identity parse.
   - The #2086 replay charges 20.99 GiB.
 - **Stage 3.**
   - Same-charge launch refusal (#2091) drops from 25 offers to 0 without a change.
-  - Holds shrink after growth stops on contained pools only.
+  - Holds shrink after growth stops on contained pools only, and never for a raised E.
   - The audit's 16 GiB holder case.
+  - The review's R2 case releases nothing.
   - The #2179 waiting-set benchmark.
 - **Stage 4.**
   - Short backfill runs before a waiting 90 GiB head without delaying it.
+  - The review's staggered case: the head starts when the ninth job ends.
   - An unknown duration does not backfill.
   - The #787 starvation regression.
 
 ## Sources
 
 - The approved [memory admission design](design-memory-admission.md) and its sources (Linux cgroup v2, PSI and `/proc` documentation; Kubernetes node-pressure eviction; systemd-oomd; Verma et al., Borg, EuroSys 2015, section 6.2). Borg's section 5.5 on resource reclamation is cited from memory, not re-read.
+- Linux `oom_badness()` in `mm/oom_kill.c`: a process's score is its resident pages, swap and page tables, plus `oom_score_adj` thousandths of RAM and swap. Cited from memory, not re-read.
 - Lifka, "The ANL/IBM SP scheduling system", JSSPP 1995 (EASY backfilling). Cited from memory, not re-read.
 - Mu'alem and Feitelson, IEEE TPDS 12(6), 2001 (conservative backfilling). Cited from memory, not re-read.
 - Issues #625, #806, #1044, #1484, #1500, #1690, #2037, #2086, #2091, #2179, #2183–#2186 and #1493. PRs #2089, #2106, #2114, #2129 and #2180.
