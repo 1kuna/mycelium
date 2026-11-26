@@ -36,6 +36,10 @@ func TestSharedQueueProofProcess(t *testing.T) {
 	if os.Getenv("MYCE_SHARED_PROOF_HELPER") != "1" {
 		t.Skip("subprocess entry point")
 	}
+	if os.Getenv("MYCE_SHARED_PROOF_SINGLE") == "1" {
+		serveProofSingle(t)
+		return
+	}
 	path := os.Getenv("MYCE_SHARED_PROOF_DATABASE")
 	endpoint := os.Getenv("MYCE_SHARED_PROOF_LISTEN")
 	l, err := net.Listen("tcp", endpoint)
@@ -94,14 +98,20 @@ type proofProcess struct {
 
 func startProofMember(t *testing.T, dir, name, addr, dsn string) *proofProcess {
 	t.Helper()
+	return startProofProcess(t, "TestSharedQueueProofProcess", dir, name, addr, "MYCE_SHARED_PROOF_POSTGRES="+dsn)
+}
+
+// startProofProcess runs a queue entry point test as its own OS process. All
+// processes in one fixture share the file store and checkpoint root in dir.
+func startProofProcess(t *testing.T, entry, dir, name, addr string, env ...string) *proofProcess {
+	t.Helper()
 	p := &proofProcess{db: filepath.Join(dir, name, "queue.db"), log: filepath.Join(dir, name+".log"), done: make(chan error, 1)}
-	p.cmd = exec.Command(os.Args[0], "-test.run=^TestSharedQueueProofProcess$", "-test.v=false")
-	p.cmd.Env = append(os.Environ(),
+	p.cmd = exec.Command(os.Args[0], "-test.run=^"+entry+"$", "-test.v=false")
+	p.cmd.Env = append(append(os.Environ(),
 		"MYCE_SHARED_PROOF_HELPER=1",
 		"MYCE_SHARED_PROOF_DATABASE="+p.db,
 		"MYCE_SHARED_PROOF_LISTEN="+addr,
-		"MYCE_SHARED_PROOF_FILES="+dir,
-		"MYCE_SHARED_PROOF_POSTGRES="+dsn)
+		"MYCE_SHARED_PROOF_FILES="+dir), env...)
 	if err := os.MkdirAll(filepath.Join(dir, "checkpoints"), 0700); err != nil {
 		t.Fatal(err)
 	}

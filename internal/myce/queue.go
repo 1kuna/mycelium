@@ -240,6 +240,7 @@ type Queue struct {
 	models          ModelConfig
 	calls           map[string]*ModelCall
 	lock            *os.File
+	borrowedLock    bool // The caller keeps holding the single-writer lock after Close.
 	mu              queueMutex
 	stopping        atomic.Bool // Fence before waiting for a queue transaction or either listener.
 	shutdownOnce    sync.Once
@@ -391,7 +392,10 @@ func openQueue(path, root string, clock Clock, shared *sharedQueueWriter, lock *
 	if err != nil {
 		return nil, err
 	}
-	if shared == nil {
+	// A single-queue caller may pass the lock it already holds, such as the
+	// cutover command, which must keep the writer fenced after Close.
+	borrowed := shared == nil && lock != nil
+	if shared == nil && lock == nil {
 		lock, err = lockQueueDatabase(path)
 		if err != nil {
 			return nil, err
@@ -399,7 +403,7 @@ func openQueue(path, root string, clock Clock, shared *sharedQueueWriter, lock *
 	}
 	success := false
 	defer func() {
-		if !success && shared == nil && lock != nil {
+		if !success && shared == nil && lock != nil && !borrowed {
 			_ = lock.Close()
 		}
 	}()
@@ -415,10 +419,10 @@ func openQueue(path, root string, clock Clock, shared *sharedQueueWriter, lock *
 			if err != nil {
 				return nil, err
 			}
-			return nil, errors.New("a shared queue copy requires shared queue proof mode")
+			return nil, errSharedCopy
 		}
 	}
-	q := &Queue{sharedWriter: shared, startupReadWorkers: startupQueueReadWorkers, slimJobRecords: slimJobRecordsDefault, fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lock: lock, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, FairUsageVersion: 1, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
+	q := &Queue{sharedWriter: shared, startupReadWorkers: startupQueueReadWorkers, slimJobRecords: slimJobRecordsDefault, fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lock: lock, borrowedLock: borrowed, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, FairUsageVersion: 1, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
 	q.diskHost, _ = os.Hostname()
 	q.mu.control = &controlClock{clock: func() time.Time { return q.clock.Now() }, at: clock.Now()}
 	q.admissionWaitBuild.synchronous = synchronousAdmissionWaitDefault
@@ -706,7 +710,7 @@ func (q *Queue) Close() error {
 		err = errors.Join(err, q.uploadSpool.lock.Close())
 		q.uploadSpool.lock = nil
 	}
-	if q.lock != nil && q.sharedWriter == nil {
+	if q.lock != nil && q.sharedWriter == nil && !q.borrowedLock {
 		err = errors.Join(err, syscall.Flock(int(q.lock.Fd()), syscall.LOCK_UN), q.lock.Close())
 	}
 	q.lock = nil

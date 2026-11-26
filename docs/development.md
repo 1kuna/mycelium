@@ -102,8 +102,13 @@ disposable token and its own `--state-dir`. The worker's normal memory
 containment requirements apply. The active process can hand off
 on SIGTERM. On a crash, the others wait for its PostgreSQL turn to expire.
 A follower routes live requests to the current coordinator. The Stage 2
-worker uses its local member. External clients can exercise the same failover
-with the [queue endpoint list](#external-client-failover). During an outage an authenticated
+worker uses its local member. An ordinary worker also works against a member:
+the member's protocol refusal advertises the shared control protocol and the
+worker switches to it, and a single queue's reply switches it back. The
+[cutover and rollback rehearsal](operations.md#shared-queue-cutover-and-rollback)
+relies on this to keep a running attempt across both switches. External
+clients can exercise the same failover with the
+[queue endpoint list](#external-client-failover). During an outage an authenticated
 `GET /api/shared-queue/status?job=JOB_ID` returns the local SQLite sequence and
 the retained job's lifecycle fields, with `last_known: true`. An absent job in that
 response has unknown current status. Normal job and wait endpoints require

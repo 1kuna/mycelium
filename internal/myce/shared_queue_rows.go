@@ -141,29 +141,37 @@ func (out *sharedQueueRows) capture(rows *sql.Rows, name string, deleting bool, 
 		if err := rows.Scan(dest...); err != nil {
 			return n, err
 		}
-		row := sharedQueueRow{Table: name, Delete: deleting, Values: make([]sharedQueueValue, ncols)}
-		for i, value := range src {
-			switch v := value.(type) {
-			case nil:
-				row.Values[i] = sharedQueueValue{Kind: "null"}
-			case int64:
-				row.Values[i] = sharedQueueValue{Kind: "int", Int: v}
-			case float64:
-				row.Values[i] = sharedQueueValue{Kind: "real", Real: v}
-			case string:
-				// SQLite TEXT may hold non-UTF-8 log bytes. JSON's string
-				// encoding replaces invalid UTF-8, so preserve the raw bytes.
-				row.Values[i] = sharedQueueValue{Kind: "text", Bytes: []byte(v)}
-			case []byte:
-				row.Values[i] = sharedQueueValue{Kind: "blob", Bytes: v}
-			default:
-				return n, fmt.Errorf("unsupported SQLite value type %T", value)
-			}
+		values, err := sharedQueueValues(src)
+		if err != nil {
+			return n, err
 		}
-		out.Rows = append(out.Rows, row)
+		out.Rows = append(out.Rows, sharedQueueRow{Table: name, Delete: deleting, Values: values})
 		n++
 	}
 	return n, rows.Err()
+}
+
+func sharedQueueValues(src []any) ([]sharedQueueValue, error) {
+	values := make([]sharedQueueValue, len(src))
+	for i, value := range src {
+		switch v := value.(type) {
+		case nil:
+			values[i] = sharedQueueValue{Kind: "null"}
+		case int64:
+			values[i] = sharedQueueValue{Kind: "int", Int: v}
+		case float64:
+			values[i] = sharedQueueValue{Kind: "real", Real: v}
+		case string:
+			// SQLite TEXT may hold non-UTF-8 log bytes. JSON's string
+			// encoding replaces invalid UTF-8, so preserve the raw bytes.
+			values[i] = sharedQueueValue{Kind: "text", Bytes: []byte(v)}
+		case []byte:
+			values[i] = sharedQueueValue{Kind: "blob", Bytes: v}
+		default:
+			return nil, fmt.Errorf("unsupported SQLite value type %T", value)
+		}
+	}
+	return values, nil
 }
 
 func (r sharedQueueRows) apply(ctx context.Context, tx *sql.Tx) error {
