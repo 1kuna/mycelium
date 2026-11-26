@@ -13,6 +13,7 @@ import (
 	"hash"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -855,8 +856,10 @@ func (a API) registerFiles(mux *requestMux) {
 		respondOperation(w, map[string]bool{"ok": true}, a.Queue.PreflightFileStore(r.Context(), files), "job_spec_invalid")
 	})
 	mux.HandleFunc("/api/files/uploads/", func(w http.ResponseWriter, r *http.Request) {
+		started := a.Queue.clock.Now()
 		a.Queue.reportUploadQueueService(w, r)
 		a.Queue.files.serveUpload(w, r)
+		a.Queue.recordUploadService(r.Method, a.Queue.clock.Now().Sub(started))
 	})
 	mux.HandleFunc("GET /api/files/blobs/{hash}", func(w http.ResponseWriter, r *http.Request) { a.Queue.files.serveBlob(w, r, false) })
 	mux.HandleFunc("GET /api/files/blobs/{hash}/metadata", func(w http.ResponseWriter, r *http.Request) { a.Queue.files.serveBlob(w, r, true) })
@@ -875,38 +878,131 @@ var errFileTransferLocal = errors.New("local download storage failed")
 
 func (c Client) fileTimeout(_ int64) time.Duration { return c.transferIdle }
 
-// Per-operation evidence spans the tus HEAD/POST/PATCH exchange, not unrelated
-// uploads. RFC 6298 sections 2.1/2.4 specify a one-second initial/minimum TCP
-// retransmission timer: a faster socket copy cannot justify declaring a dead
-// peer before it has an opportunity to retransmit. Four measured service periods
-// retain the existing progress jitter allowance. Retry-After is a server signal,
-// not a throughput estimate. The owner's context can always end the operation.
+// Per-operation evidence spans the tus HEAD/POST/PATCH exchange of one upload
+// (or one result's files), not unrelated uploads. Each route (create, chunk)
+// learns its own response latency: the wait between handing the last body byte
+// to the kernel and the response headers. Four measured latencies retain the
+// existing jitter allowance, and the body's transfer time at the slowest
+// measured throughput covers bytes still buffered on the way to the server when
+// that wait starts. A route with no completed response yet uses the same
+// server's other upload route. RFC 6298 sections 2.1/2.4 specify a one-second
+// initial/minimum TCP retransmission timer: a faster socket copy cannot justify
+// declaring a dead peer before it has an opportunity to retransmit, and with no
+// measurement at all it is the protocol's initial estimate. Retry-After is a
+// server signal, not a throughput estimate. The owner's context can always end
+// the operation.
+//
+// An abandoned response is not a latency sample (Karn's algorithm): it only
+// says the server took longer than the window. Like RFC 6298 section 5.5, each
+// consecutive abandonment doubles that route's window until a response
+// completes. Without new evidence the doubling stops at RFC 6298's 60-second
+// maximum (section 2.5), so a silent server is given up within
+// max(measured window, 60s) per request instead of a window that compounds on
+// its own timeouts (#2165).
 type uploadTiming struct {
-	mu                sync.Mutex
-	service, pressure time.Duration
+	mu       sync.Mutex
+	latency  map[string]time.Duration // Slowest completed response wait per route.
+	timeouts map[string]int           // Consecutive abandoned responses per route.
+	perByte  float64                  // Slowest completed body transfer, nanoseconds per byte.
+	pressure time.Duration
+	progress time.Time // Last accepted upload body (2xx POST or PATCH with bytes).
 }
 
-func (t *uploadTiming) observe(service, pressure time.Duration) {
+const rfc6298MaxRTO = 60 * time.Second
+
+// A durable acknowledgement through the same queue writer is evidence for an
+// upload route that has not completed yet, never for one that has.
+const durableAckRoute = "ack"
+
+// uploadRoute names the upload requests that learn a response window.
+func uploadRoute(method string) string {
+	if method == http.MethodPost || method == http.MethodPatch {
+		return method
+	}
+	return ""
+}
+
+// completed records an answered request. latency is zero when the response
+// arrived before the body ended or was covered by verification progress.
+func (t *uploadTiming) completed(route string, latency time.Duration, body int64, sending time.Duration, pressure time.Duration, accepted bool, now time.Time) {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.service = max(t.service, service)
 	t.pressure = max(t.pressure, pressure)
+	if route == "" {
+		return
+	}
+	if t.latency == nil {
+		t.latency, t.timeouts = map[string]time.Duration{}, map[string]int{}
+	}
+	delete(t.timeouts, route)
+	if latency > 0 {
+		t.latency[route] = max(t.latency[route], latency)
+	}
+	if body > 0 && sending > 0 {
+		t.perByte = max(t.perByte, float64(sending)/float64(body))
+	}
+	if accepted && body > 0 {
+		t.progress = now
+	}
 }
-func (t *uploadTiming) window() time.Duration {
+
+func (t *uploadTiming) abandoned(route string) {
+	if t == nil || route == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.timeouts == nil {
+		t.latency, t.timeouts = map[string]time.Duration{}, map[string]int{}
+	}
+	t.timeouts[route]++
+}
+
+// lastProgress is when the server last accepted upload bytes.
+func (t *uploadTiming) lastProgress() time.Time {
+	if t == nil {
+		return time.Time{}
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.progress
+}
+
+// window is the response wait for route after body bytes were sent.
+func (t *uploadTiming) window(route string, body int64) time.Duration {
 	if t == nil {
 		return 0
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return max(clientRecoveryPeriod, growDuration(growDuration(t.service)), t.pressure)
+	latency, known := t.latency[route]
+	if !known {
+		for _, other := range t.latency {
+			latency = max(latency, other)
+		}
+	}
+	transfer := time.Duration(min(float64(math.MaxInt64/2), t.perByte*float64(max(0, body))))
+	measured := growDuration(growDuration(latency))
+	measured += min(transfer, time.Duration(math.MaxInt64)-measured)
+	window := max(clientRecoveryPeriod, measured, t.pressure)
+	backoff := window
+	for range t.timeouts[route] {
+		if backoff >= rfc6298MaxRTO {
+			break
+		}
+		backoff = growDuration(backoff)
+	}
+	return max(window, min(backoff, rfc6298MaxRTO))
 }
 
 type fileTransferConn struct {
 	net.Conn
 	timing                      *uploadTiming
+	route                       string        // Upload route whose latency this response learns.
+	sent                        atomic.Int64  // Body bytes written after the request headers.
 	idle                        time.Duration // Explicit test/owner override; zero learns from progress.
 	clock                       Clock
 	readProgress, writeProgress transferProgress
@@ -918,14 +1014,21 @@ type fileTransferConn struct {
 
 // Thirty seconds allows nearly three times the measured production p95 mutex
 // wait of 11 seconds while bounding the time a silent queue can hold an upload.
+// It bounds only the server's hint: the client's own measured window stands.
 const maxHintedUploadResponseWindow = 30 * time.Second
 
 func (c *fileTransferConn) responseWindow() time.Duration {
-	window := max(c.idle, c.timing.window())
+	window := max(c.idle, c.timing.window(c.route, c.sent.Load()))
 	if c.queueService > 0 {
-		window = min(maxHintedUploadResponseWindow, max(window, growDuration(growDuration(c.queueService))))
+		window = max(window, min(maxHintedUploadResponseWindow, growDuration(growDuration(c.queueService))))
 	}
 	return window
+}
+
+// progressFloor is the shortest no-progress window this request's measured
+// service allows while bytes are still moving.
+func (c *fileTransferConn) progressFloor() time.Duration {
+	return c.timing.window(c.route, 0)
 }
 
 func (c *fileTransferConn) deadline(read bool, bytes int) error {
@@ -935,12 +1038,12 @@ func (c *fileTransferConn) deadline(read bool, bytes int) error {
 	if idle == 0 {
 		if read {
 			if c.reading == nil || c.reading.Load() {
-				idle = max(c.readProgress.window(bytes), c.timing.window())
+				idle = max(c.readProgress.window(bytes), c.progressFloor())
 			} else if c.awaiting != nil && c.awaiting.Load() {
 				idle = c.responseWindow()
 			}
 		} else if c.writing == nil || c.writing.Load() {
-			idle = max(c.writeProgress.window(bytes), c.timing.window())
+			idle = max(c.writeProgress.window(bytes), c.progressFloor())
 		}
 	}
 	end := time.Time{}
@@ -1003,7 +1106,7 @@ func (c *fileTransferConn) Read(p []byte) (int, error) {
 		c.readProgress.record(now, now.Sub(started), n, waited)
 	}
 	if err != nil {
-		window := max(c.idle, c.readProgress.window(len(p)), c.timing.window())
+		window := max(c.idle, c.readProgress.window(len(p)), c.progressFloor())
 		if c.awaiting != nil && c.awaiting.Load() && c.reading != nil && !c.reading.Load() {
 			c.deadlineMu.Lock()
 			window = c.responseWindow()
@@ -1028,6 +1131,7 @@ func (c *fileTransferConn) Write(p []byte) (int, error) {
 		if c.writing == nil || c.writing.Load() {
 			now := clock.Now()
 			c.writeProgress.record(now, now.Sub(started), n, waited)
+			c.sent.Add(int64(n))
 		}
 		total += n
 		p = p[n:]
@@ -1036,7 +1140,7 @@ func (c *fileTransferConn) Write(p []byte) (int, error) {
 			if n > 0 && errors.As(err, &timeout) && timeout.Timeout() {
 				continue
 			}
-			return total, fileTransferTimeout(err, max(c.idle, c.writeProgress.window(len(p)), c.timing.window()))
+			return total, fileTransferTimeout(err, max(c.idle, c.writeProgress.window(len(p)), c.progressFloor()))
 		}
 		if n == 0 {
 			return total, io.ErrNoProgress
@@ -1126,6 +1230,7 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 	var reading, writing, awaiting atomic.Bool
 	var progressConn atomic.Pointer[fileTransferConn]
 	var verificationReads uint64
+	var wroteHeaders, wroteRequest atomic.Int64 // Injected-clock UnixNano.
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
 		Got1xxResponse: func(code int, header textproto.MIMEHeader) error {
 			if code != http.StatusProcessing {
@@ -1154,8 +1259,12 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 			}
 			return nil
 		},
-		WroteHeaders: func() { writing.Store(true) },
+		WroteHeaders: func() {
+			wroteHeaders.Store(c.clock().Now().UnixNano())
+			writing.Store(true)
+		},
 		WroteRequest: func(httptrace.WroteRequestInfo) {
+			wroteRequest.Store(c.clock().Now().UnixNano())
 			writing.Store(false)
 			awaiting.Store(true)
 			// net/http reads the response concurrently with uploading the body.
@@ -1172,10 +1281,13 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 		req.Header.Set(k, v)
 	}
 	uploading := method == "PATCH" || method == "POST" && req.Header.Get("Content-Type") == "application/offset+octet-stream"
+	// A bodyless create is the same route as a creation-with-upload: its
+	// latency is evidence for both, though only requests with bodies are timed.
+	route := uploadRoute(method)
 	if uploading && c.uploadTiming != nil {
 		// Four actual-read reports fit inside the learned idle window. This
 		// keeps full-blob verification distinct from a stalled network peer.
-		req.Header.Set("X-Myce-Upload-Progress", (max(c.transferIdle, c.uploadTiming.window()) / 4).String())
+		req.Header.Set("X-Myce-Upload-Progress", (max(c.transferIdle, c.uploadTiming.window(route, 0)) / 4).String())
 		if c.transferIdle == 0 {
 			req.Header.Set(uploadQueueServiceHeader, "1")
 		}
@@ -1222,7 +1334,7 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 			}
 			// Socket deadlines use the real socket's clock, independently of an
 			// injected observation/pacing clock (unit tests may freeze that).
-			wrapped := &fileTransferConn{Conn: conn, idle: idle, clock: RealClock{}, reading: &reading, writing: &writing, awaiting: &awaiting, timing: timing}
+			wrapped := &fileTransferConn{Conn: conn, idle: idle, clock: RealClock{}, reading: &reading, writing: &writing, awaiting: &awaiting, timing: timing, route: route}
 			progressConn.Store(wrapped)
 			return wrapped, nil
 		}
@@ -1276,13 +1388,27 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 		transport.DisableKeepAlives = true
 		local.Transport = transport
 	}
-	started := c.clock().Now()
 	res, err := c.doQueueRequest(&local, req, method == http.MethodGet || method == http.MethodHead)
-	pressure := time.Duration(0)
+	now := c.clock().Now()
 	if res != nil {
-		pressure = retryAfter(res.Header.Get("Retry-After"), c.clock().Now())
+		// Only an answered request is evidence of the server's latency. A
+		// response before the body ended, or one held open by verification
+		// progress, measures something else: keep its other evidence only.
+		var latency, sending time.Duration
+		var sent int64
+		if headersAt, requestAt := wroteHeaders.Load(), wroteRequest.Load(); requestAt != 0 && verificationReads == 0 {
+			latency = max(time.Nanosecond, now.Sub(time.Unix(0, requestAt)))
+			if headersAt != 0 {
+				sending = time.Duration(requestAt - headersAt)
+			}
+		}
+		if conn := progressConn.Load(); conn != nil {
+			sent = conn.sent.Load()
+		}
+		c.uploadTiming.completed(route, latency, sent, sending, retryAfter(res.Header.Get("Retry-After"), now), res.StatusCode >= 200 && res.StatusCode < 300, now)
+	} else if errors.Is(err, errFileTransferStalled) && (wroteHeaders.Load() != 0 || awaiting.Load()) {
+		c.uploadTiming.abandoned(route)
 	}
-	c.uploadTiming.observe(c.clock().Now().Sub(started), pressure)
 	if err != nil {
 		return nil, fmt.Errorf("file transfer connection failed: %w", err)
 	}
@@ -1371,7 +1497,7 @@ func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileR
 		// measured service/pressure instead of relearning from zero per file.
 		c.uploadTiming = &c.publication.timing
 	}
-	pace := ClientPace{}
+	var backoff retryBackoff
 	for {
 		if err := c.ownerError(ctx); err != nil {
 			return err
@@ -1381,8 +1507,14 @@ func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileR
 		if err == nil || c.singleAttempt || !retryTransient(err) {
 			return err
 		}
-		pace.Observe(c.clock().Now().Sub(started), false)
-		if stopped := c.pause(ctx, pace.Delay(c.clock().Now(), time.Time{}, err, c.Jitter)); stopped != nil {
+		// Accepted chunks are progress, not the cost of the request that failed.
+		since := started
+		if progress := c.uploadTiming.lastProgress(); progress.After(since) {
+			since = progress
+			backoff.progress()
+		}
+		now := c.clock().Now()
+		if stopped := c.pause(ctx, backoff.next(err, now.Sub(since), c.Jitter)); stopped != nil {
 			return &clientRetryStopped{err, stopped}
 		}
 	}

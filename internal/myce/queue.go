@@ -154,6 +154,7 @@ type Queue struct {
 	hostHealthReports    atomic.Uint64 // Queue receipt order; never worker wall time.
 	requestBudgets       requestBudgets
 	checkinService       recentCheckinService
+	uploadService        [2]recentCheckinService // Store service per upload route: create, chunk.
 	evidencePending      map[string]bool
 	evidenceRows         []string
 	evidenceBytes        uint64

@@ -140,7 +140,8 @@ func TestOutputUploadWaitsForMeasuredQueueService(t *testing.T) {
 	if got := job(t, q, j.ID); got.State != "succeeded" || got.Attempt != j.Attempt || got.Session != j.Session || got.OutputRefs["output"] != ref {
 		t.Fatalf("output lost exact attempt custody: %+v", got)
 	}
-	clock.Advance(checkinServiceBucket)
+	// Both the check-in peak and this upload's own measured service age out.
+	clock.Advance(2 * checkinServiceBucket)
 	if got := outputUploadServiceHint(q, time.Second); got != "" {
 		t.Fatalf("expired queue service was still advertised: %s", got)
 	}

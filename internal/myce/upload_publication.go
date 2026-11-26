@@ -68,6 +68,28 @@ func (q *Queue) recordCheckinService(ctx context.Context) {
 	q.checkinService.record(q.clock, service)
 }
 
+// The store's service time for each upload route, measured here over whole
+// requests (body receipt, write, sync, publication, response), whatever their
+// outcome: an interrupted request still took at least that long. A new client
+// has no samples of its own, so the hint lets it wait for this server's measured
+// service instead of abandoning a slow store's normal create or chunk (#2165).
+// The peak ages out like the check-in peak, so one outlier does not stick.
+func (q *Queue) uploadServiceFor(method string) *recentCheckinService {
+	switch method {
+	case http.MethodPost:
+		return &q.uploadService[0]
+	case http.MethodPatch:
+		return &q.uploadService[1]
+	}
+	return nil
+}
+
+func (q *Queue) recordUploadService(method string, service time.Duration) {
+	if s := q.uploadServiceFor(method); s != nil {
+		s.record(q.clock, service)
+	}
+}
+
 // Before the upload can block on custody or accounting, give this connection
 // the queue's own service measurement. Verification 102s still represent only
 // actual reads. The hint is scoped to this response and the owner can cancel.
@@ -81,7 +103,7 @@ func (q *Queue) reportUploadQueueService(w http.ResponseWriter, r *http.Request)
 	}
 	// Each check-in takes a turn through the same mutex. Long polls and
 	// unrelated transfers can wait by design, and do not estimate that turn.
-	service := q.checkinService.peak(q.clock)
+	service := max(q.checkinService.peak(q.clock), q.uploadServiceFor(r.Method).peak(q.clock))
 	if p := q.mu.pressure.Load(); p != nil && q.mu.waiting.Load() > 0 {
 		_, wait, _ := p.measurement()
 		service = max(service, wait)

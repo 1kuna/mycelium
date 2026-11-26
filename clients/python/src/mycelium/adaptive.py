@@ -7,6 +7,8 @@ import sys
 # Fast failures do not measure recovery time. Permit one transport recovery
 # period without a server signal; slower observed service can extend it.
 RECOVERY_PERIOD = 1.0
+# RFC 6298 section 2.5: a maximum retransmission timer is at least 60 seconds.
+MAX_RETRANSMISSION_PERIOD = 60.0
 
 
 def retry_after(value, now):
@@ -38,6 +40,37 @@ class Pace:
         if event is not None and event > now:
             delay = min(delay, max(self.cost, (event - now) / 2))
         return delay
+
+
+class Backoff:
+    """Retries of one operation after failures with no progress between them.
+
+    Without a server signal the first retry waits one recovery period and each
+    further failure doubles it, never past the measured cost of the work since
+    the operation's last progress. One lost reply late in a long upload is then
+    retried within seconds, not after a pause as long as the upload (#2164).
+    Retry-After stays authoritative; jitter spreads contenders.
+    """
+    def __init__(self, jitter=None):
+        self.failures = 0
+        self.jitter = jitter or random.random
+
+    def progress(self):
+        self.failures = 0
+
+    def next(self, error, cost):
+        self.failures += 1
+        signal = getattr(error, "retry_after", 0)
+        if signal:
+            return signal
+        limit = max(RECOVERY_PERIOD, cost)
+        delay = RECOVERY_PERIOD
+        for _ in range(1, self.failures):
+            if delay >= limit:
+                break
+            delay *= 2
+        delay = min(delay, limit)
+        return delay * (1 + min(1, max(0, self.jitter())))
 
 
 class Progress:

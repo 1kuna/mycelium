@@ -1,5 +1,6 @@
 import hashlib
 import http.client
+import io
 import socket
 import threading
 import time
@@ -10,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mycelium import Client
+from mycelium.client import APIError, TransferStalledError
 from mycelium.transfer import UploadTiming, _ProgressSocket
 
 
@@ -125,3 +127,81 @@ class UploadStallTests(unittest.TestCase):
         finally:
             receiver.close()
             sender.close()
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+    def monotonic(self):
+        return self.now
+    def time(self):
+        return 1793880000 + self.now
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+class _Reply(io.BytesIO):
+    def __init__(self, headers):
+        super().__init__(b"")
+        self.headers = headers
+
+
+class UploadTimingRegressionTests(unittest.TestCase):
+    def test_abandoned_requests_do_not_compound_the_window(self):
+        # #2165: a silent server is given up within a bounded window per request.
+        clock = _Clock()
+        client = Client("http://fixture.invalid", "fixture")
+        client._clock = clock
+        timing = UploadTiming()
+        timing.observe(2)
+        windows = []
+        def silent(*args, **kwargs):
+            windows.append(timing.window())
+            clock.now += windows[-1]
+            raise TransferStalledError("file transfer made no network progress")
+        with patch.object(client, "_file_request_once", side_effect=silent):
+            for _ in range(6):
+                with self.assertRaises(TransferStalledError):
+                    client._file_request("PATCH", "/upload", b"x", timing=timing, retry=False)
+        self.assertEqual(windows[0], 8)
+        self.assertLessEqual(max(windows), 60, windows)
+        self.assertEqual(windows[-1], 60, windows)
+
+    def test_late_abandoned_chunk_retries_within_seconds(self):
+        # #2164: one chunk abandoned late in a long upload is retried after one
+        # recovery period, not after a pause as long as the upload so far.
+        clock = _Clock()
+        client = Client("http://fixture.invalid", "fixture")
+        client._clock = clock
+        client._jitter = lambda: 0
+        body = bytes(6 << 20)
+        digest = hashlib.sha256(body).hexdigest()
+        state = {"accepted": 0, "stalled": False}
+        def server(method, path, data=None, headers=None, size=0, owner_timeout=None, timing=None):
+            if method == "HEAD" and "/blobs/" in path:
+                if state["accepted"] < len(body):
+                    raise APIError(404, '{"code":"file_not_found","error":"missing"}')
+                return _Reply({"Content-Length": str(len(body)), "ETag": '"' + digest + '"'})
+            if method == "POST":
+                clock.now += 60
+                return _Reply({})
+            if method == "HEAD":
+                return _Reply({"Upload-Offset": str(state["accepted"]), "Upload-Length": str(len(body))})
+            if state["accepted"] + len(data) == len(body) and not state["stalled"]:
+                state["stalled"] = True
+                clock.now += timing.window()
+                state["accepted"] += len(data)  # The server finishes it anyway.
+                raise TransferStalledError("file transfer made no network progress")
+            clock.now += 60
+            state["accepted"] += len(data)
+            return _Reply({"Upload-Offset": str(state["accepted"])})
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory, "source")
+            source.write_bytes(body)
+            with patch.object(client, "_file_request_once", side_effect=server):
+                self.assertEqual(client.upload_file(source), {"sha256": digest, "size_bytes": len(body)})
+        self.assertTrue(state["stalled"])
+        self.assertGreater(clock.now, 5 * 60)
+        self.assertEqual(clock.sleeps, [1.0])

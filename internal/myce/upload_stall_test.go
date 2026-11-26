@@ -187,11 +187,11 @@ func (t *uploadClosedAckTransport) RoundTrip(r *http.Request) (*http.Response, e
 
 func TestUploadTimingProtocolAndPressure(t *testing.T) {
 	timing := &uploadTiming{}
-	if got := timing.window(); got != time.Second {
+	if got := timing.window("PATCH", 0); got != time.Second {
 		t.Fatal("TCP retransmission floor", got)
 	}
-	timing.observe(131*time.Millisecond, 0)
-	if got := timing.window(); got != time.Second {
+	timing.completed("PATCH", 131*time.Millisecond, 0, 0, 0, true, time.Time{})
+	if got := timing.window("PATCH", 0); got != time.Second {
 		t.Fatal("fast wire sample shrank floor", got)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Header().Set("Retry-After", "13"); w.WriteHeader(503) }))
@@ -202,11 +202,11 @@ func TestUploadTimingProtocolAndPressure(t *testing.T) {
 		t.Fatal(err)
 	}
 	response.Body.Close()
-	if got := timing.window(); got != 13*time.Second {
+	if got := timing.window("PATCH", 0); got != 13*time.Second {
 		t.Fatal("ignored server pressure", got)
 	}
-	timing.observe(4*time.Second, 0)
-	if got := timing.window(); got != 16*time.Second {
+	timing.completed("PATCH", 4*time.Second, 0, 0, 0, true, time.Time{})
+	if got := timing.window("PATCH", 0); got != 16*time.Second {
 		t.Fatal("ignored service time", got)
 	}
 }

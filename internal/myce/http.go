@@ -847,7 +847,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 			if release, ok := in.(Result); c.publication != nil && method == http.MethodPost && path == "/api/workers/complete" && ok && release.ReleaseOnly && !release.ReleasePending {
 				// Before its first upload, this attempt has already measured a
 				// durable acknowledgement through the same queue writer.
-				c.publication.timing.observe(clock.Now().Sub(started), 0)
+				c.publication.timing.completed(durableAckRoute, clock.Now().Sub(started), 0, 0, 0, false, clock.Now())
 			}
 		}
 		var api *HTTPError

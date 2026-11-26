@@ -105,6 +105,38 @@ func (p *ClientPace) ServiceDelay(failure error, jitter func() float64) time.Dur
 	return delay
 }
 
+// retryBackoff paces one operation's retries after consecutive failures with
+// no progress between them. Without a server signal the first retry waits
+// RFC 6298's one-second recovery period, and each further failure doubles it
+// (RFC 6298 section 5.5), never past the measured cost of the work that failed
+// since the operation's last progress. A long healthy transfer is progress, so
+// one lost reply late in it is retried within seconds instead of after a pause
+// as long as the transfer (#2164); repeated failures of expensive work still
+// spend about as long waiting as working. Retry-After stays authoritative.
+// Jitter spreads contenders across the delay.
+type retryBackoff struct{ failures int }
+
+func (b *retryBackoff) progress() { b.failures = 0 }
+
+func (b *retryBackoff) next(failure error, cost time.Duration, jitter func() float64) time.Duration {
+	b.failures++
+	var api *HTTPError
+	if errors.As(failure, &api) && api.RetryAfter > 0 {
+		return api.RetryAfter
+	}
+	limit := max(clientRecoveryPeriod, cost)
+	delay := clientRecoveryPeriod
+	for i := 1; i < b.failures && delay < limit; i++ {
+		delay = growDuration(delay)
+	}
+	delay = min(delay, limit)
+	if jitter == nil {
+		jitter = rand.Float64
+	}
+	extra := time.Duration(float64(delay) * min(1, max(0, jitter())))
+	return delay + min(max(0, extra), time.Duration(math.MaxInt64)-delay)
+}
+
 // Seconds is the existing batch-v1 protocol's whole-second, at-most-20s hold.
 // No extra poll sleep is needed when the transport already waited this long.
 func (p *ClientPace) Seconds(now time.Time, event time.Time) int {
