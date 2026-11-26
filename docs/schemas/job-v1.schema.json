@@ -442,6 +442,9 @@
             "null"
           ]
         },
+        "exclusive_device": {
+          "type": "boolean"
+        },
         "expected_minutes": {
           "type": "number"
         },
@@ -6677,6 +6680,11 @@
             "array",
             "null"
           ],
+          "x-contract": "diagnostic"
+        },
+        "exclusive_device": {
+          "description": "Wire form of advanced.exclusive_device. Default false: measured single-card attempts may share a card. True keeps each attempt's whole card on any platform: no other attempt joins it and it never joins a held card. Queues older than this field refuse it as an unknown field.",
+          "type": "boolean",
           "x-contract": "diagnostic"
         },
         "execution": {

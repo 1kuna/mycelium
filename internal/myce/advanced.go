@@ -22,6 +22,10 @@ type Advanced struct {
 	// AllowCPUFallback lets GPU work run on a CPU target when no GPU target
 	// fits it at placement time. Default false: GPU work waits for a GPU.
 	AllowCPUFallback bool `json:"allow_cpu_fallback,omitempty" yaml:"allow_cpu_fallback,omitempty"`
+	// ExclusiveDevice keeps each attempt's whole accelerator card: no other
+	// attempt joins it, and it never joins a card another attempt holds.
+	// Default false: measured single-card work may share a card (#538).
+	ExclusiveDevice bool `json:"exclusive_device,omitempty" yaml:"exclusive_device,omitempty"`
 
 	// Resume and preemption.
 	Resumable           bool                 `json:"resumable,omitempty" yaml:"resumable,omitempty"`
@@ -60,7 +64,7 @@ type Advanced struct {
 }
 
 // Fields whose old top-level placement is accepted for one release (MY-54).
-// allow_cpu_fallback is new and exists only under advanced.
+// allow_cpu_fallback and exclusive_device are new and exist only under advanced.
 func retiredResidentError() error {
 	return &HTTPError{Status: 400, Code: "job_resident_retired", Message: "advanced.resident was retired; call the catalog model through /v1 or start a native sidecar (docs/services.md)"}
 }
@@ -98,7 +102,7 @@ func (s *Spec) FoldAdvanced() ([]string, error) {
 		field := t.Field(i)
 		key := strings.Split(field.Tag.Get("json"), ",")[0]
 		target := flat.FieldByName(field.Name)
-		if field.Name != "WarmPieces" && field.Name != "AllowCPUFallback" && field.Name != "WorkerData" && field.Name != "CheckpointPolicy" && !target.IsZero() {
+		if field.Name != "WarmPieces" && field.Name != "AllowCPUFallback" && field.Name != "ExclusiveDevice" && field.Name != "WorkerData" && field.Name != "CheckpointPolicy" && !target.IsZero() {
 			deprecated = append(deprecated, key)
 		}
 		if !nested.IsValid() {
@@ -127,10 +131,10 @@ func AdvancedStatus(s *Spec) *Advanced {
 	if logs == "keep" {
 		logs = "" // The default.
 	}
-	if s.WarmPieces == "" && s.CheckpointPolicy == "" && s.WorkerData == "" && !s.AllowCPUFallback && !s.Resumable && !s.Preemptible && s.Isolation == "" && s.Reason == "" && s.WallTime == "" && s.GiveUpAt == nil && s.ExpectedMinutes == 0 && s.StartBy == nil && s.StartWindow == "" && len(s.AllowedMachines) == 0 && len(s.ExcludedMachines) == 0 && !s.Portable && !s.RequireTarget && s.OutputDelivery == "" && len(s.QualityTolerance) == 0 && logs == "" {
+	if s.WarmPieces == "" && s.CheckpointPolicy == "" && s.WorkerData == "" && !s.AllowCPUFallback && !s.ExclusiveDevice && !s.Resumable && !s.Preemptible && s.Isolation == "" && s.Reason == "" && s.WallTime == "" && s.GiveUpAt == nil && s.ExpectedMinutes == 0 && s.StartBy == nil && s.StartWindow == "" && len(s.AllowedMachines) == 0 && len(s.ExcludedMachines) == 0 && !s.Portable && !s.RequireTarget && s.OutputDelivery == "" && len(s.QualityTolerance) == 0 && logs == "" {
 		return nil
 	}
-	return &Advanced{WarmPieces: s.WarmPieces, CheckpointPolicy: s.CheckpointPolicy, WorkerData: s.WorkerData, AllowCPUFallback: s.AllowCPUFallback, Resumable: s.Resumable, Preemptible: s.Preemptible, Isolation: s.Isolation, Reason: s.Reason, WallTime: s.WallTime, GiveUpAt: s.GiveUpAt, ExpectedMinutes: s.ExpectedMinutes, StartBy: s.StartBy, StartWindow: s.StartWindow, AllowedMachines: s.AllowedMachines, ExcludedMachines: s.ExcludedMachines, Portable: s.Portable, RequireTarget: s.RequireTarget, OutputDelivery: s.OutputDelivery, QualityTolerance: s.QualityTolerance, Logs: logs}
+	return &Advanced{WarmPieces: s.WarmPieces, CheckpointPolicy: s.CheckpointPolicy, WorkerData: s.WorkerData, AllowCPUFallback: s.AllowCPUFallback, ExclusiveDevice: s.ExclusiveDevice, Resumable: s.Resumable, Preemptible: s.Preemptible, Isolation: s.Isolation, Reason: s.Reason, WallTime: s.WallTime, GiveUpAt: s.GiveUpAt, ExpectedMinutes: s.ExpectedMinutes, StartBy: s.StartBy, StartWindow: s.StartWindow, AllowedMachines: s.AllowedMachines, ExcludedMachines: s.ExcludedMachines, Portable: s.Portable, RequireTarget: s.RequireTarget, OutputDelivery: s.OutputDelivery, QualityTolerance: s.QualityTolerance, Logs: logs}
 }
 
 // cpuFallback reports the MY-54 opt-in for plain GPU work. Extension work runs

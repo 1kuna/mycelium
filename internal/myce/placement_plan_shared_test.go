@@ -151,6 +151,48 @@ func TestSharedDeviceXPUTierIsolation(t *testing.T) {
 	}
 }
 
+// advanced.exclusive_device keeps a whole XPU card that r6.58 measured
+// sharing would otherwise pack (#2197): set on either job, no co-tenant.
+func TestSharedDeviceExclusiveDeviceKeepsXPUCard(t *testing.T) {
+	for _, exclusive := range []string{"", "holder", "newcomer"} {
+		t.Run("exclusive="+exclusive, func(t *testing.T) {
+			q, _ := fixture(t)
+			m := sharedDiscreteMachine("xpu")
+			holderSpec, newcomerSpec := sharedSpec("production", 3), sharedSpec("production", 2)
+			holderSpec.ExclusiveDevice, newcomerSpec.ExclusiveDevice = exclusive == "holder", exclusive == "newcomer"
+			if exclusive != "" {
+				holderSpec.Advanced, newcomerSpec.Advanced = &Advanced{ExclusiveDevice: holderSpec.ExclusiveDevice}, &Advanced{ExclusiveDevice: newcomerSpec.ExclusiveDevice}
+				holderSpec.ExclusiveDevice, newcomerSpec.ExclusiveDevice = false, false
+			}
+			holder := submitMeasuredCardJob(t, q, m, holderSpec)
+			run := assignedJob(machineCheck(t, q, m))
+			if run == nil || run.ID != holder.ID {
+				t.Fatal("holder not assigned", run, job(t, q, holder.ID).Reason)
+			}
+			if err := q.Started(result(run, false)); err != nil {
+				t.Fatal(err)
+			}
+			newcomer := submitMeasuredCardJob(t, q, m, newcomerSpec)
+			if exclusive != "" && !job(t, q, newcomer.ID).Spec.ExclusiveDevice && !job(t, q, holder.ID).Spec.ExclusiveDevice {
+				t.Fatal("advanced.exclusive_device was not stored flat")
+			}
+			got := assignedJob(machineCheck(t, q, m, run))
+			if exclusive == "" {
+				if got == nil || got.ID != newcomer.ID || !slices.Equal(got.AllocatedDevices, run.AllocatedDevices) {
+					t.Fatal("measured XPU jobs no longer share without the option", got, job(t, q, newcomer.ID).Reason)
+				}
+				return
+			}
+			if got != nil {
+				t.Fatal("exclusive_device on the "+exclusive+" still shared the card", got.ID)
+			}
+			if a := AdvancedStatus(&job(t, q, holder.ID).Spec); exclusive == "holder" && (a == nil || !a.ExclusiveDevice) {
+				t.Fatal("status advanced view omits exclusive_device", a)
+			}
+		})
+	}
+}
+
 func TestSharedDeviceMetalHigherTierPacks(t *testing.T) {
 	testSharedDeviceTierPacks(t, "metal", "production")
 }
