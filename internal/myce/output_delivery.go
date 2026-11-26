@@ -29,9 +29,82 @@ const deliveryRetryDelay = time.Minute
 // of checkpoint mode. An empty root disables new asynchronous delivery tasks.
 func WithOutputDeliveryRoot(root string) QueueOption { return func(q *Queue) { q.deliveryRoot = root } }
 
+// A delivery records its destination as deliveryRootID, a hash of the
+// recording host's path to the root. Shared-queue members mount one share at
+// different local paths (#2148), so a path cannot name the destination across
+// hosts. Each host that delivers registers its own hash as an empty entry in
+// the destination root, and a recorded ID names the root this host opened when
+// it is this host's hash or registered there. Another share has no such entry,
+// so a real change of destination is still refused. Records keep their format.
 func deliveryRootID(root string) string {
 	sum := sha256.Sum256([]byte(root))
 	return hex.EncodeToString(sum[:])
+}
+
+const deliveryAliases = ".myce-destinations"
+
+var errDeliveryDestination = errors.New("NAS destination configuration missing or changed")
+
+// registerDeliveryAlias records this host's ID in an existing destination
+// root. It never creates the root: a missing mount stays missing.
+func registerDeliveryAlias(root *os.Root, own string) error {
+	name := filepath.Join(deliveryAliases, own)
+	if _, err := root.Lstat(name); !os.IsNotExist(err) {
+		return err
+	}
+	if err := root.Mkdir(deliveryAliases, 0700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE, 0600)
+	if err != nil {
+		return err
+	}
+	return errors.Join(f.Sync(), f.Close(), syncDeliveryDirectory(root, deliveryAliases))
+}
+
+// checkDeliveryDestination registers this host's ID for root, at path on this
+// host, and reports whether recorded names the same destination.
+func checkDeliveryDestination(root *os.Root, path, recorded string) error {
+	own := deliveryRootID(path)
+	if err := registerDeliveryAlias(root, own); err != nil {
+		return err
+	}
+	if recorded == own {
+		return nil
+	}
+	if _, err := hex.DecodeString(recorded); err != nil || len(recorded) != sha256.Size*2 {
+		return errDeliveryDestination
+	}
+	_, err := root.Lstat(filepath.Join(deliveryAliases, recorded))
+	if os.IsNotExist(err) {
+		return errDeliveryDestination
+	}
+	return err
+}
+
+// registerDeliveryDestinations registers this host's ID in each root it
+// delivers to. A shared-queue member runs it when it takes the turn, so a
+// delivery it records stays publishable by a successor even if it never
+// publishes one itself. Its filesystem I/O runs outside q.mu.
+func (q *Queue) registerDeliveryDestinations() error {
+	q.mu.RLock()
+	roots := []string{q.deliveryRoot}
+	if !q.fileCheckpoints && !q.simulation {
+		roots = append(roots, q.root)
+	}
+	q.mu.RUnlock()
+	var errs []error
+	for _, path := range roots {
+		if path == "" {
+			continue
+		}
+		root, err := os.OpenRoot(path)
+		if err == nil {
+			err = errors.Join(registerDeliveryAlias(root, deliveryRootID(path)), root.Close())
+		}
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 type OutputDelivery struct {
@@ -92,7 +165,7 @@ func validateOutputDelivery(s Spec) error {
 		return errors.New("async_nas requires individual tasks")
 	}
 	for name, prefix := range s.Outputs {
-		if !validOutputDeclaration(name) || !safeRelative(prefix) || (strings.Split(name, "/")[0] == deliveryReceiptName || strings.Split(name, "/")[0] == ".myce-result-spool") {
+		if !validOutputDeclaration(name) || !safeRelative(prefix) || (strings.Split(name, "/")[0] == deliveryReceiptName || strings.Split(name, "/")[0] == ".myce-result-spool") || strings.Split(prefix, "/")[0] == deliveryAliases {
 			return errors.New("async_nas requires relative output names/prefixes without the receipt name")
 		}
 	}
@@ -161,7 +234,10 @@ func (q *Queue) advanceOutputDelivery(ctx context.Context) error {
 				}
 				now := q.clock.Now()
 				j.Delivery.LastProgressAt = &now
-				if publishErr != nil {
+				if errors.Is(publishErr, errDeliveryDestination) {
+					j.Delivery.State, j.Delivery.Cause = "failed", "NAS destination configuration missing or changed; restore the original output-delivery-root"
+					j.Delivery.NextAttemptAt = now.Add(deliveryRetryDelay)
+				} else if publishErr != nil {
 					j.Delivery.State, j.Delivery.Cause = "failed", "NAS publication or receipt verification failed; source files retained"
 					j.Delivery.NextAttemptAt = now.Add(deliveryRetryDelay)
 				} else {
@@ -218,7 +294,8 @@ func (q *Queue) advanceOutputDelivery(ctx context.Context) error {
 			return strings.Compare(a.ID, b.ID)
 		})
 		for _, candidate := range jobs {
-			if q.deliveryPath(candidate) == "" || candidate.Delivery.DestinationID != deliveryRootID(q.deliveryPath(candidate)) {
+			// The publisher checks the destination's identity on the share (#2148).
+			if q.deliveryPath(candidate) == "" {
 				j := q.touchDelivery(candidate)
 				j.Delivery.State, j.Delivery.Cause = "failed", "NAS destination configuration missing or changed; restore the original output-delivery-root"
 				continue
@@ -257,7 +334,7 @@ func (q *Queue) advanceOutputDelivery(ctx context.Context) error {
 // receipt identity AND destination content, never just the existence of a file.
 func publishOutputDelivery(j Job, store *FileStore, path string, callbacks ...func()) error {
 	progress := outputDeliveryProgress(callbacks)
-	if store == nil || j.Delivery == nil || deliveryDigest(j) != j.Delivery.ManifestSHA256 || deliveryRootID(path) != j.Delivery.DestinationID {
+	if store == nil || j.Delivery == nil || deliveryDigest(j) != j.Delivery.ManifestSHA256 {
 		return ErrStale
 	}
 	root, err := os.OpenRoot(path)
@@ -265,6 +342,9 @@ func publishOutputDelivery(j Job, store *FileStore, path string, callbacks ...fu
 		return err
 	}
 	defer root.Close()
+	if err = checkDeliveryDestination(root, path, j.Delivery.DestinationID); err != nil {
+		return err
+	}
 	progress()
 	groups := map[string]FileManifest{}
 	for name, ref := range j.OutputRefs {

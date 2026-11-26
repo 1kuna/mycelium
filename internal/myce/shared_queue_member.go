@@ -396,6 +396,8 @@ func (m *sharedQueueMember) promote(ctx context.Context, turn sharedQueueTurn) s
 	m.leader = l
 	m.mu.Unlock()
 	go m.prepareStorage(tickCtx, q)
+	// Best effort: every publication registers again before it checks (#2148).
+	go func() { _ = q.registerDeliveryDestinations() }()
 	go func() {
 		defer close(l.tickDone)
 		// The same maintenance loop as a single queue. A failed tick ends

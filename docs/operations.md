@@ -1697,6 +1697,12 @@ same attempt keeps its number, session and start time across both switches.
   queue's file store is local today, copy it there first with the
   [consistent copy](#consistent-copy-and-restore) procedure. Pass the copy's
   path as `--file-store` to the cutover and to every member's install.
+  Each member may mount the share at its own local path. Members resolve
+  upload files and checkpoint folders under their own roots. Each one marks the
+  output-delivery and checkpoint roots it delivers to with an empty entry under
+  `.myce-destinations/`, so a successor still publishes pending NAS deliveries.
+  Leave that folder in place: a delivery that no member can match to its root
+  fails with `NAS destination configuration missing or changed`.
 - [Preserve one complete generation](#preserve-one-complete-generation). The
   commands do not move the joining identity, configuration, model catalog or
   the per-host idle history beside the database.
