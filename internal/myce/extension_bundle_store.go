@@ -85,7 +85,7 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 			return e
 		}
 		if missing {
-			if e = os.Link(f.Name(), s.blob(next)); e != nil && !os.IsExist(e) {
+			if e = s.linkBlob(f.Name(), s.blob(next), next.SHA256); e != nil && !os.IsExist(e) {
 				return e
 			}
 		} else {

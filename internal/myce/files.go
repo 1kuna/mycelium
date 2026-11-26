@@ -153,8 +153,9 @@ type FileStore struct {
 	explainRefusal              func(context.Context, error) error
 	handler                     http.Handler
 	uploadLocker                tus.Locker
-	syncDir                     func(string) error // Durability failure injection.
-	beforeTrash                 func(string)       // Fixtures may block a collector's move.
+	syncDir                     func(string) error         // Durability failure injection.
+	beforeTrash                 func(string)               // Fixtures may block a collector's move.
+	link                        func(string, string) error // Fixtures may refuse hard links; nil is os.Link.
 	expired                     func(string, ...context.Context) bool
 	lifecycle                   *sync.RWMutex
 	clock                       Clock
@@ -328,7 +329,7 @@ func (s *FileStore) publish(ctx context.Context, ref FileRef) error {
 	if err = errors.Join(f.Sync(), f.Close()); err != nil {
 		return uploadFailure(ctx, "upload_sync", err)
 	}
-	if err = os.Link(source, s.blob(ref)); err != nil && !os.IsExist(err) {
+	if err = s.linkBlob(source, s.blob(ref), ref.SHA256); err != nil && !os.IsExist(err) {
 		return uploadFailure(ctx, "blob_link", err)
 	}
 	if err = s.verify(ctx, ref); err != nil {
