@@ -1195,7 +1195,7 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 		local.Transport = transport
 	}
 	started := c.clock().Now()
-	res, err := local.Do(req)
+	res, err := c.doQueueRequest(&local, req, method == http.MethodGet || method == http.MethodHead)
 	pressure := time.Duration(0)
 	if res != nil {
 		pressure = retryAfter(res.Header.Get("Retry-After"), c.clock().Now())

@@ -31,6 +31,11 @@ print(client.get(job["id"]))
 client.cancel(job["id"])
 ```
 
+For several members of one shared queue, pass their comma-separated origins as
+`MYCE_QUEUE` or as the first argument to `Client(...)`. See
+[endpoint failover](../../docs/development.md#external-client-failover) for
+credential, TLS and retry behavior.
+
 Hold queued work with `client.pause(job_id, reason="review inputs")`.
 To checkpoint-stop your own running job and then hold it, call
 `client.pause(job_id, project="example", reason="free capacity", yield_=True)`.

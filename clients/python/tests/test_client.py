@@ -1029,6 +1029,44 @@ if __name__ == "__main__":
 
 
 class ClientIdentityTests(unittest.TestCase):
+    def test_endpoint_failover_preserves_replay_and_identity_rules(self):
+        from urllib.error import URLError
+        from mycelium.transfer import EndpointConnectError
+
+        first, second = "https://first.invalid", "https://second.invalid"
+        for method, path, body, failure, replayed in (
+                ("GET", "/api/jobs/job", None, 503, True),
+                ("POST", "/api/jobs", {"submission_key": "same-intent"}, 503, True),
+                ("POST", "/api/jobs", {}, 503, False),
+                ("POST", "/api/jobs/job/cancel", {}, None, True),
+                ("POST", "/api/jobs/job/cancel", {}, 503, False),
+                ("GET", "/api/jobs/job", None, 401, False),
+                ("GET", "/api/jobs/job", None, 302, False)):
+            with self.subTest(method=method, path=path, failure=failure, replayed=replayed):
+                client = Client(first + "," + second, "fixture")
+                requests = []
+
+                def respond(request, **kwargs):
+                    requests.append(request)
+                    if request.full_url == first + path:
+                        if failure is None:
+                            raise URLError(EndpointConnectError("fixture"))
+                        raise HTTPError(request.full_url, failure, "fixture",
+                                        {"Location": second + path}, Reply(b"{}"))
+                    return Reply(b"{}")
+
+                client._urlopen = respond
+                if replayed:
+                    self.assertEqual(client._call(method, path, body, retry=False), {})
+                else:
+                    with self.assertRaises(APIError) as error:
+                        client._call(method, path, body, retry=False)
+                    self.assertEqual(error.exception.status, failure)
+                self.assertEqual([r.full_url for r in requests],
+                                 [first + path, second + path] if replayed else [first + path])
+                for request in requests:
+                    self.assertEqual(request.get_header("Authorization"), "Bearer fixture")
+
     def test_job_reads_send_package_identity(self):
         from mycelium.client import USER_AGENT
         from importlib.metadata import version, PackageNotFoundError

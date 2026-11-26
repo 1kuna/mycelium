@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,81 @@ import (
 	"testing"
 	"time"
 )
+
+func TestSharedQueueMemberReconcilesReleaseBeforeReplacement(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sig  syscall.Signal
+	}{{"planned", syscall.SIGTERM}, {"crash", syscall.SIGKILL}} {
+		t.Run(tc.name, func(t *testing.T) {
+			pg := startProofPostgres(t)
+			a := pg.authority(t)
+			dir := t.TempDir()
+			old := startProofMember(t, dir, "old", "127.0.0.1:0", pg.dsn)
+			first := proofLeader(t, a, old, 0)
+			next := startProofMember(t, dir, "next", "127.0.0.1:0", pg.dsn)
+			owner := machine("owner", "cpu", "owner-fixture")
+			replacement := machine("replacement", "cpu", "replacement-fixture")
+			job := proofSubmit(t, old.client, proofSpec("release-before-replacement"))
+			before := proofAssignment(t, old.client, owner, job.ID)
+			release := resultIdentity(before)
+			release.ReleaseOnly = true
+			if err := old.client.Call(t.Context(), http.MethodPost, "/api/workers/"+owner.ID+"/leave",
+				map[string]bool{"now": true}, nil); err != nil {
+				t.Fatal(err)
+			}
+			old.stop(t, tc.sig)
+			proofLeader(t, a, next, first.number)
+			// Spend the stop grace while the owner is still in restart grace,
+			// then let that exact session report before considering placement.
+			if err := next.client.Call(t.Context(), http.MethodPost, "/api/dev/clock/advance",
+				map[string]float64{"seconds": StopGrace.Seconds() + 1}, nil); err != nil {
+				t.Fatal(err)
+			}
+			stop := proofCheckin(t, next.client, owner)
+			if len(stop.Attempts) != 1 || !stop.Attempts[0].Stop || !stop.Attempts[0].Kill ||
+				stop.Attempts[0].Execution != release.Execution || stop.Attempts[0].Session != release.Session {
+				t.Fatalf("successor did not send an exact kill after stop grace: %+v", stop.Attempts)
+			}
+			const complete = "/api/workers/complete"
+			wrongAttempt, wrongSession := release, release
+			wrongAttempt.Attempt++
+			wrongSession.Session = replacement.Session
+			for _, bad := range []Result{wrongAttempt, wrongSession} {
+				if err := next.client.Call(t.Context(), http.MethodPost, complete, bad, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if offer := proofCheckin(t, next.client, replacement); len(offer.Attempts) != 0 {
+				t.Fatalf("replacement received work before exact release: %+v", offer.Attempts)
+			}
+			stopping, err := next.client.GetJob(t.Context(), job.ID)
+			if err != nil || stopping.State != "stopping" || stopping.Attempt != before.Attempt ||
+				stopping.Losses != before.Losses || len(stopping.Copies) != 1 || stopping.Copies[0].ReleaseConfirmed {
+				t.Fatalf("pending custody changed on handover: %+v, %v", stopping, err)
+			}
+			if err := next.client.Call(t.Context(), http.MethodPost, complete, release, nil); err != nil {
+				t.Fatal(err)
+			}
+			after := proofAssignment(t, next.client, replacement, job.ID)
+			if after.Attempt != before.Attempt+1 || after.Session != replacement.Session ||
+				len(after.Copies) != 2 || !after.Copies[0].ReleaseConfirmed || after.Copies[1].ReleaseConfirmed {
+				t.Fatalf("replacement did not follow exact release: %+v", after)
+			}
+			release.ReleaseOnly, release.Success = false, true
+			var refusal *HTTPError
+			err = next.client.Call(t.Context(), http.MethodPost, complete, release, nil)
+			if !errors.As(err, &refusal) || refusal.Code != "request_stale" {
+				t.Fatalf("superseded attempt's result = %v", err)
+			}
+			active, err := next.client.GetJob(t.Context(), job.ID)
+			if err != nil || active.State != "running" || active.Attempt != after.Attempt ||
+				active.Session != after.Session || active.Copies[1].ReleaseConfirmed {
+				t.Fatalf("stale result changed the replacement: %+v, %v", active, err)
+			}
+		})
+	}
+}
 
 func proofCheckin(t *testing.T, c Client, m Machine) Reply {
 	t.Helper()
