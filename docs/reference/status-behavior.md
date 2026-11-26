@@ -570,27 +570,60 @@ and main in the same exact attempt subtree. Envelope calibration is separate.
 first maintenance observation. Diagnose a single project with
 `myce efficiency --project NAME`.
 
-- `hosts` compares reserved, measured Mycelium and total physical RAM.
+- `utilization` answers "is work waiting while a card sits idle?" per card or
+  CPU pool over the last seven UTC days (#2183). Each maintenance observation
+  classifies every card as busy, busy while more compatible work waited, idle
+  while compatible work waited, idle with no demand, held, or unknown, and
+  holds until the next observation or until the card's inventory goes stale.
+  `unknown_card_hours` is window time no observation covered; it is reported
+  beside the idle number, never folded into it. Waiting reasons are the
+  efficiency categories below, or `would_fit:BLOCKER` when a waiting job fit
+  physically once one term is charged at its measurement:
+  `holder_pending_growth` (running holders charged only to their measured
+  peak), `own_charge` (the job at its own measured peak),
+  `card_exclusive_unmeasured_device` (the card is refused only because a
+  holder's device peak is unmeasured), `accumulation_fence` (room exists but
+  the backfill fence withholds it) and `unknown_stale_inventory`.
+  `would_have_fit_at_measured_size` totals job episodes and job-hours by
+  blocker. Would-fit is a counterfactual, never an admission decision.
+- `hosts` compares reserved, measured Mycelium and total physical RAM. Its
+  integrals restart when the host's inventory identity changes; `since` is
+  their window and the text view prints it. `measured_memory_unknown` says why
+  measured Mycelium memory is unknown, and `attempt_peaks` gives retained
+  accepted per-attempt host peaks, which exist where host-wide attribution
+  does not.
   `programs` groups reservation and use integrals by host, work and sizing
   basis. Reservation spans custody through release. Measured coverage
   distinguishes missing readings from zero. Use
   `reserved_covered_memory_gb_seconds` for like-for-like comparisons.
 - `wait_seconds` reports observed time by blocker, starting from the first
   observation. Earlier time stays unknown and pause time is attributed to holds.
+  Every hold kind maps to a named category. Host-memory ledger, pool and
+  headroom refusals are `memory_reservation`, including when some other target
+  is refused for a different reason; an unmapped kind is `unknown`.
 - `stranded` means the job fits current capacity if only the named authored
   or policy exclusions are removed. Qualification, preparation, resource and
   custody requirements still apply. Host-restricted and targeted jobs count
   separately. Observed wait alone is no causal estimate of the cost of a pin.
-- `predictions` compares reservation with the accepted peak, and estimated
+- `predictions` compares reservation with the accepted peak the scheduler
+  learns from (host peak, or the combined GPU-host peak), and estimated
   duration with actual duration. Only accepted learning samples qualify for
-  the memory comparison.
-- `wasted_attempts` includes loss, kill, guard-stop and OOM outcomes. A
-  `suspect` ending gives positive contrary evidence worth investigating, while
-  missing evidence stays unknown.
+  the memory comparison. `cgroup_peak_gb` is diagnostic: it counts reclaimable
+  page cache.
+- `wasted_attempts` lists every retained stopped attempt with its `kind`:
+  `lost` (ran, then interrupted), `lost_start_unknown`, `never_started`,
+  `cancelled`, `killed`, `guard_stopped` or `oom`, plus `started` and
+  `burned_seconds` (command time, when known). `wasted_windows` counts them for
+  the last 7 days and for the whole retained span, with its dates; the
+  headline and regression signals count only kinds that may have burned run
+  time. A `suspect` ending gives positive contrary evidence worth
+  investigating, while missing evidence stays unknown.
 
 `myce usage --by machine` reports GPU busy and idle hours per physical card.
-A multi-card target charges its constituent cards. Busy percentage uses
-observed hours and excludes unknown outages. CPU and I/O counters describe
+A multi-card target charges its constituent cards. `busy_percent` is
+allocation occupancy (GPU-hours assigned to started work over observed online
+hours, excluding unknown outages), not device utilization. Project rows carry
+GPU-hours only: a project has no observed-time denominator. CPU and I/O counters describe
 observed attempt windows. Lower-bound indicators flag incomplete coverage,
 which limits comparisons with reservation-time integrals.
 

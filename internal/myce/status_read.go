@@ -415,7 +415,7 @@ func (q *Queue) captureObservationInputs(id string, options *statusOptions, borr
 		v.efficiencyView = q.efficiencyView
 	} else if id != "" {
 		// Job-only reads never return fleet diagnostics or their baselines.
-		s.EfficiencyHosts, s.EfficiencyHealth, s.StrandedDemand = nil, nil, nil
+		s.EfficiencyHosts, s.EfficiencyHealth, s.StrandedDemand, s.Utilization = nil, nil, nil, nil
 	}
 	healthEvents, externalMemory := s.Health.Events, maps.Clone(s.ExternalMemory)
 	s.Health.Events, s.ExternalMemory = nil, nil
