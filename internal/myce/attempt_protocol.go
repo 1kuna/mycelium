@@ -41,13 +41,15 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	}
 	c = w.diskBudgetCheckin(c)
 	c, expirySent := w.checkpointExpiryCheckin(c)
+	// Client.Call sends the gate only to a queue that advertised it.
+	gateSent := c.Machine.HostRAMGate != nil && w.Client.hostRAMGateWire != nil && w.Client.hostRAMGateWire.Load()
 	var reply Reply
 	err := w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
 	var refusal *HTTPError
-	if (c.Machine.InventoryProbe != nil || c.Machine.HostRAMGate != nil) && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
+	if (c.Machine.InventoryProbe != nil || gateSent) && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
 		// Rolling upgrades: predecessor queues still consume device reasons
-		// and the ordinary ledger. The refusal's reply already turned the
-		// negotiated RAM gate off; drop it from this retry too.
+		// and the ordinary ledger. A sent gate means the queue was replaced
+		// since it advertised the gate; drop both in this one retry.
 		if c.Machine.InventoryProbe != nil && w.Client.inventoryWire != nil {
 			w.Client.inventoryWire.Store(false)
 		}
