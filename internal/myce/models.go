@@ -456,6 +456,7 @@ func (q *Queue) reconcileModels(m *Machine, reports []ModelReport) {
 	}
 }
 func (q *Queue) maintainModels() {
+	defer q.bodyPhaseFinish("maintain_models", q.bodyPhaseStart())
 	q.admissionWaitDecisions = nil
 
 	if q.s.ModelSlots == nil {
@@ -1293,7 +1294,7 @@ func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool, candidat
 	var best *placementPlan
 	var selected *Job
 	for _, m := range scan.machines {
-		if !q.placementAllowed(j, m) || q.unreported[m.ID] || planned[targetKey(m)] {
+		if !q.scanPlacementAllowed(j, m, scan) || q.unreported[m.ID] || planned[targetKey(m)] {
 			continue
 		}
 		set := candidates[targetKey(m)]
@@ -1351,6 +1352,21 @@ func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool, candidat
 		q.retainPlacementReleases(best, q.touchJob(j.ID))
 	}
 	return targetKey(best.machine), changed
+}
+
+// The caller rebuilds scan after any release changes custody, so this check
+// shares the pass's planning cache, as candidate building does. Without it,
+// every waiting job rescanned the live set per target (#2179).
+func (q *Queue) scanPlacementAllowed(j *Job, m *Machine, scan *placementScan) bool {
+	if q.memoryPlanning != nil {
+		return q.placementAllowed(j, m)
+	}
+	if scan.memory == nil {
+		scan.memory = newMemoryPlanningCache()
+	}
+	q.memoryPlanning = scan.memory
+	defer func() { q.memoryPlanning = nil }()
+	return q.placementAllowed(j, m)
 }
 
 var errPriorityPreemption = errors.New("model call interrupted by higher priority demand")

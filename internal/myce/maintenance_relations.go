@@ -71,6 +71,7 @@ func (q *Queue) settleMaintenance() {
 	if m == nil || !m.ran || m.draining {
 		return
 	}
+	defer q.bodyPhaseFinish("maintain_settle", q.bodyPhaseStart())
 	m.draining = true
 	defer func() { m.draining = false }()
 	for len(m.pending) > 0 {

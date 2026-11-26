@@ -143,6 +143,7 @@ func (q *Queue) startWaitingReason(j *Job, scans ...*placementScan) string {
 
 // Expire before planning any new reclaim or assignment. Release custody is independent.
 func (q *Queue) maintainStartDeadlines() {
+	defer q.bodyPhaseFinish("maintain_deadlines", q.bodyPhaseStart())
 	now := q.clock.Now()
 	for _, j := range q.liveJobs() {
 		if j.Spec.Priority == "production" && !terminal(j.State) && !relativeStartPaused(j) && (j.Spec.StartBy != nil || dependencyReady(j)) {

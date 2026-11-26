@@ -74,7 +74,11 @@ Additional `body_maintain_ms`, `body_placement_ms`, `body_environment_plan_ms`,
 `body_qualification_plan_ms`, `body_model_plan_ms`, `body_copy_plan_ms`,
 `body_health_ms`, `body_efficiency_ms` and `body_retained_index_ms` are inclusive
 helper timings: do not add them to the enclosing phases. For example, health
-detection is inside the transaction tail. All timings use an observational clock
+detection is inside the transaction tail. `body_maintain_models_ms`,
+`body_maintain_deadlines_ms`, `body_maintain_reservations_ms` and
+`body_maintain_pool_yield_ms` are inclusive children of `body_maintain_ms`
+(#2179). `body_maintain_settle_ms` sums relation settlement, which also runs
+outside maintenance. All timings use an observational clock
 and never affect scheduling. The logger's existing adaptive admission remains
 unchanged; timestamps and fixed counters are collected without per-job logs.
 

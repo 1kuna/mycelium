@@ -190,6 +190,9 @@ var queueBodyPhaseNames = [...]string{
 	"checkin_maintain", "checkin_attempts", "checkin_plans", "transaction_tail",
 	"maintain", "placement", "environment_plan", "qualification_plan",
 	"model_plan", "copy_plan", "health", "efficiency", "retained_index",
+	// Children of maintain (#2179). Settlement also runs outside maintenance.
+	"maintain_models", "maintain_deadlines", "maintain_settle",
+	"maintain_reservations", "maintain_pool_yield",
 }
 
 func holdNow(clock Clock) time.Time {
