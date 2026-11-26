@@ -615,6 +615,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 
 	timing.enter(launchPrechecks)
 	executionWork := j.Spec.Run.Workdir
+	j.stagedWork = executionWork
 	if err := checkPayloadMachOLinkage(ctx, machineTarget(&w.Machine), executionWork); err != nil {
 		return nil, err
 	}

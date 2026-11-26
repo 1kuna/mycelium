@@ -144,9 +144,13 @@ func TestFanOutLossRetriesOnlyAffectedPiece(t *testing.T) {
 	}
 }
 
-func curveFixture(t *testing.T) (*Queue, *workerFakeClock, Machine, Extension, Spec) {
+// setup runs before the extension is registered, which binds bundle storage.
+func curveFixture(t *testing.T, setup ...func(*Queue)) (*Queue, *workerFakeClock, Machine, Extension, Spec) {
 	t.Helper()
 	q, initial := fixture(t)
+	for _, f := range setup {
+		f(q)
+	}
 	clock := &workerFakeClock{now: initial.Now()}
 	q.clock = clock
 	e := compositionExtension(t, false)

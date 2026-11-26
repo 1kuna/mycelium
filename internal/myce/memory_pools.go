@@ -127,7 +127,7 @@ func pooledEvidenceKeyForExtension(j *Job, m *Machine, extension *Extension) mem
 				key.Reference = variant.References[j.Spec.workType()]
 			}
 		}
-		key.Work = j.Spec.workType()
+		key.Work = evidenceWork(j.Spec)
 		key.Check = j.Spec.ExtensionCheck != nil
 	} else {
 		key.Work = profileMemoryIdentity(j)

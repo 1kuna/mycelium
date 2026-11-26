@@ -496,6 +496,10 @@ type Job struct {
 	// Set only on read-only planner copies, never the durable job. Plain work's
 	// recipe and input identity is independent of the target or learned memory.
 	planningMemoryIdentity string
+	// Set only on a worker's launch copy: the attempt directory holding staged
+	// inputs. A lowered extension can run main in another working directory,
+	// and warm items still read their inputs and write outputs here.
+	stagedWork string
 	// Queue-owned comparison in progress. A restart discards unfinished
 	// measurements and keeps completed observations in the evidence store.
 	gpuSharingRun *gpuSharingRun

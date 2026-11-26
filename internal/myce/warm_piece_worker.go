@@ -261,7 +261,10 @@ func prepareWarmItem(j Job, d *WarmPieceDelivery) (*warmPieceItem, error) {
 	if p.Key != d.Key {
 		return nil, errors.New("warm item differs from the frozen declaration")
 	}
-	work := j.Spec.Run.Workdir
+	work := j.stagedWork
+	if work == "" {
+		work = j.Spec.Run.Workdir
+	}
 	item := &warmPieceItem{Key: p.Key, Args: p.Args, Inputs: map[string]string{}}
 	prefix := PlainPiecePrefix + p.Key + "/"
 	for name := range j.Spec.Files {
