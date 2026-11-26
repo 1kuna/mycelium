@@ -5,7 +5,7 @@ import socket
 import select
 import ssl
 import time
-from .adaptive import Progress, RECOVERY_PERIOD
+from .adaptive import MAX_RETRANSMISSION_PERIOD, Progress, RECOVERY_PERIOD
 from urllib.request import HTTPHandler, HTTPSHandler, HTTPRedirectHandler, build_opener
 
 
@@ -16,16 +16,37 @@ class UploadTiming:
     timer. Faster buffered copies cannot prove a dead peer before retransmit.
     Four measured service periods retain Progress's jitter allowance; a server
     Retry-After may raise the window. An owner's deadline still wins.
+
+    Only answered requests measure service. An abandoned request says only
+    that the server took longer (Karn's algorithm): like RFC 6298 5.5, each
+    consecutive abandonment doubles the window until a request is answered,
+    stopping at RFC 6298's 60-second maximum without new evidence, so a
+    silent server is given up within a bounded time per request (#2165).
     """
     def __init__(self):
         self.service = self.pressure = 0
+        self.timeouts = 0
+        self.progress = None  # Monotonic time the server last accepted bytes.
 
     def observe(self, service, pressure=0):
         self.service = max(self.service, service)
         self.pressure = max(self.pressure, pressure)
+        self.timeouts = 0
+
+    def abandoned(self):
+        self.timeouts += 1
+
+    def accepted(self, now):
+        self.progress = now
 
     def window(self):
-        return max(RECOVERY_PERIOD, 4 * self.service, self.pressure)
+        window = max(RECOVERY_PERIOD, 4 * self.service, self.pressure)
+        backoff = window
+        for _ in range(self.timeouts):
+            if backoff >= MAX_RETRANSMISSION_PERIOD:
+                break
+            backoff *= 2
+        return max(window, min(backoff, MAX_RETRANSMISSION_PERIOD))
 
 
 class _ProgressSocket:

@@ -68,3 +68,26 @@ func TestClientRetryPacingDiscardsUnchangedHistory(t *testing.T) {
 		t.Fatal("fallback lost measured service cost", got)
 	}
 }
+
+// One failure after progress retries after one recovery period; consecutive
+// failures double toward, never past, the failed work's measured cost, and a
+// server's Retry-After stays authoritative (#2164).
+func TestClientRetryBackoffFollowsFailureHistory(t *testing.T) {
+	none := func() float64 { return 0 }
+	var b retryBackoff
+	for i, want := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 5 * time.Second, 5 * time.Second} {
+		if got := b.next(io.EOF, 5*time.Second, none); got != want {
+			t.Fatalf("failure %d waited %s, want %s", i+1, got, want)
+		}
+	}
+	if got := b.next(&HTTPError{Status: 503, RetryAfter: 13 * time.Second}, 5*time.Second, none); got != 13*time.Second {
+		t.Fatal("Retry-After lost authority", got)
+	}
+	b.progress()
+	if got := b.next(io.EOF, 9*time.Minute, none); got != time.Second {
+		t.Fatal("a failure after progress paid for the whole pass", got)
+	}
+	if got := b.next(io.EOF, 0, func() float64 { return .5 }); got != 1500*time.Millisecond {
+		t.Fatal("fast failures lost the recovery period or its jitter", got)
+	}
+}

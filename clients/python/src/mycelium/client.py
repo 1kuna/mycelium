@@ -28,7 +28,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
-from .adaptive import RECOVERY_PERIOD, Pace, retry_after
+from .adaptive import RECOVERY_PERIOD, Backoff, Pace, retry_after
 from .transfer import EndpointConnectError
 
 try:
@@ -384,9 +384,15 @@ class Client:
 
     def _request(self, operation: Callable[[float | None], Any], *,
                  policy: str = "none", end: float | None = None,
-                 expired: Callable[[], Exception] = lambda: TimeoutError("queue request timed out")) -> Any:
-        """One retry owner; operations that reconcile writes disable inner retries."""
+                 expired: Callable[[], Exception] = lambda: TimeoutError("queue request timed out"),
+                 progress: Callable[[], float | None] | None = None) -> Any:
+        """One retry owner; operations that reconcile writes disable inner retries.
+
+        progress, when given, returns the monotonic time the operation last
+        made progress, so a failure costs only the work since then.
+        """
         pace = Pace(jitter=self._jitter)
+        backoff = Backoff(jitter=self._jitter)
         while True:
             started = self._clock.monotonic()
             remaining = None if end is None else end - started
@@ -397,8 +403,20 @@ class Client:
             except REQUEST_ERRORS as error:
                 if not self._retryable(error, policy):
                     raise
-                pace.observe(self._clock.monotonic() - started)
-                self._pause(pace, end=end, error=error)
+                if progress is None:
+                    pace.observe(self._clock.monotonic() - started)
+                    self._pause(pace, end=end, error=error)
+                    continue
+                since = started
+                last = progress()
+                if last is not None and last > since:
+                    since = last
+                    backoff.progress()
+                now = self._clock.monotonic()
+                delay = backoff.next(error, now - since)
+                if end is not None:
+                    delay = min(delay, max(0, end - now))
+                self._clock.sleep(delay)
 
     def _open_endpoints(self, request: Request, *, timeout: float | None,
                         opener: Any = None, replay_safe: bool = False) -> Any:
@@ -719,12 +737,18 @@ class Client:
                 if timing is None:
                     return self._file_request_once(method, path, data, headers, size, remaining)
                 response = self._file_request_once(method, path, data, headers, size, remaining, timing)
-            except REQUEST_ERRORS as error:
+            except TransferStalledError:
                 if timing is not None:
+                    timing.abandoned()  # Not a service sample: it never answered.
+                raise
+            except REQUEST_ERRORS as error:
+                if timing is not None and isinstance(error, APIError):
                     timing.observe(self._clock.monotonic() - started, getattr(error, "retry_after", 0))
                 raise
-            timing.observe(self._clock.monotonic() - started,
-                           retry_after(response.headers.get("Retry-After"), self._clock.time()))
+            now = self._clock.monotonic()
+            timing.observe(now - started, retry_after(response.headers.get("Retry-After"), self._clock.time()))
+            if method == "PATCH":
+                timing.accepted(now)
             return response
         return self._request(attempt, policy="read" if retry and method in {"GET", "HEAD"} else "none",
                              end=end, expired=lambda: TransferStalledError("file transfer owner timeout"))
@@ -871,7 +895,8 @@ class Client:
                 return result
 
         return self._request(lambda remaining: reconciled_attempt(), policy="upload", end=end,
-                             expired=lambda: TransferStalledError("file transfer owner timeout"))
+                             expired=lambda: TransferStalledError("file transfer owner timeout"),
+                             progress=lambda: timing.progress)
 
     def recover_result(self, job_id: str, *, files: Mapping[str, str | Path],
                        key: str, requested_by: str, reason: str,

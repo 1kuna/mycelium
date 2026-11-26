@@ -469,14 +469,23 @@ A blob HEAD or GET still rechecks the stored bytes before certifying or
 serving them.
 
 File transfers have no default whole-request deadline. The per-socket progress
-window learns byte service time and gaps. Upload PATCH windows additionally use
-the upload's observed request round-trip/service time (four service periods of
-jitter allowance) and server `Retry-After` signals, with the one-second TCP
-initial/minimum retransmission timer basis from RFC 6298 sections 2.1/2.4. This
-prevents fast local copies from declaring a dead peer before retransmission;
-slower service and pressure raise the window. Evidence is scoped to one upload.
-A socket with no progress still times out; recovery reconciles rather than
-blindly replaying. Before non-PATCH response headers, only the owner bounds queue
+window learns byte service time and gaps. An upload create or chunk then waits
+for its response for four times that route's slowest measured response latency
+on this server, plus the body's transfer time at the slowest measured
+throughput, raised by server `Retry-After` signals. A route with no answer yet
+uses the server's other upload route. The server also measures its own create
+and chunk service and sends it to new clients in an HTTP 102 hint, so a slow
+store's first request from a new job is not abandoned. With no evidence at all,
+the window is RFC 6298's one-second initial timer (sections 2.1/2.4). An
+abandoned response is not a latency sample: each consecutive abandonment
+doubles that route's window, up to RFC 6298's 60-second maximum without new
+evidence, so a silent server is given up within a bounded time per request.
+Evidence is scoped to one upload or one result's files. A socket with no
+progress still times out; recovery reconciles rather than blindly replaying.
+After a failed request, the retry waits one second, doubling for each further
+failure without accepted bytes in between, never past the cost of the work
+since the last accepted bytes; `Retry-After` overrides it. One lost reply late
+in a long upload is retried within seconds. Before non-PATCH response headers, only the owner bounds queue
 verification. Go callers use a context deadline; Python `transfer_timeout`
 bounds the whole upload, including retries. API `timeout` is separate and does
 not set this no-progress threshold. There is no default retry-count limit.

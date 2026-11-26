@@ -84,6 +84,14 @@ func (p *publicationProgress) request(clock Clock, method, path string) func() {
 	return p.begin(clock, method+" "+path)
 }
 
+// uploadProgress is when the queue last accepted bytes of this result.
+func (p *publicationProgress) uploadProgress() time.Time {
+	if p == nil {
+		return time.Time{}
+	}
+	return p.timing.lastProgress()
+}
+
 func (p *publicationProgress) confirm(ref FileRef) {
 	if p == nil {
 		return

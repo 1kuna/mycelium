@@ -239,8 +239,20 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		}
 	}
 	finish := func(err error) { a.mu.Lock(); a.err, a.finished = err, true; a.mu.Unlock() }
-	var publicationPace ClientPace
+	var publicationBackoff retryBackoff
 	var publicationRetryAt time.Time
+	var publicationStarted time.Time
+	// Uploaded bytes the queue accepted are progress, like an acknowledged log
+	// batch: a later failure costs only the work since then (#2164).
+	retryPublication := func(w Worker, err error) {
+		now := w.Clock.Now()
+		since := publicationStarted
+		if progress := a.publication.uploadProgress(); progress.After(since) {
+			since = progress
+			publicationBackoff.progress()
+		}
+		publicationRetryAt = now.Add(publicationBackoff.next(err, now.Sub(since), w.Client.Jitter))
+	}
 	var preparationRetryAt time.Time
 	var releaseSent, launchRefusalLogged bool
 	recoveryProgress := a.recovering != nil
@@ -526,7 +538,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			continue
 		}
 		if connected && !d.Hold && !now.Before(publicationRetryAt) {
-			publicationStarted := w.Clock.Now()
+			publicationStarted = w.Clock.Now()
 			var err error
 			resultReady := p == nil && s.state.Result != nil
 			// Report a warm stop with its actual result. A release-only report
@@ -552,7 +564,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					// failed request. Otherwise a long replay makes one lost
 					// acknowledgement impose another replay-length idle pause.
 					publicationStarted = w.Clock.Now()
-					publicationPace = ClientPace{}
+					publicationBackoff.progress()
 				})
 			}
 			if err == nil && !floorRefusal && (!stopWithoutPublication || !resultReady) && (a.job.storedFileResults() || resultReady && scarceYieldStop(s.state.Result.PriorityStop)) {
@@ -639,8 +651,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			if canRelease && (resultAcknowledged || discarded) {
 				if e := w.cleanupRefusedCheckpoint(ioCtx, s); e != nil {
 					s.fileError = "refused checkpoint cleanup pending; attempt custody retained"
-					publicationPace.Observe(w.Clock.Now().Sub(publicationStarted), false)
-					publicationRetryAt = w.Clock.Now().Add(publicationPace.ServiceDelay(e, w.Client.Jitter))
+					retryPublication(w, e)
 					wait()
 					continue
 				}
@@ -689,8 +700,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			}
 			if err != nil && !errors.Is(err, errCheckpointIOPending) {
 				a.publication.failed(err)
-				publicationPace.Observe(w.Clock.Now().Sub(publicationStarted), false)
-				publicationRetryAt = w.Clock.Now().Add(publicationPace.ServiceDelay(err, w.Client.Jitter))
+				retryPublication(w, err)
 			}
 		}
 		wait()

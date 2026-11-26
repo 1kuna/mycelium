@@ -183,7 +183,10 @@ func TestUploadPublicationRetainsMeasuredService(t *testing.T) {
 		if r.Method == "PATCH" {
 			patches++
 			if patches == 1 {
+				// The server answers four seconds after the whole body arrived.
+				response, err := http.DefaultTransport.RoundTrip(r)
 				clock.Advance(4 * time.Second)
+				return response, err
 			} else {
 				period, err := time.ParseDuration(r.Header.Get("X-Myce-Upload-Progress"))
 				if err != nil || period < 4*time.Second {
