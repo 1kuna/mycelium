@@ -18,11 +18,11 @@ import urllib.request
 import urllib.parse
 
 REPO = Path(__file__).resolve().parent.parent
-# MY-42: candidate r6.20 must interoperate with the live r6.19 release.
+# MY-42: exercise the exact adjacent release used during rolling upgrades.
 # Advance this pair together at each release.
-PREVIOUS = "7f10215c8bcdcb2a97c7be45c7f1fd041ccd1bc3"
-OLD_VERSION = "v3.1.0-rc.20261114.s076r6.19"
-VERSION = "v3.1.0-rc.20261115.s076r6.20"
+PREVIOUS = "09b1aa1a2b8099c12851736c7ffd4f80f2b0a18c"
+OLD_VERSION = "v3.1.0-rc.20261126.s100r6.49"
+VERSION = "v3.1.0-rc.20261126.s100r6.50"
 FIXTURE = REPO / "scripts/testdata/upgrade_compat_test.go.txt"
 FIXTURE_SUPPORT = "queue_state_fixture_test.go"
 # Top-level source the build needs; `skills` is the consumer skill embedded in

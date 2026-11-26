@@ -211,8 +211,8 @@ verification belongs to the separately authorized release after deployment.
 ### Release upgrade compatibility
 
 The full gate runs `scripts/upgrade-compat.py` against the current sources and
-one pinned predecessor under [MY-42](DECISIONS.md#my-42). The r6.20 candidate
-pairs with r6.19 (`7f10215c8bcdcb2a97c7be45c7f1fd041ccd1bc3`).
+one pinned predecessor under [MY-42](DECISIONS.md#my-42). The r6.50 candidate
+pairs with r6.49 (`09b1aa1a2b8099c12851736c7ffd4f80f2b0a18c`).
 For an additional live patch predecessor, pass its exact commit and version to
 both `prepare` and `run` with `--previous SHA --old-version VERSION`. Advance `PREVIOUS`, `OLD_VERSION` and `VERSION` together for a
 release.
