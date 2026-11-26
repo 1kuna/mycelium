@@ -11,7 +11,9 @@ entries:
                 - 'gate full: exit=0'
                 - gate-result.txt
         class: test
-        environment: {backend: pixi, lock_file: env/mycelium-gate/pixi.lock}
+        environment:
+            backend: pixi
+            lock_file: env/mycelium-gate/pixi.lock
         inputs:
             .mycelium/adapter.yaml: .mycelium/adapter.yaml
         needs:
@@ -45,7 +47,9 @@ entries:
                 - 'gate full: exit=0'
                 - gate-result.txt
         class: test
-        environment: {backend: pixi, lock_file: env/mycelium-gate/pixi.lock}
+        environment:
+            backend: pixi
+            lock_file: env/mycelium-gate/pixi.lock
         inputs:
             .mycelium/adapter.yaml: .mycelium/adapter.yaml
         needs:
@@ -76,7 +80,9 @@ entries:
                 - 'gate quick: exit=0'
                 - gate-result.txt
         class: test
-        environment: {backend: pixi, lock_file: env/mycelium-gate/pixi.lock}
+        environment:
+            backend: pixi
+            lock_file: env/mycelium-gate/pixi.lock
         inputs:
             .mycelium/adapter.yaml: .mycelium/adapter.yaml
         memory_class: per_item
@@ -111,7 +117,9 @@ entries:
                 - 'gate quick: exit=0'
                 - gate-result.txt
         class: test
-        environment: {backend: pixi, lock_file: env/mycelium-gate/pixi.lock}
+        environment:
+            backend: pixi
+            lock_file: env/mycelium-gate/pixi.lock
         inputs:
             .mycelium/adapter.yaml: .mycelium/adapter.yaml
         memory_class: per_item
