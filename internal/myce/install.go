@@ -48,6 +48,9 @@ type MachineProbe struct {
 	// XPUFreeMemory is a read-only, PCI-keyed kernel/broker source. It must
 	// never initialize a vendor runtime; nil means unsupported, not fallback.
 	XPUFreeMemory func(context.Context) (map[string]float64, error)
+	// XeFreeMemory reads one card's free VRAM with the broker's read-only Xe
+	// kernel query, for cards the broker reports none for; nil is unsupported.
+	XeFreeMemory func(context.Context, string) (float64, error)
 }
 
 func LocalMachineProbe() MachineProbe {
@@ -106,7 +109,7 @@ func LocalMachineProbe() MachineProbe {
 		}
 		return stdout.Bytes(), err
 	}
-	return MachineProbe{infoState: &localProbeInfo, XeActivity: nativeXeActivity, Info: func(line string) { fmt.Fprintln(os.Stderr, line) }, OS: runtime.GOOS, Arch: runtime.GOARCH, Files: guardedProbeFS{os.DirFS("/")}, CommandEnv: run, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
+	return MachineProbe{infoState: &localProbeInfo, XeActivity: nativeXeActivity, XeFreeMemory: nativeXeFreeMemory, Info: func(line string) { fmt.Fprintln(os.Stderr, line) }, OS: runtime.GOOS, Arch: runtime.GOARCH, Files: guardedProbeFS{os.DirFS("/")}, CommandEnv: run, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
 		return run(ctx, nil, n, args...)
 	}}
 }
