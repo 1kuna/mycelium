@@ -2762,6 +2762,9 @@
     },
     "FanOutPiece": {
       "properties": {
+        "after": {
+          "$ref": "#/$defs/PieceDependency"
+        },
         "args": {
           "items": {
             "type": "string"
@@ -7446,6 +7449,15 @@
         "delivery": {
           "$ref": "#/$defs/WarmPieceDelivery"
         },
+        "dependencies": {
+          "additionalProperties": {
+            "$ref": "#/$defs/PieceBinding"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "failures": {
           "additionalProperties": {
             "$ref": "#/$defs/Execution"
@@ -7455,12 +7467,22 @@
             "null"
           ]
         },
+        "idle_since": {
+          "format": "date-time",
+          "type": "string"
+        },
         "item_seconds": {
           "type": "number"
         },
         "last_settled_at": {
           "format": "date-time",
           "type": "string"
+        },
+        "load_attempt": {
+          "type": "integer"
+        },
+        "load_seconds": {
+          "type": "number"
         },
         "loads": {
           "type": "integer"
