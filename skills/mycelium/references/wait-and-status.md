@@ -71,7 +71,9 @@ returns retryable 503 `status_unavailable`: back off and keep the same job and
 key.
 
 `myce efficiency` gives one read of reservation versus measured use, blocker
-wait totals and wasted attempts; missing samples are unknown, not zero.
+wait totals, per-card idle time while work waited, jobs that would have fit at
+measured size, and stopped attempts split by outcome and window; missing
+samples are unknown, not zero.
 `myce efficiency --project NAME` shows only your project's waits, the observed waits for named-host lists and platform targets, typed sizing against learned peaks,
 and one advice line per item. An observed wait alone cannot establish the cost of a restriction. See
 [queue efficiency](https://github.com/1kuna/mycelium/blob/main/docs/status.md).

@@ -10,11 +10,20 @@ import (
 	"time"
 )
 
+// BusyPercent is allocation occupancy: GPU-hours assigned to started work over
+// observed online time. It is not device utilization.
 type UsageSummary struct {
 	Name        string  `json:"name"`
 	GPUHours    float64 `json:"gpu_hours"`
 	BusyPercent float64 `json:"busy_percent"`
 	IdleHours   float64 `json:"idle_hours"`
+	PinnedHours float64 `json:"pinned_hours"`
+}
+
+// ProjectUsage has no occupancy: a project has no observed-time denominator.
+type ProjectUsage struct {
+	Name        string  `json:"name"`
+	GPUHours    float64 `json:"gpu_hours"`
 	PinnedHours float64 `json:"pinned_hours"`
 }
 type CardUsage struct {
@@ -24,11 +33,12 @@ type CardUsage struct {
 }
 
 type DailyUsage struct {
-	Date        string  `json:"date"`
-	Project     string  `json:"project,omitempty"`
-	Machine     string  `json:"machine,omitempty"`
-	GPUHours    float64 `json:"gpu_hours"`
-	BusyPercent float64 `json:"busy_percent"`
+	Date     string  `json:"date"`
+	Project  string  `json:"project,omitempty"`
+	Machine  string  `json:"machine,omitempty"`
+	GPUHours float64 `json:"gpu_hours"`
+	// Allocation occupancy, on machine rows only.
+	BusyPercent *float64 `json:"busy_percent,omitempty" jsonschema:"nullable"`
 }
 type Preemption struct {
 	At      time.Time `json:"at"`
@@ -44,7 +54,7 @@ type ProductionStart struct {
 type UsageReport struct {
 	Since            time.Time         `json:"since"`
 	Until            time.Time         `json:"until"`
-	Projects         []UsageSummary    `json:"projects"`
+	Projects         []ProjectUsage    `json:"projects"`
 	Machines         []UsageSummary    `json:"machines"`
 	Cards            []CardUsage       `json:"cards"`
 	Daily            []DailyUsage      `json:"daily"`
@@ -318,7 +328,7 @@ func (q *Queue) usageSnapshot(since time.Time, requestContexts ...context.Contex
 
 func (q *Queue) readUsage(db *sql.DB, since time.Time, contexts ...context.Context) (UsageReport, error) {
 	now := q.clock.Now()
-	out := UsageReport{Since: since, Until: now, Projects: []UsageSummary{}, Machines: []UsageSummary{}, Cards: []CardUsage{}, Daily: []DailyUsage{}, Preemptions: []Preemption{}, ProductionStarts: []ProductionStart{}}
+	out := UsageReport{Since: since, Until: now, Projects: []ProjectUsage{}, Machines: []UsageSummary{}, Cards: []CardUsage{}, Daily: []DailyUsage{}, Preemptions: []Preemption{}, ProductionStarts: []ProductionStart{}}
 	if since.After(now) {
 		return out, fmt.Errorf("since must precede current time")
 	}
@@ -327,7 +337,7 @@ func (q *Queue) readUsage(db *sql.DB, since time.Time, contexts ...context.Conte
 		return out, e
 	}
 	defer rows.Close()
-	projects := map[string]*UsageSummary{}
+	projects := map[string]*ProjectUsage{}
 	machines := map[string]*UsageSummary{}
 	days := map[string]*DailyUsage{}
 	coverage := map[string]float64{}
@@ -378,7 +388,7 @@ func (q *Queue) readUsage(db *sql.DB, since time.Time, contexts ...context.Conte
 		if r.Project != "" {
 			p := projects[r.Project]
 			if p == nil {
-				p = &UsageSummary{Name: r.Project}
+				p = &ProjectUsage{Name: r.Project}
 				projects[r.Project] = p
 			}
 			p.GPUHours += r.Busy / 3600
@@ -464,7 +474,8 @@ func (q *Queue) readUsage(db *sql.DB, since time.Time, contexts ...context.Conte
 	}
 	for key, d := range days {
 		if dayCoverage[key] > 0 {
-			d.BusyPercent = d.GPUHours * 3600 / dayCoverage[key] * 100
+			busy := d.GPUHours * 3600 / dayCoverage[key] * 100
+			d.BusyPercent = &busy
 		}
 		out.Daily = append(out.Daily, *d)
 	}

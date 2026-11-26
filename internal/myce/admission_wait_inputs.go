@@ -108,7 +108,7 @@ func waitMachine(m Machine) Machine {
 func waitState(s state) state {
 	s.Machines = nil
 	s.EfficiencyAt, s.LastWorkerContact, s.UsageAt, s.UsageMaintenance = time.Time{}, time.Time{}, time.Time{}, time.Time{}
-	s.EfficiencyHosts, s.EfficiencyHealth, s.StrandedDemand = nil, nil, nil
+	s.EfficiencyHosts, s.EfficiencyHealth, s.StrandedDemand, s.Utilization = nil, nil, nil, nil
 	s.FairUsage = nil
 	s.Health = healthAlerts{}
 	return s
