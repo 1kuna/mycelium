@@ -12,7 +12,7 @@ import (
 	"mycelium/internal/myce"
 )
 
-const fleetUsage = "usage: myce fleet upgrade [--release VERSION] [--urgency normal|critical]\n       " + fleetLeaseUsage
+const fleetUsage = "usage: myce fleet upgrade [--release VERSION] [--urgency normal|critical] [--host HOST]\n       " + fleetLeaseUsage
 
 const fleetLeaseUsage = "myce fleet lease open --project P --key K --for DURATION [--platform LIST] [--memory-gb N] [--stages JSON]\n       myce fleet lease close --project P --key K\n       myce fleet lease list"
 
@@ -26,7 +26,8 @@ func fleetCommand(ctx context.Context, args []string, out io.Writer) error {
 	f := flag.NewFlagSet("fleet upgrade", flag.ContinueOnError)
 	authority := installedClientFlags(f)
 	release := f.String("release", "", "approved signed release (default: current approval)")
-	urgency := f.String("urgency", "normal", "normal: wait for work, then checkpoint-stop resumable non-production attempts after a bounded wait; critical: stop work immediately")
+	urgency := f.String("urgency", "normal", "normal: take over running work, or wait for it to finish naturally; critical: may stop work when takeover is impossible")
+	host := f.String("host", "", "update only this host's worker service; the queue service and other hosts stay as they are")
 	if err := f.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -38,7 +39,7 @@ func fleetCommand(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	}
 	var status myce.FleetUpgradeStatus
-	if err = client.Call(ctx, "POST", "/api/fleet/upgrade", myce.FleetUpgradeRequest{Urgency: *urgency, Release: *release}, &status); err != nil {
+	if err = client.Call(ctx, "POST", "/api/fleet/upgrade", myce.FleetUpgradeRequest{Urgency: *urgency, Release: *release, Host: *host}, &status); err != nil {
 		return err
 	}
 	return json.NewEncoder(out).Encode(status)

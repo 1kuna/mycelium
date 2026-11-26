@@ -106,7 +106,11 @@ func NewCompactStatus(s Snapshot) CompactStatus {
 		c.AlertDelivery = d
 	}
 	if u := s.FleetUpgrade; u != nil && (u.State != "complete" || slices.ContainsFunc(u.Hosts, func(h FleetHostStatus) bool { return h.Outcome == FleetHostDeferred })) {
-		c.FleetUpgrade = append(c.FleetUpgrade, fmt.Sprintf("fleet upgrade %s: release=%s state=%s", u.Operation, u.Release, u.State))
+		line := fmt.Sprintf("fleet upgrade %s: release=%s state=%s", u.Operation, u.Release, u.State)
+		if u.Host != "" {
+			line += " host=" + u.Host
+		}
+		c.FleetUpgrade = append(c.FleetUpgrade, line)
 		for _, h := range u.Hosts {
 			line := fmt.Sprintf("host %s: phase=%s wait=%s failure=%s outcome=%s deferred_reason=%s", h.Host, h.Phase, h.Wait, h.Failure, h.Outcome, h.DeferredReason)
 			if h.TakeoverWait != "" {

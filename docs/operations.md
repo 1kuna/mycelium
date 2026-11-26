@@ -17,6 +17,7 @@ Agent skill/harness installation lives [beside the skill](../skills/mycelium/set
 | Replace pre-v3 state | [archive old state](#archive-old-state-and-install-fresh) | [migration archive](reference/migrations.md) |
 | Build, sign and approve a release | [publish](#publish-and-approve-an-onboarding-release), [advance the default](#advance-the-default-after-a-signed-update) | [invite and upgrade machines](reference/onboarding.md#invite-and-upgrade-machines) |
 | Upgrade the whole fleet | [rolling fleet upgrades](#rolling-fleet-upgrades), [preserve accepted work evidence](#preserve-accepted-work-evidence-across-a-release) | [fleet upgrade internals and failure codes](reference/fleet-upgrades.md) |
+| Upgrade one worker without draining it | [upgrade one worker](#upgrade-one-worker) | [fleet upgrade internals and failure codes](reference/fleet-upgrades.md) |
 | Drain, disable, exclude or budget a host or device | [queue maintenance](#queue-maintenance) | [maintenance semantics](reference/queue-maintenance.md), [host capacity](reference/host-capacity.md) |
 | Qualify an extension or reserve hardware | [extension check](#check-an-installed-workers-extension), [reservations](#reserve-a-host-or-its-devices-for-an-existing-validation-job) | [reservation semantics](reference/queue-maintenance.md#validation-reservation-semantics) |
 | Change project or host policy | [live project policy](#change-live-project-policy) | [scheduling](scheduling.md) |
@@ -902,6 +903,7 @@ complete history for the after-check: `myce status --history --json > before.jso
 myce fleet upgrade                      # the approved release, normal urgency
 myce fleet upgrade --release vX.Y.Z     # name the approved release explicitly
 myce fleet upgrade --urgency critical   # MY-35/MY-39: explicit interruption fallback
+myce fleet upgrade --host HOST          # one worker only; see "Upgrade one worker" below
 ```
 
 The command returns the operation and exits; the queue runs it. `myce status`
@@ -1129,6 +1131,49 @@ does not prove storage closure.
 
 How hosts are chosen, how services verify a release, and every failure code are
 in [fleet upgrade internals](reference/fleet-upgrades.md).
+
+### Upgrade one worker
+
+Use `myce fleet upgrade --host HOST` to bring one installed worker onto the
+approved release without waiting for the next full rollout, for example a host
+that a rollout deferred or one whose long-running work kept it behind (#2140).
+It is the same operation as a full rollout, restricted to that host's worker
+service:
+
+```sh
+myce fleet upgrade --host HOST                    # the approved release
+myce fleet upgrade --host HOST --release vX.Y.Z   # name it explicitly
+```
+
+- **The same path.** Steps 2 to 7 above run for the selected worker only:
+  takeover proof, the brief cutover fence, the signed binary swap, the health
+  check, the `worker_start` probe and fix forward. Running attempts, including
+  production and non-resumable ones, keep their process, attempt and session.
+  When takeover can't be proved, the host takes the ordinary natural wait
+  (step 3), with the reason in `wait` and `takeover_wait`. Normal urgency never
+  stops work.
+- **Nothing else changes.** Every other host, including the queue's, is listed
+  as `skipped` with `wait: not selected (--host HOST)`. They get no
+  instruction, drain, fence or probe, and keep their processes, releases and
+  maintenance policy. The queue service is never replaced, even when HOST is
+  the queue's host; only a full `myce fleet upgrade` updates it. A drain or an
+  owed start check that an earlier operation left on another host stays
+  recorded, so the next full rollout still adopts it.
+- **Refusals.** It refuses with `fleet_host_no_worker` when HOST has no
+  installed worker. It refuses with the worker's own code
+  (`fleet_worker_unmanaged`, `fleet_worker_runtime_unavailable`,
+  `fleet_worker_target_incompatible` or `fleet_worker_downgrade_refused`)
+  when that worker can't be updated now. The message names the worker and the
+  missing proof. Other hosts' proofs don't affect it.
+- **One operation at a time.** A scoped operation is an ordinary fleet
+  operation: rerunning the same request returns it, and any other request
+  (another host, a full rollout, a different release or urgency) is refused
+  with `fleet_upgrade_target_conflict` until it completes or stops. `myce
+  status` shows it with `host=HOST`.
+
+Check the result as for a full rollout: the host is `complete`, `myce status`
+lists the worker on the new release, and its running attempts kept their
+attempt numbers.
 
 ### Verify the installed consumer skill
 
