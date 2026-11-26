@@ -85,7 +85,8 @@ func (w Worker) startAssignedAttempt(ctx context.Context, s *workerStore, j Job)
 // settled-job retention. The source lives in an earlier attempt, never here.
 func (w Worker) cleanupRefusedCheckpoint(ctx context.Context, s *workerStore) error {
 	j, r := s.state.Job, s.state.Result
-	if j == nil || j.Spec.ephemeral() || r == nil || r.ReleasePending || r.ID != j.ID || r.Attempt != j.Attempt || r.Session != j.Session {
+	// An attempt refused before its folder resolved has no copy (#2146).
+	if j == nil || j.Spec.ephemeral() || j.Checkpoint == "" || r == nil || r.ReleasePending || r.ID != j.ID || r.Attempt != j.Attempt || r.Session != j.Session {
 		return nil
 	}
 	if r.CheckpointFloorMissing != nil {

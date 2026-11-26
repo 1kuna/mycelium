@@ -1497,6 +1497,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 						if !j.Spec.Needs.cpuOnly() && len(j.AllocatedDevices) == 0 {
 							j.AllocatedDevices = []string{firstDevice(j, w.Machine)}
 						}
+						var unresolved error
 						if j.Spec.localFirst() {
 							j.Checkpoint = filepath.Join(root.dir, "local-checkpoints", j.ID, strconv.Itoa(j.Attempt))
 						} else if j.FileTransport {
@@ -1504,9 +1505,12 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 						} else if !filepath.IsAbs(j.Checkpoint) {
 							rel := filepath.Clean(j.Checkpoint)
 							if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-								return errors.New("invalid relative checkpoint path")
+								// Refuse only this attempt; exiting orphaned every other
+								// attempt and crash-looped on the same offer (#2146).
+								j.Checkpoint, unresolved = "", errCheckpointOutsideRoot
+							} else {
+								j.Checkpoint = filepath.Join(root.state.CheckpointRoot, rel)
 							}
-							j.Checkpoint = filepath.Join(root.state.CheckpointRoot, rel)
 						}
 						s, e := newAttemptStore(root, j)
 						if e != nil {
@@ -1516,7 +1520,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 							r := Result{Machine: m.ID, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Interrupted: true, Error: "worker leaving before command started"}
 							s.state.Result = &r
 						}
-						if hold := workerMemoryHold(&admissionWorker.Machine); hold != nil {
+						if unresolved != nil {
+							e = unresolved
+						} else if hold := workerMemoryHold(&admissionWorker.Machine); hold != nil {
 							e = refuseAdmission(hold.Kind, "controllers", 1, 0, true)
 						} else {
 							e = localAttemptAdmission(admissionWorker, activeJobs(), j, modelReports, environments.cores())
