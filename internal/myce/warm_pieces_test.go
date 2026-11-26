@@ -433,8 +433,12 @@ func warmRefusals() []warmRefusal {
 	multiple := 2
 	return []warmRefusal{
 		{"elastic", "accepts fixed", func(s *Spec) { s.WarmPieces = "elastic" }},
-		{"no pieces", "plain-command pieces", func(s *Spec) { s.FanOut = nil }},
-		{"extension", "plain-command pieces", func(s *Spec) { s.Kind = "extension" }},
+		{"no pieces", "plain-command or extension pieces", func(s *Spec) { s.FanOut = nil }},
+		{"extension without workload", "workload describing one item", func(s *Spec) { s.Kind = "extension" }},
+		{"program", "programs and checks", func(s *Spec) { s.Program = &Program{Type: "script", File: "run.py"} }},
+		{"extension concurrency", "omit max_concurrency", func(s *Spec) {
+			s.Kind, s.Workload, s.FanOut.MaxConcurrency = "extension", &Workload{InputShape: "item", Units: 1}, 2
+		}},
 		{"dependency", "after inputs", func(s *Spec) { s.After = &PieceDependency{Job: "producer", Piece: "a"} }},
 		{"multi-device", "one accelerator", func(s *Spec) { s.Needs.GPU = &GPUSelection{Count: &multiple} }},
 		{"NAS inputs", "file-store outputs", func(s *Spec) { s.Inputs = map[string]string{"in": "inputs"} }},
@@ -809,5 +813,42 @@ func TestWarmPiecesSameTierContentionAmortizesLoads(t *testing.T) {
 	// worth of item work.
 	if total > 4 || len(turns) < 3 || turns[0] == turns[1] {
 		t.Fatalf("contended replay used %d loads for 12 items; turns=%v", total, turns)
+	}
+}
+
+// An extension warm parent is placed as one ordinary extension job, only on a
+// worker that serves the helper to a lowered variant. Its memory evidence is
+// kept apart from one-shot runs of the same variant.
+func TestWarmPiecesExtensionPlacement(t *testing.T) {
+	q, _, m, _, s := curveFixture(t, func(q *Queue) {
+		if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
+			t.Fatal(err)
+		}
+	})
+	s.WarmPieces, s.SubmissionKey = warmPiecesFixed, "warm-extension"
+	s.FanOut = &FanOut{Pieces: []FanOutPiece{{Key: "a"}, {Key: "b"}}}
+	s.Outputs = map[string]string{"out": "results"}
+	j := submit(t, q, s)
+	for _, capabilities := range [][]string{nil, {warmPiecesCapability}} {
+		m.Capabilities = append(slices.Clone(m.Capabilities), capabilities...)
+		if got := check(t, q, m, nil).Job; got != nil {
+			t.Fatalf("worker with %v received extension warm job", capabilities)
+		}
+	}
+	m.Capabilities = append(m.Capabilities, warmPiecesExtensionCapability)
+	got := check(t, q, m, nil).Job
+	if got == nil || got.ID != j.ID || got.Extension == nil || got.Spec.FanOut == nil || len(got.Spec.FanOut.Pieces) != 2 {
+		t.Fatalf("capable worker received %+v", got)
+	}
+	if stored := job(t, q, j.ID); len(stored.FanOut.Children) != 0 || stored.FanOut.Warm == nil {
+		t.Fatalf("warm extension parent materialized children: %+v", stored.FanOut)
+	}
+	oneShot := *got
+	oneShot.Spec.WarmPieces = ""
+	q.mu.RLock()
+	warmKey, oneShotKey := pooledEvidenceKey(got, &m), pooledEvidenceKey(&oneShot, &m)
+	q.mu.RUnlock()
+	if warmKey == oneShotKey {
+		t.Fatal("warm attempt shares one-shot memory evidence")
 	}
 }

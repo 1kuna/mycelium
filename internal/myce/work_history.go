@@ -174,7 +174,7 @@ func (q *Queue) workObservationKey(j *Job) (*ObservationKey, string) {
 	if !ok || j.Spec.ExtensionCheck == nil && ref.InputShape != j.Spec.Workload.InputShape {
 		return nil, "input shape has no matching reference"
 	}
-	key, reason := referenceObservationKey(*e, m, ref, j.Spec.workType(), j.Spec.Needs, j.Spec.Args, j.Spec.Program, component, hardware)
+	key, reason := referenceObservationKey(*e, m, ref, evidenceWork(j.Spec), j.Spec.Needs, j.Spec.Args, j.Spec.Program, component, hardware)
 	if key != nil {
 		key.Check = j.Spec.ExtensionCheck != nil
 	}

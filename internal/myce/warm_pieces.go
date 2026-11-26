@@ -11,8 +11,11 @@ import (
 const (
 	warmPiecesFixed      = "fixed"
 	warmPiecesCapability = "warm_pieces_fixed_v1"
-	warmBoundaryYield    = "warm pieces: yielded at an item boundary"
-	predicateWarmPieces  = AdmissionPredicate("warm_pieces_capability")
+	// Workers that serve the helper to a lowered extension variant, whose
+	// working directory can differ from the attempt's staged inputs.
+	warmPiecesExtensionCapability = "warm_pieces_extension_v1"
+	warmBoundaryYield             = "warm pieces: yielded at an item boundary"
+	predicateWarmPieces           = AdmissionPredicate("warm_pieces_capability")
 )
 
 func (s Spec) warmPieces() bool  { return s.WarmPieces == warmPiecesFixed }
@@ -25,8 +28,11 @@ func validateWarmPieces(s Spec) error {
 	if !s.warmPieces() {
 		return errors.New("advanced.warm_pieces currently accepts fixed")
 	}
-	if s.FanOut == nil || s.extensionJob() || s.Kind != "" || s.Program != nil || s.Workload != nil || s.ExtensionCheck != nil {
-		return errors.New("warm_pieces requires plain-command pieces")
+	if s.FanOut == nil || s.Program != nil || s.ExtensionCheck != nil || s.Workload != nil && !s.extensionJob() {
+		return errors.New("warm_pieces requires plain-command or extension pieces; programs and checks are unsupported")
+	}
+	if s.extensionJob() && (s.Workload == nil || !s.Workload.valid()) {
+		return errors.New("extension warm_pieces requires a workload describing one item")
 	}
 	if s.After != nil {
 		return errors.New("warm_pieces cannot use after inputs")
@@ -51,9 +57,23 @@ func validateWarmPieces(s Spec) error {
 	return nil
 }
 
-func warmWorkerRefusal(m *Machine) string {
+// evidenceWork names extension work for memory and duration evidence. A warm
+// attempt holds its model across every item, so its whole-attempt peak and
+// duration are not comparable with one-shot runs of the same variant, and a
+// first warm run is sized like any new work. Qualification keeps workType.
+func evidenceWork(s Spec) string {
+	if s.warmPieces() {
+		return "warm:" + s.workType()
+	}
+	return s.workType()
+}
+
+func warmWorkerRefusal(j *Job, m *Machine) string {
 	if !slices.Contains(m.Capabilities, warmPiecesCapability) {
 		return "worker does not support fixed warm pieces"
+	}
+	if j.Spec.extensionJob() && !slices.Contains(m.Capabilities, warmPiecesExtensionCapability) {
+		return "worker does not support extension warm pieces"
 	}
 	if len(m.groupMembers) > 1 {
 		return "fixed warm pieces require one device or CPU"

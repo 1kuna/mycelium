@@ -420,3 +420,52 @@ approval and leaves the MY-40 study on its own approval path.
 - **Put an item loop inside an opaque job.** This works today for load
   amortization under one peak reservation. It leaves the queue unable to
   accept individual items or lend and reclaim memory through the planner.
+
+## Addendum: extension stages, per-item dependencies and in-engine slots
+
+Proposed 2026-11-26 for [#2187](https://github.com/1kuna/mycelium/issues/2187).
+Slice A is built under the approval above, which anticipated extension
+support "when their contracts are exercised". Slices B and C need review
+before they are built. The trust model, settle semantics, recovery rules and
+fixed reservation above apply unchanged to all three.
+
+**Evidence.** A production consumer's 73-item, four-stage batch submits
+each item as its own extension job, gated by `after` on its upstream stage.
+Per item, the model stages pay 15.6–40.2 s from assignment to command
+(12–18 s of it queue control calls), 9–14 s of sidecar start, and up to about
+30 s of fixed in-command time. The replay in #2187 puts warm execution of
+those stages at 40–55 min of batch wall time (316 → 262–274 min). It also
+cuts 63–99 min of lane time on the discrete-XPU host and 27 min on the
+unified-memory CUDA host, whose single LLM lane is the critical path.
+Those stages are extensions, and their items become ready one at a time,
+so they need both slice A and slice B.
+
+### A. Extension stages (built)
+
+- `advanced.warm_pieces: fixed` is accepted on `extension:` and `kind:`
+  jobs with a `workload` describing one item and `fan_out.pieces` without
+  `max_concurrency` or `share_xpu`. Programs and checks stay refused.
+  Per-item stored inputs use `.myce-pieces/KEY/DEST`, as for plain pieces.
+- The parent is selected, qualified and placed as one ordinary extension
+  job. The worker lowers the variant as usual, then main and its sidecars
+  start once. Variant parity holds (MY-19, MY-51) and the automatic
+  qualification check are unchanged. The check runs the variant's one-shot
+  `check` command, so a variant's main uses the helper only when
+  `MYCE_WARM_PIECES_FD` is set.
+- Items read inputs and write outputs in the attempt's staged directory,
+  even when main runs in `{extension}`.
+- Memory and duration evidence uses the work name `warm:<work type>`. A
+  whole warm attempt is not comparable with one-shot runs, so its first run
+  is sized like any new work: typed needs, with exclusive card use until
+  comparable device evidence exists (MY-34). Qualification keeps the
+  ordinary work type.
+- Workers advertise `warm_pieces_extension_v1`. Older workers hold the job
+  with a `capability` reason.
+
+### B and C: proposed
+
+Per-item `after` dependencies (slice B) and in-engine parallel slots
+(slice C) are proposed on [#2187](https://github.com/1kuna/mycelium/issues/2187)
+for review before they are built. Slice A on its own serves a first stage,
+or any stage whose inputs all exist at submission. Most of the 40–55 min
+needs A and B together.

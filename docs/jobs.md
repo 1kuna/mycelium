@@ -1510,9 +1510,45 @@ Fixed warm pieces require a worker that advertises support, synchronous
 file-store outputs, and CPU or one accelerator device. Plain pieces' input
 and key bounds apply. Omit per-piece dependencies, result-check wrappers,
 NAS inputs or output delivery, ephemeral worker data, explicit
-checkpoint policies, multi-device requests, and extension work. Other
+checkpoint policies, multi-device requests, programs and checks. Other
 jobs can use the ordinary `after.piece` binding to consume a warm receipt.
 The [warm pieces design](design-warm-jobs.md) describes the rollout stages.
+
+#### Extension stages
+
+An extension job takes the same opt-in. Declare `extension`, a `workload`
+that describes **one** item, `fan_out.pieces` without `max_concurrency` or
+`share_xpu`, and each item's stored inputs under `.myce-pieces/KEY/DEST`:
+
+```yaml
+name: stage-batch-1
+project: research
+class: production
+submission_key: operation-42.stage.batch-1
+extension: stage@1
+workload: {input_shape: item-v1, units: 1}
+advanced: {warm_pieces: fixed}
+files:                              # common inputs, then one folder per key
+  .myce-pieces/rec-001/audio.wav: {sha256: ..., size_bytes: ...}
+  .myce-pieces/rec-002/audio.wav: {sha256: ..., size_bytes: ...}
+outputs: {words.json: results}
+fan_out:
+  pieces:
+    - {key: rec-001, args: [--language, en]}
+    - {key: rec-002, args: [--language, en]}
+```
+
+The queue selects, qualifies and places the variant as for one ordinary
+extension job, then runs the variant's main and sidecars once for every
+item. Variant parity holds and the automatic qualification check are
+unchanged; the check still runs the variant's one-shot `check` command.
+The variant's main must use the helper loop when `MYCE_WARM_PIECES_FD`
+is set, and may keep its one-shot behaviour otherwise. Item paths are
+absolute, so main can run in `{extension}` or any other working directory.
+Memory and duration evidence for a warm attempt is kept apart from the
+variant's one-shot runs, so the first warm run is sized like new work.
+Older workers hold the job with a `capability` reason. Per-item `after`
+dependencies are not supported yet; see the [design addendum](design-warm-jobs.md#addendum-extension-stages-per-item-dependencies-and-in-engine-slots).
 
 ## Observing parents and native children
 
