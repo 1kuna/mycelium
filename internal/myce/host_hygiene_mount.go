@@ -339,20 +339,25 @@ func (p *hostMountProbe) schedule(now time.Time, r hostMountResult, limit time.D
 		p.nextProbe = now.Add(p.retryDelay)
 		return
 	}
+	healthy := time.Time{}
+	if p.period > 0 {
+		healthy = now.Add(max(p.period, 10*r.latency))
+	}
 	if p.withheld() {
 		// Space a confirmation from the success's completion, not from the
 		// sampling tick that noticed it, so each one costs one tick, not two.
+		// It is never later than a healthy root's next access.
 		finished := p.started.Add(r.latency)
 		if finished.After(now) {
 			finished = now
 		}
 		p.nextProbe = finished.Add(cost)
+		if healthy.Before(p.nextProbe) {
+			p.nextProbe = healthy
+		}
 		return
 	}
-	p.retryDelay, p.nextProbe = 0, time.Time{}
-	if p.period > 0 {
-		p.nextProbe = now.Add(max(p.period, 10*r.latency))
-	}
+	p.retryDelay, p.nextProbe = 0, healthy
 }
 
 func (p *hostMountProbe) withheld() bool {
