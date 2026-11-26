@@ -1068,6 +1068,38 @@ class ClientIdentityTests(unittest.TestCase):
                 for request in requests:
                     self.assertEqual(request.get_header("Authorization"), "Bearer fixture")
 
+    def test_installed_fleet_environment_lists_members(self):
+        from urllib.error import URLError
+        from mycelium.transfer import EndpointConnectError
+
+        first, second = "http://first.invalid:7331", "http://second.invalid:7331"
+        with tempfile.TemporaryDirectory() as directory, patch("ssl.OPENSSL_VERSION", "OpenSSL 3.5.0"):
+            environment = Path(directory) / "fleet.env"
+            environment.write_text(f"MYCE_QUEUE={first},{second}\nMYCE_TOKEN=fixture\n")
+            environment.chmod(0o600)
+            config = Path(directory) / "config.json"
+            config.write_text(json.dumps({"queue": "http://unused.invalid", "environment_file": str(environment)}))
+            client = Client.from_installed(config)
+            requests = []
+
+            def respond(request, **kwargs):
+                requests.append(request.full_url)
+                if request.full_url.startswith(first):
+                    raise URLError(EndpointConnectError("fixture"))
+                return Reply(b"{}")
+
+            client._urlopen = respond
+            self.assertEqual(client._call("GET", "/api/jobs/job", None, retry=False), {})
+            self.assertEqual(requests, [first + "/api/jobs/job", second + "/api/jobs/job"])
+            # A pinned joining authority names one verified address.
+            invitation = Path(directory) / "invitation.json"
+            invitation.write_text(json.dumps({"version": 1, "fingerprint": "0" * 64, "token": "fixture",
+                                              "address": "https://first.invalid,https://second.invalid"}))
+            invitation.chmod(0o600)
+            config.write_text(json.dumps({"joining_file": str(invitation)}))
+            with self.assertRaises(ValueError):
+                Client.from_installed(config)
+
     def test_job_reads_send_package_identity(self):
         from mycelium.client import USER_AGENT
         from importlib.metadata import version, PackageNotFoundError

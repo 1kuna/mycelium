@@ -126,11 +126,12 @@ the worker retries the same handshake under the next turn.
 
 For a shared queue, supply the comma-separated origins of members of the same
 fleet through `MYCE_QUEUE`. The CLI also accepts the list in `--queue`, and
-the Python client accepts it as the first argument to `Client(...)`. Provide
-the fleet credential through the normal explicit credential channel.
-Each HTTPS origin uses system certificate trust. Loopback HTTP origins support
-the laptop proof. Installed and joining-file clients use their existing
-single-endpoint authority.
+the Python client accepts it as the first argument to `Client(...)`. An
+installation's fleet environment file can hold the list, so the installed
+`myce` and `Client.from_installed()` fail over with the installed credential.
+Each HTTPS origin uses system certificate trust. HTTP origins behave like the
+single-endpoint `MYCE_QUEUE` setting, for example members listening on the
+local network. A joining-file client keeps its one pinned address.
 
 Clients start in list order and prefer a responding member for later calls.
 A failed connection can move any request to another member. After an ambiguous
@@ -157,8 +158,9 @@ PostgreSQL stores an ordered versioned row log. Each replica commits the cursor
 with the applied rows. The proof starts from sequence zero or an already bound
 copy. Snapshot creation, log compaction and importing single-queue state belong
 to cutover preparation. The proof uses loopback routing and shared test
-credentials. Installed service integration, fleet endpoint trust and
-production credential provisioning are cutover work.
+credentials. Installed members (`myce install queue --shared-authority`) use
+the fleet token, a PostgreSQL password file and the members' own `--queue`
+addresses; see [installing the members](operations.md#install-the-members).
 
 Before cutover, qualify PostgreSQL support on the NAS across appliance updates,
 backup and restore, and confirmed durable restart. Measure PostgreSQL commit

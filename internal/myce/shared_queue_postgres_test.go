@@ -2,8 +2,16 @@ package myce
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"database/sql"
+	"encoding/pem"
 	"errors"
+	"fmt"
+	"math/big"
 	"net"
 	"os"
 	"os/exec"
@@ -20,6 +28,8 @@ type proofPostgres struct {
 	pgCtl     string
 	port      string
 	running   bool
+	// Extra server settings, such as a LAN listener and TLS.
+	options string
 }
 
 func proofPostgresUnavailable(t *testing.T, reason string) {
@@ -72,7 +82,11 @@ func (pg *proofPostgres) data() string { return filepath.Join(pg.root, "data") }
 
 func (pg *proofPostgres) start() {
 	pg.t.Helper()
-	pg.ctl("-l", filepath.Join(pg.root, "postgres.log"), "-o", "-p "+pg.port+" -c listen_addresses='' -c unix_socket_directories="+pg.root, "start")
+	options := "-p " + pg.port + " -c unix_socket_directories=" + pg.root
+	if pg.options == "" {
+		options += " -c listen_addresses=''"
+	}
+	pg.ctl("-l", filepath.Join(pg.root, "postgres.log"), "-o", options+pg.options, "start")
 	pg.running = true
 }
 
@@ -94,9 +108,150 @@ func (pg *proofPostgres) ctl(args ...string) {
 	}
 }
 
+// proofLANAddress is this machine's own non-loopback IPv4 address. A server
+// bound only there is reached over the network stack as a remote host is.
+func proofLANAddress(t *testing.T) string {
+	t.Helper()
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, i := range interfaces {
+		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, _ := i.Addrs()
+		for _, a := range addrs {
+			ip, ok := a.(*net.IPNet)
+			if !ok || ip.IP.To4() == nil || ip.IP.IsLoopback() || ip.IP.IsLinkLocalUnicast() {
+				continue
+			}
+			if l, err := net.Listen("tcp", net.JoinHostPort(ip.IP.String(), "0")); err == nil {
+				l.Close()
+				return ip.IP.String()
+			}
+		}
+	}
+	proofPostgresUnavailable(t, "the remote PostgreSQL fixture needs a non-loopback IPv4 address")
+	return ""
+}
+
+type remoteProofPostgres struct {
+	*proofPostgres
+	// dsn reaches the server over the LAN address without a password.
+	dsn, address, password, passwordFile string
+}
+
+// startRemoteProofPostgres runs a disposable cluster that accepts TCP only on
+// this machine's LAN address, with scram-sha-256 password authentication and
+// TLS offered. Setup uses the cluster's private socket.
+func startRemoteProofPostgres(t *testing.T) *remoteProofPostgres {
+	t.Helper()
+	address := proofLANAddress(t)
+	pg := startProofPostgres(t)
+	pg.stop()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "proof"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IPAddresses: []net.IP{net.ParseIP(address)}}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, certKey := filepath.Join(pg.data(), "proof.crt"), filepath.Join(pg.data(), "proof.key")
+	if err := os.WriteFile(cert, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(certKey, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	hba, err := os.OpenFile(filepath.Join(pg.data(), "pg_hba.conf"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = fmt.Fprintf(hba, "host all proof %s/32 scram-sha-256\n", address)
+	if err = errors.Join(err, hba.Close()); err != nil {
+		t.Fatal(err)
+	}
+	pg.options = " -c listen_addresses=" + address + " -c ssl=on -c ssl_cert_file=" + cert + " -c ssl_key_file=" + certKey
+	pg.start()
+	r := &remoteProofPostgres{proofPostgres: pg, address: address, password: "proof-" + ID(),
+		dsn: "host=" + address + " port=" + pg.port + " dbname=postgres user=proof"}
+	setup, err := sql.Open("pgx", pg.dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer setup.Close()
+	if _, err := setup.ExecContext(t.Context(), "SET password_encryption = 'scram-sha-256'; ALTER ROLE proof PASSWORD '"+r.password+"'"); err != nil {
+		t.Fatal(err)
+	}
+	r.passwordFile = filepath.Join(pg.root, "password")
+	if err := os.WriteFile(r.passwordFile, []byte(r.password+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// A member reaches a PostgreSQL server on another address with scram-sha-256
+// and the password file, uses TLS when the server offers it, and still refuses
+// a server without durable commits.
+func TestSharedQueuePostgresRemoteAuthority(t *testing.T) {
+	pg := startRemoteProofPostgres(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	for name, file := range map[string]string{"missing file": "", "wrong file": filepath.Join(t.TempDir(), "absent")} {
+		if _, err := openSharedQueueAuthority(ctx, pg.dsn, file); err == nil {
+			t.Fatalf("%s: authority opened without the password", name)
+		}
+	}
+	if err := os.Chmod(pg.passwordFile, 0640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openSharedQueueAuthority(ctx, pg.dsn, pg.passwordFile); err == nil || !strings.Contains(err.Error(), "chmod 600") {
+		t.Fatalf("a group-readable password file was accepted: %v", err)
+	}
+	if err := os.Chmod(pg.passwordFile, 0600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := openSharedQueueAuthority(ctx, pg.dsn, pg.passwordFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tls bool
+	var client, method string
+	if err := a.db.QueryRowContext(ctx, `SELECT s.ssl, host(inet_client_addr()), left(a.rolpassword, 13)
+		FROM pg_stat_ssl s, pg_authid a WHERE s.pid = pg_backend_pid() AND a.rolname = current_user`).Scan(&tls, &client, &method); err != nil {
+		t.Fatal(err)
+	}
+	if !tls || client != pg.address || method != "SCRAM-SHA-256" {
+		t.Fatalf("connection tls=%t client=%s password=%s; want TLS from %s with SCRAM", tls, client, method, pg.address)
+	}
+	if _, err := a.acquire(ctx, "remote", "http://"+pg.address+":7331", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	a.db.Close()
+	plain, err := openSharedQueueAuthority(ctx, pg.dsn+" sslmode=disable", pg.passwordFile)
+	if err != nil {
+		t.Fatalf("plaintext LAN connection: %v", err)
+	}
+	plain.db.Close()
+	pg.stop()
+	pg.options += " -c fsync=off"
+	pg.start()
+	if _, err := openSharedQueueAuthority(ctx, pg.dsn, pg.passwordFile); !errors.Is(err, errSharedPostgresDurability) {
+		t.Fatalf("remote authority without fsync = %v", err)
+	}
+}
+
 func (pg *proofPostgres) authority(t *testing.T) *sharedQueueAuthority {
 	t.Helper()
-	a, err := openSharedQueueAuthority(t.Context(), pg.dsn)
+	a, err := openSharedQueueAuthority(t.Context(), pg.dsn, "")
 	if err != nil {
 		t.Fatal(err)
 	}

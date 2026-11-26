@@ -19,6 +19,9 @@ func sharedQueueMigrationCommand(ctx context.Context, action string, args []stri
 	checkpoints := f.String("checkpoints", "", "queue checkpoint root")
 	files := f.String("file-store", "", "shared file store the members use")
 	acknowledge := f.String("acknowledge", "", "accept the file problems reported with this digest")
+	authority := f.String("shared-authority", os.Getenv("MYCE_SHARED_QUEUE_PG_DSN"), "PostgreSQL authority DSN without a password (default MYCE_SHARED_QUEUE_PG_DSN)")
+	f.Lookup("shared-authority").DefValue = ""
+	passwordFile := f.String("shared-authority-password-file", "", "private file (chmod 600) holding the authority password")
 	verifyOnly := new(bool)
 	if action == "cutover" {
 		f.BoolVar(verifyOnly, "verify-only", false, "only verify file references; change nothing")
@@ -30,7 +33,7 @@ func sharedQueueMigrationCommand(ctx context.Context, action string, args []stri
 		return &exitError{2, fmt.Errorf("usage: myce queue %s --db DB --checkpoints DIR --file-store DIR", action)}
 	}
 	cfg := myce.SharedQueueMigration{
-		Postgres: os.Getenv("MYCE_SHARED_QUEUE_PG_DSN"), Database: *db, Checkpoints: *checkpoints, FileStore: *files,
+		Postgres: *authority, PostgresPasswordFile: *passwordFile, Database: *db, Checkpoints: *checkpoints, FileStore: *files,
 		Clock: myce.RealClock{}, Acknowledge: *acknowledge, VerifyOnly: *verifyOnly,
 	}
 	run := myce.SharedQueueCutover

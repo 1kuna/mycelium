@@ -300,6 +300,8 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	address := f.String("listen", "127.0.0.1:7331", "queue listen address")
 	db := f.String("db", "myce-state/myce.db", "SQLite database file")
 	sharedQueueProof := f.Bool("shared-queue-proof", false, "opt in to the loopback PostgreSQL laptop proof (queue or join)")
+	sharedAuthority := f.String("shared-authority", "", "queue: run as a shared-queue member of this PostgreSQL authority (DSN without a password; docs/operations.md#shared-queue-cutover-and-rollback)")
+	sharedPasswordFile := f.String("shared-authority-password-file", "", "queue: private file (chmod 600) holding the shared authority password")
 	queueCommitUnderLock := f.Bool("queue-commit-under-lock", false, "temporarily commit queue state under the lock")
 	uploadSpoolDir := f.String("upload-spool-dir", "", "queue model-upload directory (default private directory beside DB)")
 	logRetention := f.Duration("log-retention", myce.DefaultLogRetention, "retention of completed batch and inactive model-server logs")
@@ -474,6 +476,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		}
 
 	}
+	if *sharedAuthority != "" && args[0] != "queue" || *sharedPasswordFile != "" && *sharedAuthority == "" {
+		return errors.New("--shared-authority applies to myce queue; --shared-authority-password-file requires it")
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if *sharedQueueProof {
@@ -507,7 +512,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return err
 			}
 			defer listener.Close()
-			return myce.ServeSharedQueueProof(ctx, listener, myce.SharedQueueProofConfig{
+			return myce.ServeSharedQueueProof(ctx, listener, myce.SharedQueueMemberConfig{
 				Postgres: os.Getenv("MYCE_SHARED_QUEUE_PG_DSN"),
 				Database: *db, Checkpoints: *checkpoint, FileStore: *fileStore,
 				Token: *token, Clock: myce.RealClock{},
@@ -653,102 +658,131 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if *checkpointExpiryGrace <= 0 {
 			return errors.New("checkpoint-expiry-grace must be positive")
 		}
-		q, err := myce.Open(*db, *checkpoint, myce.RealClock{}, myce.WithStartupTrace(queueStartupTrace(myce.RealClock{}, log.Printf)), myce.WithQueueCommitUnderLock(*queueCommitUnderLock), myce.WithCheckpointShards(), myce.WithFileStoreProductionReserve(*fileStoreProductionReserve), myce.WithFileStore(*fileStore, *fileStoreLimit, !nasConfigured), myce.WithOutputDeliveryRoot(*outputDeliveryRoot), myce.WithHealthStorageDelay(*healthStorageDelay), myce.WithCheckpointExpiryGrace(*checkpointExpiryGrace))
+		queueOptions := []myce.QueueOption{myce.WithQueueCommitUnderLock(*queueCommitUnderLock), myce.WithCheckpointShards(), myce.WithFileStoreProductionReserve(*fileStoreProductionReserve), myce.WithFileStore(*fileStore, *fileStoreLimit, !nasConfigured), myce.WithOutputDeliveryRoot(*outputDeliveryRoot), myce.WithHealthStorageDelay(*healthStorageDelay), myce.WithCheckpointExpiryGrace(*checkpointExpiryGrace)}
+		// The single queue applies these settings once. A shared member
+		// applies them to the queue that each of its coordinator turns opens.
+		configureQueue := func(ctx context.Context, q *myce.Queue, shared bool) (err error) {
+			if err = q.ConfigureHealthNotifier(ctx, *healthNotify); err != nil {
+				return err
+			}
+			if *serviceConfigPath != "" {
+				c, e := myce.ReadServiceConfig(*serviceConfigPath)
+				if e != nil {
+					return e
+				}
+				if e = q.ConfigureFleetService(c); e != nil {
+					return e
+				}
+			}
+
+			if err = q.ConfigureFileRetention(*fileRetention); err != nil {
+				return err
+			}
+			startupPhase("service_and_retention")
+			if *releaseManifest != "" || *releaseKey != "" || *releaseURL != "" || *releaseCA != "" {
+				data, e := os.ReadFile(*releaseManifest)
+				if e != nil {
+					return e
+				}
+				key, e := myce.ReadReleasePublicKey(*releaseKey)
+				if e != nil {
+					return e
+				}
+				var ca []byte
+				if *releaseCA != "" {
+					ca, e = os.ReadFile(*releaseCA)
+					if e != nil {
+						return e
+					}
+				}
+				if e = q.ConfigureStartupEnrollmentRelease(data, key, *releaseURL, string(ca), *allowReleaseDowngrade); e != nil {
+					return e
+				}
+			}
+
+			if nasConfigured && *discovery {
+				if err = q.ConfigureOnboardingNAS(ctx, probe.OS, probe.Command); err != nil {
+					return err
+				}
+			}
+			if !nasConfigured {
+				if err = os.MkdirAll(*checkpoint, 0700); err != nil {
+					return err
+				}
+			}
+			if *hostConfig != "" {
+				if err = q.ConfigureHosts(hosts); err != nil {
+					return err
+				}
+			}
+			startupPhase("catalogs_and_host_policy")
+			if err = q.ConfigureLogRetention(*logRetention); err != nil {
+				return err
+			}
+			startupPhase("log_retention")
+			if !shared {
+				// A shared member owns one spool across all of its turns.
+				if err = q.ConfigureUploadSpool(*uploadSpoolDir, *uploadSpoolBytes); err != nil {
+					return err
+				}
+			}
+			startupPhase("upload_spool")
+			if err = q.ConfigureEnvironments(ec); err != nil {
+				return err
+			}
+			startupPhase("environments")
+			if err = q.ConfigureModels(mc); err != nil {
+				return err
+			}
+			startupPhase("models")
+			if *projectConfig != "" {
+				policies, e := myce.ReadProjectPolicies(*projectConfig)
+				if e != nil {
+					return e
+				}
+				if e = q.SeedProjects(policies); e != nil {
+					return e
+				}
+			}
+			if err = q.SetProductionInfrastructureRetries(*productionRetries); err != nil {
+				return err
+			}
+			q.SetRestartGrace(*restartGrace)
+			if err = q.SetProductionGrace(*productionGrace); err != nil {
+				return err
+			}
+			if err = q.SetLossTimeouts(*productionLoss, *deadlineLoss, *experimentLoss); err != nil {
+				return err
+			}
+			startupPhase("policy")
+			return nil
+		}
+		if *sharedAuthority != "" {
+			if endpoint, err := neturl.Parse(*url); err != nil || net.ParseIP(endpoint.Hostname()).IsLoopback() || endpoint.Hostname() == "localhost" {
+				return errors.New("a shared queue member needs --queue set to its own address on the local network, which the other members use")
+			}
+			if debugListener != nil {
+				go func() { _ = debugServer.Serve(debugListener) }()
+			}
+			return serveSharedQueueMember(ctx, myce.SharedQueueMemberConfig{
+				Postgres: *sharedAuthority, PostgresPasswordFile: *sharedPasswordFile,
+				Database: *db, Checkpoints: *checkpoint, FileStore: *fileStore, Token: *token, Clock: myce.RealClock{},
+				Endpoint: *url, FileStoreBytes: *fileStoreLimit, UploadSpoolDir: *uploadSpoolDir, UploadSpoolBytes: *uploadSpoolBytes,
+				Options:   append([]myce.QueueOption{myce.WithStartupTrace(queueStartupTrace(myce.RealClock{}, log.Printf))}, queueOptions...),
+				Configure: func(ctx context.Context, q *myce.Queue) error { return configureQueue(ctx, q, true) },
+				// Members never seed an empty authority: cutover imports first.
+				AwaitImport: true,
+			}, sharedMemberListeners{address: *address, discovery: *discovery, discoveryListen: *discoveryListen, identityDir: *identityDir, serviceConfig: *serviceConfigPath, db: *db, notifySocket: notifySocket})
+		}
+		q, err := myce.Open(*db, *checkpoint, myce.RealClock{}, append([]myce.QueueOption{myce.WithStartupTrace(queueStartupTrace(myce.RealClock{}, log.Printf))}, queueOptions...)...)
 		if err != nil {
 			return err
 		}
 		defer q.Close()
 		startupPhase("load_state")
-		if err := q.ConfigureHealthNotifier(ctx, *healthNotify); err != nil {
+		if err = configureQueue(ctx, q, false); err != nil {
 			return err
 		}
-		if *serviceConfigPath != "" {
-			c, e := myce.ReadServiceConfig(*serviceConfigPath)
-			if e != nil {
-				return e
-			}
-			if e = q.ConfigureFleetService(c); e != nil {
-				return e
-			}
-		}
-
-		if err = q.ConfigureFileRetention(*fileRetention); err != nil {
-			return err
-		}
-		startupPhase("service_and_retention")
-		if *releaseManifest != "" || *releaseKey != "" || *releaseURL != "" || *releaseCA != "" {
-			data, e := os.ReadFile(*releaseManifest)
-			if e != nil {
-				return e
-			}
-			key, e := myce.ReadReleasePublicKey(*releaseKey)
-			if e != nil {
-				return e
-			}
-			var ca []byte
-			if *releaseCA != "" {
-				ca, e = os.ReadFile(*releaseCA)
-				if e != nil {
-					return e
-				}
-			}
-			if e = q.ConfigureStartupEnrollmentRelease(data, key, *releaseURL, string(ca), *allowReleaseDowngrade); e != nil {
-				return e
-			}
-		}
-
-		if nasConfigured && *discovery {
-			if err = q.ConfigureOnboardingNAS(ctx, probe.OS, probe.Command); err != nil {
-				return err
-			}
-		}
-		if !nasConfigured {
-			if err = os.MkdirAll(*checkpoint, 0700); err != nil {
-				return err
-			}
-		}
-		if *hostConfig != "" {
-			if err = q.ConfigureHosts(hosts); err != nil {
-				return err
-			}
-		}
-		startupPhase("catalogs_and_host_policy")
-		if err = q.ConfigureLogRetention(*logRetention); err != nil {
-			return err
-		}
-		startupPhase("log_retention")
-		if err = q.ConfigureUploadSpool(*uploadSpoolDir, *uploadSpoolBytes); err != nil {
-			return err
-		}
-		startupPhase("upload_spool")
-		if err = q.ConfigureEnvironments(ec); err != nil {
-			return err
-		}
-		startupPhase("environments")
-		if err = q.ConfigureModels(mc); err != nil {
-			return err
-		}
-		startupPhase("models")
-		if *projectConfig != "" {
-			policies, e := myce.ReadProjectPolicies(*projectConfig)
-			if e != nil {
-				return e
-			}
-			if e = q.SeedProjects(policies); e != nil {
-				return e
-			}
-		}
-		if err = q.SetProductionInfrastructureRetries(*productionRetries); err != nil {
-			return err
-		}
-		q.SetRestartGrace(*restartGrace)
-		if err = q.SetProductionGrace(*productionGrace); err != nil {
-			return err
-		}
-		if err = q.SetLossTimeouts(*productionLoss, *deadlineLoss, *experimentLoss); err != nil {
-			return err
-		}
-		startupPhase("policy")
 		listener, err := listenWithRetry(ctx, *address, net.Listen, myce.RealClock{}, waitForBind, log.Printf)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {

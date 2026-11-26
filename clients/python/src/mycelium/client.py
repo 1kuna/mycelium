@@ -5,7 +5,6 @@ import base64
 import hashlib
 import http.client
 import io
-import ipaddress
 from importlib.metadata import PackageNotFoundError, version
 import tempfile
 import re
@@ -290,15 +289,9 @@ class Client:
             if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
                 raise ValueError("queue URL must be an HTTP(S) URL without credentials, query or fragment")
             if len(self._origins) > 1:
-                loopback = False
-                if parsed.scheme == "http":
-                    try:
-                        loopback = ipaddress.ip_address(parsed.hostname).is_loopback
-                    except ValueError:
-                        pass
                 _ = parsed.port  # Reject malformed ports before any request.
-                if parsed.username is not None or parsed.path or "?" in origin or "#" in origin or not (parsed.scheme == "https" or loopback):
-                    raise ValueError("queue endpoints must be HTTPS origins or loopback HTTP origins")
+                if parsed.username is not None or parsed.path or "?" in origin or "#" in origin:
+                    raise ValueError("queue endpoints must be HTTP(S) origins without credentials, paths or queries")
         if len(self._origins) > 1 and os.environ.get("MYCE_DEV_SESSION_ROOT"):
             raise ValueError("a queue endpoint list requires explicit fleet credentials outside dev authority")
         self.token = os.environ.get("MYCE_TOKEN", "") if token is None else token
@@ -344,9 +337,8 @@ class Client:
                 "joining certificate. Detected "
                 f"{ssl.OPENSSL_VERSION}. Use Homebrew or python.org Python.")
         from .installed import installed_authority
+        # An installed fleet environment can list the shared queue members.
         address, token, opener = installed_authority(config)
-        if "," in address:
-            raise ValueError("a queue endpoint list requires explicit fleet credentials")
         client = cls(address, token, timeout=timeout, poll_interval=poll_interval, transfer_timeout=transfer_timeout)
         client._urlopen = opener
         client._authority = ("installed", config)

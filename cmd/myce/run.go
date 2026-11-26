@@ -282,11 +282,13 @@ func devSessionQueue() (queue, token string, ok bool) {
 func (authority *runAuthority) resolve(address, token string) (myce.Client, error) {
 	config, joining := authority.Config, authority.Joining
 	if strings.Contains(address, ",") {
-		if _, _, dev := devSessionQueue(); config != "" || joining != "" || dev {
-			return myce.Client{}, errors.New("a queue endpoint list requires explicit fleet credentials outside installed or dev authority")
+		if _, _, dev := devSessionQueue(); joining != "" || dev {
+			return myce.Client{}, errors.New("a queue endpoint list requires fleet credentials outside joining or dev authority")
 		}
-		client, err := myce.NewMultiEndpointClient(address, token)
-		return client.WithProgressWatch(), err
+		if config == "" && token != "" {
+			client, err := myce.NewMultiEndpointClient(address, token)
+			return client.WithProgressWatch(), err
+		}
 	}
 	if queue, sessionToken, ok := devSessionQueue(); ok && config == "" && joining == "" {
 		// The dev session outranks installed fleet authority: never read the
@@ -347,6 +349,9 @@ func (authority *runAuthority) resolve(address, token string) (myce.Client, erro
 		}
 	}
 	if joining != "" {
+		if strings.Contains(address, ",") {
+			return myce.Client{}, errors.New("a queue endpoint list requires fleet credentials outside joining or dev authority")
+		}
 		var err error
 		authority.Joining, err = filepath.Abs(joining)
 		if err != nil {
@@ -364,6 +369,11 @@ func (authority *runAuthority) resolve(address, token string) (myce.Client, erro
 	}
 	if address == "" {
 		address = "http://127.0.0.1:7331"
+	}
+	if strings.Contains(address, ",") {
+		// An installed fleet environment can list the shared queue members.
+		client, err := myce.NewMultiEndpointClient(address, token)
+		return client.WithProgressWatch(), err
 	}
 	u, err := url.Parse(address)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
