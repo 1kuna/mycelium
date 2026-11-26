@@ -500,12 +500,20 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 			}
 		}
 		d.MemoryMode = "auto"
-		if len(w.DeviceSettings) > 0 && configured.FixedAcceleratorMemory {
+		// A discrete card whose runtime reports its allocatable memory (XPU via
+		// Level Zero) is sized from that report. On these backends a fixed
+		// --memory-gb is the budget for cards that cannot report a size, not a
+		// cap: install wrote it when detection was unavailable, and a stale value
+		// must neither undercut nor overstate what the driver hands out. An
+		// auto-mode --memory-gb still caps, and --reserve-memory-gb still applies.
+		selfSized := backendFor(d.Platform).fixedMemoryDefault && d.TotalMemoryGB > 0 && d.pciFact != nil && !d.pciFact.integrated
+		fixed, staleFixed := configured.FixedAcceleratorMemory && !selfSized, configured.FixedAcceleratorMemory && selfSized
+		if len(w.DeviceSettings) > 0 && fixed {
 			d.MemoryMode = "fixed"
 			d.TotalMemoryGB = configured.Machine.FreeMemoryGB
 			d.ReserveMemoryGB = configured.Machine.ReservedMemoryGB
 			d.BudgetGB = max(0, d.TotalMemoryGB-d.ReserveMemoryGB)
-		} else if backendFor(d.Platform).fixedMemoryDefault && configured.FixedAcceleratorMemory {
+		} else if backendFor(d.Platform).fixedMemoryDefault && fixed {
 			d.MemoryMode, d.BudgetGB = "fixed", configured.Machine.FreeMemoryGB
 			d.TotalMemoryGB, d.ReserveMemoryGB = configured.Machine.FreeMemoryGB+configured.Machine.ReservedMemoryGB, configured.Machine.ReservedMemoryGB
 		} else {
@@ -521,13 +529,16 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 					d.MemoryMode = configuredMode
 				}
 				capacity := detected.MemoryGB
-				if configured.Machine.FreeMemoryGB > 0 {
+				if configured.Machine.FreeMemoryGB > 0 && !staleFixed {
 					capacity = min(capacity, configured.Machine.FreeMemoryGB)
 				}
 				d.BudgetGB = max(0, capacity-d.ReserveMemoryGB)
 			} else {
-				d.BudgetGB = max(0, detected.MemoryGB-detected.ReserveGB)
-				if configured.Machine.FreeMemoryGB > 0 {
+				if staleFixed {
+					d.ReserveMemoryGB = configured.Machine.ReservedMemoryGB
+				}
+				d.BudgetGB = max(0, detected.MemoryGB-d.ReserveMemoryGB)
+				if configured.Machine.FreeMemoryGB > 0 && !staleFixed {
 					d.BudgetGB = min(d.BudgetGB, configured.Machine.FreeMemoryGB)
 				}
 			}
