@@ -16,13 +16,26 @@ import (
 	"time"
 )
 
+// Foreground SIGTERM takes the same path (#2136): no leave handshake to wait on.
 func TestWorkerServiceShutdownCancelsInventoryAndSilentCheckin(t *testing.T) {
+	for _, foreground := range []bool{false, true} {
+		t.Run(map[bool]string{false: "installed", true: "foreground"}[foreground], func(t *testing.T) {
+			testWorkerShutdownCancelsSilentCheckin(t, foreground)
+		})
+	}
+}
+
+func testWorkerShutdownCancelsSilentCheckin(t *testing.T, foreground bool) {
 	entered, canceled, inventoryCanceled := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	var probes atomic.Int32
 	state := t.TempDir()
 	w := Worker{EnvironmentLimit: 1 << 20, StateDir: state, Interval: time.Millisecond,
 		Machine: machine("service", "fake"), ServiceConfig: &ServiceConfig{Role: "worker", State: state}}
+	leave := context.Background()
+	if foreground {
+		w.ServiceConfig = nil
+	}
 	w.Client = Client{URL: "http://queue.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path == "/api/workers/checkin" {
 			once.Do(func() { close(entered) })
@@ -44,8 +57,13 @@ func TestWorkerServiceShutdownCancelsInventoryAndSilentCheckin(t *testing.T) {
 		return nil, ctx.Err()
 	}
 	ctx, stop := context.WithCancel(context.Background())
+	if foreground {
+		w.Restart = ctx
+	} else {
+		leave = ctx
+	}
 	done := make(chan error, 1)
-	go func() { done <- w.Run(ctx) }()
+	go func() { done <- w.Run(leave) }()
 	defer stop()
 	for _, ready := range []<-chan struct{}{entered, probeEntered} {
 		select {
@@ -56,14 +74,14 @@ func TestWorkerServiceShutdownCancelsInventoryAndSilentCheckin(t *testing.T) {
 			t.Fatal("worker did not enter the blocked calls")
 		}
 	}
-	stop() // signal.NotifyContext delivers installed SIGTERM by canceling this context.
+	stop() // signal.NotifyContext delivers SIGTERM by canceling this context.
 	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatal(err)
 		}
 	case <-time.After(testWaitTimeout):
-		t.Fatal("idle installed worker requires a queue reply to exit after TERM")
+		t.Fatal("idle worker requires a queue reply to exit after TERM")
 	}
 	for _, canceled := range []<-chan struct{}{canceled, inventoryCanceled} {
 		select {

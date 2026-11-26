@@ -999,7 +999,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	var cpuProbe checkpointIO[*memoryCeilings]
 	sharedCPUAllowance := 0
 	events := make(chan WorkerEvent, 16)
-	w.control = &processControl{clock: w.Clock, wake: make(chan struct{}, 1), availability: w.availability, service: w.ServiceConfig != nil}
+	w.control = &processControl{clock: w.Clock, wake: make(chan struct{}, 1), availability: w.availability, service: w.ServiceConfig != nil, serviceStop: w.serviceStop}
 	controlDone := make(chan struct{})
 	go func() { defer close(controlDone); w.control.run(ctx, stop, events) }()
 	defer func() { cancel(); <-controlDone }()

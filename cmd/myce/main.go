@@ -934,6 +934,19 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		}
 		fmt.Printf("Joining as %s\n", w)
 		w.Custodian = *custodian
+		if w.ServiceConfig == nil && w.Custodian == "" {
+			// Ctrl-C is the planned leave. SIGTERM restarts, as an installed
+			// worker's does: no wait for result uploads, custody kept (#2166).
+			leave, stopLeave := signal.NotifyContext(context.Background(), os.Interrupt)
+			defer stopLeave()
+			restart, stopRestart := signal.NotifyContext(context.Background(), syscall.SIGTERM)
+			defer stopRestart()
+			if ctx.Err() != nil {
+				return nil // Signaled before these contexts could see it; nothing has joined.
+			}
+			w.Restart = restart
+			return w.Run(leave)
+		}
 		return w.Run(ctx)
 	case "submit":
 		if f.NArg() != 1 {
