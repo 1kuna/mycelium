@@ -194,6 +194,7 @@ func InstallSettings() []InstallSetting {
 			}
 			return nil
 		}),
+		installPath("file-store", "FileStore", "queue: authoritative file store folder every shared-queue member uses (absolute; empty returns to the default beside the database)", func(c *ServiceConfig) *string { return &c.FileStore }, false),
 		installPath("shared-authority-password-file", "SharedAuthorityPasswordFile", "queue: private file (chmod 600) holding the shared authority password", func(c *ServiceConfig) *string { return &c.SharedAuthorityPasswordFile }, false),
 		installSetting("name", "Name", "stable worker name", func(c *ServiceConfig) *string { return &c.Name }, installName),
 		installContext(installSetting("gpu", "Detection.Platform", "GPU platform override", func(c *ServiceConfig) *string { return &c.Detection.Platform }, installAny[string]), func(c ServiceConfig) error {

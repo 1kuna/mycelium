@@ -313,7 +313,17 @@ func TestInstallDeploymentNASAndUpgrade(t *testing.T) {
 			if err := Install(context.Background(), c, executable, "", runner); err != nil {
 				t.Fatal(err)
 			}
-			for _, dir := range []string{"checkpoints", "models", "environments"} {
+			dirs := []string{"checkpoints", "models", "environments"}
+			if c.Role == "queue" {
+				// A queue never reads the model or environment roots (#2141).
+				for _, dir := range dirs[1:] {
+					if _, err := os.Stat(filepath.Join(nas, "mycelium", dir)); !errors.Is(err, os.ErrNotExist) {
+						t.Fatal("queue install created a worker-only NAS root", dir, err)
+					}
+				}
+				dirs = dirs[:1]
+			}
+			for _, dir := range dirs {
 				// Probes keep one fixed per-host file and its rename marker, and never delete (#1545).
 				entries, err := os.ReadDir(filepath.Join(nas, "mycelium", dir))
 				want := filepath.Base(storageProbePath(dir, ".myce-install-probe-", "install"))
