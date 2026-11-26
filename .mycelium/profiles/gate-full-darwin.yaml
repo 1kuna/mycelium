@@ -20,7 +20,7 @@ needs:
 targets:
   - {os: darwin, arch: arm64, platform: cpu}
 # Locked CPU tools for every declared target (see env/mycelium-gate/README.md).
-environment: mycelium-gate
+environment: {backend: pixi, lock_file: env/mycelium-gate/pixi.lock}
 advanced:
   keep_on_failure: [gate-failures.txt]
 outputs:
