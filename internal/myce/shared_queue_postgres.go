@@ -189,6 +189,10 @@ func lockedSharedTurn(ctx context.Context, tx *sql.Tx) (sharedQueueTurn, time.Ti
 	return t, now, err
 }
 
+// acquire takes the next turn once the current one has expired. A member may
+// also replace an unexpired turn it owns: it calls acquire only while it
+// serves no turn, so its own turn there is left by an acquisition or release
+// whose reply was lost. The new number fences any writer of the old one.
 func (a *sharedQueueAuthority) acquire(ctx context.Context, owner, endpoint string, lease time.Duration) (sharedQueueTurn, error) {
 	tx, err := a.begin(ctx)
 	if err != nil {
@@ -199,7 +203,7 @@ func (a *sharedQueueAuthority) acquire(ctx context.Context, owner, endpoint stri
 	if err != nil {
 		return sharedQueueTurn{}, err
 	}
-	if t.expires.After(now) {
+	if t.expires.After(now) && t.owner != owner {
 		return sharedQueueTurn{}, errSharedTurn
 	}
 	t, err = scanSharedTurn(tx.QueryRowContext(ctx, `UPDATE myce_coordinator_v1

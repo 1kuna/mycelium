@@ -1834,7 +1834,8 @@ Do this before taking the original host down for maintenance.
    `myce status` answers through the remaining members and that running jobs
    keep their attempt and session.
 4. **Abort point:** if no member coordinates within a minute, check each
-   member's log for `event=shared_queue_promotion_failed reason=...`. To return
+   member's log for `event=shared_queue_promotion_failed reason=...` and
+   `event=shared_queue_maintenance_failed reason=...`. To return
    to the single queue, use [Roll back](#roll-back).
 
 ### Roll back
