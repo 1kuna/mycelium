@@ -27,6 +27,7 @@ type queueMaintenance struct {
 	dependents    map[string]map[string]bool
 	draining      bool
 	ran           bool
+	planned       bool // ran includes the fleet-wide planning pass
 	memoryCheckin string
 }
 
