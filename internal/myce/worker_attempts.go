@@ -1550,7 +1550,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 						r.Binary = filepath.Join(w.EnvironmentSourceRoot, r.BinaryRelative)
 					}
 				}
-				keep := (reply.HostMaintenance == "drained" || reply.HostMaintenance == "disabled") && reply.PreparationStopAt == nil
+				keep := (reply.HostMaintenance == "drained" || reply.HostMaintenance == "disabled" || reply.FilePlansDeferred && !leaving) && reply.PreparationStopAt == nil
 				prepareWorker := w
 				environments.mu.Lock()
 				environments.prepare = prepareWorker.prepareRegisteredExtension
@@ -1565,12 +1565,17 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				rt.admissionBlocked = reply.AdmissionBlocked
 				rt.publishHostLedgerLocked()
 				rt.mu.Unlock()
-				rt.sync(reply.ModelPlan)
+				if !reply.FilePlansDeferred || leaving {
+					rt.sync(reply.ModelPlan)
+				}
 				if leaving && !leaveSent {
 					err = w.Client.Call(observeCtx, "POST", "/api/workers/"+m.ID+"/leave", map[string]bool{"now": false}, nil)
 					leaveSent = err == nil
 				}
-				if err == nil && leaving && len(actors) == 0 && !recovering && len(reply.ModelPlan) == 0 {
+				modelCleanupPending := reply.FilePlansDeferred && slices.ContainsFunc(modelReports, func(m ModelReport) bool {
+					return m.State != "unloaded" && m.State != "failed"
+				})
+				if err == nil && leaving && len(actors) == 0 && !recovering && len(reply.ModelPlan) == 0 && !modelCleanupPending {
 					return nil
 				}
 			}

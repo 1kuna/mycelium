@@ -543,6 +543,9 @@ func (q *Queue) preparationAvailable(m *Machine, deviceExclusive bool) bool {
 }
 
 func (q *Queue) checkinEnvironmentPlan(m *Machine) []EnvironmentRecipe {
+	if !q.sharedFilesReady() {
+		return nil
+	}
 	for _, target := range q.machineTargets(m) {
 		if plan := q.environmentPlan(target); len(plan) > 0 {
 			return plan

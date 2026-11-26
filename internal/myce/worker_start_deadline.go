@@ -69,6 +69,8 @@ func (w Worker) controlHandshake(path string, in, out any) (time.Time, error) {
 		}
 		started := c.clock().Now()
 		var body json.RawMessage
+		// In shared mode each retry probes a fresh turn. The mutation
+		// remains exact-custody and idempotent if its prior reply was lost.
 		err := c.Call(ctx, "POST", path, in, &body)
 		measured := latency.observe(path, c.clock().Now().Sub(started))
 		if ctx.Err() != nil {

@@ -49,6 +49,8 @@ export UV_OFFLINE=1 UV_PYTHON_DOWNLOADS=never UV_CACHE_DIR="$scratch/uv" PIXI_HO
 # Fixtures explicitly join helper processes, so omit the race runtime's
 # one-second exit delay for every child.
 export GORACE=atexit_sleep_ms=0
+# A selected shared-queue proof must exercise a real disposable database.
+export MYCE_GATE_REQUIRE_POSTGRES=1
 
 status=0
 step() {

@@ -164,6 +164,12 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/xe_activity_other.go'] = (
     'xe_activity_linux_test.go', 'device_telemetry_test.go', 'discrete_fanout_sharing_test.go')
 
 
+# The shared writer's row capture and turn fencing have no exported symbols;
+# the PostgreSQL proof fixtures exercise them.
+SUPPLEMENTAL_CONSUMERS['internal/myce/shared_queue_rows.go'] = (
+    'shared_queue_postgres_test.go', 'shared_queue_fencing_test.go')
+
+
 # Installer manager helpers are private; exercise transaction restoration and
 # launchd lifecycle behavior through the existing injected-manager fixtures.
 SUPPLEMENTAL_CONSUMERS['internal/myce/install_manager.go'] = (

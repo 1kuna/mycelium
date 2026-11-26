@@ -765,6 +765,9 @@ func (q *Queue) Run(ctx context.Context) error {
 var clientTransport = &http.Transport{Proxy: http.ProxyFromEnvironment}
 
 type Client struct {
+	// SharedQueueProof requires durable acceptance of worker control decisions
+	// through the worker's local member.
+	SharedQueueProof bool
 	publication      *publicationProgress
 	publicationWire  *atomic.Bool
 	inventoryWire    *atomic.Bool
@@ -863,6 +866,10 @@ func requestDecodeRefused(err error) bool {
 var replaySafePost = map[string]bool{"/api/resolve": true, "/api/files/preflight": true, "/api/extensions": true}
 
 func (c Client) callOnce(ctx context.Context, method, path string, in, out any) error {
+	return c.callOnceShared(ctx, method, path, in, out, "")
+}
+
+func (c Client) callOnceShared(ctx context.Context, method, path string, in, out any, handover string) error {
 	checkin, workerCheckin := in.(Checkin)
 	workerCheckin = workerCheckin && path == "/api/workers/checkin"
 	if workerCheckin && checkin.Machine.EphemeralRefusal != "" {
@@ -906,6 +913,15 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	if workerProtocolEndpoint(path) {
 		req.Header.Set("X-Myce-Start-Gate", startGateProtocol)
 	}
+	proposal, mutation := sharedWorkerControl(path)
+	proposal, mutation = c.SharedQueueProof && proposal, c.SharedQueueProof && mutation
+	confirm := c.SharedQueueProof && method == http.MethodPost && path == sharedTurnPath
+	if proposal || mutation || confirm {
+		req.Header.Set(sharedVerifyHeader, sharedControlProtocol)
+	}
+	if handover != "" {
+		req.Header.Set(sharedTurnHeader, handover)
+	}
 	hc := c.HTTP
 	if hc == nil {
 		hc = &http.Client{Transport: clientTransport}
@@ -915,13 +931,14 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 		return err
 	}
 	defer res.Body.Close()
-	if c.stagingWire != nil && workerProtocolEndpoint(path) {
+	advertisesWorkerProtocol := workerProtocolEndpoint(path) && !(mutation && handover == "")
+	if c.stagingWire != nil && advertisesWorkerProtocol {
 		c.stagingWire.Store(res.Header.Get(stagingPhasesHeader) == stagingPhasesProtocol)
 	}
-	if c.launchTimingWire != nil && workerProtocolEndpoint(path) {
+	if c.launchTimingWire != nil && advertisesWorkerProtocol {
 		c.launchTimingWire.Store(res.Header.Get(launchTimingsHeader) == launchTimingsWire)
 	}
-	if c.faultWire != nil && workerProtocolEndpoint(path) {
+	if c.faultWire != nil && advertisesWorkerProtocol {
 		c.faultWire.Store(res.Header.Get(faultEvidenceHeader) == faultEvidenceProtocol)
 	}
 	if res.StatusCode >= 300 {
@@ -951,12 +968,59 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 		}
 		return e
 	}
+	turn := res.Header.Get(sharedTurnHeader)
+	if confirm {
+		if res.StatusCode != http.StatusNoContent || turn != handover {
+			return queueStopping()
+		}
+		return nil
+	}
+	if proposal || mutation {
+		if number, err := strconv.ParseUint(turn, 10, 63); err != nil || number == 0 {
+			return queueStopping()
+		}
+	}
+	if mutation {
+		if handover == "" {
+			if res.StatusCode != http.StatusNoContent {
+				return queueStopping()
+			}
+			return c.callOnceShared(ctx, method, path, in, out, turn)
+		}
+		if turn != handover || res.StatusCode == http.StatusNoContent {
+			return queueStopping()
+		}
+	}
+	if proposal {
+		if out == nil {
+			// Discard-only callers do not act on a directive.
+			_, err = io.Copy(io.Discard, res.Body)
+			return err
+		}
+		dest := reflect.ValueOf(out)
+		if dest.Kind() != reflect.Pointer || dest.IsNil() {
+			return errors.New("shared queue control requires a response pointer")
+		}
+		next := reflect.New(dest.Elem().Type())
+		if err := json.NewDecoder(res.Body).Decode(next.Interface()); err != nil {
+			return err
+		}
+		if _, err := io.Copy(io.Discard, res.Body); err != nil {
+			return err
+		}
+		// A delayed proposal cannot spend a newer turn. Expose it only
+		// after a fresh read confirms the original turn in PostgreSQL.
+		if err := c.callOnceShared(ctx, http.MethodPost, sharedTurnPath, nil, nil, turn); err != nil {
+			return err
+		}
+		dest.Elem().Set(next.Elem())
+		return nil
+	}
 	if out != nil {
 		if stream, ok := out.(io.Writer); ok {
 			return copyJSONDocument(stream, res.Body)
 		}
-		// A truncated reply must not leave fields that leak into the retry's
-		// complete reply when the replacement omits them.
+		// Keep a truncated reply from contaminating a retry's destination.
 		dest := reflect.ValueOf(out)
 		if dest.Kind() == reflect.Pointer && !dest.IsNil() {
 			next := reflect.New(dest.Elem().Type())

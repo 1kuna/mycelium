@@ -857,6 +857,7 @@ type Reply struct {
 	HostMemoryBudget  *HostMemoryBudget   `json:"host_memory_budget,omitempty"`
 	FileCheckpoints   bool                `json:"file_checkpoints,omitempty"`
 	AdmissionBlocked  bool                `json:"admission_blocked,omitempty"`
+	FilePlansDeferred bool                `json:"file_plans_deferred,omitempty"`
 	EnvironmentPlan   []EnvironmentRecipe `json:"environment_plan,omitempty"`
 	CopyPlan          retiredField        `json:"copy_plan,omitzero"`
 	CacheUsage        retiredField        `json:"cache_usage,omitzero"`

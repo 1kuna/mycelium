@@ -39,14 +39,23 @@ func (q *Queue) verifyManifest(ctx context.Context, m FileManifest) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if q.files == nil {
+	if q.sharedWriter != nil && len(m) == 0 {
+		return nil // An execution without artifacts needs only the queue.
+	}
+	unlock := requestReadLock(ctx, &q.mu)
+	store, ready := q.files, q.sharedFilesReady()
+	unlock()
+	if !ready {
+		return queueStopping()
+	}
+	if store == nil {
 		return errors.New("file store unavailable")
 	}
 	if err := m.validate(); err != nil {
 		return err
 	}
 	for _, ref := range m {
-		if err := q.files.verify(ctx, ref); err != nil {
+		if err := store.verify(ctx, ref); err != nil {
 			return errors.New("manifest file unavailable or corrupt")
 		}
 	}
@@ -55,7 +64,7 @@ func (q *Queue) verifyManifest(ctx context.Context, m FileManifest) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := q.files.syncDir(filepath.Join(q.files.root, "blobs")); err != nil {
+	if err := store.syncDir(filepath.Join(store.root, "blobs")); err != nil {
 		return err
 	}
 	return ctx.Err()

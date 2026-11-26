@@ -155,6 +155,11 @@ func (e *memoryEvidence) prepareWrite(batch *queueWriteBatch) error {
 // Load or project before the queue begins serving requests. The projection
 // marker commits with its rows, so an interrupted upgrade can safely retry.
 func loadMemoryEvidence(db *sql.DB, s state) (*memoryEvidence, error) {
+	return (queueSQLiteWriter{db: db}).loadMemoryEvidence(s)
+}
+
+func (w queueSQLiteWriter) loadMemoryEvidence(s state) (*memoryEvidence, error) {
+	db := w.db
 	if _, err := db.Exec(memoryEvidenceSchema); err != nil {
 		return nil, err
 	}
@@ -165,6 +170,9 @@ func loadMemoryEvidence(db *sql.DB, s state) (*memoryEvidence, error) {
 	if err == nil {
 		if err := evidence.readGPUSharing(db); err != nil {
 			return nil, err
+		}
+		if w.shared != nil {
+			return w.repairMemoryEvidence(evidence, s)
 		}
 		return repairMemoryEvidence(db, evidence, s)
 	}
@@ -180,7 +188,7 @@ func loadMemoryEvidence(db *sql.DB, s state) (*memoryEvidence, error) {
 		return nil, err
 	}
 	batch.add(`INSERT INTO memory_evidence(kind,key,data) VALUES ('projection','v1','true'), ('projection','v2','true'), ('projection','v3','true')`)
-	if err := (queueSQLiteWriter{db: db}).apply(context.Background(), &batch, nil, nil); err != nil {
+	if err := w.apply(context.Background(), &batch, nil, nil); err != nil {
 		return nil, err
 	}
 	evidence.writes = nil

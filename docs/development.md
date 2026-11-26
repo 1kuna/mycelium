@@ -71,6 +71,82 @@ The gate uses a private fixture HOME and a one-hour Go test timeout per package.
 Release builds cover the cross-architecture build matrix. The full suite retains
 security, incident and consumer-facing tests under [MY-53](DECISIONS.md#my-53).
 
+### Shared queue laptop proof
+
+This exercises [MY-40 stage 2](design-queue-beyond-one-host.md#shortest-path-from-today)
+with disposable state. Install PostgreSQL tools and put `initdb` and `pg_ctl`
+on PATH. Run as an unprivileged user.
+
+```sh
+go test -race -count=1 -v ./internal/myce -run '^TestSharedQueue(Member|Rows|Postgres)'
+```
+
+The tests initialize a separate PostgreSQL cluster and use a private Unix
+socket with its own port number and durable writes enabled. They start separate queue processes with distinct SQLite files,
+a common disposable file store, and an injected scheduling clock. The
+worker executes ordinary CPU commands. The tests exercise planned shutdown,
+process kill and suspension, loss of PostgreSQL, both kinds of network
+partition, and a returning member catching up and starting work alone.
+The commit-reply loss test discards the response to an actual PostgreSQL
+commit and verifies the original operation and row sequence after restart.
+A direct Go test reports a skip when the PostgreSQL tools or an unprivileged
+account are unavailable. Quick and full gates fail when selected tests cannot
+start the fixture.
+
+For a manual run, set `MYCE_SHARED_QUEUE_PG_DSN` for a dedicated local database.
+Start each queue with `myce queue --shared-queue-proof`, an explicit loopback
+`--listen` address, a distinct `--db` in a fresh local state directory, and
+a shared disposable `--file-store`, `--checkpoints` and `--token`. A worker
+uses `myce join --shared-queue-proof` with its local queue endpoint, the same
+disposable token and its own `--state-dir`. The worker's normal memory
+containment requirements apply. The active process can hand off
+on SIGTERM. On a crash, the others wait for its PostgreSQL turn to expire.
+A follower routes live requests to the current coordinator. The Stage 2
+worker uses its local member. Reconnecting external clients across multiple
+known authenticated endpoints is part of the Stage 3 cutover rehearsal. During an outage an authenticated
+`GET /api/shared-queue/status?job=JOB_ID` returns the local SQLite sequence and
+the retained job's lifecycle fields, with `last_known: true`. An absent job in that
+response has unknown current status. Normal job and wait endpoints require
+authority.
+
+Worker check-ins and stop polls issue proposals. Before using a proposal,
+the worker checks the issuing handover with a fresh PostgreSQL read. The
+turn must still be ready and unexpired. Launch and Started commit under the
+proposed handover and check exact custody in the same decision. If the turn
+changes, the worker probes again with the same attempt and session.
+A PostgreSQL write that fails or times out ends the coordinator turn, and
+the worker retries the same handshake under the next turn.
+
+Coordinator startup and renewal are independent of file-store setup and
+retained-bundle verification. When storage is unavailable, the queue holds
+file-dependent jobs, defers preparation and model plans, and returns a
+retryable refusal for new submissions that need file verification or
+publication. Plain work can continue. The local upload spool stays with its
+member across coordinator turns, so retired handlers can drain independently.
+
+Shared mode never deletes job file bytes. Expiry still updates records, but
+published blobs and interrupted uploads stay on the file store. Another
+coordinator turn may have verified the same bytes for a reference it has
+not yet committed, and one member's lock cannot fence that. Reclaim across
+turns is Stage 3 work.
+
+PostgreSQL stores an ordered versioned row log. Each replica commits the cursor
+with the applied rows. The proof starts from sequence zero or an already bound
+copy. Snapshot creation, log compaction and importing single-queue state belong
+to cutover preparation. The proof uses loopback routing and shared test
+credentials. Installed service integration, fleet endpoint trust and
+production credential provisioning are cutover work.
+
+Before cutover, qualify PostgreSQL support on the NAS across appliance updates,
+backup and restore, and confirmed durable restart. Measure PostgreSQL commit
+and recovery latency during concurrent SMB traffic, network latency and loss
+from members, live change volume, cold and resumed catch-up time, and SQLite
+disk and process memory use. Exercise a broken Mac mount while the same member
+and other members keep committing PostgreSQL metadata. Verify the retained
+manifests, checkpoint references and pending delivery inventory against the
+NAS bytes before importing state. Use those measurements to choose lease and
+renewal timing for the fleet.
+
 ### Local Linux VM
 
 For Linux-specific behavior from a Mac, run the same commands in a Linux

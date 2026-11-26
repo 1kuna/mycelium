@@ -34,16 +34,27 @@ type uploadSpool struct {
 // ConfigureUploadSpool configures queue-local storage before serving requests.
 // An empty directory uses a private directory beside the queue DB. Use -1 for measured disk capacity or a positive explicit byte budget.
 func (q *Queue) ConfigureUploadSpool(dir string, budget int64) error {
+	return q.modelUploadSpool().configure(dir, budget)
+}
+
+func (q *Queue) modelUploadSpool() *uploadSpool {
+	if q.sharedWriter != nil && q.sharedWriter.spool != nil {
+		return q.sharedWriter.spool
+	}
+	return &q.uploadSpool
+}
+
+func (s *uploadSpool) configure(dir string, budget int64) error {
 	if budget == 0 || budget < -1 {
 		return errors.New("upload-spool-bytes must be positive or -1 for automatic capacity")
 	}
-	q.uploadSpool.mu.Lock()
-	defer q.uploadSpool.mu.Unlock()
-	if q.uploadSpool.used != 0 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.used != 0 {
 		return errors.New("cannot configure upload spool while uploads are held")
 	}
 	if dir == "" {
-		dir = q.uploadSpool.defaultDir
+		dir = s.defaultDir
 	}
 	if err := PrepareStateRoots(dir); err != nil {
 		return err
@@ -55,7 +66,7 @@ func (q *Queue) ConfigureUploadSpool(dir string, budget int64) error {
 	if err != nil {
 		return err
 	}
-	if abs != q.uploadSpool.dir || q.uploadSpool.lock == nil {
+	if abs != s.dir || s.lock == nil {
 		lock, err := os.OpenFile(abs+".lock", os.O_CREATE|os.O_RDWR, 0600)
 		if err != nil {
 			return err
@@ -76,13 +87,13 @@ func (q *Queue) ConfigureUploadSpool(dir string, budget int64) error {
 			lock.Close()
 			return errors.New("upload spool startup cleanup failed")
 		}
-		if q.uploadSpool.lock != nil {
-			q.uploadSpool.lock.Close()
+		if s.lock != nil {
+			s.lock.Close()
 		}
-		q.uploadSpool.lock = lock
+		s.lock = lock
 	}
 	dir = abs
-	q.uploadSpool.dir, q.uploadSpool.limit = dir, budget
+	s.dir, s.limit = dir, budget
 	return nil
 }
 

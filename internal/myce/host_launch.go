@@ -103,6 +103,12 @@ func (q *Queue) hostSessionLaunchAllowed(m *Machine, session string) bool {
 	return m != nil && !q.fleetTakeoverFence(hostID(m)) && q.hostHygieneReason(m) == "" && q.hostSessionOpen(m, session)
 }
 
+// After a shared handover the same worker session can still report while
+// its exact launch request is waiting. Preserve custody during that window.
+func (q *Queue) sharedWorkerAwaitingCheckin(m *Machine, session string) bool {
+	return q.sharedWriter != nil && m != nil && m.Session == session && !m.Gone && q.unreported[m.ID]
+}
+
 func (q *Queue) hostSessionOpen(m *Machine, session string) bool {
 	return m != nil && !m.Recovering && m.Session == session && !m.Gone && !m.Leaving && !q.unreported[m.ID] && !q.maintenanceBlocked(hostID(m)) && !availabilityBlocked(m)
 }
@@ -189,6 +195,12 @@ func (q *Queue) authorizeLaunchWithCustody(ctx context.Context, request workerLa
 			}
 		}
 		m := q.s.Machines[l.Machine]
+		if q.sharedWorkerAwaitingCheckin(m, l.Session) {
+			return sharedQueueControlRetry()
+		}
+		if l.Kind == "batch" && q.sharedFileHold(batch) || l.Kind != "batch" && !q.sharedFilesReady() {
+			return sharedFileStoreUnready()
+		}
 		allowed := q.hostLaunchAllowed(m, l.Session)
 		p := q.s.PreparationPlans[l.Attempt]
 		// Repeated gates within an already started preparation retain its exact

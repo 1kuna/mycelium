@@ -1,0 +1,606 @@
+package myce
+
+import (
+	"context"
+	"crypto/subtle"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"log"
+	"net"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+// SharedQueueProofConfig opts into an isolated laptop experiment. Each member
+// needs its own local SQLite path and all members use the same disposable file
+// store, PostgreSQL database and test token. The bound listener is loopback.
+type SharedQueueProofConfig struct {
+	Postgres, Database, Checkpoints, FileStore, Token string
+	Clock                                             Clock
+
+	// Fixtures may shorten the turn and route through a partitionable link.
+	lease, interval time.Duration
+	peerTransport   http.RoundTripper
+}
+
+type sharedQueueMember struct {
+	cfg       SharedQueueProofConfig
+	authority *sharedQueueAuthority
+	replica   *sql.DB
+	lock      *os.File
+	owner     string
+	endpoint  string
+	sequence  int64 // Member loop only.
+	timeout   time.Duration
+
+	spool     *uploadSpool // Owned by the member across all coordinator turns.
+	fileSetup sync.Mutex   // One outstanding setup even if the mount hangs across turns.
+	mu        sync.Mutex   // Protects local handler admission, never held for I/O.
+	leader    *sharedQueueLeader
+}
+
+type sharedQueueLeader struct {
+	writer   *sharedQueueWriter
+	queue    *Queue
+	api      http.Handler
+	requests sync.WaitGroup
+	stopTick context.CancelFunc
+	tickDone chan struct{}
+}
+
+func ServeSharedQueueProof(ctx context.Context, listener net.Listener, cfg SharedQueueProofConfig) error {
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok || !addr.IP.IsLoopback() {
+		return errors.New("the shared queue proof requires a loopback listener")
+	}
+	if cfg.Postgres == "" || cfg.Database == "" || cfg.Checkpoints == "" || cfg.FileStore == "" || cfg.Token == "" || cfg.Clock == nil {
+		return errors.New("the shared queue proof requires PostgreSQL, a local database, disposable storage, a test token and a clock")
+	}
+	if cfg.interval == 0 {
+		cfg.interval = time.Second
+	}
+	if cfg.lease == 0 {
+		cfg.lease = 6 * time.Second
+	}
+	if cfg.lease < 3*cfg.interval || cfg.interval <= 0 {
+		return errors.New("the shared queue turn must span at least three renewal intervals")
+	}
+	if cfg.peerTransport == nil {
+		transport := &http.Transport{} // Direct connections to loopback peers.
+		defer transport.CloseIdleConnections()
+		cfg.peerTransport = transport
+	}
+	if err := PrepareStateRoots(filepath.Dir(cfg.Database), cfg.Database+".uploads"); err != nil {
+		return err
+	}
+	lock, err := lockQueueDatabase(cfg.Database)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	initCtx, cancel := context.WithTimeout(ctx, cfg.lease)
+	authority, err := openSharedQueueAuthority(initCtx, cfg.Postgres)
+	cancel()
+	if err != nil {
+		return err
+	}
+	defer authority.db.Close()
+	replica, err := openQueueSQLite(cfg.Database)
+	if err != nil {
+		return err
+	}
+	defer replica.Close()
+	m := &sharedQueueMember{
+		cfg: cfg, authority: authority, replica: replica, lock: lock, owner: ID(),
+		endpoint: "http://" + addr.String(), timeout: cfg.lease / 3,
+	}
+	defer func() {
+		if m.spool != nil {
+			_ = m.spool.lock.Close()
+		}
+	}()
+	if err := m.bindReplica(ctx); err != nil {
+		return err
+	}
+	server := &http.Server{Handler: m, ConnContext: QueueConnectionContext, ReadHeaderTimeout: 5 * time.Second}
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- server.Serve(listener) }()
+	loopCtx, stopLoop := context.WithCancel(ctx)
+	loopDone := make(chan struct{})
+	go func() {
+		defer close(loopDone)
+		m.run(loopCtx)
+	}()
+	select {
+	case err = <-serverDone:
+		stopLoop()
+	case <-ctx.Done():
+		stopLoop()
+		err = errors.Join(server.Close(), <-serverDone)
+	}
+	<-loopDone
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
+func (m *sharedQueueMember) bindReplica(ctx context.Context) error {
+	tx, err := m.replica.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, schema := range []string{sharedQueueCursorSchema, memoryEvidenceSchema, gpuSharingSchema} {
+		if _, err := tx.ExecContext(ctx, schema); err != nil {
+			return err
+		}
+	}
+	var identity string
+	err = tx.QueryRowContext(ctx, "SELECT identity,sequence FROM myce_shared_cursor WHERE id=1").Scan(&identity, &m.sequence)
+	if err == nil {
+		if identity != m.authority.identity {
+			return errors.New("the SQLite copy belongs to a different PostgreSQL authority")
+		}
+		return tx.Commit()
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	// A single-queue database must never become a shared replica implicitly.
+	for name := range sharedQueueTables {
+		var populated bool
+		err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM "+name+")").Scan(&populated)
+		if err != nil {
+			return err
+		}
+		if populated {
+			return errors.New("the shared queue proof requires a fresh or already bound SQLite copy")
+		}
+	}
+	if _, err = tx.ExecContext(ctx, "INSERT INTO myce_shared_cursor(id,identity,sequence) VALUES(1,?,0)", m.authority.identity); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (m *sharedQueueMember) run(ctx context.Context) {
+	tick := time.NewTicker(m.cfg.interval)
+	defer tick.Stop()
+	defer m.retire()
+	for {
+		m.step(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+func (m *sharedQueueMember) step(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+	if leader := m.leader; leader != nil {
+		if !leader.writer.disabled.Load() && m.renew(ctx, leader.writer.turn, m.cfg.lease, true) == nil {
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		leader.writer.disabled.Store(true)
+		m.retire()
+		return
+	}
+	t, err := m.current(ctx)
+	if err != nil || m.pull(ctx, t.head) != nil || t.ready {
+		return
+	}
+	call, cancel := context.WithTimeout(ctx, m.timeout)
+	t, err = m.authority.acquire(call, m.owner, m.endpoint, m.cfg.lease)
+	cancel()
+	if err != nil {
+		return
+	}
+	if failure := m.promote(ctx, t); failure != "" {
+		log.Printf("event=shared_queue_promotion_failed reason=%s", failure)
+		m.release(t)
+	}
+}
+
+func (m *sharedQueueMember) pull(ctx context.Context, head int64) error {
+	if m.sequence > head {
+		return errSharedHead
+	}
+	for m.sequence < head {
+		call, cancel := context.WithTimeout(ctx, m.timeout)
+		err := m.authority.changes(call, m.sequence, min(head, m.sequence+64), func(change sharedQueueChange) error {
+			if err := replaySharedQueueChange(call, m.replica, change); err != nil {
+				return err
+			}
+			m.sequence = change.sequence
+			return nil
+		})
+		cancel()
+		if err != nil {
+			// A fenced writer may have finished applying its last committed
+			// SQLite transaction after the old turn was retired.
+			m.readCursor()
+			return err
+		}
+	}
+	return nil
+}
+
+type sharedPromotionFailure string
+
+const (
+	promotionReplay sharedPromotionFailure = "replica_replay"
+	promotionHead   sharedPromotionFailure = "replica_sequence_mismatch"
+	promotionSpool  sharedPromotionFailure = "local_upload_spool"
+	promotionQueue  sharedPromotionFailure = "local_queue_startup"
+	promotionTurn   sharedPromotionFailure = "coordinator_turn"
+	promotionDB     sharedPromotionFailure = "postgresql_renewal"
+)
+
+func (m *sharedQueueMember) promote(ctx context.Context, turn sharedQueueTurn) sharedPromotionFailure {
+	if err := m.pull(ctx, turn.head); err != nil {
+		if errors.Is(err, errSharedHead) {
+			return promotionHead
+		}
+		return promotionReplay
+	}
+	if m.spool == nil {
+		spool := &uploadSpool{defaultDir: m.cfg.Database + ".uploads"}
+		if err := spool.configure("", DefaultUploadSpoolBytes); err != nil {
+			return promotionSpool
+		}
+		m.spool = spool
+	}
+	writer := &sharedQueueWriter{authority: m.authority, turn: turn, sequence: turn.head, timeout: m.timeout, spool: m.spool}
+	q, err := openQueue(m.cfg.Database, m.cfg.Checkpoints, m.cfg.Clock, writer, m.lock, WithFileStore(m.cfg.FileStore, 100<<30, true))
+	if err != nil {
+		// Startup may already have committed a projection before failing.
+		// Reload the atomic SQLite cursor before trying another promotion.
+		m.readCursor()
+		if errors.Is(err, errSharedTurn) {
+			return promotionTurn
+		}
+		if errors.Is(err, errSharedHead) {
+			return promotionHead
+		}
+		return promotionQueue
+	}
+	if err := m.renew(ctx, turn, m.cfg.lease, true); err != nil {
+		writer.disabled.Store(true)
+		_ = q.Close()
+		m.readCursor()
+		if errors.Is(err, errSharedTurn) {
+			return promotionTurn
+		}
+		return promotionDB
+	}
+	tickCtx, stop := context.WithCancel(ctx)
+	l := &sharedQueueLeader{writer: writer, queue: q, api: API{Queue: q, Token: m.cfg.Token}.Handler(), stopTick: stop, tickDone: make(chan struct{})}
+	m.mu.Lock()
+	m.leader = l
+	m.mu.Unlock()
+	go m.prepareStorage(tickCtx, q)
+	go func() {
+		defer close(l.tickDone)
+		tick := time.NewTicker(time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-tickCtx.Done():
+				return
+			case <-tick.C:
+				_ = q.TickContext(tickCtx)
+			}
+		}
+	}()
+	return ""
+}
+
+func (m *sharedQueueMember) prepareStorage(ctx context.Context, q *Queue) {
+	retry := time.NewTicker(m.cfg.interval)
+	defer retry.Stop()
+	for ctx.Err() == nil {
+		if m.fileSetup.TryLock() {
+			store := m.prepareStorageOnce(ctx, q)
+			m.fileSetup.Unlock()
+			if store != nil {
+				m.watchStorage(ctx, q, store)
+				return
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-retry.C:
+		}
+	}
+}
+
+func (m *sharedQueueMember) prepareStorageOnce(ctx context.Context, q *Queue) *FileStore {
+	q.mu.RLock()
+	controlFiles := q.controlStorageFiles()
+	q.mu.RUnlock()
+	store, err := q.prepareFileStore(m.cfg.FileStore, 100<<30, 0, controlFiles)
+	if err != nil || ctx.Err() != nil {
+		return nil
+	}
+	q.mu.RLock()
+	refs, err := q.frozenBundleFiles()
+	q.mu.RUnlock()
+	if err != nil || verifyFrozenBundleFiles(ctx, store, refs) != nil {
+		return nil
+	}
+	q.fileLifecycle.Lock()
+	defer q.fileLifecycle.Unlock()
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if ctx.Err() != nil || q.stopping.Load() {
+		return nil
+	}
+	q.files = store
+	q.republishReads()
+	return store
+}
+
+// Health sampling stays independent of both turn renewal and bulk
+// maintenance. A stuck reclaim or delivery cannot hide a backing-store fault.
+func (m *sharedQueueMember) watchStorage(ctx context.Context, q *Queue, store *FileStore) {
+	tick := time.NewTicker(m.cfg.interval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			available, _ := q.healthStoreProbe.runProgress(store.root, func(progress func()) (bool, error) {
+				return checkpointAvailable(store.root, "queue-files", progress), nil
+			})
+			q.sharedWriter.storageFault.Store(!available)
+		}
+	}
+}
+
+func (m *sharedQueueMember) readCursor() {
+	// On failure, a lower in-memory cursor can only cause replay to fail
+	// closed. No successor is installed until it agrees with SQLite.
+	_ = m.replica.QueryRow("SELECT sequence FROM myce_shared_cursor WHERE id=1").Scan(&m.sequence)
+}
+
+func (m *sharedQueueMember) retire() {
+	m.mu.Lock()
+	l := m.leader
+	m.leader = nil
+	m.mu.Unlock()
+	if l == nil {
+		return
+	}
+	l.queue.BeginShutdown()
+	l.stopTick()
+	l.writer.disabled.Store(true)
+	// Drop authority before waiting for old file handlers or maintenance.
+	// A kernel-blocked mount must not prevent a new turn on this member.
+	m.release(l.writer.turn)
+	go func() {
+		<-l.tickDone
+		l.requests.Wait()
+		_ = l.queue.Close()
+	}()
+
+	m.readCursor()
+}
+
+func (m *sharedQueueMember) current(ctx context.Context) (sharedQueueTurn, error) {
+	call, cancel := context.WithTimeout(ctx, m.timeout)
+	defer cancel()
+	return m.authority.current(call)
+}
+
+func (m *sharedQueueMember) renew(ctx context.Context, turn sharedQueueTurn, lease time.Duration, ready bool) error {
+	call, cancel := context.WithTimeout(ctx, m.timeout)
+	defer cancel()
+	return m.authority.renew(call, turn, lease, ready)
+}
+
+func (m *sharedQueueMember) release(turn sharedQueueTurn) {
+	_ = m.renew(context.Background(), turn, 0, false)
+}
+
+const (
+	sharedTurnPath        = "/api/shared-queue/turn"
+	sharedReplicaPath     = "/api/shared-queue/status"
+	sharedTurnHeader      = "X-Myce-Shared-Turn"
+	sharedVerifyHeader    = "X-Myce-Shared-Turn-Protocol"
+	sharedControlProtocol = "3"
+	sharedProxyHeader     = "X-Myce-Shared-Forward"
+)
+
+func sharedQueueControlRetry() error {
+	const code = "shared_queue_control_retry"
+	return &HTTPError{Status: http.StatusServiceUnavailable, Code: code, Message: rejectionMessages[code]}
+}
+
+func sharedFileStoreUnready() error {
+	const code = "shared_file_store_unready"
+	return &HTTPError{Status: http.StatusServiceUnavailable, Code: code, Message: rejectionMessages[code]}
+}
+
+// A check-in or event poll proposes directives. Launch, start and yield
+// authorize an effect only in the second request, with the proposed turn.
+func sharedWorkerControl(path string) (proposal, mutation bool) {
+	path, _, _ = strings.Cut(path, "?")
+	switch path {
+	case "/api/workers/checkin":
+		return true, false
+	case "/api/workers/launch", "/api/workers/started", "/api/workers/yield-stop":
+		return false, true
+	}
+	id, found := strings.CutPrefix(path, "/api/workers/")
+	worker, events := strings.CutSuffix(id, "/events")
+	return found && events && worker != "", false
+}
+
+func (m *sharedQueueMember) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	credential := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/api/status") {
+		if user, password, ok := r.BasicAuth(); ok && user == "myce" {
+			credential = password
+		}
+	}
+	if subtle.ConstantTimeCompare([]byte(credential), []byte(m.cfg.Token)) != 1 {
+		respond(w, nil, &HTTPError{Status: 401, Code: "authentication_required"})
+		return
+	}
+	if r.Method == http.MethodGet && r.URL.Path == sharedReplicaPath {
+		m.serveReplica(w, r)
+		return
+	}
+	turn, err := m.current(r.Context())
+	if err != nil || !turn.ready {
+		respond(w, nil, queueStopping())
+		return
+	}
+	proposal, mutation := sharedWorkerControl(r.URL.Path)
+	confirm := r.Method == http.MethodPost && r.URL.Path == sharedTurnPath
+	if (proposal || mutation || confirm) && r.Header.Get(sharedVerifyHeader) != sharedControlProtocol {
+		respond(w, nil, &HTTPError{Status: http.StatusUpgradeRequired, Code: "worker_protocol_mismatch"})
+		return
+	}
+	number := strconv.FormatInt(turn.number, 10)
+	want := r.Header.Get(sharedTurnHeader)
+	if want != "" && want != number || confirm && want == "" {
+		// A changed turn is transient. The successor still has to check the
+		// exact custody when a worker retries a launch or start under its turn.
+		respond(w, nil, sharedQueueControlRetry())
+		return
+	}
+	if confirm {
+		// The authoritative read above checks readiness and expiry against
+		// database time. Handover only increases, so the same number also
+		// proves that no takeover committed after the proposal was issued.
+		w.Header().Set(sharedTurnHeader, number)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if turn.owner != m.owner {
+		m.forward(w, r, turn)
+		return
+	}
+	expected := r.Header.Get(sharedProxyHeader)
+	if expected != "" && expected != strconv.FormatInt(turn.number, 10) {
+		respond(w, nil, queueStopping())
+		return
+	}
+	m.mu.Lock()
+	l := m.leader
+	if l != nil && sameSharedTurn(turn, l.writer.turn) && !l.writer.disabled.Load() {
+		l.requests.Add(1)
+	} else {
+		l = nil
+	}
+	m.mu.Unlock()
+	if l == nil {
+		respond(w, nil, queueStopping())
+		return
+	}
+	defer l.requests.Done()
+	if r.Method == http.MethodGet && r.URL.Path == sharedTurnPath {
+		// The retired verification protocol can never authorize an effect.
+		respond(w, nil, queueStopping())
+		return
+	}
+	if proposal || mutation {
+		w.Header().Set(sharedTurnHeader, number)
+	}
+	if mutation && want == "" {
+		// This reply carries no authorization, even if delayed past a handover.
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	files := strings.HasPrefix(r.URL.Path, "/api/files/") && r.URL.Path != "/api/files/config"
+	extensions := r.URL.Path == "/api/extensions" && r.Method == http.MethodPost || strings.HasPrefix(r.URL.Path, "/api/extensions/")
+	if files || extensions {
+		l.queue.mu.RLock()
+		ready := l.queue.sharedFilesReady()
+		l.queue.mu.RUnlock()
+		if !ready {
+			respond(w, nil, sharedFileStoreUnready())
+			return
+		}
+	}
+	l.api.ServeHTTP(w, r)
+}
+
+func (m *sharedQueueMember) forward(w http.ResponseWriter, r *http.Request, turn sharedQueueTurn) {
+	target, err := url.Parse(turn.endpoint)
+	if err != nil || target.Scheme != "http" || !net.ParseIP(target.Hostname()).IsLoopback() ||
+		target.Host == r.Host || r.Header.Get(sharedProxyHeader) != "" {
+		respond(w, nil, queueStopping())
+		return
+	}
+	proxy := httputil.ReverseProxy{
+		Transport: m.cfg.peerTransport,
+		Rewrite: func(p *httputil.ProxyRequest) {
+			p.SetURL(target)
+			p.Out.Header.Set(sharedProxyHeader, strconv.FormatInt(turn.number, 10))
+		},
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+			respond(w, nil, queueStopping())
+		},
+	}
+	proxy.ServeHTTP(w, r)
+}
+
+func (m *sharedQueueMember) serveReplica(w http.ResponseWriter, r *http.Request) {
+	// The persisted job also contains its execution payload. Replica reads
+	// expose only lifecycle fields and leave full projections to the API.
+	type replicaJob struct {
+		ID        string     `json:"id"`
+		State     string     `json:"state"`
+		StartedAt *time.Time `json:"started_at,omitempty"`
+	}
+	type replicaStatus struct {
+		LastKnown bool        `json:"last_known"`
+		Sequence  int64       `json:"sequence"`
+		Job       *replicaJob `json:"job,omitempty"`
+	}
+	out := replicaStatus{LastKnown: true}
+	ctx := r.Context()
+	tx, err := m.replica.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err == nil {
+		defer tx.Rollback()
+		err = tx.QueryRowContext(ctx, "SELECT sequence FROM myce_shared_cursor WHERE id=1").Scan(&out.Sequence)
+	}
+	if id := r.URL.Query().Get("job"); id != "" && err == nil {
+		var data []byte
+		err = tx.QueryRowContext(ctx, "SELECT data FROM queue_state WHERE key=?", "jobs/"+id).Scan(&data)
+		if errors.Is(err, sql.ErrNoRows) {
+			err = nil
+		} else if err == nil {
+			data, err = expandJobRecord(data)
+			if err == nil {
+				err = json.Unmarshal(data, &out.Job)
+			}
+		}
+	}
+	if err != nil {
+		respond(w, nil, queueStopping())
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	respond(w, out, nil)
+}

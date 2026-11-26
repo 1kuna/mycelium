@@ -132,8 +132,9 @@ type state struct {
 	Front        int64                   `json:"front"`
 }
 type Queue struct {
-	diskHost                string       // Physical hostname for co-located disk relief.
-	startupTrace            func(string) // Startup only; controlled phase names, no state values.
+	sharedWriter            *sharedQueueWriter // Set only for an active shared-queue proof turn.
+	diskHost                string             // Physical hostname for co-located disk relief.
+	startupTrace            func(string)       // Startup only; controlled phase names, no state values.
 	startupReadWorkers      int
 	readInvalidations       map[string]bool // q.mu; applied atomically with capture publication.
 	readDependenciesInvalid bool
@@ -351,6 +352,35 @@ func WithCheckpointAvailability(probe func() bool) QueueOption {
 }
 
 func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error) {
+	return openQueue(path, root, clock, nil, nil, options...)
+}
+
+func lockQueueDatabase(path string) (*os.File, error) {
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		lock.Close()
+		return nil, fmt.Errorf("queue database already in use: %w", err)
+	}
+	return lock, nil
+}
+
+func openQueueSQLite(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS enrollment_tickets (digest TEXT PRIMARY KEY, pin TEXT NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS queue_state (key TEXT PRIMARY KEY, data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY CHECK(id=1), data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, attempt INTEGER NOT NULL, text TEXT NOT NULL); CREATE TABLE IF NOT EXISTS log_offsets (job TEXT, attempt INTEGER, offset INTEGER, PRIMARY KEY(job,attempt,offset)); CREATE TABLE IF NOT EXISTS environment_log_offsets (job TEXT, machine TEXT, session TEXT, key TEXT, offset INTEGER, PRIMARY KEY(job,machine,session,key,offset)); CREATE TABLE IF NOT EXISTS environment_build_logs (machine TEXT, session TEXT, key TEXT, offset INTEGER, text TEXT, PRIMARY KEY(machine,session,key,offset)); CREATE INDEX IF NOT EXISTS logs_job ON logs(job,seq); CREATE TABLE IF NOT EXISTS job_summaries (id TEXT PRIMARY KEY, finished INTEGER NOT NULL, summary BLOB NOT NULL, learned BLOB); CREATE TABLE IF NOT EXISTS usage_samples (at INTEGER NOT NULL, span INTEGER NOT NULL, machine TEXT NOT NULL, device TEXT NOT NULL, project TEXT NOT NULL, job TEXT NOT NULL, model TEXT NOT NULL, busy REAL NOT NULL, idle REAL NOT NULL, pinned REAL NOT NULL, memory_seconds REAL NOT NULL, observed REAL NOT NULL, PRIMARY KEY(at,span,machine,device,project,job,model));`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+func openQueue(path, root string, clock Clock, shared *sharedQueueWriter, lock *os.File, options ...QueueOption) (*Queue, error) {
 	if clock == nil {
 		return nil, errors.New("clock is required")
 	}
@@ -361,27 +391,34 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 	if err != nil {
 		return nil, err
 	}
-	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		return nil, err
-	}
-	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		lock.Close()
-		return nil, fmt.Errorf("queue database already in use: %w", err)
+	if shared == nil {
+		lock, err = lockQueueDatabase(path)
+		if err != nil {
+			return nil, err
+		}
 	}
 	success := false
 	defer func() {
-		if !success {
-			_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+		if !success && shared == nil && lock != nil {
 			_ = lock.Close()
 		}
 	}()
-	db, err := sql.Open("sqlite", path)
+	db, err := openQueueSQLite(path)
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
-	q := &Queue{startupReadWorkers: startupQueueReadWorkers, slimJobRecords: slimJobRecordsDefault, fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lock: lock, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, FairUsageVersion: 1, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
+	if shared == nil {
+		var replica bool
+		err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='myce_shared_cursor')").Scan(&replica)
+		if err != nil || replica {
+			db.Close()
+			if err != nil {
+				return nil, err
+			}
+			return nil, errors.New("a shared queue copy requires shared queue proof mode")
+		}
+	}
+	q := &Queue{sharedWriter: shared, startupReadWorkers: startupQueueReadWorkers, slimJobRecords: slimJobRecordsDefault, fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lock: lock, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, FairUsageVersion: 1, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
 	q.diskHost, _ = os.Hostname()
 	q.mu.control = &controlClock{clock: func() time.Time { return q.clock.Now() }, at: clock.Now()}
 	q.admissionWaitBuild.synchronous = synchronousAdmissionWaitDefault
@@ -397,10 +434,6 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 			db.Close()
 			return nil, err
 		}
-	}
-	if _, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS enrollment_tickets (digest TEXT PRIMARY KEY, pin TEXT NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS queue_state (key TEXT PRIMARY KEY, data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY CHECK(id=1), data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, attempt INTEGER NOT NULL, text TEXT NOT NULL); CREATE TABLE IF NOT EXISTS log_offsets (job TEXT, attempt INTEGER, offset INTEGER, PRIMARY KEY(job,attempt,offset)); CREATE TABLE IF NOT EXISTS environment_log_offsets (job TEXT, machine TEXT, session TEXT, key TEXT, offset INTEGER, PRIMARY KEY(job,machine,session,key,offset)); CREATE TABLE IF NOT EXISTS environment_build_logs (machine TEXT, session TEXT, key TEXT, offset INTEGER, text TEXT, PRIMARY KEY(machine,session,key,offset)); CREATE INDEX IF NOT EXISTS logs_job ON logs(job,seq); CREATE TABLE IF NOT EXISTS job_summaries (id TEXT PRIMARY KEY, finished INTEGER NOT NULL, summary BLOB NOT NULL, learned BLOB); CREATE TABLE IF NOT EXISTS usage_samples (at INTEGER NOT NULL, span INTEGER NOT NULL, machine TEXT NOT NULL, device TEXT NOT NULL, project TEXT NOT NULL, job TEXT NOT NULL, model TEXT NOT NULL, busy REAL NOT NULL, idle REAL NOT NULL, pinned REAL NOT NULL, memory_seconds REAL NOT NULL, observed REAL NOT NULL, PRIMARY KEY(at,span,machine,device,project,job,model));`); err != nil {
-		db.Close()
-		return nil, err
 	}
 	if err = db.QueryRow("PRAGMA page_size").Scan(&q.persistencePageBytes); err != nil {
 		db.Close()
@@ -434,7 +467,11 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		log.Print("ignoring saved model pins, pre-copy requests and demand history (docs/services.md)")
 		q.s.Pins, q.s.SyncRequests, q.s.ModelUses = nil, nil, nil
 	}
-	q.memoryEvidence, err = loadMemoryEvidence(db, q.s)
+	if shared == nil {
+		q.memoryEvidence, err = loadMemoryEvidence(db, q.s)
+	} else {
+		q.memoryEvidence, err = (queueSQLiteWriter{db: db, shared: shared}).loadMemoryEvidence(q.s)
+	}
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("load memory evidence: %w", err)
@@ -448,12 +485,18 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 	if fileRoot == "" {
 		fileRoot = path + ".files"
 	}
-	if err = q.ConfigureFileStore(fileRoot, fileLimit, fileCheckpoints); err == nil {
-		err = q.verifyBundleFiles()
-	}
-	if err != nil {
-		db.Close()
-		return nil, err
+	if shared != nil {
+		// Shared members publish storage only after an independent setup and
+		// verification pass. Checkpoint mode stays fixed from startup.
+		q.fileCheckpoints = fileCheckpoints
+	} else {
+		if err = q.ConfigureFileStore(fileRoot, fileLimit, fileCheckpoints); err == nil {
+			err = q.verifyBundleFiles()
+		}
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	q.traceStartup("load_frozen_bundles")
 	q.unreported = map[string]bool{}
@@ -483,9 +526,11 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		db.Close()
 		return nil, err
 	}
-	if err = q.ConfigureUploadSpool("", DefaultUploadSpoolBytes); err != nil {
-		db.Close()
-		return nil, err
+	if shared == nil || shared.spool == nil {
+		if err = q.ConfigureUploadSpool("", DefaultUploadSpoolBytes); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	q.traceStartup("load_defaults")
 	q.usageReader, err = openUsageReader(path)
@@ -592,7 +637,25 @@ func (q *Queue) machineLossTimeout(id string) time.Duration {
 
 // Simulated workers have an always-available pretend NAS; production still probes it.
 func (q *Queue) checkpointsAvailable() bool { return q.simulation || q.nasAvailable }
+
+// Caller holds q.mu. A plain job can use authority during a file-store
+// outage. Jobs depending on bulk custody wait before the first payload start.
+func (q *Queue) sharedFilesReady() bool {
+	return q.sharedWriter == nil || q.files != nil && !q.sharedWriter.storageFault.Load()
+}
+
+func (q *Queue) sharedFileHold(j *Job) bool { return !q.sharedFilesReady() && jobNeedsSharedFiles(j) }
+
+func jobNeedsSharedFiles(j *Job) bool {
+	return needsCheckpoint(j) || j.Spec.ephemeral() || j.Spec.OutputDelivery == asyncNAS ||
+		len(j.Spec.Files)+len(j.Spec.SharedInputs)+len(j.Spec.ModelSnapshots) != 0 || j.Spec.extensionJob() ||
+		j.storedFileResults() && len(j.Spec.Outputs) != 0 || jobHasFrozenFiles(j)
+}
+
 func (q *Queue) checkpointReady(j *Job, m *Machine) bool {
+	if q.sharedFileHold(j) {
+		return false
+	}
 	if j.Spec.localFirst() {
 		return contains(m.Capabilities, localFirstProtocol)
 	}
@@ -622,14 +685,18 @@ func (q *Queue) BeginShutdown() {
 }
 
 func (q *Queue) Close() error {
+	// Fence even no-op control requests, which can skip the SQLite writer.
+	q.BeginShutdown()
 	err := errors.Join(q.closeCheckpointShards(), q.closeIdleHistory())
 	if q.stopping.Load() {
 		log.Printf("event=queue_shutdown phase=storage_wait")
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if flushErr := q.flushHistories(); flushErr != nil {
-		err = errors.Join(err, fmt.Errorf("write measurement histories at close: %w", flushErr))
+	if q.sharedWriter == nil || !q.sharedWriter.disabled.Load() {
+		if flushErr := q.flushHistories(); flushErr != nil {
+			err = errors.Join(err, fmt.Errorf("write measurement histories at close: %w", flushErr))
+		}
 	}
 	if q.usageReader != nil {
 		err = errors.Join(err, q.usageReader.Close())
@@ -639,10 +706,10 @@ func (q *Queue) Close() error {
 		err = errors.Join(err, q.uploadSpool.lock.Close())
 		q.uploadSpool.lock = nil
 	}
-	if q.lock != nil {
+	if q.lock != nil && q.sharedWriter == nil {
 		err = errors.Join(err, syscall.Flock(int(q.lock.Fd()), syscall.LOCK_UN), q.lock.Close())
-		q.lock = nil
 	}
+	q.lock = nil
 	if q.stopping.Load() {
 		log.Printf("event=queue_shutdown phase=storage_closed clean=%t", err == nil)
 	}
@@ -696,7 +763,7 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	var waitCapture *admissionWaitCapture
 	var idle idleCapture
 	available := true
-	if !q.simulation && !observationOnly {
+	if !q.simulation && !observationOnly && q.sharedWriter == nil {
 		if q.checkpointProbe != nil {
 			available = q.checkpointProbe()
 		} else {
@@ -822,7 +889,7 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 		}
 		tail.finish()
 		hold.next(holdPersist)
-		if audit != nil {
+		if err == nil && audit != nil {
 			err = audit()
 		}
 		if err == nil {
@@ -938,18 +1005,23 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 	// Own all client maps/slices before the lock and across verification.
 	s = cloneJob(&Job{Spec: s}).Spec
 	unlockRequest := requestLock(ctx, submissionMutex{&q.mu})
-	store := q.files
+	store, ready := q.files, q.sharedFilesReady()
 	catalog := q.environments
 	environmentRevision := q.environmentRevision
 	replay := s.SubmissionKey != "" && q.s.Submissions[submissionDigest(s.Project, s.SubmissionKey)] != nil
-	if len(submissionFiles(s)) > 0 && !replay && q.submitVerificationSlot == nil {
+	files := submissionFiles(s)
+	if len(files) > 0 && !replay && ready && q.submitVerificationSlot == nil {
 		q.submitVerificationSlot = make(chan struct{}, 1)
 	}
 	slot := q.submitVerificationSlot
 	unlockRequest()
 	var verificationErr error
-	if len(submissionFiles(s)) > 0 && !replay {
-		verificationErr = verifySubmissionInputs(ctx, store, submissionFiles(s), slot)
+	if len(files) > 0 && !replay {
+		if ready {
+			verificationErr = verifySubmissionInputs(ctx, store, files, slot)
+		} else {
+			verificationErr = sharedFileStoreUnready()
+		}
 	}
 	// Use the same execution adapter as the transaction, on an owned copy.
 	// Validation errors are handled below in their existing order; key replay
@@ -975,6 +1047,7 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 	var frozenLock *EnvironmentLock
 	var sidecarRecipes map[string]map[string]EnvironmentRecipe
 	var recipeErr error
+	requiresStore := len(files) > 0 || s.OutputDelivery == asyncNAS
 	var discovery *CommandDiscovery
 	var entryCoverage *EntryCoverage
 	var lockTargets []ExecutionTarget
@@ -996,7 +1069,11 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 			entryCoverage = deriveEntryCoverage(prepared, recipes, discovery)
 			lockTargets, lockTargetsKnown = frozenCommandLockCoverage(prepared, recipes, sidecarRecipes)
 		}
-		if recipeErr == nil && !q.simulation {
+		requiresStore = requiresStore || recipesNeedFreeze(recipes)
+		for _, side := range sidecarRecipes {
+			requiresStore = requiresStore || recipesNeedFreeze(side)
+		}
+		if recipeErr == nil && !q.simulation && (ready || !requiresStore) {
 			verified := map[FileRef]bool{}
 			recipeErr = store.freezeRecipes(recipes, verified, ctx)
 			for _, side := range sidecarRecipes {
@@ -1010,7 +1087,7 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 	var resultCapacity FileStoreStatus
 	var resultPayloads map[string]storedPayload
 	var resultView *fileCapacitySnapshot
-	if s.OutputDelivery == asyncNAS && !replay && store != nil {
+	if s.OutputDelivery == asyncNAS && !replay && ready && store != nil {
 		resultView = store.snapshotCapacity(ctx)
 		defer resultView.release()
 	}
@@ -1049,6 +1126,9 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 				return typed
 			}
 			return reject("job_files_invalid", verificationErr)
+		}
+		if requiresStore && (!ready || !q.sharedFilesReady()) {
+			return sharedFileStoreUnready()
 		}
 		if q.files != store || q.environmentRevision != environmentRevision {
 			return ErrStale
@@ -1297,8 +1377,10 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 			return &out, errors.Join(err, healthErr)
 		}
 	}
-	if err == nil {
-		err = store.hydrateJob(&out) // Submit holds the publication fence through delivery.
+	if err == nil && (q.sharedWriter == nil || ready && !q.sharedWriter.storageFault.Load()) {
+		// Submit holds the publication fence through delivery. A replay
+		// can return its committed identity during a shared-store outage.
+		err = store.hydrateJob(&out)
 	}
 	return &out, err
 }
@@ -1653,7 +1735,9 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 	files := q.files
 	requestUnlock1()
 	fileAvailable := true
-	if !q.simulation && files != nil {
+	if q.sharedWriter != nil {
+		fileAvailable = files != nil && !q.sharedWriter.storageFault.Load()
+	} else if !q.simulation && files != nil {
 		fileAvailable, _ = q.healthStoreProbe.runProgress(files.root, func(progress func()) (bool, error) {
 			return checkpointAvailable(files.root, "queue-files", progress), nil
 		})
@@ -1676,6 +1760,9 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 	q.publishEfficiencyDiagnostics(diagnostics)
 	evidenceErr := q.maintainEvidence(requestCtx)
 	q.flushIdleEvidence(requestCtx)
+	if q.sharedWriter != nil && !fileAvailable {
+		return errors.Join(evidenceErr, q.pruneBatchLogs(requestCtx), q.pruneJobHistory(requestCtx))
+	}
 	return errors.Join(evidenceErr, q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx))
 }
 func (q *Queue) CheckinKeyed(c Checkin) (Reply, error) {
@@ -2059,6 +2146,19 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			if hold := workerMemoryHold(&m); hold != nil {
 				m.AdmissionReason = hold.Kind + ": " + hold.Reason
 			}
+			boundPreparationStops := func() {
+				for _, l := range q.s.PreparationPlans {
+					if l.Machine == m.ID && l.Session == m.Session && l.StopAt != nil {
+						boundStop(&reply.PreparationStopAt, *l.StopAt)
+					}
+				}
+			}
+			if !q.sharedFilesReady() {
+				boundPreparationStops()
+				deferSharedFileOffers(&reply)
+				q.cancelUnofferedPreparations(&m, reply)
+				return
+			}
 			if c.Recovering || q.workerSuspect(&m, q.clock.Now()) || workerMemoryHold(&m) != nil {
 				// Preserve retained engines and deliver their cleanup deadlines.
 				// A retention-only plan cannot start a missing engine: the worker
@@ -2075,11 +2175,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 				q.cancelUnofferedPreparations(&m, reply)
 				return
 			}
-			for _, l := range q.s.PreparationPlans {
-				if l.Machine == m.ID && l.Session == m.Session && l.StopAt != nil {
-					boundStop(&reply.PreparationStopAt, *l.StopAt)
-				}
-			}
+			boundPreparationStops()
 			if len(reply.EnvironmentPlan) == 0 {
 				reply.EnvironmentPlan = q.checkinEnvironmentPlan(&m)
 			}
@@ -3199,6 +3295,12 @@ func (q *Queue) startedWithCustody(ctx context.Context, request workerStartedReq
 			return nil
 		}
 		m := q.s.Machines[r.Machine]
+		if q.sharedWorkerAwaitingCheckin(m, r.Session) {
+			return sharedQueueControlRetry()
+		}
+		if j.StartedAt == nil && q.sharedFileHold(j) {
+			return sharedFileStoreUnready()
+		}
 		q.refreshHostMemory()
 		predicate := "host_launch"
 		if q.assignedLaunchAllowed(m, r.Session, j) {

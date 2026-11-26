@@ -652,6 +652,9 @@ func (q *Queue) expiredBlob(hash string, requestContexts ...context.Context) boo
 // holds q.mu. Only positively marked job-input uploads can be orphans.
 func (q *Queue) reclaimJobFilesContext(requestContexts ...context.Context) error {
 	requestCtx := requestContext(requestContexts)
+	if q.sharedWriter != nil {
+		return nil // See reclaimPublishedFilesUntil.
+	}
 
 	return errors.Join(q.reclaimInterruptedUploads(requestCtx), q.reclaimPublishedFilesContext(requestCtx))
 }
@@ -669,6 +672,12 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 // idle queue keeps draining; a capacity-refused write passes its need instead,
 // and collection of already authorized bytes continues until it frees that many.
 func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint64) (freed uint64, _ error) {
+	// A shared-queue member never unlinks job file bytes. Another coordinator
+	// turn may have verified them for a reference it has yet to commit, and
+	// one member's lifecycle lock cannot fence that. Reclaim is Stage 3 work.
+	if q.sharedWriter != nil {
+		return 0, nil
+	}
 
 	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
 	store := q.files

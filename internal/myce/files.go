@@ -184,37 +184,34 @@ func (j Job) storedFileResults() bool {
 	return false
 }
 
-func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) error {
-	if q.fileStoreProductionReserve < 0 || q.fileStoreProductionReserve > limit {
-		return errors.New("file store production reserve must be between zero and the store limit")
+func (q *Queue) prepareFileStore(root string, limit int64, reserve uint64, controlFiles controlStorageFiles) (*FileStore, error) {
+	if limit > 0 && reserve > uint64(limit) {
+		return nil, errors.New("file store production reserve must be between zero and the store limit")
 	}
 	if limit <= 0 {
-		return errors.New("file store limit must be positive")
+		return nil, errors.New("file store limit must be positive")
 	}
 	root, err := filepath.Abs(root)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err = PrepareStateRoots(root); err != nil {
-		return err
+		return nil, err
 	}
 	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err = noModelSymlinks(root, false); err != nil {
-		return err
+		return nil, err
 	}
 	for _, dir := range []string{root, filepath.Join(root, "blobs"), filepath.Join(root, "uploads")} {
 		if err = os.MkdirAll(dir, 0700); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	s := &FileStore{inputClaim: q.inputClaimContext, checkAttempt: q.checkFileStoreAttempt, productionReserve: uint64(q.fileStoreProductionReserve), admit: q.admitFileUpload, admitCreation: q.admitFileCreation, explainRefusal: q.explainFileStoreRefusal, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
-	if q.lock != nil {
-		database := strings.TrimSuffix(q.lock.Name(), ".lock")
-		s.controlFiles = controlStorageFiles{database: database, wal: database + "-wal", shared: database + "-shm"}
-	}
+	s := &FileStore{inputClaim: q.inputClaimContext, checkAttempt: q.checkFileStoreAttempt, productionReserve: reserve, admit: q.admitFileUpload, admitCreation: q.admitFileCreation, explainRefusal: q.explainFileStoreRefusal, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
+	s.controlFiles = controlFiles
 	fs := filestore.New(filepath.Join(root, "uploads"))
 	fs.DirModePerm = 0700
 	fs.FileModePerm = 0600
@@ -247,9 +244,29 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 		},
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	s.handler = http.StripPrefix("/api/files/uploads/", h)
+	return s, nil
+}
+
+func (q *Queue) controlStorageFiles() controlStorageFiles {
+	if q.lock == nil {
+		return controlStorageFiles{}
+	}
+	database := strings.TrimSuffix(q.lock.Name(), ".lock")
+	return controlStorageFiles{database: database, wal: database + "-wal", shared: database + "-shm"}
+}
+
+func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) error {
+	if q.fileStoreProductionReserve < 0 {
+		return errors.New("file store production reserve must be between zero and the store limit")
+	}
+	s, err := q.prepareFileStore(root, limit, uint64(q.fileStoreProductionReserve), q.controlStorageFiles())
+	if err != nil {
+		return err
+	}
+	root = s.root
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
 	q.mu.Lock()
@@ -727,7 +744,7 @@ func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request, metadata b
 }
 func (a API) registerFiles(mux *requestMux) {
 	mux.HandleFunc("GET /api/files/config", func(w http.ResponseWriter, r *http.Request) { respond(w, FileConfig{a.Queue.fileCheckpoints}, nil) })
-	if a.Queue.files == nil {
+	if a.Queue.files == nil && a.Queue.sharedWriter == nil {
 		return
 	}
 	mux.HandleFunc("POST /api/files/input-claims", func(w http.ResponseWriter, r *http.Request) {
