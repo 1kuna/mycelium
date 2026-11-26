@@ -478,9 +478,16 @@ func (a filePublicationAge) interruptedUploadIdle(modified time.Time, claims []F
 }
 
 // The publication fence excludes active transfers and verify/commit intervals
-// while custody and idle time are rechecked.
+// while custody and idle time are rechecked. It is released before any store
+// syscall (#2117). A transfer that resumes in that gap had been idle past its
+// window; it fails and the client uploads again. Only upload paths are
+// removed here, never a blob.
 func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) error {
 	requestCtx := requestContext(requestContexts)
+	if !q.fileCollection.TryLock() {
+		return nil
+	}
+	defer q.fileCollection.Unlock()
 
 	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
 	store := q.files
@@ -553,17 +560,17 @@ func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) er
 		remove := q.files == store && !referenced[hash] && (!marked || at.IsZero()) &&
 			(!output || len(receipts) == 0) && age.interruptedUploadIdle(time.Time{}, receipts)
 		requestUnlock2()
+		q.fileLifecycle.Unlock()
 		if remove {
 			if err := q.reclaimInterruptedUpload(requestCtx, store, hash, age, receipts, marked); err != nil {
 				log.Printf("file retention deferred upload=%s error=%q; retrying next tick", hash, err)
 			}
 		}
-		q.fileLifecycle.Unlock()
 	}
 	return nil
 }
 
-// Caller holds the lifecycle write fence. Disk checks and removal never hold q.mu.
+// Disk checks and removal hold neither q.mu nor the lifecycle fence.
 func (q *Queue) reclaimInterruptedUpload(ctx context.Context, store *FileStore, hash string, age filePublicationAge, claims []FileInputClaim, marked bool) error {
 	var published time.Time
 	if st, err := os.Lstat(store.blob(FileRef{SHA256: hash})); err == nil {

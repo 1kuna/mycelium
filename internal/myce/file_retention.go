@@ -6,7 +6,6 @@ import (
 	"log"
 	"maps"
 	"os"
-	"path/filepath"
 	"slices"
 	"time"
 )
@@ -647,15 +646,13 @@ func (q *Queue) expiredBlob(hash string, requestContexts ...context.Context) boo
 	return refs.collectionEligible()
 }
 
-// Tick snapshots candidates, then fences reference publication and rechecks
-// custody for each unlink. Neither filesystem access nor waiting for the fence
-// holds q.mu. Only positively marked job-input uploads can be orphans.
+// Tick snapshots candidates and moves each to a unique trash name, then
+// verifies custody before purging that name (file_trash.go). No exclusive
+// publication fence is held across a store syscall, and nothing here holds
+// q.mu for filesystem access. Only positively marked job-input uploads can be
+// orphans. In shared mode only the current turn holder purges.
 func (q *Queue) reclaimJobFilesContext(requestContexts ...context.Context) error {
 	requestCtx := requestContext(requestContexts)
-	if q.sharedWriter != nil {
-		return nil // See reclaimPublishedFilesUntil.
-	}
-
 	return errors.Join(q.reclaimInterruptedUploads(requestCtx), q.reclaimPublishedFilesContext(requestCtx))
 }
 
@@ -664,21 +661,38 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 	return err
 }
 
+// sharedTurnCurrent reports whether this queue still holds the routable shared
+// turn, so its state is the committed state. A single queue always does.
+func (q *Queue) sharedTurnCurrent(ctx context.Context) bool {
+	w := q.sharedWriter
+	if w == nil {
+		return true
+	}
+	if w.disabled.Load() {
+		return false
+	}
+	call, cancel := context.WithTimeout(ctx, w.timeout)
+	defer cancel()
+	t, err := w.authority.current(call)
+	return err == nil && t.ready && sameSharedTurn(t, w.turn) && !w.disabled.Load()
+}
+
 // Each pass snapshots candidates under a short read lock, then works in
-// batches: one publication-fence hold and one short q.mu recheck of current
-// custody per batch, unlinks outside q.mu, and one commit transaction at the
-// end. Measured control pressure ends the pass after its first batch rather
-// than before it, so collection always progresses (#1375). With need zero an
-// idle queue keeps draining; a capacity-refused write passes its need instead,
-// and collection of already authorized bytes continues until it frees that many.
+// batches. A batch moves eligible blobs to unique trash names, checks that no
+// publication was in flight and the turn is current, rechecks custody under a
+// short q.mu read lock, and then purges or restores each entry. Entries left
+// by an interrupted pass or a late move are verified the same way. One commit
+// transaction ends the pass. Measured control pressure ends the pass after its
+// first batch rather than before it, so collection always progresses (#1375).
+// With need zero an idle queue keeps draining; a capacity-refused write passes
+// its need instead, and collection of already authorized bytes continues until
+// it frees that many.
 func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint64) (freed uint64, _ error) {
-	// A shared-queue member never unlinks job file bytes. Another coordinator
-	// turn may have verified them for a reference it has yet to commit, and
-	// one member's lifecycle lock cannot fence that. Reclaim is Stage 3 work.
-	if q.sharedWriter != nil {
+	// One pass at a time, so no pass purges an entry another is restoring.
+	if !q.fileCollection.TryLock() {
 		return 0, nil
 	}
-
+	defer q.fileCollection.Unlock()
 	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
 	store := q.files
 	if store == nil {
@@ -691,11 +705,16 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 	claimCutoff := age.now.Add(-q.s.PublicationHorizon)
 	markers, bundles := q.jobUploadMarkers(), maps.Clone(q.s.BundleUploads)
 	requestUnlock1()
+	leftovers, err := store.trashEntries()
+	if err != nil {
+		log.Printf("file retention deferred: trash inventory unavailable: %v", err)
+	}
 
 	orphanCutoff := age.now.Add(-age.retention)
 	type candidate struct {
 		hash           string
 		orphan, bundle bool
+		entry          string // Set for a trash entry left by an earlier move.
 	}
 	var items []candidate
 	for hash, ref := range refs {
@@ -704,37 +723,45 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 		}
 	}
 	orphans := map[string]time.Time{}
-	for hash, published := range markers {
-		if age.retention > 0 && !published.IsZero() && !published.After(orphanCutoff) && refs[hash].flags&fileReferenced == 0 {
-			orphans[hash] = published
+	oldOrphan := func(hash string) bool {
+		published := markers[hash]
+		return age.retention > 0 && !published.IsZero() && !published.After(orphanCutoff) && refs[hash].flags&fileReferenced == 0
+	}
+	oldBundle := func(hash string) bool {
+		published, ok := bundles[hash]
+		return ok && age.retention > 0 && !published.After(orphanCutoff) && refs[hash].flags&fileReferenced == 0
+	}
+	for hash := range markers {
+		if oldOrphan(hash) {
+			orphans[hash] = markers[hash]
 			items = append(items, candidate{hash: hash, orphan: true})
 		}
 	}
-	for hash, published := range bundles {
-		if age.retention > 0 && !published.After(orphanCutoff) && refs[hash].flags&fileReferenced == 0 {
+	for hash := range bundles {
+		if oldBundle(hash) {
 			items = append(items, candidate{hash: hash, bundle: true})
 		}
 	}
-	batch := fileCollectionBatch(len(refs) + len(markers) + len(bundles))
+	// A leftover follows the rule its digest would have as a live blob. One
+	// that no rule collects is restored.
+	for entry, hash := range leftovers {
+		c := candidate{hash: hash, entry: entry, orphan: oldOrphan(hash)}
+		if c.orphan {
+			orphans[hash] = markers[hash]
+		}
+		c.bundle = !c.orphan && oldBundle(hash)
+		items = append(items, c)
+	}
+	batch := fileCollectionBatch(len(refs) + len(markers) + len(bundles) + len(leftovers))
 	gone := map[string]bool{}
 	deferred, yielded := false, false
 	var reclaimedBlobs uint64
-	// Reports false when the fence is busy and the batch was not attempted.
-	reclaimBatch := func(batch []candidate) bool {
-		// The same fence covers tus publication and verify-then-commit callers.
-		// Do not queue a writer behind slow hashing/uploads: RWMutex writer
-		// preference would then stall unrelated publications. Tick retries later.
-		if !q.fileLifecycle.TryLock() {
-			return false
-		}
-		defer q.fileLifecycle.Unlock()
-		type decision struct {
-			remove, marked, expired bool
-		}
-		decisions := make([]decision, len(batch))
-		requestUnlock2 := requestReadLock(requestCtx, &q.mu)
-		// Every queue transaction and catalog change advances this fence. Reuse
-		// the reference snapshot only while it still describes current custody.
+	type decision struct {
+		remove, marked, expired bool
+	}
+	// Caller holds q.mu. Every queue transaction and catalog change advances the
+	// revision. Reuse the reference snapshot only while it describes custody.
+	decide := func(batch []candidate, decisions []decision) {
 		if revision != q.fileReferenceRevision {
 			refs = q.captureFileReferences(true, nil, nil, false)
 			revision = q.fileReferenceRevision
@@ -759,26 +786,40 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 			remove = remove && (!trackedBundle || expired || !bundleTime.After(orphanCutoff))
 			decisions[i] = decision{remove: remove, marked: c.orphan || trackedBundle, expired: expired}
 		}
+	}
+	// Reports false when the batch could not be verified. Its moved entries
+	// then wait in trash for a later pass, and readers restore them on demand.
+	reclaimBatch := func(batch []candidate) bool {
+		// A busy fence means a publication is between verification and commit.
+		// Defer before moving anything; Tick retries later.
+		if !q.fileLifecycle.TryLock() {
+			return false
+		}
+		q.fileLifecycle.Unlock()
+		decisions := make([]decision, len(batch))
+		requestUnlock2 := requestReadLock(requestCtx, &q.mu)
+		decide(batch, decisions)
 		requestUnlock2()
-		// The fence stays held from the recheck through every unlink below, so
-		// no publication can commit a new reference to a hash in this batch.
+		entries := make([]string, len(batch))
+		var moving uint64
 		for i, c := range batch {
-			if need > 0 && freed >= need {
+			if c.entry != "" {
+				entries[i] = c.entry
+				continue
+			}
+			if need > 0 && freed+moving >= need {
 				break
 			}
 			if !decisions[i].remove || gone[c.hash] {
 				continue
 			}
-			path := filepath.Join(store.root, "blobs", c.hash)
-			st, err := os.Lstat(path)
-			// Stat inside the publication fence: a publisher/HEAD may have
-			// refreshed mtime since the collection snapshot was taken.
+			st, err := os.Lstat(store.blob(FileRef{SHA256: c.hash}))
 			if err == nil && age.payloadEligible(st, decisions[i].marked, decisions[i].expired) {
-				err = os.Remove(path)
+				entries[i], err = store.trashBlob(c.hash)
 				if err == nil {
-					gone[c.hash] = true
-					reclaimedBlobs++
-					freed = addDiskBytes(freed, uint64(st.Size()))
+					moving = addDiskBytes(moving, uint64(st.Size()))
+				} else {
+					entries[i] = ""
 				}
 			}
 			if errors.Is(err, os.ErrNotExist) {
@@ -787,6 +828,54 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 			}
 			if err != nil {
 				log.Printf("file retention deferred hash=%s error=%q; retrying next tick", c.hash, err)
+			}
+		}
+		// A publication that verified bytes before a move holds the fence until
+		// its reference commits. A free fence afterwards therefore means the
+		// state read below includes every such reference. A later publication
+		// finds the blob missing and restores it from trash or uploads it again.
+		verified := q.fileLifecycle.TryLock()
+		if verified {
+			q.fileLifecycle.Unlock()
+			verified = q.sharedTurnCurrent(requestCtx)
+		}
+		if !verified {
+			return false
+		}
+		// Rename keeps the mtime, so a HEAD refresh before the move is visible here.
+		stats := make([]os.FileInfo, len(batch))
+		for i := range batch {
+			if entries[i] != "" {
+				stats[i], _ = os.Lstat(entries[i])
+			}
+		}
+		requestUnlock3 := requestReadLock(requestCtx, &q.mu)
+		decide(batch, decisions)
+		requestUnlock3()
+		for i, c := range batch {
+			st := stats[i]
+			if st == nil {
+				continue
+			}
+			if decisions[i].remove && age.payloadEligible(st, decisions[i].marked, decisions[i].expired) {
+				err := os.Remove(entries[i])
+				if err == nil {
+					gone[c.hash] = true
+					reclaimedBlobs++
+					freed = addDiskBytes(freed, uint64(st.Size()))
+				} else if !errors.Is(err, os.ErrNotExist) {
+					log.Printf("file retention deferred hash=%s error=%q; retrying next tick", c.hash, err)
+				}
+				continue
+			}
+			// Still in custody: copy the bytes back unless a blob exists, then
+			// drop this unique name.
+			err := store.restoreFrom(c.hash, entries[i])
+			if err == nil {
+				err = os.Remove(entries[i])
+			}
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				log.Printf("file restore deferred hash=%s error=%q; retrying next tick", c.hash, err)
 			}
 		}
 		return true

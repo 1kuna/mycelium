@@ -148,6 +148,7 @@ func (s *FileStore) hydrateFiles(files *map[string][]byte, ref *FileRef) error {
 	if err := ref.validate(); err != nil {
 		return err
 	}
+	s.restoreMissing(ref.SHA256)
 	data, err := os.ReadFile(s.blob(*ref))
 	if err != nil {
 		return err

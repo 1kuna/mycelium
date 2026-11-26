@@ -163,6 +163,13 @@ unidentified uploads have no project release command. Pending collection is
 queue-wide, and release receipts acknowledge custody expiry before physical
 collection. See [retention and early release](reference/file-store.md).
 
+Collection never deletes a blob in place. It moves the blob to a unique name
+under the store's `trash/` folder, checks custody again, and then deletes
+that name or copies the bytes back. A move that a stalled store delays can
+only hide bytes. A reader that finds a referenced blob missing, and the next
+collector pass, restore it from `trash/`. Entries normally leave `trash/` in
+the same pass, so `file_store.used_bytes` does not count them.
+
 ### Folder and glob outputs (#1341)
 
 An output name may be a file, a folder or a glob, so a job never needs to tar

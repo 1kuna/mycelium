@@ -56,6 +56,7 @@ func verifyLocalFirstStore(store *FileStore, save FileCheckpoint) error {
 	if !ok || ref.SizeBytes > 1<<20 {
 		return checkpointRefusal("checkpoint_generation_invalid", "generation manifest missing")
 	}
+	store.restoreMissing(ref.SHA256)
 	data, err := os.ReadFile(store.blob(ref))
 	if err != nil {
 		return err
@@ -74,6 +75,7 @@ func verifyLocalFirstStore(store *FileStore, save FileCheckpoint) error {
 		if name == generationMarker {
 			continue
 		}
+		store.restoreMissing(ref.SHA256)
 		data, err = os.ReadFile(store.blob(ref))
 		if err != nil {
 			return err

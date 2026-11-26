@@ -897,7 +897,13 @@ func TestFileRetentionRetriesRemovalFailure(t *testing.T) {
 	if _, err := os.Stat(q.files.blob(b)); !os.IsNotExist(err) {
 		t.Fatal("one removal failure blocked another candidate", err)
 	}
-	if err := os.Remove(child); err != nil {
+	// The move succeeded; the purge of its unique trash name failed.
+	entries, err := filepath.Glob(filepath.Join(q.files.trashDir(), a.SHA256+".*"))
+	if err != nil || len(entries) != 1 {
+		t.Fatal("failed purge left no trash entry", entries, err)
+	}
+	path = entries[0]
+	if err := os.Remove(filepath.Join(path, "blocked")); err != nil {
 		t.Fatal(err)
 	}
 	// Removing the child changes the directory's mtime using the real clock.

@@ -95,6 +95,7 @@ func (q *Queue) publishCheckpoint(ctx context.Context, p checkpointPublication) 
 			if ref.SizeBytes > 1<<20 {
 				return errors.New("checkpoint JSON metadata exceeds 1 MiB")
 			}
+			q.files.restoreMissing(ref.SHA256)
 			data, err := os.ReadFile(q.files.blob(ref))
 			if err != nil {
 				return err
