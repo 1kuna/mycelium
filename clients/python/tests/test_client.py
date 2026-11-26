@@ -1043,12 +1043,13 @@ class ClientIdentityTests(unittest.TestCase):
                 ("GET", "/api/jobs/job", None, 401, False),
                 ("GET", "/api/jobs/job", None, 302, False)):
             with self.subTest(method=method, path=path, failure=failure, replayed=replayed):
-                client = Client(first + "," + second, "fixture")
+                client = Client(first + "," + second, "fixture", timeout=4)
                 requests = []
 
                 def respond(request, **kwargs):
                     requests.append(request)
                     if request.full_url == first + path:
+                        self.assertLessEqual(request._mycelium_connect_timeout, 2)
                         if failure is None:
                             raise URLError(EndpointConnectError("fixture"))
                         raise HTTPError(request.full_url, failure, "fixture",

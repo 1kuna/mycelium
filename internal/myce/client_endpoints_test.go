@@ -1,13 +1,49 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
+
+func TestMultiEndpointClientReservesDialTimeForFallback(t *testing.T) {
+	const primary, alternate = "https://primary.invalid", "https://alternate.invalid"
+	client, err := NewMultiEndpointClient(primary+","+alternate, proofToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const timeout = 4 * time.Second
+	ctx, cancel := context.WithTimeout(t.Context(), timeout)
+	defer cancel()
+	var calls int
+	client.HTTP.Transport = proofRoundTrip(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if r.URL.Host == "primary.invalid" {
+			budget, ok := r.Context().Value(queueEndpointDialBudget{}).(time.Duration)
+			if !ok || budget <= 0 || budget > timeout/2 {
+				t.Fatalf("first origin dial budget = %v", budget)
+			}
+			return nil, &net.OpError{Op: "dial", Err: os.ErrDeadlineExceeded}
+		}
+		if r.URL.Host != "alternate.invalid" {
+			t.Fatalf("unexpected origin %q", r.URL.Host)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("{}"))}, nil
+	})
+	// This write can fail over only because the error happened during dial.
+	if err := client.Call(ctx, http.MethodPost, "/api/jobs/example/cancel", nil, nil); err != nil || calls != 2 {
+		t.Fatalf("calls=%d, err=%v", calls, err)
+	}
+}
 
 func TestMultiEndpointClientReplayAndIdentity(t *testing.T) {
 	for _, tc := range []struct {

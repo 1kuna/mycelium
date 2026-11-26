@@ -425,8 +425,9 @@ class Client:
             attempt.unredirected_hdrs = request.unredirected_hdrs.copy()
             attempt.remove_header("Host")
             attempt.full_url = self._origins[index] + request.selector
-            attempt._mycelium_bound_connect = True
             remaining = None if end is None else max(0, end - time.monotonic())
+            attempt._mycelium_connect_timeout = (
+                5 if remaining is None else min(5, remaining / (len(self._origins) - offset)))
             try:
                 response = opener(attempt, timeout=remaining)
             except (HTTPError, URLError, OSError) as error:

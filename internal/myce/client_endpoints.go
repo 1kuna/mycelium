@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/http"
@@ -14,6 +15,8 @@ type queueEndpoints struct {
 	origins   []*url.URL
 	preferred atomic.Uint32
 }
+
+type queueEndpointDialBudget struct{}
 
 // NewMultiEndpointClient uses one fleet credential and independently verifies
 // each HTTPS origin with system trust. HTTP is limited to loopback proofs.
@@ -35,8 +38,13 @@ func NewMultiEndpointClient(addresses, token string) (Client, error) {
 	}
 	transport := clientTransport.Clone()
 	// Give a blackholed address the same connect budget used by joining.
-	dialer := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
-	transport.DialContext = dialer.DialContext
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		dialer := net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
+		if budget, ok := ctx.Value(queueEndpointDialBudget{}).(time.Duration); ok {
+			dialer.Timeout = max(time.Nanosecond, min(dialer.Timeout, budget))
+		}
+		return dialer.DialContext(ctx, network, address)
+	}
 	return Client{URL: e.origins[0].String(), Token: token, endpoints: e, HTTP: &http.Client{Transport: transport}}, nil
 }
 
@@ -54,7 +62,14 @@ func (c Client) doQueueRequest(hc *http.Client, req *http.Request, replaySafe bo
 	for offset := 0; ; offset++ {
 		index := (start + offset) % len(e.origins)
 		endpoint := e.origins[index]
-		attempt := req.Clone(req.Context())
+		ctx := req.Context()
+		if end, ok := ctx.Deadline(); ok {
+			// Reserve dialing time for each remaining origin. Once connected,
+			// the request can use the caller's remaining deadline.
+			budget := time.Until(end) / time.Duration(len(e.origins)-offset)
+			ctx = context.WithValue(ctx, queueEndpointDialBudget{}, budget)
+		}
+		attempt := req.Clone(ctx)
 		attempt.URL.Scheme, attempt.URL.Host, attempt.Host = endpoint.Scheme, endpoint.Host, endpoint.Host
 		if offset > 0 && req.GetBody != nil {
 			body, err := req.GetBody()
