@@ -204,6 +204,11 @@ type ServiceConfig struct {
 	Credentials            string    `json:"credentials"`
 	Service                string    `json:"service"`
 	Config                 string    `json:"config"`
+
+	// A queue with a shared authority runs as a shared-queue member. The
+	// password stays in its own private file, never in this config or argv.
+	SharedAuthority             string `json:"shared_authority,omitempty"`
+	SharedAuthorityPasswordFile string `json:"shared_authority_password_file,omitempty"`
 }
 
 // PlanInstall is pure. The command boundary supplies the OS account; omitted
@@ -1038,6 +1043,12 @@ func (c ServiceConfig) Args() []string {
 		for _, v := range [][2]string{{"--project-config", c.ProjectConfig}, {"--host-config", c.HostConfig}, {"--upload-spool-dir", c.UploadSpoolDir}} {
 			if v[1] != "" {
 				args = append(args, v[0], v[1])
+			}
+		}
+		if c.SharedAuthority != "" {
+			args = append(args, "--shared-authority", c.SharedAuthority)
+			if c.SharedAuthorityPasswordFile != "" {
+				args = append(args, "--shared-authority-password-file", c.SharedAuthorityPasswordFile)
 			}
 		}
 		args = append(args, "--upload-spool-bytes", strconv.FormatInt(c.UploadSpoolBytes, 10), "--restart-grace", c.RestartGrace.String(), "--production-infrastructure-retries", strconv.Itoa(c.ProductionInfrastructureRetries), "--production-loss-timeout", c.ProductionLossTimeout.String(), "--deadline-loss-timeout", c.DeadlineLossTimeout.String(), "--experiment-loss-timeout", c.ExperimentLossTimeout.String())

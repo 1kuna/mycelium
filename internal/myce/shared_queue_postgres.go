@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"net"
-	"path/filepath"
+	"net/url"
+	"os"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -16,7 +18,7 @@ var (
 	errSharedTurn               = errors.New("shared queue coordinator turn is unavailable")
 	errSharedHead               = errors.New("shared queue copy does not match the committed sequence")
 	errSharedPostgres           = errors.New("shared queue PostgreSQL authority could not be opened")
-	errSharedPostgresDurability = errors.New("PostgreSQL must enable fsync and full_page_writes for the shared queue proof")
+	errSharedPostgresDurability = errors.New("PostgreSQL must enable fsync and full_page_writes for the shared queue")
 )
 
 type sharedQueueTurn struct {
@@ -52,20 +54,22 @@ CREATE TABLE IF NOT EXISTS myce_changes_v1 (
 );
 `
 
-func openSharedQueueAuthority(ctx context.Context, dsn string) (*sharedQueueAuthority, error) {
+// openSharedQueueAuthority connects to the PostgreSQL authority. The DSN
+// names the server, port, database and user; it may be local or on the LAN.
+// The password comes only from passwordFile, a private regular file, so it is
+// never in argv, the environment or a log. Without an sslmode in the DSN, pgx
+// uses TLS when the server offers it and plaintext otherwise ("prefer").
+func openSharedQueueAuthority(ctx context.Context, dsn, passwordFile string) (*sharedQueueAuthority, error) {
+	if sharedQueueDSNHasPassword(dsn) {
+		return nil, errSharedPostgresDSNPassword
+	}
 	cfg, err := pgx.ParseConfig(dsn)
 	if err != nil {
 		return nil, errors.New("invalid PostgreSQL connection settings")
 	}
-	local := func(host string) bool {
-		return filepath.IsAbs(host) || net.ParseIP(host).IsLoopback()
-	}
-	if !local(cfg.Host) {
-		return nil, errors.New("the shared queue proof requires local PostgreSQL")
-	}
-	for _, fallback := range cfg.Fallbacks {
-		if !local(fallback.Host) {
-			return nil, errors.New("the shared queue proof requires local PostgreSQL")
+	if passwordFile != "" {
+		if cfg.Password, err = readSharedQueuePassword(passwordFile); err != nil {
+			return nil, err
 		}
 	}
 	db := stdlib.OpenDB(*cfg)
@@ -80,6 +84,44 @@ func openSharedQueueAuthority(ctx context.Context, dsn string) (*sharedQueueAuth
 		return nil, errSharedPostgres
 	}
 	return a, nil
+}
+
+var errSharedPostgresDSNPassword = errors.New("put the PostgreSQL password in the password file, not the connection settings")
+
+// sharedQueueDSNHasPassword refuses a password in either DSN form, so a
+// secret never reaches a command line or saved configuration.
+func sharedQueueDSNHasPassword(dsn string) bool {
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		u, err := url.Parse(dsn)
+		if err != nil {
+			return true // Refuse what cannot be inspected.
+		}
+		_, set := u.User.Password()
+		return set || u.Query().Has("password")
+	}
+	return sharedDSNPasswordKey.MatchString(dsn)
+}
+
+var sharedDSNPasswordKey = regexp.MustCompile(`(^|\s)password\s*=`)
+
+func readSharedQueuePassword(path string) (string, error) {
+	private := errors.New("the PostgreSQL password file must be a private regular file (chmod 600) holding one line")
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", errors.New("cannot read the PostgreSQL password file")
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
+		return "", private
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", errors.New("cannot read the PostgreSQL password file")
+	}
+	password := strings.TrimSuffix(strings.TrimSuffix(string(data), "\n"), "\r")
+	if password == "" || strings.ContainsAny(password, "\r\n\x00") {
+		return "", private
+	}
+	return password, nil
 }
 
 func (a *sharedQueueAuthority) initialize(ctx context.Context) error {

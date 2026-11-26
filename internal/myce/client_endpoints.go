@@ -18,8 +18,9 @@ type queueEndpoints struct {
 
 type queueEndpointDialBudget struct{}
 
-// NewMultiEndpointClient uses one fleet credential and independently verifies
-// each HTTPS origin with system trust. HTTP is limited to loopback proofs.
+// NewMultiEndpointClient uses one fleet credential for every origin. HTTPS
+// origins verify with system trust. HTTP origins match the single-endpoint
+// fleet setting, such as members listening on the local network.
 func NewMultiEndpointClient(addresses, token string) (Client, error) {
 	if token == "" {
 		return Client{}, errors.New("queue credential is missing")
@@ -28,8 +29,8 @@ func NewMultiEndpointClient(addresses, token string) (Client, error) {
 	for _, address := range strings.Split(addresses, ",") {
 		u, err := url.Parse(strings.TrimRight(strings.TrimSpace(address), "/"))
 		if err != nil || u.Hostname() == "" || u.User != nil || u.EscapedPath() != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" ||
-			(u.Scheme != "https" && (u.Scheme != "http" || !net.ParseIP(u.Hostname()).IsLoopback())) {
-			return Client{}, errors.New("queue endpoints must be HTTPS origins or loopback HTTP origins")
+			u.Scheme != "https" && u.Scheme != "http" {
+			return Client{}, errors.New("queue endpoints must be HTTP(S) origins without credentials, paths or queries")
 		}
 		e.origins = append(e.origins, u)
 	}

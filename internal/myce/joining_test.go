@@ -145,6 +145,41 @@ func TestJoiningAuthenticatesBeforeSendingCredential(t *testing.T) {
 		t.Fatal("credential leaked to impersonating endpoint")
 	}
 }
+
+// A worker repointed at its own host's member keeps using it, even when
+// discovery lists other members that serve the same fleet identity.
+func TestJoiningPrefersSavedLocalMember(t *testing.T) {
+	identity, err := LoadJoiningIdentity(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := identity.TLS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := func() *httptest.Server {
+		server := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		server.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
+		server.Config.ErrorLog = log.New(io.Discard, "", 0)
+		server.StartTLS()
+		t.Cleanup(server.Close)
+		return server
+	}
+	other, local := member(), member()
+	i := Invitation{Version: 1, Token: "throwaway-test-only", Fingerprint: identity.Fingerprint(), Address: local.URL}
+	d := &fakeDiscovery{addresses: []string{other.URL}}
+	c, err := ResolveJoining(context.Background(), i, "", d)
+	if err != nil || c.URL != local.URL || d.calls != 0 {
+		t.Fatalf("selected %s (discovery calls %d): %v", c.URL, d.calls, err)
+	}
+	c.HTTP.CloseIdleConnections()
+	local.Close()
+	if c, err = ResolveJoining(context.Background(), i, "", d); err != nil || c.URL != other.URL {
+		t.Fatalf("no discovery fallback when the local member is down: %s, %v", c.URL, err)
+	}
+	c.HTTP.CloseIdleConnections()
+}
+
 func TestJoiningFallbackExplicitAndWrongCredential(t *testing.T) {
 	server, i := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer throwaway-test-only" {

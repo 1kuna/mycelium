@@ -34,7 +34,9 @@ var (
 // are the queue's own database, checkpoint root and file store.
 type SharedQueueMigration struct {
 	Postgres, Database, Checkpoints, FileStore string
-	Clock                                      Clock
+	// PostgresPasswordFile is a private file holding the authority password.
+	PostgresPasswordFile string
+	Clock                Clock
 	// Acknowledge accepts exactly the reported set of file problems.
 	Acknowledge string
 	// VerifyOnly opens the database, reports file problems and changes no
@@ -80,7 +82,7 @@ func (cfg SharedQueueMigration) validate() error {
 		return errors.New("shared queue migration requires --db, --checkpoints and --file-store")
 	}
 	if !cfg.VerifyOnly && cfg.Postgres == "" {
-		return errors.New("set MYCE_SHARED_QUEUE_PG_DSN to the PostgreSQL authority")
+		return errors.New("set --shared-authority or MYCE_SHARED_QUEUE_PG_DSN to the PostgreSQL authority")
 	}
 	return nil
 }
@@ -113,7 +115,7 @@ func SharedQueueCutover(ctx context.Context, cfg SharedQueueMigration) (SharedQu
 		out.Files, err = verifySharedFileReferences(ctx, cfg, lock)
 		return out, err
 	}
-	authority, err := openSharedQueueAuthority(ctx, cfg.Postgres)
+	authority, err := openSharedQueueAuthority(ctx, cfg.Postgres, cfg.PostgresPasswordFile)
 	if err != nil {
 		return out, err
 	}
@@ -325,7 +327,7 @@ func SharedQueueRollback(ctx context.Context, cfg SharedQueueMigration) (SharedQ
 				"Never start an older pre-cutover database or backup: it would lose acknowledged shared work", path)
 		}
 	}
-	authority, err := openSharedQueueAuthority(ctx, cfg.Postgres)
+	authority, err := openSharedQueueAuthority(ctx, cfg.Postgres, cfg.PostgresPasswordFile)
 	if err != nil {
 		return out, err
 	}

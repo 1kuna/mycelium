@@ -1644,21 +1644,42 @@ consistent snapshot as ordinary changes, and rollback replays the committed
 changes with the same code every member uses.
 
 ```sh
-myce queue cutover  --db DB --checkpoints CHECKPOINT_ROOT --file-store FILE_STORE [--verify-only] [--acknowledge DIGEST]
-myce queue rollback --db NEW_DB --checkpoints CHECKPOINT_ROOT --file-store FILE_STORE [--acknowledge DIGEST]
+myce queue cutover  --db DB --checkpoints CHECKPOINT_ROOT --file-store FILE_STORE [--verify-only] [--acknowledge DIGEST] AUTHORITY
+myce queue rollback --db NEW_DB --checkpoints CHECKPOINT_ROOT --file-store FILE_STORE [--acknowledge DIGEST] AUTHORITY
 ```
 
-Both read the authority from `MYCE_SHARED_QUEUE_PG_DSN`, which the operator
-sets from the private credential store; never print it. Shared members still
-run only as the loopback laptop proof (`--shared-queue-proof`, local
-PostgreSQL). The live cutover waits for a release that lifts that limit
-and for NAS qualification (#1176). Rehearse first on
-a laptop with PostgreSQL `initdb` and `pg_ctl` on `PATH`:
+`AUTHORITY` is `--shared-authority DSN --shared-authority-password-file
+PASSWORD_FILE`. Both commands and every member use the same pair. Cutover and
+rollback also read the DSN from `MYCE_SHARED_QUEUE_PG_DSN`.
+
+- **DSN.** Use `host=DB_HOST port=DB_PORT dbname=DB_NAME user=DB_USER`. The
+  host can be a local socket or a LAN address. A DSN that contains a
+  password is refused.
+- **Password file.** It holds the database password on one line and must be a
+  private regular file (`chmod 600`). Write it from the private credential
+  store without displaying it. The password never appears in argv, the
+  environment, logs or status output, so jobs cannot inherit it.
+- **TLS.** With no `sslmode`, the connection uses TLS when the server offers it
+  and plaintext when it doesn't. It does not verify the server certificate.
+  To require verified TLS, add `sslmode=verify-full sslrootcert=CA_FILE`.
+- **Durability.** Members and both commands refuse a server without `fsync` and
+  `full_page_writes`. Members also enforce the identity and coordinator-turn
+  checks against a remote server.
+
+Live cutover waits for NAS qualification (#1176). Rehearse first on a laptop
+with PostgreSQL `initdb` and `pg_ctl` on `PATH`:
 
 ```sh
 MYCE_GATE_REQUIRE_POSTGRES=1 go test ./internal/myce -count=1 \
-  -run 'TestSharedQueueCutoverAndRollbackRehearsal|TestSharedQueueCutoverVerifiesFileBytes'
+  -run 'TestSharedQueueCutoverAndRollbackRehearsal|TestSharedQueueCutoverVerifiesFileBytes|TestSharedQueueMemberServiceRemoteAuthority'
 ```
+
+`TestSharedQueueMemberServiceRemoteAuthority` runs the installed command
+line of two members against a cluster that listens only on the laptop's LAN
+address. The cluster uses scram-sha-256, a password file and TLS. Members
+wait for cutover, forward over the LAN and take over after the coordinator
+is killed. The test also checks that the password never reaches argv, the
+environment, logs or a job.
 
 The rehearsal cuts over a single queue running a real CPU attempt, kills the
 original queue process, then proves submit, assignment, wait, cancel,
@@ -1679,6 +1700,45 @@ same attempt keeps its number, session and start time across both switches.
 - [Preserve one complete generation](#preserve-one-complete-generation). The
   commands do not move the joining identity, configuration, model catalog or
   the per-host idle history beside the database.
+- [Install the members](#install-the-members) before the cutover. They wait,
+  so they can be installed while the single queue still serves.
+
+### Install the members
+
+Run a member on every host that runs a worker, plus any other host that
+should be able to coordinate. A member is the ordinary queue service with a
+shared authority. It uses the same signed-release upgrade path and keeps its
+settings across reinstalls.
+
+1. Upgrade the host to a release with shared members.
+2. Write the password file, mode 600.
+3. If workers or clients use joining files, copy the original queue's joining
+   identity directory privately to the member's identity directory before its
+   first start. By default this is the member's `DB.joining`. Every member
+   then serves the same pinned TLS identity, so existing invitations verify.
+   A member without the copy creates its own identity, and joining clients
+   refuse to use it.
+4. Install the queue service. `--queue` is this member's own address, which
+   the other members use to reach it while it coordinates:
+
+   ```sh
+   myce install queue --nas NAS_PATH --listen 0.0.0.0:7331 --queue http://MEMBER_ADDRESS:7331 \
+     --shared-authority 'host=DB_HOST port=DB_PORT dbname=DB_NAME user=DB_USER' \
+     --shared-authority-password-file PASSWORD_FILE --dry-run
+   ```
+
+   Check that the `Command:` line ends with the shared authority, then run it
+   again without `--dry-run`. Use the same `--nas`, `--checkpoints` and file
+   store as the single queue. A reinstall without these options keeps them.
+   `--shared-authority ''` returns the service to a single queue.
+
+   On the original queue host, install the member only after the cutover,
+   with the same `--db`. The fenced database is that member's copy. On every
+   other host, use the default new database.
+
+A member started before cutover waits. It never takes an empty authority,
+so the cutover can still import. Until a member coordinates, every request
+returns 503.
 
 ### Preflight without downtime
 
@@ -1734,13 +1794,48 @@ again. Never delete a reference or a file to make the report clean.
 3. The original database is now fenced. Single-queue startup refuses it with
    `this database is a shared queue copy or was cut over to the shared queue`.
    It stays a valid member copy at sequence K. Keep it; do not delete it.
-4. Start the members with the same file store and checkpoint root, each with
-   its own new local database. The first one replays changes 1..K, takes the
-   coordinator turn and serves. Check that `myce status` through a member shows
-   the expected jobs and that running jobs keep their attempt, session and start
-   time. Point each worker at its local member and give external clients the
-   member endpoints ([client failover](development.md#external-client-failover)).
-   In the rehearsal, the first member listens on the original queue's address.
+4. The installed members replay changes 1..K. One takes the coordinator turn
+   and serves; the others forward to it. Install the original host's member
+   now (see [Install the members](#install-the-members)). Check that `myce
+   status` through a member shows the expected jobs, and that running jobs
+   keep their attempt, session and start time. In the rehearsal, the first
+   member listens on the original queue's address.
+5. Point each worker at the member on its own host. A worker switches
+   protocol by itself but reads its endpoint only at start, so this takes
+   one worker restart, done as for an [upgrade](#install-and-upgrade).
+   - A worker installed with a fleet environment file: set that host's
+     `MYCE_QUEUE=http://127.0.0.1:7331`.
+   - A worker installed with a joining file: run `myce install worker --config
+     WORKER_CONFIG --queue https://127.0.0.1:JOINING_PORT`. This repair verifies
+     the local member against the saved pin. A saved loopback address is tried
+     before discovery.
+6. On client-only hosts, with no member and no worker, set the fleet
+   environment's `MYCE_QUEUE` to the comma-separated member list. A worker
+   reads the same setting and needs one endpoint, its local member. For example
+   `http://MEMBER_A:7331,http://MEMBER_B:7331`. The installed `myce` and the
+   Python `Client.from_installed()` then fail over between members with no
+   other change ([client failover](development.md#external-client-failover)).
+   A joining-file client keeps one pinned address.
+
+### Prove the queue with the original host offline
+
+Do this before taking the original host down for maintenance.
+
+1. Stop the original host's member, or shut the host down. Within one turn
+   lease, about 6 s, another member takes over. Running jobs on other hosts
+   keep going.
+2. From a host other than the original, prove submit, assignment, wait,
+   cancel, checkpoint resume and verified fetch. For example, run `myce run
+   --key cutover-proof --out DIR -- ...` for a CPU job and check its output.
+   Then submit and cancel a second job, and run a resumable job through one
+   yield and resume.
+3. Exercise a planned handover by stopping the current coordinator's service.
+   Exercise a crash by killing the coordinator process. After each, check that
+   `myce status` answers through the remaining members and that running jobs
+   keep their attempt and session.
+4. **Abort point:** if no member coordinates within a minute, check each
+   member's log for `event=shared_queue_promotion_failed reason=...`. To return
+   to the single queue, use [Roll back](#roll-back).
 
 ### Roll back
 
@@ -1766,7 +1861,8 @@ again. Never delete a reference or a file to make the report clean.
      Fix the bytes or acknowledge the digest, then rerun. A rerun keeps the
      fence and replays again.
 2. Stop the members. Start the single queue on `NEW_DB` with the preserved
-   identity, configuration, file store and checkpoint root. Workers switch back
+   identity, configuration, file store and checkpoint root. For an installed
+   queue, reinstall with `--shared-authority '' --db NEW_DB`. Workers switch back
    on their own. Verify jobs, running attempts and worker reconnection before
    resuming submissions.
 3. **Never start the pre-cutover database or a backup older than the last

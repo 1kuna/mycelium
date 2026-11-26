@@ -19,12 +19,28 @@ import (
 	"time"
 )
 
-// SharedQueueProofConfig opts into an isolated laptop experiment. Each member
-// needs its own local SQLite path and all members use the same disposable file
-// store, PostgreSQL database and test token. The bound listener is loopback.
-type SharedQueueProofConfig struct {
+// SharedQueueMemberConfig runs one member of the shared queue. Each member
+// has its own local SQLite copy and uses the same PostgreSQL authority, file
+// store, checkpoint root and fleet token as every other member.
+type SharedQueueMemberConfig struct {
 	Postgres, Database, Checkpoints, FileStore, Token string
-	Clock                                             Clock
+	// PostgresPasswordFile is a private file holding the authority password.
+	PostgresPasswordFile string
+	Clock                Clock
+	// Endpoint is the address other members forward to while this member
+	// coordinates. It must be reachable from every member.
+	Endpoint string
+	// FileStoreBytes limits the shared file store (default 100 GiB).
+	FileStoreBytes   int64
+	UploadSpoolDir   string
+	UploadSpoolBytes int64
+	// Options and Configure apply the installed queue settings to the queue
+	// each coordinator turn opens. Configure runs before the turn is routable.
+	Options   []QueueOption
+	Configure func(context.Context, *Queue) error
+	// AwaitImport leaves an empty authority untouched so that
+	// myce queue cutover can import the single queue first.
+	AwaitImport bool
 
 	// Fixtures may shorten the turn and route through a partitionable link.
 	lease, interval time.Duration
@@ -33,8 +49,12 @@ type SharedQueueProofConfig struct {
 	verifyBundles func(context.Context, *FileStore, map[FileRef]bool) error
 }
 
+// SharedQueueMember serves the queue API on behalf of whichever member holds
+// the coordinator turn. Create it with OpenSharedQueueMember.
+type SharedQueueMember = sharedQueueMember
+
 type sharedQueueMember struct {
-	cfg       SharedQueueProofConfig
+	cfg       SharedQueueMemberConfig
 	authority *sharedQueueAuthority
 	replica   *sql.DB
 	lock      *os.File
@@ -42,6 +62,7 @@ type sharedQueueMember struct {
 	endpoint  string
 	sequence  int64 // Member loop only.
 	timeout   time.Duration
+	closeIdle func()
 
 	spool     *uploadSpool // Owned by the member across all coordinator turns.
 	fileSetup sync.Mutex   // One outstanding setup even if the mount hangs across turns.
@@ -58,63 +79,19 @@ type sharedQueueLeader struct {
 	tickDone chan struct{}
 }
 
-func ServeSharedQueueProof(ctx context.Context, listener net.Listener, cfg SharedQueueProofConfig) error {
+// ServeSharedQueueProof runs a member on a loopback listener for the laptop
+// proof. Production members use OpenSharedQueueMember.
+func ServeSharedQueueProof(ctx context.Context, listener net.Listener, cfg SharedQueueMemberConfig) error {
 	addr, ok := listener.Addr().(*net.TCPAddr)
 	if !ok || !addr.IP.IsLoopback() {
 		return errors.New("the shared queue proof requires a loopback listener")
 	}
-	if cfg.Postgres == "" || cfg.Database == "" || cfg.Checkpoints == "" || cfg.FileStore == "" || cfg.Token == "" || cfg.Clock == nil {
-		return errors.New("the shared queue proof requires PostgreSQL, a local database, disposable storage, a test token and a clock")
-	}
-	if cfg.interval == 0 {
-		cfg.interval = time.Second
-	}
-	if cfg.lease == 0 {
-		cfg.lease = 6 * time.Second
-	}
-	if cfg.lease < 3*cfg.interval || cfg.interval <= 0 {
-		return errors.New("the shared queue turn must span at least three renewal intervals")
-	}
-	if cfg.verifyBundles == nil {
-		cfg.verifyBundles = verifyFrozenBundleFiles
-	}
-	if cfg.peerTransport == nil {
-		transport := &http.Transport{} // Direct connections to loopback peers.
-		defer transport.CloseIdleConnections()
-		cfg.peerTransport = transport
-	}
-	if err := PrepareStateRoots(filepath.Dir(cfg.Database), cfg.Database+".uploads"); err != nil {
-		return err
-	}
-	lock, err := lockQueueDatabase(cfg.Database)
+	cfg.Endpoint = "http://" + addr.String()
+	m, err := OpenSharedQueueMember(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
-	initCtx, cancel := context.WithTimeout(ctx, cfg.lease)
-	authority, err := openSharedQueueAuthority(initCtx, cfg.Postgres)
-	cancel()
-	if err != nil {
-		return err
-	}
-	defer authority.db.Close()
-	replica, err := openQueueSQLite(cfg.Database)
-	if err != nil {
-		return err
-	}
-	defer replica.Close()
-	m := &sharedQueueMember{
-		cfg: cfg, authority: authority, replica: replica, lock: lock, owner: ID(),
-		endpoint: "http://" + addr.String(), timeout: cfg.lease / 3,
-	}
-	defer func() {
-		if m.spool != nil {
-			_ = m.spool.lock.Close()
-		}
-	}()
-	if err := m.bindReplica(ctx); err != nil {
-		return err
-	}
+	defer m.Close()
 	server := &http.Server{Handler: m, ConnContext: QueueConnectionContext, ReadHeaderTimeout: 5 * time.Second}
 	serverDone := make(chan error, 1)
 	go func() { serverDone <- server.Serve(listener) }()
@@ -122,7 +99,7 @@ func ServeSharedQueueProof(ctx context.Context, listener net.Listener, cfg Share
 	loopDone := make(chan struct{})
 	go func() {
 		defer close(loopDone)
-		m.run(loopCtx)
+		m.Run(loopCtx)
 	}()
 	select {
 	case err = <-serverDone:
@@ -136,6 +113,95 @@ func ServeSharedQueueProof(ctx context.Context, listener net.Listener, cfg Share
 		return nil
 	}
 	return err
+}
+
+// validSharedEndpoint accepts an HTTP(S) origin that another member can dial.
+func validSharedEndpoint(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Hostname() == "" || u.User != nil ||
+		u.EscapedPath() != "" && u.EscapedPath() != "/" || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	ip := net.ParseIP(u.Hostname())
+	return ip == nil || !ip.IsUnspecified()
+}
+
+// OpenSharedQueueMember opens the authority and the member's own SQLite copy.
+// Serve it as an http.Handler and call Run; call Close after Run returns.
+func OpenSharedQueueMember(ctx context.Context, cfg SharedQueueMemberConfig) (*SharedQueueMember, error) {
+	if cfg.Postgres == "" || cfg.Database == "" || cfg.Checkpoints == "" || cfg.FileStore == "" || cfg.Token == "" || cfg.Clock == nil {
+		return nil, errors.New("a shared queue member requires PostgreSQL, a local database, a checkpoint root, a file store, the fleet token and a clock")
+	}
+	if !validSharedEndpoint(cfg.Endpoint) {
+		return nil, errors.New("a shared queue member requires an HTTP(S) endpoint that other members can reach")
+	}
+	if cfg.interval == 0 {
+		cfg.interval = time.Second
+	}
+	if cfg.lease == 0 {
+		cfg.lease = 6 * time.Second
+	}
+	if cfg.lease < 3*cfg.interval || cfg.interval <= 0 {
+		return nil, errors.New("the shared queue turn must span at least three renewal intervals")
+	}
+	if cfg.FileStoreBytes == 0 {
+		cfg.FileStoreBytes = 100 << 30
+	}
+	if cfg.UploadSpoolBytes == 0 {
+		cfg.UploadSpoolBytes = DefaultUploadSpoolBytes
+	}
+	if cfg.verifyBundles == nil {
+		cfg.verifyBundles = verifyFrozenBundleFiles
+	}
+	closeIdle := func() {}
+	if cfg.peerTransport == nil {
+		// Direct connections to members, with the joining connect budget so a
+		// powered-off coordinator host fails a forward quickly.
+		transport := &http.Transport{DialContext: (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext}
+		closeIdle = transport.CloseIdleConnections
+		cfg.peerTransport = transport
+	}
+	if err := PrepareStateRoots(filepath.Dir(cfg.Database), cfg.Database+".uploads"); err != nil {
+		return nil, err
+	}
+	lock, err := lockQueueDatabase(cfg.Database)
+	if err != nil {
+		return nil, err
+	}
+	initCtx, cancel := context.WithTimeout(ctx, cfg.lease)
+	authority, err := openSharedQueueAuthority(initCtx, cfg.Postgres, cfg.PostgresPasswordFile)
+	cancel()
+	if err != nil {
+		lock.Close()
+		return nil, err
+	}
+	replica, err := openQueueSQLite(cfg.Database)
+	if err != nil {
+		authority.db.Close()
+		lock.Close()
+		return nil, err
+	}
+	m := &sharedQueueMember{
+		cfg: cfg, authority: authority, replica: replica, lock: lock, owner: ID(),
+		endpoint: strings.TrimRight(cfg.Endpoint, "/"), timeout: cfg.lease / 3, closeIdle: closeIdle,
+	}
+	if err := m.bindReplica(ctx); err != nil {
+		m.Close()
+		return nil, err
+	}
+	return m, nil
+}
+
+// Run takes and renews the coordinator turn until ctx ends, then retires.
+func (m *sharedQueueMember) Run(ctx context.Context) { m.run(ctx) }
+
+// Close releases the member's database handles and locks after Run returns.
+func (m *sharedQueueMember) Close() error {
+	m.closeIdle()
+	if m.spool != nil {
+		_ = m.spool.lock.Close()
+	}
+	return errors.Join(m.replica.Close(), m.authority.db.Close(), m.lock.Close())
 }
 
 func (m *sharedQueueMember) bindReplica(ctx context.Context) error {
@@ -207,7 +273,7 @@ func (m *sharedQueueMember) step(ctx context.Context) {
 		return
 	}
 	t, err := m.current(ctx)
-	if err != nil || m.pull(ctx, t.head) != nil || t.ready {
+	if err != nil || m.pull(ctx, t.head) != nil || t.ready || m.cfg.AwaitImport && t.number == 0 && t.head == 0 {
 		return
 	}
 	call, cancel := context.WithTimeout(ctx, m.timeout)
@@ -254,6 +320,7 @@ const (
 	promotionSpool  sharedPromotionFailure = "local_upload_spool"
 	promotionQueue  sharedPromotionFailure = "local_queue_startup"
 	promotionTurn   sharedPromotionFailure = "coordinator_turn"
+	promotionConfig sharedPromotionFailure = "queue_settings"
 	promotionDB     sharedPromotionFailure = "postgresql_renewal"
 )
 
@@ -266,14 +333,22 @@ func (m *sharedQueueMember) promote(ctx context.Context, turn sharedQueueTurn) s
 	}
 	if m.spool == nil {
 		spool := &uploadSpool{defaultDir: m.cfg.Database + ".uploads"}
-		if err := spool.configure("", DefaultUploadSpoolBytes); err != nil {
+		if err := spool.configure(m.cfg.UploadSpoolDir, m.cfg.UploadSpoolBytes); err != nil {
 			return promotionSpool
 		}
 		m.spool = spool
 	}
+	// Opening a large copy and applying settings can outlast one lease.
+	// Keep the turn, still unroutable, until the queue is ready to serve.
+	hold, stopHold := context.WithCancel(ctx)
+	held := make(chan error, 1)
+	go func() { held <- m.holdTurn(hold, turn) }()
 	writer := &sharedQueueWriter{authority: m.authority, turn: turn, sequence: turn.head, timeout: m.timeout, spool: m.spool}
-	q, err := openQueue(m.cfg.Database, m.cfg.Checkpoints, m.cfg.Clock, writer, m.lock, WithFileStore(m.cfg.FileStore, 100<<30, true))
+	options := append([]QueueOption{WithFileStore(m.cfg.FileStore, m.cfg.FileStoreBytes, true)}, m.cfg.Options...)
+	q, err := openQueue(m.cfg.Database, m.cfg.Checkpoints, m.cfg.Clock, writer, m.lock, options...)
 	if err != nil {
+		stopHold()
+		<-held
 		// Startup may already have committed a projection before failing.
 		// Reload the atomic SQLite cursor before trying another promotion.
 		m.readCursor()
@@ -285,16 +360,31 @@ func (m *sharedQueueMember) promote(ctx context.Context, turn sharedQueueTurn) s
 		}
 		return promotionQueue
 	}
-	if err := m.renew(ctx, turn, m.cfg.lease, true); err != nil {
+	tickCtx, stop := context.WithCancel(ctx)
+	failed := func(reason sharedPromotionFailure) sharedPromotionFailure {
+		stop()
 		writer.disabled.Store(true)
 		_ = q.Close()
 		m.readCursor()
-		if errors.Is(err, errSharedTurn) {
-			return promotionTurn
-		}
-		return promotionDB
+		return reason
 	}
-	tickCtx, stop := context.WithCancel(ctx)
+	if m.cfg.Configure != nil {
+		if err := m.cfg.Configure(tickCtx, q); err != nil {
+			stopHold()
+			<-held
+			return failed(promotionConfig)
+		}
+	}
+	stopHold()
+	if err := <-held; err != nil {
+		return failed(promotionTurn)
+	}
+	if err := m.renew(ctx, turn, m.cfg.lease, true); err != nil {
+		if errors.Is(err, errSharedTurn) {
+			return failed(promotionTurn)
+		}
+		return failed(promotionDB)
+	}
 	l := &sharedQueueLeader{writer: writer, queue: q, api: API{Queue: q, Token: m.cfg.Token}.Handler(), stopTick: stop, tickDone: make(chan struct{})}
 	m.mu.Lock()
 	m.leader = l
@@ -302,18 +392,34 @@ func (m *sharedQueueMember) promote(ctx context.Context, turn sharedQueueTurn) s
 	go m.prepareStorage(tickCtx, q)
 	go func() {
 		defer close(l.tickDone)
-		tick := time.NewTicker(time.Second)
-		defer tick.Stop()
-		for {
-			select {
-			case <-tickCtx.Done():
-				return
-			case <-tick.C:
-				_ = q.TickContext(tickCtx)
-			}
+		// The same maintenance loop as a single queue. A failed tick ends
+		// this turn; the member loop retires it and may promote again.
+		if err := q.Run(tickCtx); err != nil && tickCtx.Err() == nil {
+			log.Printf("event=shared_queue_maintenance_failed")
+			writer.disabled.Store(true)
 		}
 	}()
 	return ""
+}
+
+// holdTurn renews an unroutable turn until ctx ends. It reports a lost turn
+// or a renewal failure; the caller then gives up this promotion.
+func (m *sharedQueueMember) holdTurn(ctx context.Context, turn sharedQueueTurn) error {
+	tick := time.NewTicker(m.cfg.interval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-tick.C:
+		}
+		if err := m.renew(ctx, turn, m.cfg.lease, false); err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+	}
 }
 
 func (m *sharedQueueMember) prepareStorage(ctx context.Context, q *Queue) {
@@ -340,7 +446,8 @@ func (m *sharedQueueMember) prepareStorageOnce(ctx context.Context, q *Queue) *F
 	q.mu.RLock()
 	controlFiles := q.controlStorageFiles()
 	q.mu.RUnlock()
-	store, err := q.prepareFileStore(m.cfg.FileStore, 100<<30, 0, controlFiles)
+	reserve := max(q.fileStoreProductionReserve, 0) // Fixed by startup options.
+	store, err := q.prepareFileStore(m.cfg.FileStore, m.cfg.FileStoreBytes, uint64(reserve), controlFiles)
 	if err != nil || ctx.Err() != nil {
 		return nil
 	}
@@ -554,8 +661,7 @@ func (m *sharedQueueMember) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (m *sharedQueueMember) forward(w http.ResponseWriter, r *http.Request, turn sharedQueueTurn) {
 	target, err := url.Parse(turn.endpoint)
-	if err != nil || target.Scheme != "http" || !net.ParseIP(target.Hostname()).IsLoopback() ||
-		target.Host == r.Host || r.Header.Get(sharedProxyHeader) != "" {
+	if err != nil || !validSharedEndpoint(turn.endpoint) || turn.endpoint == m.endpoint || r.Header.Get(sharedProxyHeader) != "" {
 		respond(w, nil, queueStopping())
 		return
 	}

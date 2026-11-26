@@ -11,7 +11,9 @@ use the existing installed authority. For a missing CLI, start with
 [Setup](setup-project.md#find-the-installed-cli). Send authority refusals to the
 installation owner with the typed reason.
 
-For a shared-queue endpoint list provisioned by the installation owner, use the
+With a shared queue, installed `myce` and `Client.from_installed()` read the
+member list from the installation and fail over on their own. For a list
+provisioned another way, use the
 [external client failover settings](https://github.com/1kuna/mycelium/blob/main/docs/development.md#external-client-failover)
 with the fleet credential.
 

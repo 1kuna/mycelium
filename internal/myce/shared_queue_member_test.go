@@ -51,7 +51,7 @@ func TestSharedQueueProofProcess(t *testing.T) {
 	fmt.Println(l.Addr().String())
 	ctx, cancel := signal.NotifyContext(t.Context(), syscall.SIGTERM)
 	defer cancel()
-	err = ServeSharedQueueProof(ctx, l, SharedQueueProofConfig{
+	err = ServeSharedQueueProof(ctx, l, SharedQueueMemberConfig{
 		Database: path, Postgres: os.Getenv("MYCE_SHARED_PROOF_POSTGRES"),
 		FileStore: filepath.Join(dir, "files"), Checkpoints: filepath.Join(dir, "checkpoints"), Token: proofToken, Clock: proofClock(),
 		interval: 100 * time.Millisecond, lease: proofMemberLease,

@@ -32,7 +32,8 @@ client.cancel(job["id"])
 ```
 
 For several members of one shared queue, pass their comma-separated origins as
-`MYCE_QUEUE` or as the first argument to `Client(...)`. See
+`MYCE_QUEUE` or as the first argument to `Client(...)`. `Client.from_installed()`
+reads the same list from the installation's fleet environment file. See
 [endpoint failover](../../docs/development.md#external-client-failover) for
 credential, TLS and retry behavior.
 

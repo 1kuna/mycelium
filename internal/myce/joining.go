@@ -144,6 +144,16 @@ func ResolveJoining(ctx context.Context, i Invitation, explicit string, d Discov
 		}
 		return c, err
 	}
+	if u, err := url.Parse(i.Address); err == nil && net.ParseIP(u.Hostname()).IsLoopback() {
+		// A saved loopback address names this host's own shared-queue member,
+		// which forwards to whichever member coordinates. Prefer it.
+		attempt, cancel := context.WithTimeout(ctx, 5*time.Second)
+		c, err := verifiedJoining(attempt, i, i.Address)
+		cancel()
+		if err == nil {
+			return c, nil
+		}
+	}
 	addresses, browseErr := d.Browse(ctx)
 	failures := []string{}
 	if browseErr != nil {

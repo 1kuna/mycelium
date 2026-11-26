@@ -313,10 +313,20 @@ func TestSharedQueuePostgresStartupErrorSanitized(t *testing.T) {
 	defer cancel()
 	const role, database, password = "fixture_role", "fixture_database", "fixture_password"
 	target := t.TempDir() // no PostgreSQL socket exists here
-	dsn := "host=" + strconv.Quote(target) + " dbname=" + database + " user=" + role + " password=" + password + " sslmode=disable"
+	dsn := "host=" + strconv.Quote(target) + " dbname=" + database + " user=" + role + " sslmode=disable"
 	// A quoted Unix-socket path in the pgx keyword format uses single quotes.
 	dsn = strings.ReplaceAll(dsn, `"`, "'")
-	_, err := openSharedQueueAuthority(ctx, dsn)
+	secret := filepath.Join(t.TempDir(), "pg-password")
+	if err := os.WriteFile(secret, []byte(password+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// The password belongs only in the private file.
+	for _, inline := range []string{dsn + " password=" + password, "postgres://" + role + ":" + password + "@db.invalid/" + database, "postgres://" + role + "@db.invalid/" + database + "?password=" + password} {
+		if _, err := openSharedQueueAuthority(ctx, inline, ""); !errors.Is(err, errSharedPostgresDSNPassword) {
+			t.Fatalf("inline password accepted: %v", err)
+		}
+	}
+	_, err := openSharedQueueAuthority(ctx, dsn, secret)
 	for _, detail := range []string{target, database, role, password} {
 		if strings.Contains(fmt.Sprint(err), detail) {
 			t.Fatal("PostgreSQL startup error contains connection details")

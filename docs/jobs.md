@@ -502,6 +502,8 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `queue --upload-spool-bytes` | `17179869184` | Positive total held model-upload bytes (16 GiB); full budget returns HTTP 507 |
 | `queue --upload-spool-dir` | OS temporary directory | Local model-upload spool location; files removed after completion/abort |
 | `queue --db` | `myce.db` | Durable local SQLite file; one queue owner |
+| `queue --shared-authority` | empty | PostgreSQL DSN without a password; runs the queue as a [shared-queue member](operations.md#install-the-members) |
+| `queue --shared-authority-password-file` | empty | Private file (mode 600) holding the authority password |
 | `queue --checkpoints` | `./checkpoints` | Shared root; create on mounted NAS first |
 | `queue --restart-grace` | `3m` | Worker reconciliation after queue restart |
 | `queue --production-infrastructure-retries` | `2` | Maximum production infrastructure requeues (clamped to 2; zero disables) |

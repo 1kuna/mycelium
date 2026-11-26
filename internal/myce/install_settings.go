@@ -187,6 +187,14 @@ func InstallSettings() []InstallSetting {
 			_, _, err := net.SplitHostPort(v)
 			return err
 		}),
+		// Rendered only for a queue service, and the password file only with an authority.
+		installSetting("shared-authority", "SharedAuthority", "queue: run as a shared-queue member of this PostgreSQL authority DSN (no password; empty returns to the single queue)", func(c *ServiceConfig) *string { return &c.SharedAuthority }, func(v string) error {
+			if strings.ContainsAny(v, "\x00\n\r") || sharedQueueDSNHasPassword(v) {
+				return errors.New("must be one line without a password; use --shared-authority-password-file")
+			}
+			return nil
+		}),
+		installPath("shared-authority-password-file", "SharedAuthorityPasswordFile", "queue: private file (chmod 600) holding the shared authority password", func(c *ServiceConfig) *string { return &c.SharedAuthorityPasswordFile }, false),
 		installSetting("name", "Name", "stable worker name", func(c *ServiceConfig) *string { return &c.Name }, installName),
 		installContext(installSetting("gpu", "Detection.Platform", "GPU platform override", func(c *ServiceConfig) *string { return &c.Detection.Platform }, installAny[string]), func(c ServiceConfig) error {
 			if c.Role == "worker" && !validGPU(c.Detection.Platform) {

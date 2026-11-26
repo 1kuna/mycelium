@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -218,5 +219,49 @@ func TestOwnerWritesInstalledQueueEnvironment(t *testing.T) {
 		if err := os.Remove(config); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// A host's fleet environment can list the shared queue members; installed
+// clients fail over between them with the installed credential.
+func TestInstalledFleetEnvironmentListsMembers(t *testing.T) {
+	t.Setenv("MYCE_DEV_SESSION_ROOT", "")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer member-fixture" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprint(w, `{}`)
+	}))
+	defer server.Close()
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	offline := "http://" + closed.Addr().String()
+	closed.Close() // A powered-off member refuses the connection.
+	dir := t.TempDir()
+	credentials := filepath.Join(dir, "fleet.env")
+	if err := os.WriteFile(credentials, []byte("MYCE_TOKEN=member-fixture\nMYCE_QUEUE="+offline+","+server.URL+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(dir, "config.json")
+	data, _ := json.Marshal(myce.ServiceConfig{Role: "worker", EnvironmentFile: credentials})
+	if err := os.WriteFile(config, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := runClient(config, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Call(t.Context(), http.MethodGet, "/api/ping", nil, nil); err != nil {
+		t.Fatalf("installed client did not fail over to the live member: %v", err)
+	}
+	invitation := filepath.Join(dir, "invitation.json")
+	if err := myce.WriteInvitation(invitation, myce.Invitation{Version: 1, Fingerprint: strings.Repeat("0", 64), Token: "member-fixture"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runClient("", invitation, "https://first.invalid,https://second.invalid", ""); err == nil {
+		t.Fatal("a pinned joining authority accepted an endpoint list")
 	}
 }

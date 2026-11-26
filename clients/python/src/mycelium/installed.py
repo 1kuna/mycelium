@@ -87,7 +87,7 @@ def installed_authority(config=None):
             raise ValueError("invalid installed joining authority")
         from urllib.parse import urlsplit
         parsed = urlsplit(address or "")
-        if parsed.scheme != "https" or parsed.path not in {"", "/"}:
+        if "," in (address or "") or parsed.scheme != "https" or parsed.path not in {"", "/"}:
             raise ValueError("installed joining authority requires an HTTPS queue origin")
         handlers.append(_pinned_handler(pin))
     else:
