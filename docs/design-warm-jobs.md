@@ -498,7 +498,10 @@ fan_out:
 5. **Staging.** A delivery names the binding's immutable references. The
    worker downloads and verifies them into the item's folder before `start`,
    through ordinary transport and outside `q.mu`. Retention and claims
-   count them as dependency inputs.
+   count them as dependency inputs. An attempt receives only the files its
+   own pieces declare, never a producer's other outputs. The worker removes
+   an item's staged inputs when its receipt is acknowledged, and removes all
+   attempt scratch at attempt end under ordinary cleanup.
 6. **Idle bound.** When no key is ready, `next` returns `wait`. The queue
    decides this on the injected Clock. The attempt keeps its reservation
    while two things hold: the idle time since the last settle is under the
@@ -511,17 +514,23 @@ fan_out:
    (MY-34).
 
 **Consumer pattern.** Submit one warm parent per stage per group of items.
+The consumer confirmed this fits all four of its stages, with groups of 8–10
+recordings, and gates adoption on byte-identical output against one-shot runs
+of public parity fixtures.
 A first stage's inputs must be uploaded before submission, so it submits a
 group as each set of uploads completes, and each group pays one load.
 A downstream parent names each item's upstream piece or job, and is
 submitted once those producers exist. Matching the group boundaries
 across stages keeps that order free.
 
-### C. In-engine parallel slots (proposed, measure first)
+### C. In-engine parallel slots (designed only, not planned)
 
 Two LLM-stage processes on one GPU measured 302 s each when overlapped,
 against 139 s solo, so separate processes add nothing. A second lane there
-has to come from one engine serving concurrent requests.
+has to come from one engine serving concurrent requests. The consumer then
+measured two slots in its naming engine on that GPU. Throughput fell 2.45%
+and label agreement got worse: that stage is GPU-bound. Slice C stays
+designed only, for an engine that shows a measured gain.
 
 - An opt-in `advanced.warm_slots: N` (2–8) lets the helper keep up to `k`
   deliveries outstanding. Each has its own sequence, output folder and
@@ -534,8 +543,8 @@ has to come from one engine serving concurrent requests.
   increment, taken from peaks observed at that `k`. Without evidence for
   `k+1`, the queue doesn't offer it. In fixed mode the charge changes only
   at a new attempt. Growing within an attempt waits for stage 2 (#2086).
-- Before building it, run a canary measuring items per hour at `k` = 1, 2
-  and 4 on the target engine.
+- Build it only for an engine whose canary shows higher items per hour at
+  `k` = 2 than at 1, with output parity.
 
 ### Slices and expected gain
 
@@ -543,7 +552,7 @@ has to come from one engine serving concurrent requests.
 | --- | --- | --- | --- |
 | A, built | Extension stages with sidecars, no dependencies | A first stage, or any stage whose inputs exist at submission | Up to about 45 s per additional item on that stage's lane (15.6 s assignment to command, at most 29 s fixed time). Small makespan effect while the CUDA lane bounds the batch. |
 | B | Per-item `after`, ready-order delivery, idle bound | Every model stage | 40–55 min of wall time in the #2187 replay |
-| C | In-engine slots | Engines with continuous batching | Unmeasured. About 90 min in the replay, if it yields a second effective lane |
+| C | In-engine slots | Engines with a measured slot gain | None for the consumer's naming stage: two slots measured 2.45% lower throughput |
 
 The smallest change that delivers most of the 40–55 min is A and B
 together. A is the bounded prerequisite, and B is next after review.
@@ -553,8 +562,8 @@ together. A is the bounded prerequisite, and B is next after review.
 1. Approve B: frozen membership, per-piece `after`, delivery in ready order,
    and the measured idle bound? Recommended. It reuses the dependency and
    receipt records and adds no live append.
-2. Approve C as an opt-in gated on measured aggregate throughput?
-   Recommended only after the canary measurement.
+2. Keep C designed only? Recommended. The one measured engine lost
+   throughput with two slots, and no other consumer has asked for it.
 3. Should a variant declare warm support, so the queue can refuse a warm
    submission at submit time? Not yet. The submitter opts in, as for plain
    commands. A variant without the helper fails its first attempt with "main
