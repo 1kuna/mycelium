@@ -28,6 +28,7 @@ type workerDiskBudget struct {
 	controlGrowth   map[string]uint64
 	controlPrevious map[string]uint64
 	declines        map[string]diskDecline
+	cacheFloorRetry map[string]time.Time
 	inventoryDir    string
 	fileStoreSample fileStoreDiskSample // Accessed only by the serialized hygiene lane.
 	// Read by cache sizing under cache locks, so it has its own short lock
@@ -84,6 +85,9 @@ type diskBudgetFloorKey struct{}
 type diskBudgetRoot struct {
 	name, path string
 	candidates func(context.Context) ([]diskBudgetCandidate, error)
+	// A rebuildable cache whose trimmable candidates also keep the volume at
+	// cacheFreeFloor, without any job demand.
+	cacheFloor bool
 }
 
 type diskBudgetCandidate struct {
@@ -173,6 +177,7 @@ func (b *workerDiskBudget) reserve(ctx context.Context, root string, need uint64
 	// headroom for every writer on the volume. Share pending bytes, but derive
 	// other admissions and collection floors from their own live measurements.
 	floor = max(floor, addDiskBytes(addDiskBytes(diskFreeFloor(r.TotalBytes), b.controlGrowth[r.Volume]), b.foreignHeadroomFor(r.Volume)))
+	b.trimCacheFloor(ctx, r.Volume)
 	if err = b.reclaim(ctx, r.Volume, root, need, floor); err != nil {
 		return nil, err
 	}
@@ -275,6 +280,65 @@ func (b *workerDiskBudget) reclaim(ctx context.Context, volume, path string, nee
 	return &stagingCapacityError{required: int64(min(need, math.MaxInt64)), available: int64(min(available, math.MaxInt64)), limit: int64(min(r.TotalBytes-min(r.TotalBytes, floor), math.MaxInt64)), capacity: "disk_free_floor"}
 }
 
+// cacheFreeFloorBytes is the free space Mycelium's rebuildable caches leave on
+// their volume so the host can still install and update software (maintainer,
+// 2026-11-26: about 40 GiB on every fleet Mac). On a volume under 160 GiB a
+// quarter of it is the floor instead, so the caches stay usable there; never
+// below the admission floor. Admission does not refuse work because of it.
+const cacheFreeFloorBytes = 40 << 30
+
+func cacheFreeFloor(total uint64) uint64 {
+	return max(min(cacheFreeFloorBytes, total/4), diskFreeFloor(total))
+}
+
+// trimCacheFloor trims opted-in rebuildable caches on volume (all volumes when
+// empty) until free space reaches cacheFreeFloor. Each pass removes at most the
+// measured shortfall: where deleted blocks stay held (local snapshots), statfs
+// does not rise and one pass must not empty the cache. A pass that ends below
+// the floor waits one hygiene interval before admission repeats its full scan.
+// The caller holds b.mu.
+func (b *workerDiskBudget) trimCacheFloor(ctx context.Context, volume string) {
+	now := b.clock.Now()
+	for _, root := range b.roots {
+		if !root.cacheFloor || root.candidates == nil {
+			continue
+		}
+		r, err := b.probe(root.path)
+		if err != nil || r.TotalBytes == 0 || volume != "" && r.Volume != volume || now.Before(b.cacheFloorRetry[r.Volume]) {
+			continue
+		}
+		floor := cacheFreeFloor(r.TotalBytes)
+		if r.FreeBytes >= floor {
+			continue
+		}
+		limit := floor - r.FreeBytes
+		if r.BlockBytes > 0 && limit%r.BlockBytes != 0 {
+			limit = addDiskBytes(limit, r.BlockBytes-limit%r.BlockBytes)
+		}
+		enough := func() (bool, error) {
+			d, err := b.probe(root.path)
+			return d.FreeBytes >= floor, err
+		}
+		candidates, err := root.candidates(ctx)
+		if err != nil {
+			continue
+		}
+		for _, candidate := range candidates {
+			if candidate.trim != nil {
+				_ = candidate.trim(ctx, enough, limit)
+			}
+		}
+		if ok, err := enough(); !ok || err != nil {
+			if b.cacheFloorRetry == nil {
+				b.cacheFloorRetry = map[string]time.Time{}
+			}
+			b.cacheFloorRetry[r.Volume] = b.clock.Now().Add(workerHygieneMinInterval)
+		} else {
+			delete(b.cacheFloorRetry, r.Volume)
+		}
+	}
+}
+
 // A fresh statfs shortfall can use the retention lane without waiting on the
 // adaptive backoff of its full allocation inventory.
 func (b *workerDiskBudget) reclaimPressure(ctx context.Context) {
@@ -290,6 +354,7 @@ func (b *workerDiskBudget) reclaimPressure(ctx context.Context) {
 			continue
 		}
 		seen[r.Volume] = true
+		b.trimCacheFloor(ctx, r.Volume)
 		floor := addDiskBytes(addDiskBytes(diskFreeFloor(r.TotalBytes), b.controlGrowth[r.Volume]), b.foreignHeadroomFor(r.Volume))
 		if r.FreeBytes < addDiskBytes(floor, b.reservations[r.Volume]) {
 			_ = b.reclaim(ctx, r.Volume, root.path, 0, floor)
@@ -332,6 +397,7 @@ func (b *workerDiskBudget) collect(ctx context.Context) []DiskBudgetVolume {
 			continue
 		}
 		before := r.FreeBytes
+		b.trimCacheFloor(ctx, volume)
 		base := addDiskBytes(diskFreeFloor(r.TotalBytes), b.controlGrowth[volume])
 		floor := addDiskBytes(base, b.foreignHeadroomFor(volume))
 		_ = b.reclaim(ctx, volume, roots[0].path, 0, floor)

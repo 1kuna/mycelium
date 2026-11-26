@@ -46,6 +46,7 @@ func fileStoreCompilerObjects(t *testing.T, clock *fakeClock, n int) (*workerCom
 		clock.Advance(time.Second)
 		paths[i] = path
 	}
+	clock.Advance(compilerCacheGrace) // Old enough to trim when idle.
 	return cache, paths, unit
 }
 

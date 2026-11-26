@@ -66,8 +66,27 @@ Default unsandboxed native jobs receive a worker-owned `GOCACHE`, shared between
 jobs and protected until exact process cleanup, including durable restart pins.
 Under pressure, the worker trims recognized regular Go cache objects oldest
 first until a fresh free-space read meets the current goal. It retains auxiliary
-gate state and leaves the entire cache alone while its use lock or any durable
-pin is held. The publishing worker releases both its own and the detached
+gate state and any object modified in the last 10 minutes.
+
+<a id="cache-free-floor-1836"></a>
+The Go build cache also keeps its volume at or above a **cache floor** of
+40 GiB free, or a quarter of the volume when that is smaller, and never below
+the disk floor (#1836). The retention lane's periodic pressure pass and full
+collection, and every admission reservation on that volume, trim it toward the
+floor before any job demand exists. Each pass removes at most the measured
+shortfall, because deleted blocks held by a local snapshot do not raise free
+space; a pass that cannot reach the floor waits one minute before admission
+scans again. The floor limits what caches may consume; admission never refuses
+work because of it, and other caches keep their own limits.
+
+While an attempt holds the cache (its use lock or a durable pin), trimming
+removes only objects last modified more than an hour and 10 minutes before the
+oldest pin was created. Go refreshes a used object's mtime once it is an hour
+old, so every object a current attempt has looked up is newer than that; Go's
+own cache trim relies on the same rule while other `go` commands run. A long
+attempt therefore protects what it could have used, not the whole cache. A use
+lock without a pin counts as an attempt starting now, and unreadable pins
+protect everything. The publishing worker releases both its own and the detached
 runner's pins after exact release. At startup, it can also reconcile a prior
 runner pin when a saved retired attempt names that exact custodian. If the
 parent record is absent, a matching finished custodian result, exact helper

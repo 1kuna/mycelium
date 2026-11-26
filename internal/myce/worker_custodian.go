@@ -467,7 +467,7 @@ func (w *Worker) initAttemptRuntime(stop context.Context, s *workerStore) error 
 	if err := w.compilerCache.cache.initStorage(); err != nil {
 		return err
 	}
-	w.diskBudget.add(diskBudgetRoot{name: "compiler", path: w.compilerCache.cache.Root, candidates: w.compilerCache.budgetCandidates})
+	w.diskBudget.add(diskBudgetRoot{name: "compiler", path: w.compilerCache.cache.Root, candidates: w.compilerCache.budgetCandidates, cacheFloor: true})
 	if err := w.initFileTransfers(stop, s); err != nil {
 		return err
 	}
