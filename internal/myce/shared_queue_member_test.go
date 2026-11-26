@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -356,6 +357,15 @@ func assertProofAttempt(t *testing.T, before, after *Job) {
 }
 
 func TestSharedQueueMemberRunningHandover(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "myce")
+	build := exec.CommandContext(t.Context(), "go", "build", "-o", binary, "../../cmd/myce")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build CLI: %v\n%s", err, out)
+	}
+	pythonPath, err := filepath.Abs("../../clients/python/src")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name string
 		sig  syscall.Signal
@@ -377,7 +387,46 @@ func TestSharedQueueMemberRunningHandover(t *testing.T) {
 				}
 			}
 			startProofWorker(t, next.client, dir)
-			before, unblock, finished := proofBlockingJob(t, next.client, dir)
+			addresses := old.client.URL + "," + next.client.URL
+			client, err := NewMultiEndpointClient(addresses, proofToken)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, unblock, finished := proofBlockingJob(t, client, dir)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			ready := filepath.Join(dir, "client-ready")
+			download := filepath.Join(dir, "python-download")
+			python := exec.CommandContext(ctx, "python3", "-c", `
+from pathlib import Path
+from sys import argv
+from mycelium import Client
+job, ready, destination = argv[1:]
+client = Client(timeout=12)
+assert client.get(job)["state"] == "running"
+Path(ready).touch()
+assert client.wait(job)["state"] == "succeeded"
+client.download_result(job, "result.txt", destination)
+assert Path(destination).read_bytes() == b"proof"
+`, before.ID, ready, download)
+			clientEnv := append(os.Environ(), "MYCE_QUEUE="+addresses, "MYCE_TOKEN="+proofToken)
+			python.Env = append(clientEnv, "PYTHONPATH="+pythonPath, "PYTHONDONTWRITEBYTECODE=1")
+			var pythonLog bytes.Buffer
+			python.Stdout, python.Stderr = &pythonLog, &pythonLog
+			if err := python.Start(); err != nil {
+				t.Fatal(err)
+			}
+			waited := false
+			defer func() {
+				if !waited {
+					_ = python.Process.Kill()
+					_ = python.Wait()
+				}
+			}()
+			proofEventually(t, "Python client reads from the original member", func() bool {
+				_, err := os.Stat(ready)
+				return err == nil
+			})
 			proofEventually(t, "follower replays running job", func() bool {
 				_, j := proofReplica(t, next, before.ID)
 				return j != nil && j.State == "running" && j.StartedAt != nil
@@ -389,6 +438,25 @@ func TestSharedQueueMemberRunningHandover(t *testing.T) {
 			}
 			active := proofJobState(t, next.client, before.ID, func(j *Job) bool { return j.State == "running" })
 			assertProofAttempt(t, before, active)
+			cli := func(args ...string) []byte {
+				t.Helper()
+				cmd := exec.CommandContext(ctx, binary, args...)
+				cmd.Env = clientEnv
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("CLI %s: %v\n%s", args[0], err, out)
+				}
+				return out
+			}
+			if out := cli("status", "--json", before.ID); !bytes.Contains(out, []byte(before.ID)) {
+				t.Fatalf("CLI status did not show the running job: %s", out)
+			}
+			current := resultIdentity(active)
+			current.Success = true
+			// A request carrying the retired turn must never reach completion,
+			// even when all three execution identity fields still match.
+			proofUnavailable(t, next.client.callOnceShared(ctx, http.MethodPost, "/api/workers/complete",
+				current, nil, strconv.FormatInt(first.number, 10)))
 			for _, bad := range []Result{
 				{Execution: Execution{ID: active.ID, Attempt: active.Attempt + 1}, Machine: active.Machine, Session: active.Session},
 				{Execution: Execution{ID: active.ID, Attempt: active.Attempt}, Machine: active.Machine, Session: "wrong-session"},
@@ -398,15 +466,30 @@ func TestSharedQueueMemberRunningHandover(t *testing.T) {
 				if !errors.As(err, &refusal) || refusal.Status != http.StatusConflict {
 					t.Fatalf("start under the wrong attempt identity = %v", err)
 				}
+				bad.Success = true
+				err = next.client.Call(ctx, http.MethodPost, "/api/workers/complete", bad, nil)
+				if !errors.As(err, &refusal) || refusal.Code != "request_stale" {
+					t.Fatalf("result under the wrong attempt identity = %v", err)
+				}
 			}
 			unblock()
 			finished()
 			after := proofJobState(t, next.client, before.ID, proofSucceeded)
 			assertProofAttempt(t, before, after)
-			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-			defer cancel()
+			if after.Losses != before.Losses || !after.Copies[0].ReleaseConfirmed {
+				t.Fatalf("handover changed loss accounting or lost release: losses=%d, released=%t",
+					after.Losses, after.Copies[0].ReleaseConfirmed)
+			}
+			waitErr := python.Wait()
+			waited = true
+			if waitErr != nil {
+				t.Fatalf("Python client failed after handover: %v\n%s", waitErr, pythonLog.String())
+			}
+			if out := cli("wait", "--timeout", "5s", before.ID); !strings.Contains(string(out), "succeeded") {
+				t.Fatalf("CLI wait did not report success: %s", out)
+			}
 			dest := filepath.Join(dir, "download")
-			if err := next.client.DownloadResult(ctx, after.ID, "result.txt", dest); err != nil {
+			if err := client.DownloadResult(ctx, after.ID, "result.txt", dest); err != nil {
 				t.Fatal(err)
 			}
 			if b, err := os.ReadFile(dest); err != nil || string(b) != "proof" {

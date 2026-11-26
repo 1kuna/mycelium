@@ -1665,7 +1665,11 @@ func (q *Queue) maintainControl(refreshStartReasons bool) {
 		// Machine attempts retain their exact device and host charge through kill;
 		// only their release acknowledgement can retire the stopping attempt.
 		m := q.s.Machines[j.Machine]
-		if (m == nil || m.Devices == nil) && !q.networkQuiet && !q.unreported[j.Machine] && j.State == "stopping" && !plannedPriorityStop(j) && expired(j.StopAt, now) {
+		// Shared handover preserves the same release fence for live legacy
+		// sessions. An expired stop deadline orders a kill; it is not release
+		// evidence. Confirmed worker loss is handled in the loop above.
+		releasePending := q.sharedWriter != nil && m != nil && !m.Gone && !j.ReleaseConfirmed
+		if !releasePending && (m == nil || m.Devices == nil) && !q.networkQuiet && !q.unreported[j.Machine] && j.State == "stopping" && !plannedPriorityStop(j) && expired(j.StopAt, now) {
 			if cancelled(j) {
 				q.finishCancellation(j)
 			} else {

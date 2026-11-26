@@ -5,6 +5,7 @@ import base64
 import hashlib
 import http.client
 import io
+import ipaddress
 from importlib.metadata import PackageNotFoundError, version
 import tempfile
 import re
@@ -29,6 +30,7 @@ from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from .adaptive import RECOVERY_PERIOD, Pace, retry_after
+from .transfer import EndpointConnectError
 
 try:
     CLIENT_VERSION = version("mycelium-client")
@@ -278,10 +280,27 @@ class Client:
     def __init__(self, url: str | None = None, token: str | None = None,
                  *, timeout: float | None = None, poll_interval: float | None = None,
                  transfer_timeout: float | None = None):
-        self.url = (url or os.environ.get("MYCE_QUEUE", "http://127.0.0.1:7331")).rstrip("/")
-        parsed = urlsplit(self.url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
-            raise ValueError("queue URL must be an HTTP(S) URL without credentials, query or fragment")
+        address = url or os.environ.get("MYCE_QUEUE", "http://127.0.0.1:7331")
+        self._origins = ([part.strip().rstrip("/") for part in address.split(",")]
+                         if "," in address else [address.rstrip("/")])
+        self.url = self._origins[0]
+        self._preferred = 0
+        for origin in self._origins:
+            parsed = urlsplit(origin)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+                raise ValueError("queue URL must be an HTTP(S) URL without credentials, query or fragment")
+            if len(self._origins) > 1:
+                loopback = False
+                if parsed.scheme == "http":
+                    try:
+                        loopback = ipaddress.ip_address(parsed.hostname).is_loopback
+                    except ValueError:
+                        pass
+                _ = parsed.port  # Reject malformed ports before any request.
+                if parsed.username is not None or parsed.path or "?" in origin or "#" in origin or not (parsed.scheme == "https" or loopback):
+                    raise ValueError("queue endpoints must be HTTPS origins or loopback HTTP origins")
+        if len(self._origins) > 1 and os.environ.get("MYCE_DEV_SESSION_ROOT"):
+            raise ValueError("a queue endpoint list requires explicit fleet credentials outside dev authority")
         self.token = os.environ.get("MYCE_TOKEN", "") if token is None else token
         # run_entry hands the CLI the same authority without passing the token:
         # "environment" (MYCE_TOKEN), ("installed", config) or None (explicit).
@@ -326,6 +345,8 @@ class Client:
                 f"{ssl.OPENSSL_VERSION}. Use Homebrew or python.org Python.")
         from .installed import installed_authority
         address, token, opener = installed_authority(config)
+        if "," in address:
+            raise ValueError("a queue endpoint list requires explicit fleet credentials")
         client = cls(address, token, timeout=timeout, poll_interval=poll_interval, transfer_timeout=transfer_timeout)
         client._urlopen = opener
         client._authority = ("installed", config)
@@ -387,10 +408,53 @@ class Client:
                 pace.observe(self._clock.monotonic() - started)
                 self._pause(pace, end=end, error=error)
 
+    def _open_endpoints(self, request: Request, *, timeout: float | None,
+                        opener: Any = None, replay_safe: bool = False) -> Any:
+        opener = opener or self._urlopen
+        if len(self._origins) == 1:
+            return opener(request, timeout=timeout)
+        if opener is urlopen:
+            from .transfer import file_opener
+            opener = file_opener()  # Never forward fleet credentials via redirects.
+        preferred = self._preferred
+        end = None if timeout is None else time.monotonic() + timeout
+        for offset in range(len(self._origins)):
+            index = (preferred + offset) % len(self._origins)
+            attempt = copy.copy(request)
+            attempt.headers = request.headers.copy()
+            attempt.unredirected_hdrs = request.unredirected_hdrs.copy()
+            attempt.remove_header("Host")
+            attempt.full_url = self._origins[index] + request.selector
+            remaining = None if end is None else max(0, end - time.monotonic())
+            attempt._mycelium_connect_timeout = (
+                5 if remaining is None else min(5, remaining / (len(self._origins) - offset)))
+            try:
+                response = opener(attempt, timeout=remaining)
+            except (HTTPError, URLError, OSError) as error:
+                if isinstance(error, HTTPError):
+                    unavailable = error.code in {502, 503, 504}
+                    if not unavailable and error.code not in {401, 403}:
+                        self._preferred = index
+                    failover = unavailable and replay_safe
+                else:
+                    cause = error.reason if isinstance(error, URLError) else error
+                    failover = isinstance(cause, (EndpointConnectError, ConnectionRefusedError, socket.gaierror)) or (
+                        replay_safe and isinstance(cause, OSError) and self._retryable(error, "read"))
+                if not failover or offset + 1 == len(self._origins) or (end is not None and time.monotonic() >= end):
+                    raise
+                if isinstance(error, HTTPError):
+                    error.close()
+                if isinstance(request.data, io.BytesIO):
+                    request.data.seek(0)
+            else:
+                self._preferred = index
+                return response
+
     def _open_request(self, request: Request, *, timeout: float | None,
-                      opener: Any = None) -> Any:
+                      opener: Any = None, replay_safe: bool = False) -> Any:
         try:
-            return (opener or self._urlopen)(request, timeout=timeout)
+            return self._open_endpoints(request, timeout=timeout, opener=opener,
+                                        replay_safe=replay_safe or request.method in {"GET", "HEAD"})
         except HTTPError as error:
             with error:
                 body = error.read(4096).decode("utf-8", errors="replace")
@@ -416,9 +480,11 @@ class Client:
             request.add_header("X-Myce-Collect-Completion", "1")
         budget = self.timeout if timeout is None else timeout
         end = None if budget is None else self._clock.monotonic() + budget
+        replay_safe = method == "POST" and (path in {"/api/wait", "/api/resolve", "/api/files/preflight", "/api/extensions"}
+                                            or path == "/api/jobs" and bool(body and body.get("submission_key")))
         def attempt(remaining: float | None) -> Any:
             def run() -> Any:
-                with self._open_request(request, timeout=remaining) as response:
+                with self._open_request(request, timeout=remaining, replay_safe=replay_safe) as response:
                     reply = _read_reply(response)
                     return reply if raw else json.loads(reply)
             return self._watched(method, path, run)
@@ -610,7 +676,7 @@ class Client:
                              "or set MYCE_TOKEN in the environment")
         root = Path.cwd() if root is None else Path(root).absolute()
         adapter = root / ".mycelium" / "adapter.yaml" if adapter is None else Path(adapter).absolute()
-        command = [binary, "run", "--queue", self.url, "--adapter", str(adapter)]
+        command = [binary, "run", "--queue", ",".join(self._origins), "--adapter", str(adapter)]
         environment = dict(os.environ)
         if self._authority != "environment":
             # Installed authority only: an exported credential must not override it.
@@ -1297,7 +1363,12 @@ class Client:
             headers["X-Myce-Deadline"] = deadline
         kwargs.setdefault("timeout", 600)
         kwargs.setdefault("max_retries", 0)  # do not silently replay model calls
-        if self._urlopen is not urlopen and "http_client" not in kwargs:
-            kwargs["http_client"] = _openai_http_client(self._urlopen)
+        if "http_client" not in kwargs:
+            if len(self._origins) > 1:
+                def open_endpoint(request, *, timeout):
+                    return self._open_endpoints(request, timeout=timeout, replay_safe=request.method in {"GET", "HEAD"})
+                kwargs["http_client"] = _openai_http_client(open_endpoint)
+            elif self._urlopen is not urlopen:
+                kwargs["http_client"] = _openai_http_client(self._urlopen)
         return OpenAI(base_url=self.url + "/v1", api_key=self.token,
                       default_headers=headers, **kwargs)

@@ -778,6 +778,7 @@ type Client struct {
 	hostRAMGateWire  *atomic.Bool
 	URL              string
 	Token            string
+	endpoints        *queueEndpoints
 	HTTP             *http.Client // Its Timeout bounds API calls; file transfers use progress budgets.
 	// Tests shorten the file transfer budgets; zero uses the defaults.
 	transferIdle  time.Duration
@@ -933,7 +934,10 @@ func (c Client) callOnceShared(ctx context.Context, method, path string, in, out
 	if hc == nil {
 		hc = &http.Client{Transport: clientTransport}
 	}
-	res, err := hc.Do(req)
+	spec, submit := in.(Spec)
+	replaySafe := method == http.MethodGet || method == http.MethodHead ||
+		method == http.MethodPost && (replaySafePost[path] || path == "/api/wait" || path == "/api/jobs" && submit && spec.SubmissionKey != "")
+	res, err := c.doQueueRequest(hc, req, replaySafe)
 	if err != nil {
 		return err
 	}

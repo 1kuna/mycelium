@@ -261,6 +261,10 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
+class EndpointConnectError(ConnectionError):
+    """The connection failed before any HTTP request could be sent."""
+
+
 def file_handlers():
     return _HTTPHandler(), _HTTPSHandler()
 
@@ -270,7 +274,28 @@ def file_opener():
 
 
 def file_connection(connection, request):
+    options = {}
     if getattr(request, "_mycelium_file_transfer", False):
-        return functools.partial(connection, progress_deadline=getattr(request, "_mycelium_transfer_deadline", None),
-                                 upload_timing=getattr(request, "_mycelium_upload_timing", None))
-    return connection
+        options.update(progress_deadline=getattr(request, "_mycelium_transfer_deadline", None),
+                       upload_timing=getattr(request, "_mycelium_upload_timing", None))
+    connect_timeout = getattr(request, "_mycelium_connect_timeout", None)
+    if connect_timeout is None:
+        return functools.partial(connection, **options) if options else connection
+
+    def bounded_connection(*args, **kwargs):
+        conn = connection(*args, **kwargs, **options)
+
+        def dial(address, timeout, source):
+            # Keep the caller's original timeout for request and response I/O.
+            bound = min(timeout, connect_timeout) if timeout is not None else connect_timeout
+            try:
+                sock = socket.create_connection(address, bound, source)
+            except OSError as error:
+                raise EndpointConnectError(str(error)) from error
+            sock.settimeout(timeout)
+            return sock
+
+        conn._create_connection = dial
+        return conn
+
+    return bounded_connection

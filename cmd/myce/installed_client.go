@@ -4,6 +4,7 @@ import (
 	"flag"
 	"net/url"
 	"os"
+	"strings"
 
 	"mycelium/internal/myce"
 )
@@ -31,6 +32,9 @@ func (f clientFlags) client() (myce.Client, error) {
 // The queue's configured HTTP endpoint remains supported; joining HTTPS always
 // requires its provisioned transport. No credential is included in refusals.
 func (f clientFlags) ownerClient() (myce.Client, error) {
+	if strings.Contains(*f.queue, ",") {
+		return myce.Client{}, &myce.HTTPError{Status: 403, Code: "owner_authority_unavailable", Message: "owner operations require the installed queue authority"}
+	}
 	client, err := f.client()
 	if err != nil {
 		return myce.Client{}, &myce.HTTPError{Status: 403, Code: "owner_authority_unavailable", Message: "cannot resolve owner authority; run on the queue host with --config <installed-queue-config>"}

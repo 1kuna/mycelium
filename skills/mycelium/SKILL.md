@@ -11,6 +11,10 @@ use the existing installed authority. For a missing CLI, start with
 [Setup](setup-project.md#find-the-installed-cli). Send authority refusals to the
 installation owner with the typed reason.
 
+For a shared-queue endpoint list provisioned by the installation owner, use the
+[external client failover settings](https://github.com/1kuna/mycelium/blob/main/docs/development.md#external-client-failover)
+with the fleet credential.
+
 ## Submit and fetch
 
 ```sh

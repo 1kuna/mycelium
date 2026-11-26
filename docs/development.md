@@ -102,8 +102,8 @@ disposable token and its own `--state-dir`. The worker's normal memory
 containment requirements apply. The active process can hand off
 on SIGTERM. On a crash, the others wait for its PostgreSQL turn to expire.
 A follower routes live requests to the current coordinator. The Stage 2
-worker uses its local member. Reconnecting external clients across multiple
-known authenticated endpoints is part of the Stage 3 cutover rehearsal. During an outage an authenticated
+worker uses its local member. External clients can exercise the same failover
+with the [queue endpoint list](#external-client-failover). During an outage an authenticated
 `GET /api/shared-queue/status?job=JOB_ID` returns the local SQLite sequence and
 the retained job's lifecycle fields, with `last_known: true`. An absent job in that
 response has unknown current status. Normal job and wait endpoints require
@@ -116,6 +116,22 @@ proposed handover and check exact custody in the same decision. If the turn
 changes, the worker probes again with the same attempt and session.
 A PostgreSQL write that fails or times out ends the coordinator turn, and
 the worker retries the same handshake under the next turn.
+
+### External client failover
+
+For a shared queue, supply the comma-separated origins of members of the same
+fleet through `MYCE_QUEUE`. The CLI also accepts the list in `--queue`, and
+the Python client accepts it as the first argument to `Client(...)`. Provide
+the fleet credential through the normal explicit credential channel.
+Each HTTPS origin uses system certificate trust. Loopback HTTP origins support
+the laptop proof. Installed and joining-file clients use their existing
+single-endpoint authority.
+
+Clients start in list order and prefer a responding member for later calls.
+A failed connection can move any request to another member. After an ambiguous
+failure, read-only operations and keyed submissions can be replayed. If a write
+reports an uncertain outcome, inspect its state before issuing it again.
+Workers use their own local member address.
 
 Coordinator startup and renewal are independent of file-store setup and
 retained-bundle verification. When storage is unavailable, the queue holds

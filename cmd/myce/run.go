@@ -281,6 +281,13 @@ func devSessionQueue() (queue, token string, ok bool) {
 
 func (authority *runAuthority) resolve(address, token string) (myce.Client, error) {
 	config, joining := authority.Config, authority.Joining
+	if strings.Contains(address, ",") {
+		if _, _, dev := devSessionQueue(); config != "" || joining != "" || dev {
+			return myce.Client{}, errors.New("a queue endpoint list requires explicit fleet credentials outside installed or dev authority")
+		}
+		client, err := myce.NewMultiEndpointClient(address, token)
+		return client.WithProgressWatch(), err
+	}
 	if queue, sessionToken, ok := devSessionQueue(); ok && config == "" && joining == "" {
 		// The dev session outranks installed fleet authority: never read the
 		// installed config, joining file or fleet token here (#1270).
