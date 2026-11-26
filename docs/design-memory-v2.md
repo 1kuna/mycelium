@@ -14,10 +14,10 @@ possibly be a full redesign instead of constant patching" (#2086).
 4. A job starts when its expected peak fits in memory nobody else has claimed. Every decision counts a running job the same way: what it uses now plus what it may still grow into.
 5. Memory is counted the same way everywhere. One rule per platform, so the scheduler, the stop logic, the learning and `myce efficiency` agree.
 6. A job loading inside its own size is never stopped. Where the OS can't fence GPU memory, the worker kills a job that outgrows its size once the machine is into its reserve. That reserve is sized from the fastest growth measured (8 GiB a second) times how long the kill takes.
-7. After any memory stop, the retry gets a larger size measured from that stop, or it waits with a reason that says what is missing. The same attempt never simply repeats.
+7. After any memory stop, the retry waits for room for what ended the attempt: a larger size if the job outgrew its own, or the other owners' measured peak if their growth ended it. Otherwise it waits with a reason that says what is missing. The same attempt never simply repeats.
 8. Over 14 days of real runs, these sizes would have reserved 1.08–1.19× what repeat jobs used. Today's charges reserve 1.41–2.17×. "Alone" becomes a number: the whole pool.
 9. The decision code shrinks from about 4,800 lines to about 2,800, in five stages. Each stage ships on its own and is testable on a laptop. Each hardware-dependent path stays off until its probe passes.
-10. Two safety choices are yours (section 6): killing an oversized job without letting it save, and making production jobs the kernel's preferred victims. The second is a bias, not a guarantee.
+10. You decided both safety choices yes (MY-59, section 6): killing an oversized job without letting it save, and making production jobs the kernel's preferred victims. The second is a bias, not a guarantee.
 
 ## 1. The root problem
 
@@ -51,7 +51,7 @@ The evidence:
 | **Pool** | Host RAM, and each discrete card; a unified host has only RAM. Each pool has one live **free** reading, sampled by the worker: the OS's available memory less keep, or for a card, the driver's free figure. Its **capacity** is the host allowance for RAM, or the card's size. | F1 |
 | **Keep** | What the pool leaves free: the measured idle burst or the owner reserve, unchanged. A pool the kernel doesn't contain adds a **stop term**, its platform's fastest measured growth × the worker's stop time (detection plus kill latency), so growth during an immediate stop (R4) can't reach the owners' part. | F2, F4, F5 |
 | **Footprint** | One number per attempt per pool, from one counting rule per platform (table below). Admission, holds, stops, learning, status and `myce efficiency` all call the same function. | F1 |
-| **Expected peak (E)** | The largest clean footprint among the last 20 runs of this work on this platform family. A memory stop raises it until the next clean run (R5). | F3 |
+| **Expected peak (E)** | The largest clean footprint among the last 20 runs of this work on this platform family. A stop over E or a kernel kill raises it until the next clean run (R5). | F3 |
 | **Hold** | What a running attempt keeps others out of: `max(E, high-water) − footprint`, where high-water is its own peak so far. On a *contained* pool, once the attempt has stopped growing for one reaction time, its hold drops to `high-water − footprint`. An E raised by a stop is never lent this way. | F3, F4, F5 |
 | **Slack (S)** | `free − Σ holds`: memory nobody has claimed. An attempt's **commitment** is `footprint + hold`, and S rises by exactly that when it ends. On RAM, S is also capped at `allowance − Σ commitments` (MY-45). A pool's **reach**, `S + Σ commitments`, is its slack with nothing running. Every projection below uses these sums. | F1 |
 
@@ -86,12 +86,15 @@ A run is **clean** only when every counter in its row was read for the whole run
   - On a pool the kernel doesn't contain, the worker itself stops any attempt over its E while the pool is below keep: at once, from its own sample, with no checkpoint grace (question 2). A queue round trip can take seconds (F5). The kernel acts the same way at `memory.max`.
 
   A job loading inside its own hold, with room for it, is never stopped.
-- **R5 Learn.**
+- **R5 Learn.** Each pool learns on its own.
   - A clean run adds its peak to the window, and E returns to the window's maximum.
-  - A pressure stop or a kernel kill raises the next E from what it measured:
-    - over its E, or killed by the kernel (a failed allocation never shows in the peak): `2 × max(peak, E)`;
-    - stopped within its E: `E + shortfall`, where shortfall is how far the stop's forecast took free memory below zero.
-  - A raised E is capped at the largest reach among the job's pools. If the cap leaves it no higher than the measured peak or the old E, a retry can't do better, so the job waits under the existing `memory_capacity` hold. The hold names the peak, the shortfall and each reach, and clears when a reach grows past them. Any job whose E exceeds every reach waits the same way.
+  - A stop over its E, or a kernel kill (a failed allocation never shows in the peak), raises the next E on that pool to `2 × max(peak, E)`.
+  - A stop within its E leaves E alone. S already held the attempt's growth up to E, so the shortfall came from outside it: from an attempt over its E, whose high-water already holds what it reached, or from the pool's other owners. For the owners, the pool gets an **owners' hold**, `X − x` and never below 0:
+    - x is their use now: the pool's used memory less the attempts' footprints;
+    - X is the use the stop's forecast took them to.
+
+    S subtracts it like any other hold, so R1 waits until a job fits beside the owners' peak, not just their current use. A later stop within E only raises X. The hold lapses once their use has stayed below X for 24 h.
+  - Each pool's raised E is capped at that pool's reach, the largest on any host that can run the job. If the cap leaves it no higher than the measured peak or the old E, a retry can't do better, so the job waits under the existing `memory_capacity` hold. So does any job whose E on some pool exceeds that pool's reach. The hold names the pool, its peak, any owners' peak and the reach, and clears when that reach grows past them.
   - A kill at the job's own `memory_limit_gb` still fails it (#1972).
 
   So each retry has room for what ended the attempt before it, or waits with the reason.
@@ -111,9 +114,10 @@ A run is **clean** only when every counter in its row was read for the whole run
 |---|---|---|---|---|
 | Window | 20 clean runs | Old versions of the work setting today's E | A rare large run is forgotten after 20 runs | The maximum of 20 runs covers the next run 95% of the time (order statistics); 94% measured (approved design §2.3) |
 | Overshoot step | × 2 | Repeated near-miss retries (#1484) | Up to 2× hold on one retry | Exponential search |
+| Owners' hold window | 24 h with the owners' use below X | The same owners' burst stopping a job again | Up to `X − x` idle for at least a day after each stop within E | The shorter of the two external-memory windows each host already keeps (24 h and 7 d, `external_memory.go`). Whether owners' bursts recur daily is unmeasured; the stage 0 shadow counts repeat owners' holds. |
 | Reaction time | queue: check-in period + stop grace; worker: detection + kill latency | Stopping too late | none new | Existing values; probe 0b-2 |
 | Keep | per host, plus the stop term on uncontained pools | Starving the host and its owners; a host OOM during an immediate stop | Idle memory: 8.06 GiB per second of stop time on the unified host | MY-45, MY-48; measured rate × measured stop time |
-| Kernel kill order | lower tiers +1000 and production 0 today (`memory_ceiling.go:400`); production +500 if question 3 is yes | The kernel killing a host service, such as the queue, in a host-wide OOM | Production dies before smaller host processes | The score adds `adj/1000` of RAM and swap: +1000 outranks every unadjusted process, +500 only smaller ones (question 3) |
+| Kernel kill order | lower tiers +1000 and production 0 today (`memory_ceiling.go:400`); production +500 (question 3, MY-59) | The kernel killing a host service, such as the queue, in a host-wide OOM | Production dies before smaller host processes | The score adds `adj/1000` of RAM and swap: +1000 outranks every unadjusted process, +500 only smaller ones (question 3) |
 
 Gone: the confidence target, rule Q, ratio rings, transfer from other platforms, and the platform quantile.
 
@@ -127,7 +131,7 @@ Unified CUDA rows assume probes 0b-1 and 0b-2 pass, and that keep's stop term th
 | **FP8 canary loop** (#2091) | Stopped nine times and readmitted at the same 60 GiB each time. On r6.49 the forecast projected 47.75 GiB of loss from a 4.34 GiB/s load against 33.57 GiB of room. #2129 then made retries exclusive and paused a second stop. | Its footprint went past 60; the device counter alone read 79.6. So the stop counts as over E, and R5 raises E to `min(2 × 79.6, 96) = 96`, the host's reach (its allowance). The retry waits for the pool and holds all of it, and its own load doesn't move S. If it outgrows 96 too, the cap can't rise past its peak, so it waits under `memory_capacity` with the measured peak and the 96 GiB reach. That is at most two attempts, not nine. #2091 inferred this may be its true outcome. |
 | **In-charge victim stop**, live, 2026-11-26 18:24Z | An 88 GiB-charged model load had used about 63 GiB (device 61.8, host 1.3). The forecast projected 88.7 GiB of loss (8.06 GiB/s × 11 s) against 50.6 GiB of room and stopped it, though the job could grow at most about 25 GiB more inside its own charge. Its retry is now exclusive and waits for the whole pool. | The forecast caps its growth at its 25 GiB hold, which the 50.6 GiB of free memory covers while keep's stop term stays under 25.6 GiB. No stop, and S is at most 8 GiB: the 96 GiB allowance less its 88 GiB. |
 | **In-charge victim stop**, the 87 GiB job (#2091) | Each counter alone sat under its charge (69.0 cgroup, 80.0 device). By host-wide subtraction it held 93–97 GiB. Its retry ran exclusive at the same 87. | The one rule sums the counters, so the overshoot shows, but the raw sum overstates it: a sibling attempt of the same workload read 32.9 + 79.6 GiB while the host showed about 95. With the overlap corrected (probe 0b-1), its footprint is about its host-wide 93–97 GiB. It is stopped first as the over-E attempt, and no co-tenant of its tier goes before it. R5 caps the raise at the 96 GiB reach: from a 93 GiB peak it retries at 96, and from 97 it waits under `memory_capacity` with that figure. |
-| **Alone holder blocking 93 waiting jobs** (#2179) | After one pressure stop, the retry's RAM and card pools went `alone`, so every pooled candidate conflicted with it. Maintenance then visited every waiting job: O(waiting × targets × live). Check-in hold rose from 0.7 s to 2.4 s. | There is no alone state. The retry has a number: raised by its shortfall if it was a victim, doubled if it went over E, and capped at the reach. The 93 pieces compare E with S like any job, with no custody conflicts and no release planning between same-tier jobs. If the retry's E is the whole reach, it becomes the head, and R3 lets short pieces finish around it. |
+| **Alone holder blocking 93 waiting jobs** (#2179) | After one pressure stop, the retry's RAM and card pools went `alone`, so every pooled candidate conflicted with it. Maintenance then visited every waiting job: O(waiting × targets × live). Check-in hold rose from 0.7 s to 2.4 s. | There is no alone state. The retry has a number: its own E if it was a victim, with the owners' peak held on the pool, or doubled if it went over E and capped at that pool's reach. The 93 pieces compare E with S like any job, with no custody conflicts and no release planning between same-tier jobs. If the retry's E is the whole reach, it becomes the head, and R3 lets short pieces finish around it. |
 | **About 3.7× over-reservation** | Live at 22:28Z: 261 reserved against 70 measured GiB-hours. That figure covers only the current 8.8 h and 4.6 h windows, and on unified hosts "measured" leaves out device memory. 14-day per-program figures: 2.9× on unified CUDA and 2.1× on the XPU host. The current pool estimate charges about 3× (2.97×) the summed host and device peaks of 126 accepted unified GPU attempts. | Replayed over 14 days of repeat runs, E would reserve: 1.19× on unified CUDA (today's charges: 2.17×), 1.08× on the XPU host (1.46×) and 1.17× on Macs (1.41×). Holds on contained pools also shrink to the proven high-water. `myce efficiency` counts the same footprint as admission. |
 | **One GPU could hold two jobs**, unified (#2037) | Once a production model stage's charge was corrected from 102.6 to 24.4 GiB, two ran together, and each took 8–9.5 min against 162 s alone. | Memory says both fit. The throughput comparison (#2037, merged 2026-11-24) makes that work exclusive on the device. Memory and throughput stay separate decisions. |
 | **One GPU could hold two jobs**, XPU (#2185) | 973 of 973 XPU attempts recorded no device memory. Every card E was the whole card, so no XPU card was ever shared. | v2 needs a card counter as much as today's code does. Stage 2 fixes it after probe 0b-4 names the cause. With it, a card's E is its measured peak, and two jobs share a card when both fit. |
@@ -142,7 +146,7 @@ The dedicated memory code is 37 files and 8,750 lines today, plus 48 test files 
 | Stage | Changes | Deletes | Removes |
 |---|---|---|---|
 | **0 Shadow** | One footprint function per platform. The worker computes holds, S, reach and each platform's fastest growth, and reports them. Status and `myce efficiency` show v2 numbers beside today's. Fake-clock replays of every case in section 3. No decision changes. | none | (measures the rest) |
-| **1 Stop on real shortage** | R4's per-attempt forecast replaces the whole-host forecast. The card guard becomes the same check on card pools. The worker's immediate stop and keep's stop term on uncontained pools. Production's kill score, if question 3 is yes. | The whole-host forecast and the separate card guard | in-charge victim stops |
+| **1 Stop on real shortage** | R4's per-attempt forecast replaces the whole-host forecast. The card guard becomes the same check on card pools. The worker's immediate stop and keep's stop term on uncontained pools. Production's kill score (question 3, MY-59). | The whole-host forecast and the separate card guard | in-charge victim stops |
 | **2 Learn E** | R5, R6 and the counting rule, with R5 on both result paths. The XPU card counter (#2185). | Rule Q, ratio rings, confidence feedback, foreign and platform quantiles, evidence repair (after the MY-42 floor check), combined and GPU-host bounds, the bystander test. Then the exclusive retry after a pressure stop, the alone-stop pause and the requeue route scan. | 2–3× inflation (cause 3), uncounted cards (cause 4), the same-charge loop |
 | **3 Worker-owned slack** | Holds replace charges. The queue admits on the worker's S. The launch check is the same function. | The two-arm queue ledger, the RAM gate and its fences, launch-capacity waits and startup-loss repeats, retained host charges, sample-identity fences, `fitPoolCharge`, alone custody, the unified CUDA floor | full charge held until the end (cause 1), the launch-refusal loop |
 | **4 Fair waiting** | R3 EASY backfill. | Pool backfill fences; the legacy envelope reader, one release later (MY-42) | fence holds (#2186) |
@@ -200,7 +204,7 @@ Without question 2, an over-E attempt keeps its 10 s grace. At 8.06 GiB/s that i
 |---|---|---|
 | **E too small** | 15% of repeat runs exceeded the largest of their earlier peaks: median overshoot 2%, p90 24–35%, worst 172× (Appendix A.5). Small overshoots use slack. Large ones cost one stop and a doubled E. | Stage 0 shadow: R4 stops per week split into over-E and victim, against today's `memory_pressure` stops. Attempt-hours burned (audit baseline: 45.4 h a week). |
 | **Unified counters overlap** | `anon + shmem + kernel` plus device memory may count pinned or managed pages twice. #2114 found 24 GiB showing as 112 in a five-process case, and a live attempt read 32.9 + 79.6 = 112.5 GiB while the host showed about 95. Because every decision uses the same rule, a constant overlap cancels in holds. E and reach are absolute, though: overlap inflates E (idle memory) and can push a job to the `memory_capacity` hold early. | Probe 0b-1. If pages are counted twice, the rule subtracts the attempt's pinned pages, which the sampler already reads. |
-| **Raised E idles memory** | A raise lasts until the next clean run, and a large shortfall makes a large raise. | Shadow: raises per week and the GiB-hours they hold. |
+| **Raised E and owners' holds idle memory** | A raise lasts until the next clean run. An owners' hold lasts at least a day, and a large owners' burst makes a large one. | Shadow: raises and owners' holds per week, and the GiB-hours each holds. |
 | **Lending on contained pools** | A holder that stopped growing and then grows again forces the newest job to stop. | Shadow: count stops whose victim started after the holder stopped growing. Compare that with the waits recovered (audit: 261–767 job-hours a week behind holder charges). |
 | **Queue and worker skew** | The queue admits against a sample taken before its newest assignments. Each unlisted assignment counts at its E, and the launch check is the same function. | Launch refusals with an unchanged S should be zero. #2091 reached 25 for one job. |
 | **EASY delays the head** | A duration estimate that is too short lets a backfill run past the head's start. | Fake-clock tests and live comparison of the head's actual start with its earliest start. |
@@ -209,12 +213,12 @@ Without question 2, an over-E attempt keeps its 10 s grace. At 8.06 GiB/s that i
 ## 6. Questions for the maintainer
 
 1. **Approve the replacement and its five stages?** It supersedes the 2026-11-23 design. It also replaces one agent default: "start at nine in ten", meaning the confidence target that sized charges.
-2. **Stop an oversized job without letting it save?** On a host that can't fence GPU or driver memory, a job that grows past its expected peak while the host is below its reserve is killed at once by the worker, with no checkpoint grace. That includes production, which loses unsaved progress. Recommended: yes. Without it, growth during the grace can't be bounded (section 5.1).
-3. **Rank production ahead of host processes in the kernel's kill order?** Lower tiers already rank first (+1000), which holds against every unadjusted process. Production is at 0 today, level with host processes. At +500, the kernel prefers a production job to any host process using less than the job's own counted memory plus half of RAM and swap. That protects small services such as the queue (3.4–3.7 GB RSS, #2179). It is a bias, not a guarantee:
+2. **Stop an oversized job without letting it save? Decided: yes (MY-59).** On a host that can't fence GPU or driver memory, a job that grows past its expected peak while the host is below its reserve is killed at once by the worker, with no checkpoint grace. That includes production, which loses unsaved progress. Without it, growth during the grace couldn't be bounded (section 5.1).
+3. **Rank production ahead of host processes in the kernel's kill order? Decided: yes (MY-59).** Lower tiers already rank first (+1000), which holds against every unadjusted process. Production is at 0 today, level with host processes. At +500, the kernel prefers a production job to any host process using less than the job's own counted memory plus half of RAM and swap. That protects small services such as the queue (3.4–3.7 GB RSS, #2179). It is a bias, not a guarantee:
    - on a 32 GiB host, a production job using 0.5 GiB scores like 16.5 GiB, below an owner process using 20 GiB, so the owner process dies first;
    - on unified CUDA the kernel may not count GPU memory toward the score at all (probe 0b-2 records it).
 
-   Recommended: yes. It changes nothing until the kernel is already killing.
+   It changes nothing until the kernel is already killing.
 
 ---
 
@@ -307,7 +311,7 @@ On the unified host, the current pool estimate charges 24.2× the host-only peak
 | 4 | Confidence feedback | deleted |
 | 5 | Transfer from other platforms | deleted |
 | 6 | Limited-run floor × 2 | R5 |
-| 7 | `fitPoolCharge` fallback above the allowance | E capped at the pool's reach; above every reach, the `memory_capacity` hold |
+| 7 | `fitPoolCharge` fallback above the allowance | E capped at that pool's reach; above it, the `memory_capacity` hold |
 | 8 | Cold accelerator: drop alone, then use the CPU prior | R6 |
 | 9 | Typed limit caps typical and charge | an explicit limit caps E where it contains |
 | 10 | Owner resize fixes charge and ceiling | kept |
@@ -315,7 +319,7 @@ On the unified host, the current pool estimate charges 24.2× the host-only peak
 | 12 | Exclusive retry after a pressure stop (#2129) | R5's raised E, in stage 2, on both result paths |
 | 13 | Pause on a stop while alone | R5's `memory_capacity` hold when the cap can't rise |
 | 14 | Requeue route scan into `memory_capacity` | R5: the same hold, from each pool's reach |
-| 15 | Bystander test (stopped with peak ≤ charge) | R5: a stop within E raises E by its shortfall |
+| 15 | Bystander test (stopped with peak ≤ charge) | R5: a stop within E keeps E, and the pool holds its owners' measured peak |
 | 16 | Separate release-only learning path | one record path |
 | 17 | Pool custody conflicts (alone against peers, engines and cards) | deleted |
 | 18 | Head budget, `poolBackfillFits` | R3 |
@@ -356,7 +360,15 @@ On the unified host, the current pool estimate charges 24.2× the host-only peak
 - **R3 earliest start.** `S(t)` is S plus the commitments of attempts expected to end by `t`, and `t*` is the first `t` with `S(t) ≥` the head's E. Durations are the learned durations already used for placement; an unknown duration never ends.
   - Review case: a 96 GiB pool runs nine 10 GiB jobs at their peaks, so S is 6, and a 90 GiB head waits. `S(t)` first covers 90 when the ninth job ends (6 + 9 × 10 = 96), so `t*` is the last current finish. A new 10 GiB job starts only if it ends by `t*`; otherwise `S(t*) − 10 = 86 < 90` refuses it. The head starts at `t*`. The old projection subtracted holds only, so jobs at their peak (hold 0) looked absent, each staggered job passed, and the head never started.
 - **Immediate stop (R4).** It runs on the worker, from its own attempt sample, against the E each assignment carries. The worker kills the attempt's process group and reports the stop, with its footprint and E, through the same result path as a kill-limit hit. R5 then treats it as over E. Its stop time is the detection period of the slowest counter in the footprint plus the kill latency.
-- **R5 holds.** The queue keeps the uncapped raise with the hold. Once a pool's reach exceeds both the measured peak and the old E, the job is retried at the raise capped at that reach.
+- **R5 holds.** The queue keeps the uncapped raise with the hold. Once that pool's reach exceeds both the measured peak and the old E, the job is retried at the raise capped at that reach.
+  - **Why the owners' hold, not E or keep.** A stop within E measured the owners, not the job. Raising E by the shortfall makes the job claim memory it never uses, while its next attempt still starts whenever the owners are below their peak, so the same burst stops it again. Raising keep doesn't help either: keep is also the line R4 stops at, so it moves the stop as far as it moves admission. S subtracts holds, but R4's stop line is free memory, which a hold doesn't lower. So an owners' hold reserves the owners' peak at admission without moving the stop.
+  - **Review case, a recurring owners' burst.** A RAM pool has 96 GiB above keep. A lone job sits flat at its E of 80 GiB, so its hold is 0. The owners' use reaches 10 GiB, which leaves 6 free, and R4 forecasts 7 more. Free would reach −1, so R4 stops the job, which is within E.
+    - Old R5: E becomes 81, the next attempt fits, and the same burst stops it at 81, 82 and so on, one GiB at a time, until the cap forces a hold.
+    - Now: E stays 80, and X is 17. Once the owners fall back to 10, their hold is 7, so S is `96 − 10 − 7 = 79` and the reach is also 79. 80 exceeds that reach, so the job waits under `memory_capacity`, naming 80, the owners' 17 GiB peak and the 79 GiB reach. Smaller jobs still start: a 70 GiB job fits beside a 17 GiB owners' peak.
+    - If the owners stay under 17 for 24 h, the hold lapses, the reach is back to 86, and the job starts. Only owners' use above 17 can stop it again, and that raises X. While the evidence stands, the same burst can't stop it twice.
+  - **Review case, a card stop beside a larger RAM pool.** The host's RAM reach is 87 GiB and its card is 24 GiB, with nothing else on the card. The job is stopped over its card E at a 22 GiB card peak, so the raise is 44.
+    - Old R5: capped at the largest reach, 87, card E stays 44. R1 can never admit 44 on a 24 GiB card, even an idle one, and the capacity hold doesn't fire because 44 is under 87. The job waits without a reason.
+    - Now: card E is capped at the card's reach, 24. That is above the 22 GiB peak, so one retry holds the whole card. If it fits, the run is clean and E returns to its peak. If it needs more, its next stop raises card E to 48, which caps at 24, no higher than the old 24. So the job waits under `memory_capacity`, naming the card, its peak and the 24 GiB reach. RAM's 87 never enters.
 - **Explicit limits.**
   - `memory_limit_gb` is still the opt-in kill limit (#1972): the attempt's own `memory.max` on Linux, or the RSS guard on macOS.
   - It caps E only where it contains everything. On unified CUDA it doesn't contain device memory, so it doesn't cap E there.
@@ -405,10 +417,11 @@ On the unified host, the current pool estimate charges 24.2× the host-only peak
   - Production still reclaims.
 - **Stage 2.**
   - E equals the window's maximum, and returns to it after a clean run.
-  - R5's raises: over E, a kernel kill, and a stop within E by its shortfall.
+  - R5's raises: over E and a kernel kill. A stop within E keeps E and sets the owners' hold.
   - The reach cap: on the review's 100 GiB host (9 GiB non-job use, 4 GiB keep, 96 GiB allowance), a raised E is at most 87 GiB, and a larger measured peak waits under `memory_capacity`.
+  - The card case in Appendix C caps card E at the card's 24 GiB reach, not RAM's 87, and ends in a clean run or `memory_capacity`.
   - The #2091 replay takes at most two attempts, then the hold with its measured peak.
-  - A recurring external burst stops the same job at most once for each larger shortfall.
+  - The recurring-burst case in Appendix C: E stays 80, the job waits under `memory_capacity` at a 79 GiB reach, an owners' burst no larger than 17 GiB never stops it again, and the hold lapses after 24 h below 17.
   - The normal and release-only result paths reach the same next E.
   - A missing counter makes a run not clean.
   - The XPU fdinfo units and PCI identity parse.
