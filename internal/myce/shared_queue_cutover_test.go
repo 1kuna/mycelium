@@ -183,20 +183,21 @@ func proveQueueOperations(t *testing.T, c Client, dir, phase string) {
 		t.Fatalf("%s: cancelled job = %s", phase, j.State)
 	}
 
-	saved := filepath.Join(dir, phase+"-checkpoint-saved")
 	s = proofSpec(phase + "-resume")
 	s.Resumable = true
 	s.Files = FileManifest{"input": ref} // Declared outputs need stored inputs.
 	s.Outputs = map[string]string{"resumed.json": "results"}
 	s.Run.Command = []string{"/bin/sh", "-c", `
 if [ -f "$MYCE_CHECKPOINT_DIR/save.json" ]; then cp "$MYCE_CHECKPOINT_DIR/save.json" resumed.json; exit 0; fi
-printf '{"myce_checkpoint":{"generation":1},"phase":"%s"}' "$2" > "$MYCE_CHECKPOINT_DIR/save.json"
-: > "$1"
+printf '{"myce_checkpoint":{"generation":1},"phase":"%s"}' "$1" > "$MYCE_CHECKPOINT_DIR/save.json"
 trap 'exit 143' TERM
-while :; do sleep 0.05; done`, "resume", saved, phase}
+while :; do sleep 0.05; done`, "resume", phase}
 	job = proofSubmit(t, c, s)
-	proofEventually(t, phase+" checkpoint saved", func() bool { _, err := os.Stat(saved); return err == nil })
-	running := proofJobState(t, c, job.ID, func(j *Job) bool { return j.State == "running" })
+	// Resume uses the latest accepted generation. A local save alone can lose
+	// the race with release and leave the restarted fixture waiting for a pause.
+	running := proofJobState(t, c, job.ID, func(j *Job) bool {
+		return j.State == "running" && j.FileCheckpoints[j.Attempt].Generation == 1
+	})
 	attempt := running.Attempt
 	var paused Job
 	if err := c.Call(ctx, http.MethodPost, "/api/jobs/"+job.ID+"/pause", PauseJobRequest{
@@ -208,7 +209,7 @@ while :; do sleep 0.05; done`, "resume", saved, phase}
 		t.Fatal(err)
 	}
 	done, err = c.Wait(ctx, job.ID)
-	if err != nil || done.State != "succeeded" || done.Attempt <= attempt {
+	if err != nil || done.State != "succeeded" || done.Attempt != attempt+1 {
 		t.Fatalf("%s: resumed job = %+v, %v", phase, done, err)
 	}
 	dest = filepath.Join(dir, phase+"-resumed")
