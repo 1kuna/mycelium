@@ -21,6 +21,8 @@ import (
 // refusal proven to precede replacement can leave that host drained while a
 // protocol-compatible rollout continues. The operation lives in queue state.
 type FleetUpgradeStatus struct {
+	// Host names the one worker host a scoped operation updates (#2140).
+	Host      string            `json:"host,omitempty"`
 	Urgency   string            `json:"urgency"`
 	Operation string            `json:"operation"`
 	Release   string            `json:"release"`
@@ -48,6 +50,10 @@ type FleetHostStatus struct {
 }
 type fleetUpgrade struct {
 	Urgency string `json:"urgency,omitempty"`
+	// Scope is the selected worker host of a scoped operation; empty means
+	// the whole fleet. Hosts outside it are recorded as skipped, so a queue
+	// that predates the field still reads the operation correctly.
+	Scope string `json:"scope,omitempty"`
 	// Revision stays 1. Helpers fence on operation and session; the field
 	// keeps the instruction and acknowledgement wire format unchanged.
 	Revision     int                 `json:"revision"`
@@ -98,6 +104,9 @@ type fleetQueueRuntime struct {
 type FleetUpgradeRequest struct {
 	Urgency string `json:"urgency,omitempty"`
 	Release string `json:"release,omitempty"`
+	// Host selects one installed worker host. Only its worker service is
+	// updated; the queue service and every other host are left untouched.
+	Host string `json:"host,omitempty"`
 }
 type FleetUpgradeAck struct {
 	StorageWarning *StoragePreflightFailure `json:"storage_warning,omitempty"`
@@ -132,7 +141,7 @@ func (q *Queue) fleetUpgradeStatus() *FleetUpgradeStatus {
 	if u == nil {
 		return nil
 	}
-	out := &FleetUpgradeStatus{Urgency: fleetUrgency(u.Urgency), Operation: u.Operation, Release: u.Release.Manifest.Version, State: u.State, Hosts: []FleetHostStatus{}}
+	out := &FleetUpgradeStatus{Host: u.Scope, Urgency: fleetUrgency(u.Urgency), Operation: u.Operation, Release: u.Release.Manifest.Version, State: u.State, Hosts: []FleetHostStatus{}}
 	for _, h := range u.Hosts {
 		out.Hosts = append(out.Hosts, h.FleetHostStatus)
 	}
@@ -162,7 +171,7 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 		}
 		previous := q.s.FleetUpgrade
 		if previous != nil && previous.State == "running" {
-			if previous.Release.Manifest.Version == approved.Manifest.Version && fleetUrgency(previous.Urgency) == request.Urgency {
+			if previous.Release.Manifest.Version == approved.Manifest.Version && fleetUrgency(previous.Urgency) == request.Urgency && previous.Scope == request.Host {
 				out = q.fleetUpgradeStatus()
 				return nil
 			}
@@ -182,8 +191,20 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 		if CheckReleaseUpgrade(approved.Manifest.Version, queue.Proof.Version, false, queue.Proof.SHA256 == a.SHA256) != nil {
 			return fleetError("fleet_queue_downgrade_refused")
 		}
-		u := &fleetUpgrade{Urgency: request.Urgency, Operation: ID(), Revision: 1, Release: *approved, PublisherKey: bytes.Clone(q.s.EnrollmentReleaseKey), State: "running", CreatedAt: q.clock.Now()}
+		if request.Host != "" && !q.fleetHostHasWorker(request.Host) {
+			return &HTTPError{Status: 409, Code: "fleet_host_no_worker", Message: "host " + request.Host + " has no installed worker; --host selects one worker host (the queue service updates only in a full myce fleet upgrade)"}
+		}
+		u := &fleetUpgrade{Scope: request.Host, Urgency: request.Urgency, Operation: ID(), Revision: 1, Release: *approved, PublisherKey: bytes.Clone(q.s.EnrollmentReleaseKey), State: "running", CreatedAt: q.clock.Now()}
 		byHost := map[string]*fleetUpgradeHost{queue.Host: {FleetHostStatus: FleetHostStatus{Host: queue.Host, Phase: "pending"}, Queue: true, QueueDone: q.fleetCurrent(queue.Proof, queue.OS, queue.Arch)}}
+		if request.Host != "" {
+			// A scoped operation never replaces the queue service, even on the
+			// selected host. The queue's own update stays with a full rollout.
+			if queue.Host == request.Host {
+				byHost[queue.Host].Queue, byHost[queue.Host].QueueDone = false, false
+			} else {
+				fleetOutOfScope(byHost[queue.Host], request.Host, previous)
+			}
+		}
 		for _, m := range q.s.Machines {
 			if m.Replacement != nil {
 				continue
@@ -197,7 +218,22 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 				return fleetError("fleet_legacy_siblings")
 			}
 			h.Machine = m.ID
-			if reason := q.fleetWorkerFailure(m, approved); reason != "" {
+			if request.Host != "" && h.Host != request.Host {
+				fleetOutOfScope(h, request.Host, previous)
+				continue
+			}
+			if reason := q.fleetWorkerFailure(m, approved); reason != "" && request.Host != "" {
+				// A scoped request names this worker: report why it cannot be
+				// updated now instead of parking it deferred or skipped.
+				why := q.fleetProofGap(m.Fleet)
+				if reason == "worker_runtime_unavailable" {
+					why = q.fleetInitialRuntimeReason(m)
+				}
+				if why == "" {
+					why = reason
+				}
+				return &HTTPError{Status: 409, Code: "fleet_" + reason, Message: fmt.Sprintf("worker %s on host %s: %s", m.ID, h.Host, why)}
+			} else if reason != "" {
 				if reason == "worker_runtime_unavailable" && !q.maintenanceBlocked(h.Host) {
 					h.Phase, h.Outcome = "deferred", FleetHostDeferred
 					h.DeferredReason = q.fleetInitialRuntimeReason(m)
@@ -267,6 +303,38 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 		return nil
 	}, nil)
 	return out, err
+}
+
+func (q *Queue) fleetHostHasWorker(host string) bool {
+	for _, m := range q.s.Machines {
+		if m.Replacement == nil && hostID(m) == host {
+			return true
+		}
+	}
+	return false
+}
+
+// fleetOutOfScope records a host that a scoped operation leaves alone. It is
+// skipped, so no instruction, drain, fence or probe can reach it. A start proof
+// the previous operation still owed stays owed: the next full rollout proves
+// it exactly as it would have without this operation.
+func fleetOutOfScope(h *fleetUpgradeHost, selected string, previous *fleetUpgrade) {
+	h.Phase, h.Wait = "skipped", "not selected (--host "+selected+"); services, release and admission policy unchanged"
+	if previous == nil {
+		return
+	}
+	for _, old := range previous.Hosts {
+		if old.Host != h.Host {
+			continue
+		}
+		if old.StartIdentity != "" && !old.WorkerDone {
+			h.StartIdentity = old.StartIdentity
+		}
+		// Keep a deferred outcome visible in status until a rollout clears it.
+		if old.Outcome == FleetHostDeferred {
+			h.Outcome, h.DeferredReason, h.FailureCode = old.Outcome, old.DeferredReason, old.FailureCode
+		}
+	}
 }
 
 func cloneFleetProof(p *FleetRuntimeProof) *FleetRuntimeProof {
@@ -974,7 +1042,11 @@ func (q *Queue) AckFleetUpgrade(ack FleetUpgradeAck, requestContexts ...context.
 // fleetOperationRefusal names the running operation a different request
 // would replace.
 func (q *Queue) fleetOperationRefusal(u *fleetUpgrade) error {
-	msg := fmt.Sprintf("fleet operation %s is running (release %s, urgency %s); wait for it to finish or stop (myce status), then rerun", u.Operation, u.Release.Manifest.Version, fleetUrgency(u.Urgency))
+	scope := "every host"
+	if u.Scope != "" {
+		scope = "host " + u.Scope
+	}
+	msg := fmt.Sprintf("fleet operation %s is running (release %s, urgency %s, %s); wait for it to finish or stop (myce status), then rerun", u.Operation, u.Release.Manifest.Version, fleetUrgency(u.Urgency), scope)
 	return &HTTPError{Status: 409, Code: "fleet_upgrade_target_conflict", Message: msg}
 }
 

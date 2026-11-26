@@ -189,6 +189,7 @@ Apply repairs locally through the authorized owner, then rerun
 | `maintenance_changed` | Someone changed the host's maintenance during the update; their policy is kept. Rerun when ready. |
 | `drain_conflict`, `resume_conflict`, `maintenance_unavailable` | The host's maintenance policy changed between read and write. Check `myce host status HOST`, then rerun. |
 | `worker_unmanaged`, `worker_target_incompatible`, `worker_downgrade_refused` | The worker has no fresh runtime proof, no artifact for its platform, or is newer than the release. |
+| `fleet_host_no_worker` | `myce fleet upgrade --host HOST` named a host with no installed worker. A scoped operation updates one worker service; update the queue service with a full rollout. |
 | `service_health_failed`, `storage_preflight_failed` | Aliases of `fleet_health_failed` and `fleet_storage_preflight_failed` below. |
 
 Local installer and service updater failures. Updater reports expose a fixed
