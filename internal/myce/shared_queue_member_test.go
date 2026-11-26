@@ -441,11 +441,14 @@ assert Path(destination).read_bytes() == b"proof"
 				_, j := proofReplica(t, next, before.ID)
 				return j != nil && j.State == "running" && j.StartedAt != nil
 			})
+			// The old member coordinates when it stops. It can hold a later turn
+			// than first: an authority call past its deadline ends a turn.
+			stopped := proofLeader(t, a, old, first.number-1)
 			old.stop(t, tc.sig)
-			second := proofLeader(t, a, next, first.number)
-			if second.number != first.number+1 {
-				t.Fatalf("handover number = %d, want %d", second.number, first.number+1)
-			}
+			// Handover numbers only increase and are granted once. An acquisition
+			// whose reply was lost still consumes one, so the successor's turn
+			// can be later than stopped+1 (#2134).
+			proofLeader(t, a, next, stopped.number)
 			active := proofJobState(t, next.client, before.ID, func(j *Job) bool { return j.State == "running" })
 			assertProofAttempt(t, before, active)
 			cli := func(args ...string) []byte {
@@ -463,10 +466,12 @@ assert Path(destination).read_bytes() == b"proof"
 			}
 			current := resultIdentity(active)
 			current.Success = true
-			// A request carrying the retired turn must never reach completion,
+			// A request carrying a retired turn must never reach completion,
 			// even when all three execution identity fields still match.
-			proofUnavailable(t, next.client.callOnceShared(ctx, http.MethodPost, "/api/workers/complete",
-				current, nil, strconv.FormatInt(first.number, 10)))
+			for _, retired := range []int64{first.number, stopped.number} {
+				proofUnavailable(t, next.client.callOnceShared(ctx, http.MethodPost, "/api/workers/complete",
+					current, nil, strconv.FormatInt(retired, 10)))
+			}
 			for _, bad := range []Result{
 				{Execution: Execution{ID: active.ID, Attempt: active.Attempt + 1}, Machine: active.Machine, Session: active.Session},
 				{Execution: Execution{ID: active.ID, Attempt: active.Attempt}, Machine: active.Machine, Session: "wrong-session"},

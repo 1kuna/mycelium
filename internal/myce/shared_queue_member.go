@@ -135,6 +135,10 @@ func OpenSharedQueueMember(ctx context.Context, cfg SharedQueueMemberConfig) (*S
 	if !validSharedEndpoint(cfg.Endpoint) {
 		return nil, errors.New("a shared queue member requires an HTTP(S) endpoint that other members can reach")
 	}
+	// Each authority call gets lease/3 (2 s). The NAS authority measured
+	// commit p99 about 18 ms and max about 111 ms under load (#1176), so a
+	// call that misses 2 s means a stalled authority or host, and the turn
+	// ends. The lease bounds crash failover to about lease plus one interval.
 	if cfg.interval == 0 {
 		cfg.interval = time.Second
 	}
@@ -273,7 +277,9 @@ func (m *sharedQueueMember) step(ctx context.Context) {
 		return
 	}
 	t, err := m.current(ctx)
-	if err != nil || m.pull(ctx, t.head) != nil || t.ready || m.cfg.AwaitImport && t.number == 0 && t.head == 0 {
+	// A turn this member still owns here has no writer: an acquisition or
+	// release lost its reply. Replace it now rather than idle out its lease.
+	if err != nil || m.pull(ctx, t.head) != nil || t.ready && t.owner != m.owner || m.cfg.AwaitImport && t.number == 0 && t.head == 0 {
 		return
 	}
 	call, cancel := context.WithTimeout(ctx, m.timeout)
@@ -395,11 +401,24 @@ func (m *sharedQueueMember) promote(ctx context.Context, turn sharedQueueTurn) s
 		// The same maintenance loop as a single queue. A failed tick ends
 		// this turn; the member loop retires it and may promote again.
 		if err := q.Run(tickCtx); err != nil && tickCtx.Err() == nil {
-			log.Printf("event=shared_queue_maintenance_failed")
+			log.Printf("event=shared_queue_maintenance_failed reason=%s handover=%d", sharedMaintenanceFailure(err), turn.number)
 			writer.disabled.Store(true)
 		}
 	}()
 	return ""
+}
+
+// sharedMaintenanceFailure names why a tick ended the turn without logging
+// PostgreSQL error text, which can contain connection settings.
+func sharedMaintenanceFailure(err error) sharedPromotionFailure {
+	switch {
+	case errors.Is(err, errSharedHead):
+		return promotionHead
+	case errors.Is(err, errSharedTurn):
+		// Includes a write PostgreSQL did not confirm within the call deadline.
+		return promotionTurn
+	}
+	return "local_maintenance"
 }
 
 // holdTurn renews an unroutable turn until ctx ends. It reports a lost turn

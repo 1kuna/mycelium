@@ -827,3 +827,59 @@ func TestSharedQueuePostgresReclaimRestoresLateMove(t *testing.T) {
 		t.Fatalf("the committed input lost its bytes: %v", err)
 	}
 }
+
+// An acquisition or release can commit after its caller stopped waiting. The
+// member then holds no writer for the turn it still owns. It must replace that
+// turn with a new number at once instead of idling out the lease, and the new
+// number must fence a writer left on the orphaned one.
+func TestSharedQueueMemberReplacesItsOrphanedTurn(t *testing.T) {
+	for _, ready := range []bool{false, true} {
+		t.Run(map[bool]string{false: "lost_acquire_reply", true: "lost_release_reply"}[ready], func(t *testing.T) {
+			pg := startProofPostgres(t)
+			a := pg.authority(t)
+			dir := t.TempDir()
+			m, err := OpenSharedQueueMember(t.Context(), SharedQueueMemberConfig{
+				Postgres: pg.dsn, Database: filepath.Join(dir, "member", "queue.db"),
+				FileStore: filepath.Join(dir, "files"), Checkpoints: filepath.Join(dir, "checkpoints"),
+				Token: proofToken, Clock: proofClock(), Endpoint: "http://127.0.0.1:1",
+				// Far longer than the test, so only replacement can promote.
+				interval: 100 * time.Millisecond, lease: time.Hour,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			orphan, err := a.acquire(t.Context(), m.owner, m.endpoint, time.Hour)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ready {
+				if err := a.renew(t.Context(), orphan, time.Hour, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan struct{})
+			go func() { defer close(done); m.Run(ctx) }()
+			defer func() {
+				cancel()
+				<-done
+				_ = m.Close()
+			}()
+			var turn sharedQueueTurn
+			proofEventually(t, "member replaces its orphaned turn", func() bool {
+				turn, err = a.current(t.Context())
+				return err == nil && turn.ready && turn.owner == m.owner && turn.number > orphan.number
+			})
+			if turn.number != orphan.number+1 {
+				t.Fatalf("replacement turn = %d, want %d", turn.number, orphan.number+1)
+			}
+			stale := sharedQueueChange{sequence: turn.head + 1, handover: orphan.number, operation: ID(), payload: []byte("{}")}
+			if _, err := a.append(t.Context(), orphan, stale); !errors.Is(err, errSharedTurn) {
+				t.Fatalf("append under the orphaned turn = %v", err)
+			}
+			if _, err := a.acquire(t.Context(), "another-member", "http://127.0.0.1:2", time.Hour); !errors.Is(err, errSharedTurn) {
+				t.Fatalf("another member took an unexpired turn: %v", err)
+			}
+		})
+	}
+}
