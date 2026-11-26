@@ -443,3 +443,101 @@ func TestHostHygieneMountIdleCadence(t *testing.T) {
 		}
 	})
 }
+
+// A NAS reboot fails the idle probe for a few minutes. Once storage answers,
+// the host must return to storage-backed work within one stall allowance plus
+// the fresh confirmations, not after several idle periods. A stalled retry
+// stays the only request, and a mount that never completes the consecutive
+// confirmations stays withheld.
+func TestHostHygieneMountRecoversSoonAfterOutage(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const tick = time.Second // Production control cadence (worker default interval).
+		clock := &fakeClock{now: time.Unix(100, 0)}
+		var calls atomic.Int64
+		var mode atomic.Int32 // 0 healthy, 1 failing, 2 hanging, 3 flapping
+		release := make(chan struct{})
+		p := &hostMountProbe{root: "nas", path: "unused", clock: clock, period: checkpointMetadataInterval, measure: func(string, func()) hostMountResult {
+			n := calls.Add(1)
+			switch mode.Load() {
+			case 1:
+				return hostMountResult{latency: time.Millisecond, err: errors.New("operation timed out")}
+			case 2:
+				<-release
+			case 3:
+				if n%hostHealthConfirmation == 0 {
+					return hostMountResult{latency: time.Millisecond, err: errors.New("operation timed out")}
+				}
+			}
+			return hostMountResult{latency: time.Millisecond}
+		}}
+		// Admission withholds storage roots by the reported reason (applyHostMountHealth).
+		withheld := func() bool {
+			clock.Advance(tick)
+			got := p.sample(clock.Now(), nil)
+			synctest.Wait()
+			return mountHealthWithholds(got.Reason)
+		}
+		withheld()
+		if withheld() {
+			t.Fatal("healthy mount not established", p.reason)
+		}
+		// Storage fails at the next idle probe and stays down for three minutes.
+		clock.Advance(checkpointMetadataInterval)
+		mode.Store(1)
+		for p.reason != "mount_probe_failed" {
+			withheld()
+		}
+		outage := clock.Now().Add(3 * time.Minute)
+		for clock.Now().Before(outage) {
+			if !withheld() {
+				t.Fatal("failed mount cleared during the outage")
+			}
+		}
+		mode.Store(0)
+		returned := clock.Now()
+		bound := checkpointAvailabilityStallBudget + (2*hostHealthConfirmation+1)*tick
+		for withheld() {
+			if clock.Now().Sub(returned) > bound {
+				t.Fatalf("still withheld %s after storage returned; bound %s", clock.Now().Sub(returned), bound)
+			}
+		}
+		t.Logf("recovered %s after storage returned", clock.Now().Sub(returned))
+		// Recovered storage returns to one access per idle period.
+		before := calls.Load()
+		for range int(checkpointMetadataInterval/tick) - 1 {
+			withheld()
+		}
+		if calls.Load() != before {
+			t.Fatal("recovered mount kept probing faster than the idle period", calls.Load()-before)
+		}
+
+		// A retry that stalls in the kernel is never duplicated and cannot clear.
+		mode.Store(1)
+		for p.reason != "mount_probe_failed" {
+			withheld()
+		}
+		mode.Store(2)
+		before = calls.Load()
+		for range int(10 * checkpointAvailabilityStallBudget / tick) {
+			if !withheld() {
+				t.Fatal("stalled retry cleared the failed mount")
+			}
+		}
+		if calls.Load() != before+1 {
+			t.Fatal("stalled retry was duplicated", calls.Load()-before)
+		}
+		mode.Store(3) // Never more than confirmation-1 consecutive successes.
+		close(release)
+		for range int(checkpointMetadataInterval / tick) {
+			if !withheld() {
+				t.Fatal("flapping mount cleared without consecutive confirmations")
+			}
+		}
+		mode.Store(0)
+		for withheld() {
+			if clock.Now().Sub(returned) > 2*time.Hour {
+				t.Fatal("mount never recovered after flapping stopped")
+			}
+		}
+	})
+}
