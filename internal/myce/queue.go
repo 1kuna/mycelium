@@ -684,7 +684,7 @@ func checkpointAvailable(root, purpose string, progress func()) bool {
 	if err != nil || !info.IsDir() {
 		return false
 	}
-	return probeStorageFile(storageProbePath(root, ".myce-probe-", purpose), true, plainStorageProbeOps(progress)) == nil
+	return probeStorageFile(storageProbePath(root, ".myce-probe-", purpose), plainStorageProbeOps(progress)) == nil
 }
 
 // BeginShutdown fences maintenance and in-flight mutations before API shutdown.

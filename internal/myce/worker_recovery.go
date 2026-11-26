@@ -1133,7 +1133,7 @@ func workerCheckpointAvailable(root string, progress func()) error {
 		return errors.New("checkpoint root is not a directory")
 	}
 	// One fixed per-host file, rewritten in place and never removed (#1545).
-	return probeStorageFile(storageProbePath(root, ".myce-probe-", "worker"), false, plainStorageProbeOps(progress))
+	return probeStorageFile(storageProbePath(root, ".myce-probe-", "worker"), plainStorageProbeOps(progress))
 }
 
 func syncWorkerDir(dir string) error {

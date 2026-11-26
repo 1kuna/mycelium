@@ -1,8 +1,11 @@
 package myce
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -17,9 +20,12 @@ import (
 // left one deleted file behind per probe; at fleet check-in rates that grew a
 // single bin folder past the point where listing it stalls the share (#1545).
 // Overwriting in place proves the same writable/synced access without adding
-// directory entries after the first probe.
+// directory entries after the first probe. A fresh name per probe would also
+// sidestep a client handle stuck on the fixed file (#2176), but it would hide
+// that stuck handle and bring back the recycle-bin growth, so the fixed file
+// stays and a write that never reaches the store fails the probe instead.
 
-const storageProbeContent = "myce storage probe\n"
+const storageProbePrefix = "myce storage probe "
 
 // Successful NAS operations have taken 17.73s/23.22s (#234); the existing
 // per-operation stall allowance is 30s. Ten allowances between idle probes
@@ -53,6 +59,9 @@ type storageProbeOps struct {
 	open   func(path string) (*os.File, error)
 	run    func(operation string, fn func() error) error
 	report func()
+	// bypass drops cached pages before the read-back; nil uses the platform
+	// call (Linux fadvise DONTNEED, macOS F_NOCACHE).
+	bypass func(file fs.File, offset, length int64) error
 }
 
 func plainStorageProbeOps(progress func()) storageProbeOps {
@@ -70,17 +79,30 @@ func openStorageProbe(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 }
 
-// probeStorageFile truncates and rewrites path in place, optionally syncs it,
-// closes it and reads it back. Any failed step reports the store unavailable.
-// Content is not compared: probes of the same purpose on one host may overlap,
-// and a concurrent truncate must not read as an outage.
-func probeStorageFile(path string, syncFile bool, ops storageProbeOps) (err error) {
+// probeStorageFile truncates and rewrites path in place with a fresh nonce,
+// fsyncs and closes it, then reopens it, drops the client's cached pages and
+// reads the nonce back. Any failed step reports the store unavailable.
+//
+// The write alone proves nothing on a network filesystem: on a Linux CIFS
+// mount the kernel accepted every probe write into the page cache, discarded
+// each write-back (`No writable handle in writepages ret=-9`) and served the
+// read-back from that cache, so the probe passed for 15 hours while the NAS
+// copy stayed empty (#2174). fsync surfaces a failed write-back as an error;
+// reading the nonce past the page cache proves the store holds this probe's
+// bytes rather than an earlier probe's. One lock per path serializes this
+// process's probes of the same file (health sampling and check-in admission
+// share the worker's), so a concurrent truncate never reads as an outage.
+func probeStorageFile(path string, ops storageProbeOps) (err error) {
+	lock, _ := storageProbeLocks.LoadOrStore(path, new(sync.Mutex))
+	lock.(*sync.Mutex).Lock()
+	defer lock.(*sync.Mutex).Unlock()
 	operation := "open"
 	defer func() {
 		if err != nil {
 			logStorageProbeFailure(operation, err)
 		}
 	}()
+	content := storageProbeRecord()
 	f, err := ops.open(path)
 	ops.report()
 	if err != nil {
@@ -90,9 +112,9 @@ func probeStorageFile(path string, syncFile bool, ops storageProbeOps) (err erro
 		return err
 	}
 	operation = "write"
-	err = ops.run("write", func() error { _, err := f.WriteString(storageProbeContent); return err })
+	err = ops.run("write", func() error { _, err := f.WriteString(content); return err })
 	ops.report()
-	if err == nil && syncFile {
+	if err == nil {
 		operation = "fsync"
 		err = ops.run("fsync", f.Sync)
 		ops.report()
@@ -112,23 +134,49 @@ func probeStorageFile(path string, syncFile bool, ops storageProbeOps) (err erro
 		return err
 	}
 	operation = "read"
+	bypass := ops.bypass
+	if bypass == nil {
+		bypass = storageCacheBypass
+	}
+	var stored string
 	err = ops.run("read", func() error {
 		r, err := os.Open(path)
 		if err != nil {
 			return err
 		}
-		var buf [len(storageProbeContent)]byte
-		_, err = r.Read(buf[:])
-		// Another probe of this host/purpose can have truncated the fixed
-		// file before its write. EOF proves the read completed; it is not a
-		// storage fault. Keep real read errors and all close errors.
-		if errors.Is(err, io.EOF) {
+		// Platforms without a cache-bypass call still rely on fsync above.
+		if err = bypass(r, 0, int64(len(content))); errors.Is(err, errStorageCacheBypass) {
 			err = nil
+		}
+		if err == nil {
+			buf := make([]byte, len(content))
+			var n int
+			n, err = io.ReadFull(r, buf)
+			stored = string(buf[:n])
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				err = nil // A short store is reported by the comparison below.
+			}
 		}
 		return errors.Join(err, r.Close())
 	})
 	ops.report()
+	if err == nil && stored != content {
+		operation = "verify"
+		err = errStorageProbeMismatch
+	}
 	return err
+}
+
+var (
+	storageProbeLocks       sync.Map // probe path -> *sync.Mutex
+	errStorageProbeMismatch = errors.New("storage probe read back different bytes than it wrote")
+)
+
+// storageProbeRecord is fixed-length probe content with a per-probe nonce.
+func storageProbeRecord() string {
+	var nonce [8]byte
+	_, _ = rand.Read(nonce[:]) // crypto/rand.Read never returns an error.
+	return storageProbePrefix + hex.EncodeToString(nonce[:]) + "\n"
 }
 
 // Log only fixed operation names and numeric errno, never filesystem error
@@ -149,7 +197,7 @@ func storageProbeFailureDetails(operation string, err error) (string, int) {
 	switch operation {
 	case "open", "stat", "lstat", "write", "fsync", "sync", "close", "read", "rename",
 		"create", "mkdir", "remove", "readdirent", "mount-metadata", "ancestor-metadata",
-		"filesystem", "containment", "format", "resolve", "inventory", "pending",
+		"filesystem", "verify", "containment", "format", "resolve", "inventory", "pending",
 		"local-model-ancestor", "local-model-filesystem", "local-model-headroom":
 	default:
 		operation = "unknown"
@@ -164,7 +212,7 @@ func logStorageProbeFailure(operation string, err error) {
 	log.Printf("storage probe failed operation=%s errno=%d", operation, errno)
 }
 
-// probeStorageRename proves write, sync and read on the fixed file in place,
+// probeStorageRename proves write, sync and read-back on the fixed file in place,
 // then proves rename on a separate fixed marker by moving it to an alternate
 // name and back. The written file is never renamed: on a Linux CIFS mount of
 // the fleet NAS, a file that was renamed and renamed back refuses write opens
@@ -173,7 +221,7 @@ func logStorageProbeFailure(operation string, err error) {
 // deleted (#1545). A probe interrupted between the renames leaves only the
 // alternate name, which the next probe moves back first.
 func probeStorageRename(path string, ops storageProbeOps) error {
-	if err := probeStorageFile(path, true, ops); err != nil {
+	if err := probeStorageFile(path, ops); err != nil {
 		return err
 	}
 	marker := path + ".rename"
