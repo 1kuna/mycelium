@@ -712,6 +712,14 @@ func proofOpenSharedQueue(t *testing.T, a *sharedQueueAuthority, dir, name strin
 // root is where this member mounts the shared file store.
 func proofOpenSharedQueueAt(t *testing.T, a *sharedQueueAuthority, dir, name, root string, clock Clock) (*Queue, sharedQueueTurn) {
 	t.Helper()
+	return proofOpenSharedQueueRoots(t, a, dir, name, dir, root, false, clock)
+}
+
+// checkpoints and root are where this member mounts the shared checkpoint
+// root and file store. With nas, jobs keep checkpoints under that root as
+// installed members with a NAS do; otherwise in the file store.
+func proofOpenSharedQueueRoots(t *testing.T, a *sharedQueueAuthority, dir, name, checkpoints, root string, nas bool, clock Clock) (*Queue, sharedQueueTurn) {
+	t.Helper()
 	path := filepath.Join(dir, name, "queue.db")
 	if err := PrepareStateRoots(filepath.Dir(path)); err != nil {
 		t.Fatal(err)
@@ -738,7 +746,7 @@ func proofOpenSharedQueueAt(t *testing.T, a *sharedQueueAuthority, dir, name, ro
 		t.Fatal(err)
 	}
 	writer := &sharedQueueWriter{authority: a, turn: turn, timeout: m.timeout, sequence: turn.head}
-	q, err := openQueue(path, dir, clock, writer, lock, WithFileStore(root, 1<<30, true))
+	q, err := openQueue(path, checkpoints, clock, writer, lock, WithFileStore(root, 1<<30, !nas))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -746,7 +754,7 @@ func proofOpenSharedQueueAt(t *testing.T, a *sharedQueueAuthority, dir, name, ro
 		writer.disabled.Store(true)
 		_ = q.Close()
 	})
-	if err := q.ConfigureFileStore(root, 1<<30, true); err != nil {
+	if err := q.ConfigureFileStore(root, 1<<30, !nas); err != nil {
 		t.Fatal(err)
 	}
 	return q, turn

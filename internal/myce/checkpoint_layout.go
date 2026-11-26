@@ -61,6 +61,32 @@ func checkpointShard(id string) string {
 }
 func lowerHex(b byte) bool { return '0' <= b && b <= '9' || 'a' <= b && b <= 'f' }
 
+// errCheckpointOutsideRoot refuses one offered attempt whose checkpoint
+// folder escapes this worker's checkpoint root.
+var errCheckpointOutsideRoot = reject(checkpointOutsideRoot, errors.New(checkpointOutsideRoot))
+
+const checkpointOutsideRoot = "checkpoint_outside_root"
+
+// rebaseCheckpoint resolves a NAS checkpoint folder that a queue on another
+// host recorded under its own mount of the share (#2146). Shared-queue members,
+// and a single queue restored by rollback, load the same job rows while each
+// host mounts the share at its own path. The folder keeps its layout suffix,
+// ID or shard/ID, under this queue's root. A folder already under the root,
+// which is every folder a queue recorded itself, is unchanged. No I/O.
+func rebaseCheckpoint(root string, j *Job) {
+	if j == nil || !filepath.IsAbs(j.Checkpoint) || !validCheckpointExpiryPath(j.ID, j.ID) || filepath.Base(j.Checkpoint) != j.ID {
+		return
+	}
+	if rel, err := filepath.Rel(root, j.Checkpoint); err == nil && safeRelative(filepath.ToSlash(rel)) {
+		return
+	}
+	rel := j.ID
+	if shard := checkpointShard(j.ID); shard != "" && filepath.Base(filepath.Dir(j.Checkpoint)) == shard {
+		rel = filepath.Join(shard, j.ID)
+	}
+	j.Checkpoint = filepath.Join(root, rel)
+}
+
 // checkpointPath runs under q.mu and performs no I/O.
 func (q *Queue) checkpointPath(id string) string {
 	if q.shards.ready.Load() && !q.fileCheckpoints && !q.simulation {

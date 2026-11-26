@@ -57,6 +57,7 @@ func (q *Queue) readStartupState(marker []byte) error {
 				continue
 			}
 			shareAdmissionWaitEndpoints(result.jobs[record.id])
+			rebaseCheckpoint(q.root, result.jobs[record.id])
 		}
 		done <- result
 	}()

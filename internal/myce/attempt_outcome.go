@@ -408,6 +408,7 @@ var launchPredicateMessages = map[string]string{
 	execArgumentLimit:                       "exec argument/environment size limit exceeded; read managed inputs from MYCE_BINDINGS_FILE and move large command arguments or authored environment values into files before submitting with a new key",
 	"launch_authorization":                  "queue launch authorization or assignment was refused; refresh job and host status",
 	checkpointFloorMissingHold:              "required NAS checkpoint generation is missing",
+	checkpointOutsideRoot:                   "the assigned checkpoint folder is outside this worker's checkpoint root; check that the queue and worker mount the same checkpoint share",
 }
 
 func launchFailurePredicate(kind string, cause error) string {
