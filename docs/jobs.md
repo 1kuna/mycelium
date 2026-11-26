@@ -290,6 +290,7 @@ advanced:
 | Field | Default | Meaning |
 |---|---|---|
 | `allow_cpu_fallback` | `false`: GPU work waits for a GPU | `true` lets GPU work run on a CPU target when no GPU target fits it at placement time. The attempt then reserves host RAM (its `memory_gb` becomes host memory), gets `MYCE_DEVICE=cpu` and `MYCE_GPU_COUNT=0`, and a requeue tries a GPU again. Plain commands only: extension work runs on CPU through a declared `cpu` variant; refused with `needs.model` or a `needs.gpu.devices` pin |
+| `exclusive_device` | `false`: measured single-card work may share a card | `true` keeps each attempt's whole accelerator card on any platform: no other attempt joins its card, and it never joins a card another attempt holds or is still releasing. Use it while you qualify output on an exclusive card and have not yet measured co-residency parity. It overrides `fan_out.share_xpu`. Model-server, multi-card and unmeasured work already keeps its card |
 | `worker_data` | Omitted: ordinary retention | `ephemeral` removes attempt-private worker payload and delivered logs synchronously after durable result acceptance and before release; supports offline non-resumable commands, extensions, environments, sidecars, `after` and fan-out on v2-capable Linux namespace workers. Shared software caches stay read-only. Unsupported combinations return `job_worker_data_unsupported`. Check `worker_data_cleanup` and its attempt-history receipt; unlink is not SSD secure erasure. Queue/NAS retention stays unchanged ([contract](files.md#ephemeral-worker-data)) |
 | `checkpoint` | Existing configured checkpoint mode | `local_first` opts resumable plain commands into the versioned cooperative [JSON generation protocol](files.md#local-first-checkpoints-1600); no implicit NAS substitution |
 | `memory_limit_gb` | Absent: estimate-based admission with physical containment | Explicit host RAM limit. Set it when the job must respect an authored bound. |
@@ -325,8 +326,12 @@ top level and under `advanced` with different values is refused. Stored and
 replied specs keep the flat fields this release so older workers and clients
 read them unchanged. Status and job GET add a read-only `advanced` object
 holding only the settings that differ from their defaults; it is absent when
-none do. `allow_cpu_fallback` is new and exists only under `advanced` (its
-HTTP wire form is `spec.allow_cpu_fallback`).
+none do. `allow_cpu_fallback` and `exclusive_device` are new and exist only
+under `advanced` (their HTTP wire forms are `spec.allow_cpu_fallback` and
+`spec.exclusive_device`). A queue older than `exclusive_device` refuses a spec
+that sets it with `request_invalid` (unknown field) rather than dropping it, so
+the job is never accepted without the guarantee. Those queues do not share
+cards between attempts, so omit the field only when submitting to one.
 
 Attempts get `MYCE_JOB_ID`, `MYCE_ATTEMPT`, and `MYCE_CHECKPOINT_DIR`. The last
 is writable for every job. Non-resumable jobs without declared checkpoint bytes use an attempt-local folder and

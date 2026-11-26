@@ -218,6 +218,8 @@ type Spec struct {
 	// AllowCPUFallback is the wire form of advanced.allow_cpu_fallback (MY-54).
 	WorkerData       string `json:"worker_data,omitempty" yaml:"-"`
 	AllowCPUFallback bool   `json:"allow_cpu_fallback,omitempty" yaml:"-"`
+	// ExclusiveDevice is the wire form of advanced.exclusive_device (#2197).
+	ExclusiveDevice bool `json:"exclusive_device,omitempty" yaml:"-"`
 	// Advanced is the authoring section for settings with good defaults.
 	// FoldAdvanced moves it onto the flat fields; stored specs never carry it.
 	Advanced *Advanced `json:"advanced,omitempty" yaml:"advanced,omitempty"`
