@@ -1809,8 +1809,9 @@ again. Never delete a reference or a file to make the report clean.
      WORKER_CONFIG --queue https://127.0.0.1:JOINING_PORT`. This repair verifies
      the local member against the saved pin. A saved loopback address is tried
      before discovery.
-6. On hosts without a member, set the fleet environment's `MYCE_QUEUE` to the
-   comma-separated member list, for example
+6. On client-only hosts, with no member and no worker, set the fleet
+   environment's `MYCE_QUEUE` to the comma-separated member list. A worker
+   reads the same setting and needs one endpoint, its local member. For example
    `http://MEMBER_A:7331,http://MEMBER_B:7331`. The installed `myce` and the
    Python `Client.from_installed()` then fail over between members with no
    other change ([client failover](development.md#external-client-failover)).
