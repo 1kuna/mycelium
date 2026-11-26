@@ -68,6 +68,7 @@ type state struct {
 	Health                 healthAlerts                   `json:"health_alerts,omitempty"`
 	FleetUpgrade           *fleetUpgrade                  `json:"fleet_upgrade,omitempty"`
 	WorkerHandovers        map[string]workerHandover      `json:"worker_handovers,omitempty"`
+	WorkerRestarts         map[string]workerRestart       `json:"worker_restarts,omitempty"`
 	FleetSuperseded        []fleetAbandoned               `json:"fleet_superseded,omitempty"`
 	ProductionLeases       map[string]ProductionLease     `json:"production_leases,omitempty"`
 
@@ -284,6 +285,7 @@ type Queue struct {
 
 	restartControlUntil  time.Duration // Available startup service, not blocked wall time.
 	restartGraceDuration time.Duration
+	workerRestartGrace   time.Duration // Configured grace; holds an announced worker restart (#2172).
 	restartService       restartServiceWindow
 	contactTransaction   *contactTransaction // Lazy, per-worker undo while q.mu owns a transaction.
 
@@ -509,6 +511,7 @@ func openQueue(path, root string, clock Clock, shared *sharedQueueWriter, lock *
 	}
 	q.traceStartup("load_frozen_bundles")
 	q.unreported = map[string]bool{}
+	q.workerRestartGrace = RestartGrace
 	q.contacts = map[string]*workerContact{}
 	for id, m := range q.s.Machines {
 		q.contacts[id] = &workerContact{session: m.Session}
@@ -559,10 +562,12 @@ func openQueue(path, root string, clock Clock, shared *sharedQueueWriter, lock *
 	return q, nil
 }
 
-// SetRestartGrace configures the recovery window from this queue's startup.
+// SetRestartGrace configures the recovery window from this queue's startup,
+// and how long an announced worker restart holds that worker's attempts.
 func (q *Queue) SetRestartGrace(d time.Duration) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.workerRestartGrace = d
 	if len(q.unreported) > 0 {
 		q.beginRestartGrace(d)
 		q.republishReads()
@@ -1617,7 +1622,8 @@ func (q *Queue) maintainControl(refreshStartReasons bool) {
 		if q.retainWorkerHandover(m) {
 			continue // Service replacement cannot turn live custody into a retry.
 		}
-		grace := q.restartProtectsWorker(m, now)
+		restartLapsed := q.settleWorkerRestart(m, now)
+		grace := q.restartProtectsWorker(m, now) || q.workerRestartHeld(m, now)
 		restartExpired := unreported && !grace
 		if !m.Gone && !grace && (restartExpired || (!q.networkQuiet && q.workerSuspect(m, now) && now.Sub(q.lastContact(m, now)) >= q.machineLossTimeout(m.ID))) {
 			q.touchMachine(m.ID)
@@ -1651,7 +1657,11 @@ func (q *Queue) maintainControl(refreshStartReasons bool) {
 							j.Losses++
 							q.chargeLoss(j)
 						}
-						q.retry(j, fmt.Sprintf("machine quiet for %s", q.machineLossTimeout(m.ID)))
+						quiet := q.machineLossTimeout(m.ID)
+						if restartLapsed {
+							quiet = max(quiet, q.workerRestartGrace)
+						}
+						q.retry(j, fmt.Sprintf("machine quiet for %s", quiet))
 					}
 				}
 			}
@@ -2053,6 +2063,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			}
 		}
 		delete(q.unreported, m.ID)
+		q.workerReturned(m.ID, c.contact)
 		m.Gone = false
 		q.touchMachine(m.ID)
 		m.LastSeen = q.clock.Now()

@@ -19,6 +19,11 @@ import (
 // rest of the first run, so the worker returning at all proves its exit does
 // not depend on the upload. The restarted worker keeps the session, resumes at
 // the queue's accepted tus offset and completes the same attempt.
+//
+// #2172: the queue uses the installed zero loss minimums, so it learns a loss
+// allowance of two check-in periods, and a peer keeps reporting so the silence
+// is the one worker's. The restart comes 3.3 s of queue time after the exit,
+// as in the soak, far past that allowance.
 func TestWorkerTermDuringResultUploadResumesAfterRestart(t *testing.T) {
 	for _, mode := range []string{"installed", "foreground"} {
 		t.Run(mode, func(t *testing.T) { testWorkerTermDuringResultUpload(t, mode) })
@@ -26,16 +31,22 @@ func TestWorkerTermDuringResultUploadResumesAfterRestart(t *testing.T) {
 }
 
 func testWorkerTermDuringResultUpload(t *testing.T, mode string) {
-	q, _ := fixture(t)
+	q, clock := fixture(t)
+	if err := q.SetLossTimeouts(0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
 	if err := q.ConfigureFileStore(t.TempDir(), 1<<30, true); err != nil {
 		t.Fatal(err)
 	}
+	peer := machine("peer", "fake")
+	check(t, q, peer, nil)
 	const size = 3*fileUploadChunkSize + 1
 	s := spec("experiment")
 	s.Resumable = false
 	s.Needs.MemoryGB = 1
 	s.Run.Command = []string{"sh", "-c", "echo ran; head -c " + strconv.Itoa(size) + " /dev/zero > output"}
 	s.Outputs = map[string]string{"output": "results"}
+	s.AllowedMachines = []string{"term"}
 
 	var blocking atomic.Bool
 	blocking.Store(true)
@@ -134,6 +145,14 @@ func testWorkerTermDuringResultUpload(t *testing.T, mode string) {
 		if m.Leaving || m.Gone {
 			t.Fatalf("TERM told the queue the worker left: %+v", m)
 		}
+	}
+	// A service restart takes seconds; the peer keeps reporting meanwhile.
+	for elapsed := time.Duration(0); elapsed < 3300*time.Millisecond; elapsed += 300 * time.Millisecond {
+		clock.Advance(300 * time.Millisecond)
+		check(t, q, peer, nil)
+	}
+	if got := job(t, q, j.ID); got.State != "running" || got.Attempt != 1 {
+		t.Fatalf("restart delay lost the attempt: state=%s attempt=%d reason=%q", got.State, got.Attempt, got.Reason)
 	}
 
 	blocking.Store(false)

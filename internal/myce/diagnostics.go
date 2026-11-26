@@ -103,6 +103,7 @@ var rejectionMessages = map[string]string{
 	"worker_environment_log_invalid":        "environment log report is invalid",
 	"worker_log_invalid":                    "worker log report is invalid",
 	"worker_leave_invalid":                  "worker is unknown or cannot leave",
+	"worker_restart_invalid":                "worker session is unknown or already lost",
 	"checkpoint_invalid":                    "checkpoint publication is invalid or stale",
 	"reservation_invalid":                   "reservation binding, target, owner, reason or maximum lifetime is invalid",
 	"host_control_invalid":                  "host control request is invalid",

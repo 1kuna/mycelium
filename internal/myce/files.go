@@ -338,6 +338,7 @@ func (s *FileStore) publish(ctx context.Context, ref FileRef) error {
 	if err = errors.Join(f.Sync(), f.Close()); err != nil {
 		return uploadFailure(ctx, "upload_sync", err)
 	}
+	reportPublicationStep(ctx)
 	// The blob is now the verified upload itself: a link to it, or the file
 	// renamed. An existing blob was verified when it was placed, and HEAD and
 	// GET recheck its bytes before certifying or serving them, so only its
@@ -356,24 +357,46 @@ func (s *FileStore) publish(ctx context.Context, ref FileRef) error {
 	} else if err != nil {
 		return uploadFailure(ctx, "blob_link", err)
 	}
+	reportPublicationStep(ctx)
 	if err = s.refreshBlob(s.blob(ref)); err != nil {
 		return uploadFailure(ctx, "blob_refresh", err)
 	}
+	reportPublicationStep(ctx)
 	if err = s.syncDir(filepath.Join(s.root, "blobs")); err != nil {
 		return uploadFailure(ctx, "blob_directory_sync", err)
 	}
+	reportPublicationStep(ctx)
 	// Keep only the authoritative link after publication. A later tus creation
 	// must never truncate a surviving hard link to the immutable blob.
 	if err = os.Remove(source); err != nil && !os.IsNotExist(err) {
 		return uploadFailure(ctx, "upload_unlink", err)
 	}
+	reportPublicationStep(ctx)
 	if err = os.Remove(source + ".info"); err != nil && !os.IsNotExist(err) {
 		return uploadFailure(ctx, "upload_metadata_unlink", err)
 	}
+	reportPublicationStep(ctx)
 	if err = os.Remove(source + uploadDigestSuffix); err != nil && !os.IsNotExist(err) {
 		return uploadFailure(ctx, "upload_digest_unlink", err)
 	}
-	return uploadFailure(ctx, "upload_directory_sync", s.syncDir(filepath.Join(s.root, "uploads")))
+	reportPublicationStep(ctx)
+	if err = s.syncDir(filepath.Join(s.root, "uploads")); err != nil {
+		return uploadFailure(ctx, "upload_directory_sync", err)
+	}
+	reportPublicationStep(ctx)
+	return nil
+}
+
+// reportPublicationStep reports one completed publication step (sync, rename,
+// unlink) to the request's progress observer, as each verification read is.
+// The final PATCH runs these steps before it answers, and on a busy network
+// share they outlast a window learned from plain chunks (#2171). A step that
+// hangs reports nothing, so a silent store is still abandoned one response
+// window after its last completed step.
+func reportPublicationStep(ctx context.Context) {
+	if step, ok := ctx.Value(publicationStepKey{}).(func()); ok {
+		step()
+	}
 }
 func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	r, diagnostic := uploadRequestDiagnostic(r)
@@ -1229,8 +1252,8 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 	}
 	var reading, writing, awaiting atomic.Bool
 	var progressConn atomic.Pointer[fileTransferConn]
-	var verificationReads uint64
-	var wroteHeaders, wroteRequest atomic.Int64 // Injected-clock UnixNano.
+	var verificationReads, publicationSteps uint64 // Steps are a subset of the reported operations.
+	var wroteHeaders, wroteRequest atomic.Int64    // Injected-clock UnixNano.
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
 		Got1xxResponse: func(code int, header textproto.MIMEHeader) error {
 			if code != http.StatusProcessing {
@@ -1253,7 +1276,13 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 			if err != nil || reads <= verificationReads {
 				return errors.New("invalid upload verification progress")
 			}
-			verificationReads = reads
+			steps := uint64(0)
+			if raw := header.Get(publicationStepsHeader); raw != "" {
+				if steps, err = strconv.ParseUint(raw, 10, 64); err != nil || steps > reads || steps < publicationSteps {
+					return errors.New("invalid upload publication progress")
+				}
+			}
+			verificationReads, publicationSteps = reads, steps
 			if conn := progressConn.Load(); conn != nil && conn.timing != nil {
 				conn.awaitResponse()
 			}
@@ -1393,10 +1422,11 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 	if res != nil {
 		// Only an answered request is evidence of the server's latency. A
 		// response before the body ended, or one held open by verification
-		// progress, measures something else: keep its other evidence only.
+		// reads, measures something else: keep its other evidence only.
+		// Publication steps are the final PATCH's ordinary service (#2171).
 		var latency, sending time.Duration
 		var sent int64
-		if headersAt, requestAt := wroteHeaders.Load(), wroteRequest.Load(); requestAt != 0 && verificationReads == 0 {
+		if headersAt, requestAt := wroteHeaders.Load(), wroteRequest.Load(); requestAt != 0 && verificationReads == publicationSteps {
 			latency = max(time.Nanosecond, now.Sub(time.Unix(0, requestAt)))
 			if headersAt != 0 {
 				sending = time.Duration(requestAt - headersAt)

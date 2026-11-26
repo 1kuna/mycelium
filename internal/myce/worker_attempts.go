@@ -1010,6 +1010,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	sharedCPUAllowance := 0
 	events := make(chan WorkerEvent, 16)
 	w.control = &processControl{clock: w.Clock, wake: make(chan struct{}, 1), availability: w.availability, service: w.ServiceConfig != nil, serviceStop: w.serviceStop}
+	var restartNotice <-chan struct{}
 	controlDone := make(chan struct{})
 	go func() { defer close(controlDone); w.control.run(ctx, stop, events) }()
 	defer func() { cancel(); <-controlDone }()
@@ -1150,10 +1151,16 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 		}
 		w.batchMemory.Store(math.Float64bits(batch))
 		if w.serviceStop != nil && w.serviceStop.Err() != nil {
+			if restartNotice == nil {
+				// No check-in follows from this process while commands stop and
+				// the worker exits. Tell the queue now that it is a restart (#2172).
+				restartNotice = w.announceRestart(root.state.Session)
+			}
 			// Actors retain unacknowledged results for startup replay. Waiting
 			// for remote leave/model plans here kept an idle worker's inventory
 			// alive until systemd's SIGKILL, even with no local custody.
 			if len(jobs) == 0 || custodiansDetached(actors) {
+				<-restartNotice
 				return nil
 			}
 			select {

@@ -126,9 +126,20 @@ func uploadRequestDiagnostic(r *http.Request) (*http.Request, *uploadDiagnostic)
 	return r.WithContext(context.WithValue(r.Context(), uploadDiagnosticKey{}, d)), d
 }
 
-// Informational responses report real verification I/O, never timer-only
-// liveness. A stuck read produces no reports, so dead-connection detection
-// remains bounded. Opt-in preserves clients that cannot consume HTTP 102.
+// Informational responses report real verification and publication I/O, never
+// timer-only liveness. A stuck read or sync produces no reports, so
+// dead-connection detection remains bounded. Opt-in preserves clients that
+// cannot consume HTTP 102.
+//
+// X-Myce-Verification-Reads counts every completed operation, so clients that
+// predate publication steps still extend their wait on them (#2171).
+// X-Myce-Publication-Steps counts the publication steps among them. A response
+// held open only by publication is ordinary final-PATCH service, and the client
+// still learns its latency; whole-blob verification reads are not.
+const publicationStepsHeader = "X-Myce-Publication-Steps"
+
+type publicationStepKey struct{}
+
 func (s *FileStore) uploadVerificationProgress(w http.ResponseWriter, r *http.Request) *http.Request {
 	period, err := time.ParseDuration(r.Header.Get("X-Myce-Upload-Progress"))
 	if err != nil || period <= 0 || r.Method != "PATCH" && r.Method != "POST" {
@@ -138,23 +149,34 @@ func (s *FileStore) uploadVerificationProgress(w http.ResponseWriter, r *http.Re
 	// per recovery period prevents read-buffer-sized header traffic.
 	period = max(period, clientRecoveryPeriod/4)
 	var last time.Time
-	var reads uint64
-	previous, _ := r.Context().Value(ioProgressKey{}).(func())
-	progress := func() {
-		if previous != nil {
-			previous()
-		}
-		reads++
+	var operations, steps uint64
+	report := func() {
 		now := s.clock.Now()
 		if !last.IsZero() && now.Sub(last) < period {
 			return
 		}
 		last = now
-		w.Header().Set("X-Myce-Verification-Reads", strconv.FormatUint(reads, 10))
+		w.Header().Set("X-Myce-Verification-Reads", strconv.FormatUint(operations, 10))
+		w.Header().Set(publicationStepsHeader, strconv.FormatUint(steps, 10))
 		w.WriteHeader(http.StatusProcessing)
 		w.Header().Del("X-Myce-Verification-Reads")
+		w.Header().Del(publicationStepsHeader)
 	}
-	return r.WithContext(context.WithValue(r.Context(), ioProgressKey{}, progress))
+	previous, _ := r.Context().Value(ioProgressKey{}).(func())
+	read := func() {
+		if previous != nil {
+			previous()
+		}
+		operations++
+		report()
+	}
+	step := func() {
+		operations++
+		steps++
+		report()
+	}
+	ctx := context.WithValue(r.Context(), ioProgressKey{}, read)
+	return r.WithContext(context.WithValue(ctx, publicationStepKey{}, step))
 }
 
 // Preserve error identity for the server while the HTTP envelope stays private.
@@ -229,6 +251,7 @@ func (s *FileStore) finishUpload(ctx context.Context, info tus.FileInfo) error {
 	if err := s.recordUpload(ref.SHA256, info.MetaData["purpose"], false, ctx); err != nil {
 		return uploadFailure(ctx, "upload_purpose_commit", err)
 	}
+	reportPublicationStep(ctx)
 	return uploadFailure(ctx, "upload_publication_commit", s.publishUpload(ref.SHA256, ctx))
 }
 
