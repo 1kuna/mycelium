@@ -631,7 +631,7 @@ func (q *Queue) reclaimInterruptedUpload(ctx context.Context, store *FileStore, 
 	}
 	// Remove metadata first so leftover data cannot be resumed or refreshed.
 	defer store.changed(hash)
-	for _, suffix := range []string{".info", ""} {
+	for _, suffix := range []string{".info", "", uploadDigestSuffix} {
 		if err := os.Remove(path + suffix); err != nil && !os.IsNotExist(err) {
 			return err
 		}

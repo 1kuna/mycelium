@@ -345,8 +345,10 @@ func TestOutputUploadCreationAndReconciliation(t *testing.T) {
 			if (mode == "new" || mode == "empty") && requests != 1 {
 				t.Fatal("fresh file request count", requests)
 			}
-			if mode == "new" && progress == 0 {
-				t.Fatal("creation-with-upload did not report verification progress")
+			// Publication compares the digest hashed during transfer; it reads
+			// nothing back, so it has no verification progress to report (#2155).
+			if mode == "new" && progress != 0 {
+				t.Fatal("creation-with-upload re-read the file to publish it; verification reports:", progress)
 			}
 		})
 	}

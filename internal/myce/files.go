@@ -323,8 +323,12 @@ func (s *FileStore) publish(ctx context.Context, ref FileRef) error {
 	}
 	source := filepath.Join(s.root, "uploads", ref.SHA256)
 	defer s.changed(ref.SHA256)
-	if err := verifyFile(ctx, source, ref); err != nil {
-		return uploadFailure(ctx, "upload_verify", err)
+	// Each PATCH hashed what it wrote. Only an upload without a matching
+	// digest record is read again here, on the request path (#2155).
+	if noModelSymlinks(source, false) != nil || !uploadDigestMatches(source, ref) {
+		if err := verifyFile(ctx, source, ref); err != nil {
+			return uploadFailure(ctx, "upload_verify", err)
+		}
 	}
 	f, err := os.OpenFile(source, os.O_RDWR, 0600)
 	if err != nil {
@@ -333,11 +337,23 @@ func (s *FileStore) publish(ctx context.Context, ref FileRef) error {
 	if err = errors.Join(f.Sync(), f.Close()); err != nil {
 		return uploadFailure(ctx, "upload_sync", err)
 	}
-	if err = s.linkBlob(source, s.blob(ref), ref.SHA256); err != nil && !os.IsExist(err) {
+	// The blob is now the verified upload itself: a link to it, or the file
+	// renamed. An existing blob was verified when it was placed, and HEAD and
+	// GET recheck its bytes before certifying or serving them, so only its
+	// shape is checked here. The lifecycle fence keeps it from trash meanwhile.
+	if err = s.moveBlob(source, s.blob(ref), ref.SHA256); os.IsExist(err) {
+		if st, e := os.Lstat(s.blob(ref)); e != nil {
+			err = e
+		} else if !st.Mode().IsRegular() || st.Size() != ref.SizeBytes {
+			err = errors.New("stored file identity mismatch")
+		} else {
+			err = nil
+		}
+		if err != nil {
+			return uploadFailure(ctx, "blob_verify", err)
+		}
+	} else if err != nil {
 		return uploadFailure(ctx, "blob_link", err)
-	}
-	if err = s.verify(ctx, ref); err != nil {
-		return uploadFailure(ctx, "blob_verify", err)
 	}
 	if err = s.refreshBlob(s.blob(ref)); err != nil {
 		return uploadFailure(ctx, "blob_refresh", err)
@@ -352,6 +368,9 @@ func (s *FileStore) publish(ctx context.Context, ref FileRef) error {
 	}
 	if err = os.Remove(source + ".info"); err != nil && !os.IsNotExist(err) {
 		return uploadFailure(ctx, "upload_metadata_unlink", err)
+	}
+	if err = os.Remove(source + uploadDigestSuffix); err != nil && !os.IsNotExist(err) {
+		return uploadFailure(ctx, "upload_digest_unlink", err)
 	}
 	return uploadFailure(ctx, "upload_directory_sync", s.syncDir(filepath.Join(s.root, "uploads")))
 }
