@@ -230,6 +230,9 @@ resumable, requeue, no retry or loss charge, one cause (`memory_pressure`). An
 attempt that was over its charge is a limited run and gets the doubled floor.
 An attempt stopped within its charge was an innocent victim and keeps its
 estimate. A kernel kill inside the slice is classified the same way.
+Either way, the job's next attempt runs alone on the pool at that charge
+rather than restart beside the same contention. A pressure stop while it runs
+alone pauses the job for its owner with the measured peak (#2091).
 
 ### 2.7 Growth
 

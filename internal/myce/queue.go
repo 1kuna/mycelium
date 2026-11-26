@@ -2535,7 +2535,10 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 						j.ExecutionEvidence = unstartedExecution(j.Attempt)
 					}
 					q.recordSharedHostLatencyStop(j, r)
-					q.retry(j, j.Reason)
+					// A release can settle a pressure stop before its result.
+					if j.Reason != memoryPressureCause || !q.holdAlonePressure(j) {
+						q.retry(j, j.Reason)
+					}
 				}
 			}
 		}
