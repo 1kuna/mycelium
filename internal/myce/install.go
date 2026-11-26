@@ -209,6 +209,9 @@ type ServiceConfig struct {
 	// password stays in its own private file, never in this config or argv.
 	SharedAuthority             string `json:"shared_authority,omitempty"`
 	SharedAuthorityPasswordFile string `json:"shared_authority_password_file,omitempty"`
+	// Every shared-queue member must serve the same file store; empty keeps
+	// the default beside the database.
+	FileStore string `json:"file_store,omitempty"`
 }
 
 // PlanInstall is pure. The command boundary supplies the OS account; omitted
@@ -1040,7 +1043,7 @@ func (c ServiceConfig) Args() []string {
 		// Always rendered: a saved zero means retain until release, not the default.
 		args = append(args, "--file-retention", c.FileRetention.String())
 		args = append(args, "--file-store-bytes", strconv.FormatInt(c.FileStoreBytes, 10), "--file-store-production-reserve", strconv.FormatInt(c.FileStoreProductionReserve, 10))
-		for _, v := range [][2]string{{"--project-config", c.ProjectConfig}, {"--host-config", c.HostConfig}, {"--upload-spool-dir", c.UploadSpoolDir}} {
+		for _, v := range [][2]string{{"--project-config", c.ProjectConfig}, {"--host-config", c.HostConfig}, {"--upload-spool-dir", c.UploadSpoolDir}, {"--file-store", c.FileStore}} {
 			if v[1] != "" {
 				args = append(args, v[0], v[1])
 			}

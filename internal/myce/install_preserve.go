@@ -526,7 +526,7 @@ func (c ServiceConfig) StateRoots() ([]string, error) {
 		return (Worker{StateDir: c.State, CacheRoot: c.ModelCache, EnvironmentRoot: c.EnvironmentCache}).StateRoots()
 	}
 	if c.Role == "queue" {
-		return append([]string{c.State}, QueueStateRoots(c.DB, c.UploadSpoolDir, "", "", true)...), nil
+		return append([]string{c.State}, QueueStateRoots(c.DB, c.UploadSpoolDir, c.FileStore, "", true)...), nil
 	}
 	return []string{c.State}, nil
 }

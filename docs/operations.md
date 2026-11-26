@@ -1695,8 +1695,8 @@ same attempt keeps its number, session and start time across both switches.
 - Create a fresh, empty PostgreSQL database for the authority.
 - Use the file store and checkpoint root that every member will mount. If the
   queue's file store is local today, copy it there first with the
-  [consistent copy](#consistent-copy-and-restore) procedure and pass the copy's
-  path as `--file-store`.
+  [consistent copy](#consistent-copy-and-restore) procedure. Pass the copy's
+  path as `--file-store` to the cutover and to every member's install.
 - [Preserve one complete generation](#preserve-one-complete-generation). The
   commands do not move the joining identity, configuration, model catalog or
   the per-host idle history beside the database.
@@ -1718,19 +1718,36 @@ settings across reinstalls.
    then serves the same pinned TLS identity, so existing invitations verify.
    A member without the copy creates its own identity, and joining clients
    refuse to use it.
+
+   On a host with no queue yet, the copy creates the member's state directory,
+   so first mark that directory as current state. Otherwise the install
+   refuses it with `legacy_state_present`. The default state directory is
+   `~/.local/share/mycelium/queue/state`, which holds `myce.db`:
+
+   ```sh
+   mkdir -m 700 STATE_DIR && (umask 077 && printf 'v3\n' > STATE_DIR/.myce-format)
+   cp -Rp ORIGINAL_DB.joining STATE_DIR/myce.db.joining
+   ```
+
+   Copy the whole directory, including its own `.myce-format`.
 4. Install the queue service. `--queue` is this member's own address, which
    the other members use to reach it while it coordinates:
 
    ```sh
    myce install queue --nas NAS_PATH --listen 0.0.0.0:7331 --queue http://MEMBER_ADDRESS:7331 \
+     --file-store FILE_STORE \
      --shared-authority 'host=DB_HOST port=DB_PORT dbname=DB_NAME user=DB_USER' \
      --shared-authority-password-file PASSWORD_FILE --dry-run
    ```
 
-   Check that the `Command:` line ends with the shared authority, then run it
-   again without `--dry-run`. Use the same `--nas`, `--checkpoints` and file
-   store as the single queue. A reinstall without these options keeps them.
-   `--shared-authority ''` returns the service to a single queue.
+   Check that the `Command:` line shows `--file-store FILE_STORE` and ends with
+   the shared authority, then run it again without `--dry-run`. Use the same
+   `--nas`, `--checkpoints` and `--file-store` as the cutover. The file store
+   path must be absolute. A reinstall without these options keeps them, and
+   `--file-store ''` returns to the default beside the database.
+   `--shared-authority ''` returns the service to a single queue. A queue
+   never reads the model or environment roots, so a queue install neither
+   checks nor creates them.
 
    On the original queue host, install the member only after the cutover,
    with the same `--db`. The fenced database is that member's copy. On every
@@ -1742,8 +1759,14 @@ returns 503.
 
 ### Preflight without downtime
 
-1. Copy the live database into a new, empty private directory with
-   `sqlite3 DB ".backup 'COPY_DIR/queue.db'"`.
+1. Make a new private directory marked as current state, then copy the live
+   database into it. Without the marker, the next step refuses the directory
+   with `legacy_state_present`:
+
+   ```sh
+   mkdir -m 700 COPY_DIR && (umask 077 && printf 'v3\n' > COPY_DIR/.myce-format)
+   sqlite3 DB ".backup 'COPY_DIR/queue.db'"
+   ```
 2. Run `myce queue cutover --verify-only --db COPY_DIR/queue.db --checkpoints
    CHECKPOINT_ROOT --file-store FILE_STORE`. It hashes every retained input,
    result, file-store checkpoint, pending delivery and frozen bundle that the

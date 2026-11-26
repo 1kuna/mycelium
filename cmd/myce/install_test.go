@@ -698,29 +698,43 @@ func TestInstallQueueSharedAuthorityDryRun(t *testing.T) {
 			if err := os.WriteFile(password, []byte("canary-password-never-printed\n"), 0600); err != nil {
 				t.Fatal(err)
 			}
+			// The shared store lives on the NAS, outside the member's own state.
+			store := filepath.Join(home, "mycelium", "queue-files")
 			const dsn = "host=192.0.2.10 port=5432 dbname=myce user=myce"
-			out, err := os.CreateTemp(t.TempDir(), "stdout")
-			if err != nil {
-				t.Fatal(err)
+			dryRun := func(args []string) string {
+				t.Helper()
+				out, err := os.CreateTemp(t.TempDir(), "stdout")
+				if err != nil {
+					t.Fatal(err)
+				}
+				saved := os.Stdout
+				os.Stdout = out
+				err = setupCommandWithProbe(args, dryInstallProbe(t, home, myce.MachineProbe{OS: goos, Arch: "arm64"}), home)
+				os.Stdout = saved
+				out.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
+				b, _ := os.ReadFile(out.Name())
+				return string(b)
 			}
-			saved := os.Stdout
-			os.Stdout = out
-			args := []string{"install", "queue", "--nas", home, "--dry-run", "--listen", "0.0.0.0:7331", "--queue", "http://192.0.2.11:7331",
-				"--shared-authority", dsn, "--shared-authority-password-file", password}
-			err = setupCommandWithProbe(args, dryInstallProbe(t, home, myce.MachineProbe{OS: goos, Arch: "arm64"}), home)
-			os.Stdout = saved
-			out.Close()
-			if err != nil {
-				t.Fatal(err)
+			plain := []string{"install", "queue", "--nas", home, "--dry-run", "--listen", "0.0.0.0:7331", "--queue", "http://192.0.2.11:7331"}
+			// A queue never reads the model or environment roots, so empty
+			// ones must not trip the NAS containment check (#2141).
+			plain = append(plain, "--model-root=", "--environment-root=")
+			if text := dryRun(plain); strings.Contains(text, "--file-store ") || strings.Contains(text, "--shared-authority") {
+				t.Fatalf("single-queue dry run rendered shared-member settings:\n%s", text)
 			}
-			b, _ := os.ReadFile(out.Name())
-			text := string(b)
-			wantUnit := `"--shared-authority" "` + dsn + `" "--shared-authority-password-file" "` + password + `"`
+			args := append(slices.Clone(plain), "--file-store", store, "--shared-authority", dsn, "--shared-authority-password-file", password)
+			text := dryRun(args)
+			wantUnit := `"--file-store" "` + store + `"`
 			if goos == "darwin" {
 				// launchd runs `myce service --config`, which renders the same command.
 				wantUnit = "<string>service</string><string>--config</string>"
+			} else if !strings.Contains(text, `"--shared-authority" "`+dsn+`" "--shared-authority-password-file" "`+password+`"`) {
+				t.Errorf("unit omitted the shared authority:\n%s", text)
 			}
-			for _, want := range []string{"Command: myce queue --listen 0.0.0.0:7331", "--queue http://192.0.2.11:7331", "--shared-authority " + dsn + " --shared-authority-password-file " + password, wantUnit} {
+			for _, want := range []string{"Command: myce queue --listen 0.0.0.0:7331", "--queue http://192.0.2.11:7331", "--file-store " + store + " ", "--shared-authority " + dsn + " --shared-authority-password-file " + password, wantUnit} {
 				if !strings.Contains(text, want) {
 					t.Errorf("missing %q in dry run:\n%s", want, text)
 				}
@@ -734,6 +748,11 @@ func TestInstallQueueSharedAuthorityDryRun(t *testing.T) {
 			inline := append(slices.Clone(args[:len(args)-4]), "--shared-authority", dsn+" password=inline")
 			if err := setupCommandWithProbe(inline, dryInstallProbe(t, home, myce.MachineProbe{OS: goos, Arch: "arm64"}), home); err == nil {
 				t.Fatal("install accepted a password in the authority settings")
+			}
+			// Like every install path, a relative value is saved absolute.
+			cwd, _ := os.Getwd()
+			if text := dryRun(append(slices.Clone(plain), "--file-store", "queue-files")); !strings.Contains(text, "--file-store "+filepath.Join(cwd, "queue-files")+" ") {
+				t.Fatalf("relative file store was not made absolute:\n%s", text)
 			}
 		})
 	}

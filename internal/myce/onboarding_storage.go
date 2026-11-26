@@ -294,6 +294,9 @@ func validateOnboardingStorageFS(ctx context.Context, abort context.CancelCauseF
 		return storageRootRefusal(ctx, "mount-metadata", preflightError("nas_unreachable", "storage", "mounted NAS is unavailable; restore the OS mount"), e)
 	}
 	for role, path := range []string{c.NAS, c.Checkpoints, c.ModelRoot, c.EnvironmentRoot} {
+		if c.Role == "queue" && role >= 2 {
+			continue // A queue never reads the model or environment roots.
+		}
 		ctx := storageRootContext(ctx, []string{"nas", "checkpoint", "model", "environment"}[role])
 		base := mount
 		if role == 2 && !withinNAS(mount, path) && filepath.IsAbs(path) {
@@ -355,6 +358,9 @@ func validateOnboardingStorageFS(ctx context.Context, abort context.CancelCauseF
 		return ctx.Err()
 	}
 	for i, path := range []string{c.Checkpoints, c.ModelRoot, c.EnvironmentRoot} {
+		if c.Role == "queue" && i > 0 {
+			continue
+		}
 		ctx := storageRootContext(ctx, []string{"checkpoint", "model", "environment"}[i])
 		if ctx.Err() != nil {
 			return ctx.Err()
