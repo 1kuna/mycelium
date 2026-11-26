@@ -211,6 +211,19 @@ repeating inventory-wide planning. Host-hold target/preemption planning runs
 once; release-only finalization can clear a hold after the transaction's last
 custody change.
 
+Exact launch and Started gates (`/api/workers/launch`, `/api/workers/started`)
+run the same time and custody fences. The fleet-wide planning pass (model-call
+admission, release planning for the waiting set, display reasons) grows with
+the waiting set (#2179). It can change a gate's outcome only by preempting the
+gate's own attempt for strictly higher-tier demand, or by admitting a model
+call. A gate runs planning only while such demand is waiting, for example after
+a priority policy change makes queued work outrank the attempt. Otherwise it
+runs fences only, rechecks its own attempt, session and admission, and leaves
+other planning to the next check-in, one-second tick or submission.
+`BenchmarkLaunchWaitingScale` measures gate hold and latency against
+the waiting set. `TestLaunchGateDecisionEquivalence` freezes a launch workload's
+directives, gate outcomes, refusal fences and final placements.
+
 `BenchmarkCheckinPersistence` reports control-hold and persistence phases,
 changed payload bytes and private-fixture WAL growth for retained-history and
 768-input-manifest workloads. It uses real SQLite commits and an injected queue

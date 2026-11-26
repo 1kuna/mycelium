@@ -458,7 +458,16 @@ func (q *Queue) reconcileModels(m *Machine, reports []ModelReport) {
 func (q *Queue) maintainModels() {
 	defer q.bodyPhaseFinish("maintain_models", q.bodyPhaseStart())
 	q.admissionWaitDecisions = nil
+	q.maintainModelSlots()
+	if q.networkQuiet {
+		return
+	}
+	q.planModels()
+}
 
+// Engine custody fences: forget slots of lost sessions, expire loads, retry
+// failed loads and drain idle or unplaceable engines.
+func (q *Queue) maintainModelSlots() {
 	if q.s.ModelSlots == nil {
 		q.s.ModelSlots = map[string]*ModelSlot{}
 	}
@@ -487,9 +496,11 @@ func (q *Queue) maintainModels() {
 	if removedSlot {
 		q.refreshHostMemory()
 	}
-	if q.networkQuiet {
-		return
-	}
+}
+
+// Admit model calls and plan batch releases for the waiting set.
+func (q *Queue) planModels() {
+	now := q.clock.Now()
 	// Recompute the device winners after each admission or preparation. A call
 	// can only use machines on which the shared planner gives it the next turn.
 	// Trying a loading/blocked call once still permits backfill on other resources.

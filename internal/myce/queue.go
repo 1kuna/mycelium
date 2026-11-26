@@ -1588,10 +1588,45 @@ func (q *Queue) maintain() {
 }
 
 func (q *Queue) maintainControl(refreshStartReasons bool) {
+	q.maintainPass(true, refreshStartReasons)
+}
+
+// An exact launch or Started gate needs every time and custody fence fresh.
+// The fleet-wide planning pass (model admission, release planning for the
+// waiting set, display reasons) is what grows with the waiting set (#2179),
+// and it changes a gate's outcome only by preempting the gate's own attempt
+// for strictly higher-tier demand, or by admitting a model call. Without such
+// demand the gate runs fences only; its other planning lands at the next
+// check-in, tick or submission.
+func (q *Queue) maintainGate(plan bool) {
+	if plan {
+		q.maintain()
+		return
+	}
+	q.maintainPass(false, false)
+}
+
+func (q *Queue) gatePlanningMatters(attempt Spec) bool {
+	for _, c := range q.calls {
+		if c.Machine == "" && c.Error == "" {
+			return true
+		}
+	}
+	for _, j := range q.liveJobs() {
+		if j.State == "queued" && q.comparePriority(attempt, j.Spec) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (q *Queue) maintainPass(plan, refreshStartReasons bool) {
 	if q.stopping.Load() {
 		return
 	}
-	if q.maintenance != nil && q.maintenance.ran {
+	// A fence-only pass satisfies a later fence-only request; a planning
+	// request in the same transaction still runs the complete pass.
+	if q.maintenance != nil && q.maintenance.ran && (q.maintenance.planned || !plan) {
 		q.settleMaintenance()
 		return
 	}
@@ -1601,6 +1636,7 @@ func (q *Queue) maintainControl(refreshStartReasons bool) {
 	defer q.memoizeExtensionQualifications(nil)()
 	defer q.bodyPhaseFinish("maintain", q.bodyPhaseStart())
 	q.beginMaintenance()
+	q.maintenance.planned = plan
 	q.expireInventoryObservations()
 	previousCapture := q.memoryAdmissionCapture
 	q.memoryAdmissionCapture = &memoryAdmissionCapture{decisions: map[string]memoryAdmissionDecision{}}
@@ -1736,6 +1772,11 @@ func (q *Queue) maintainControl(refreshStartReasons bool) {
 	q.maintainReservations()
 	q.settleMaintenance()
 	q.refreshHostMemory()
+	if !plan {
+		q.maintainModelSlots()
+		q.settleMaintenance()
+		return
+	}
 	q.maintainModels()
 	q.settleMaintenance()
 	q.admissionWaitPending = true
@@ -3349,7 +3390,9 @@ func (q *Queue) startedWithCustody(ctx context.Context, request workerStartedReq
 	var remaining *float64
 	var rejected error
 	err := q.updateRequest(ctx, func() error {
-		q.maintain()
+		// A missing job refuses whatever planning decides.
+		live := q.s.Jobs[r.ID]
+		q.maintainGate(live != nil && q.gatePlanningMatters(live.Spec))
 		j, e := q.current(r)
 		if e != nil {
 			rejected = e
