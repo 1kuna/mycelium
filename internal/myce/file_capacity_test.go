@@ -121,7 +121,7 @@ func TestFileCapacityAbandonedClaimedUploadSweep(t *testing.T) {
 			if legacy {
 				syncDir := q.files.syncDir
 				q.files.syncDir = func(string) error { return errors.New("test interrupted cleanup sync") }
-				if err := q.reclaimInterruptedUploads(); err != nil {
+				if err := q.reclaimInterruptedUploads(ctx, true); err != nil {
 					t.Fatal(err)
 				}
 				q.files.syncDir = syncDir
@@ -163,6 +163,49 @@ func TestFileCapacityAbandonedClaimedUploadSweep(t *testing.T) {
 	}
 }
 
+func TestFileCapacityAbandonedUnclaimedLegacyUploadSweep(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	abandoned := capacityPartial(t, c, "abandoned legacy input", jobInputUploadPurpose)
+	imported := capacityPartial(t, c, "abandoned legacy import", fileImportUploadPurpose)
+	clock.Advance(max(testFileRetention, filePublicationGrace) + time.Nanosecond)
+	recent := capacityPartial(t, c, "recent legacy input", jobInputUploadPurpose)
+	q.fileLifecycle.Lock()
+	q.fileLifecycle.Unlock()
+	if err := q.update(func() error {
+		delete(q.s.JobInputUploads, abandoned.SHA256)
+		delete(q.s.JobInputUploads, recent.SHA256)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if status := q.fileStoreStatus(ctx); status.ReclaimableBytes != 2 {
+		t.Fatalf("idle unclaimed job-input bytes missing from reclaimable accounting: %+v", status)
+	}
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	checkUpload := func(ref FileRef, present bool) {
+		t.Helper()
+		for _, suffix := range []string{"", ".info"} {
+			_, err := os.Stat(filepath.Join(q.files.root, "uploads", ref.SHA256+suffix))
+			if present && err != nil || !present && !os.IsNotExist(err) {
+				t.Fatalf("unexpected presence for %s%s, want %t: %v", ref.SHA256, suffix, present, err)
+			}
+		}
+	}
+	checkUpload(abandoned, false)
+	checkUpload(imported, true)
+	checkUpload(recent, true)
+	clock.Advance(max(testFileRetention, filePublicationGrace) + time.Nanosecond)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	checkUpload(recent, false)
+	checkUpload(imported, true)
+}
+
 func TestFileCapacityClaimedResumeAtIdleBoundary(t *testing.T) {
 	q, clock := fixture(t)
 	c := retentionClient(t, q)
@@ -193,7 +236,7 @@ func TestFileCapacityClaimedResumeAtIdleBoundary(t *testing.T) {
 	}()
 	submitVerificationWait(t, "claimed resume in lifecycle fence", entered)
 	clock.Advance(testFileRetention)
-	if err := q.reclaimInterruptedUploads(); err != nil {
+	if err := q.reclaimInterruptedUploads(ctx, true); err != nil {
 		t.Fatal(err)
 	}
 	release()
@@ -202,7 +245,7 @@ func TestFileCapacityClaimedResumeAtIdleBoundary(t *testing.T) {
 	}
 	q.fileLifecycle.Lock()
 	q.fileLifecycle.Unlock()
-	if err := q.reclaimInterruptedUploads(); err != nil {
+	if err := q.reclaimInterruptedUploads(ctx, true); err != nil {
 		t.Fatal(err)
 	}
 	res, err := c.fileRequest(ctx, http.MethodPatch, endpoint, strings.NewReader(content[2:]), map[string]string{"Tus-Resumable": "1.0.0", "Upload-Offset": "2", "Content-Type": "application/offset+octet-stream"})

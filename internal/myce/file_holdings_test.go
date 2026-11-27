@@ -523,7 +523,7 @@ func TestFileReleaseLegacyPartialClaimKeepsCollectionAuthority(t *testing.T) {
 	if status := q.fileStoreStatus(ctx); status.OpenUploadBytes != 4 || status.ReclaimableBytes != 2 {
 		t.Fatalf("release must leave written bytes for idle collection: %+v", status)
 	}
-	if err := q.reclaimInterruptedUploads(); err != nil {
+	if err := q.reclaimInterruptedUploads(ctx, true); err != nil {
 		t.Fatal(err)
 	}
 	if got := q.fileStoreStatus(ctx); got.OpenUploadBytes != 2 || got.ReclaimableBytes != 0 {

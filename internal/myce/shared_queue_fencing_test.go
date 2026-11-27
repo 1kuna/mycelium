@@ -801,7 +801,7 @@ func TestSharedQueuePostgresReclaimRestoresLateMove(t *testing.T) {
 		}
 	}
 	done := make(chan error, 1)
-	go func() { done <- old.reclaimJobFilesContext(context.Background()) }()
+	go func() { done <- old.reclaimJobFilesContext(context.Background(), true) }()
 	<-moving
 	// The old turn ends while its move is stalled, and the successor commits
 	// a reference to the bytes the move is about to hide.
@@ -827,7 +827,7 @@ func TestSharedQueuePostgresReclaimRestoresLateMove(t *testing.T) {
 	if err := next.files.verify(ctx, kept); err != nil {
 		t.Fatalf("a reader did not restore the committed input: %v", err)
 	}
-	if err := next.reclaimJobFilesContext(ctx); err != nil {
+	if err := next.reclaimJobFilesContext(ctx, true); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(next.files.blob(unreferenced)); !os.IsNotExist(err) {

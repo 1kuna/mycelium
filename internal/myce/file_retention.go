@@ -651,9 +651,8 @@ func (q *Queue) expiredBlob(hash string, requestContexts ...context.Context) boo
 // publication fence is held across a store syscall, and nothing here holds
 // q.mu for filesystem access. Only positively marked job-input uploads can be
 // orphans. In shared mode only the current turn holder purges.
-func (q *Queue) reclaimJobFilesContext(requestContexts ...context.Context) error {
-	requestCtx := requestContext(requestContexts)
-	return errors.Join(q.reclaimInterruptedUploads(requestCtx), q.reclaimPublishedFilesContext(requestCtx))
+func (q *Queue) reclaimJobFilesContext(requestCtx context.Context, discoverLegacy bool) error {
+	return errors.Join(q.reclaimInterruptedUploads(requestCtx, discoverLegacy), q.reclaimPublishedFilesContext(requestCtx))
 }
 
 func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context) error {

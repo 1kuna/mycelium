@@ -95,9 +95,12 @@ unmarked import as a job input cannot mark it; a generic import clears any marke
 Interrupted job-input uploads with unsettled claims are reclaimable after the
 queue-wide `--file-retention` idle window (72h by default). Collection removes the
 partial data and its unwritten reservation, and retires the claim. For older
-transfers missing the cleanup marker, the queue requires both the original
-job-input tus metadata and an exact matching allocated claim. Successful upload
-POST/HEAD/PATCH requests refresh the durable idle timestamp using the queue clock.
+transfers missing the cleanup marker, the queue checks the original job-input
+tus metadata and requires an exact matching allocation when an unsettled claim
+exists. On its first pass, the maintenance lane also discovers legacy transfers
+whose claims are gone. Their job-input identity and idle deadlines still apply
+when an unpublished upload has reached its declared length. Successful upload
+POST, HEAD, and PATCH requests refresh the durable idle timestamp.
 Active requests and committed references are fenced against collection. Rerun
 the upload to obtain a fresh claim and start at offset zero after collection.
 Published inputs still keep their unsettled-claim protection. A retention of `0`

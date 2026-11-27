@@ -49,7 +49,7 @@ func TestFileTrashBlockedMoveDoesNotBlockSubmit(t *testing.T) {
 		<-release
 	}
 	done := make(chan error, 1)
-	go func() { done <- q.reclaimJobFilesContext(context.Background()) }()
+	go func() { done <- q.reclaimJobFilesContext(context.Background(), true) }()
 	<-blocked
 	submitted := make(chan error, 1)
 	go func() {

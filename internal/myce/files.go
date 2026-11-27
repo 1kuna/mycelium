@@ -142,6 +142,7 @@ type FileStore struct {
 	mu                          sync.Mutex // In-memory creations only.
 	collectionMu                sync.Mutex // collection only; never held with q.mu or for I/O.
 	collection                  FileCollectionStatus
+	legacyUnclaimedUploads      map[string]bool // Initialized off-lock by the first upload collection pass.
 	pressure                    atomic.Pointer[blockedFileStoreWrite]
 	uploadFilesMu               sync.RWMutex
 	inventory                   *fileInventory // Shared members only; nil walks per snapshot.
