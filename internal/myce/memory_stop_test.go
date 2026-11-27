@@ -25,7 +25,7 @@ func TestMemoryStopAttemptForecast(t *testing.T) {
 			server := httptest.NewServer(API{Queue: q, Token: "memory-stop-fixture"}.Handler())
 			t.Cleanup(server.Close)
 			w := Worker{Clock: clock, Interval: time.Second, Client: Client{URL: server.URL, Token: "memory-stop-fixture",
-				Clock: clock, memoryShadowWire: new(atomic.Bool), memoryStopWire: new(atomic.Bool)}}
+				memoryShadowWire: new(atomic.Bool), memoryStopWire: new(atomic.Bool)}}
 
 			var running []*Job
 			c := Checkin{Machine: m}

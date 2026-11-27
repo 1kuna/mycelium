@@ -27,6 +27,9 @@ func normalizeAttemptCheckin(c Checkin) (Checkin, error) {
 }
 
 func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
+	if w.Client.Clock == nil {
+		w.Client.Clock = w.Clock
+	}
 	if w.Client.publicationWire != nil && !w.Client.publicationWire.Load() {
 		c.Machine.ResultPublications = nil
 	}
