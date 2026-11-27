@@ -310,6 +310,13 @@ type memoryRunPool struct {
 	Complete bool    `json:"complete"`
 }
 
+func (p *memoryRunPool) acceptedGB() *float64 {
+	if p.Complete && validMemoryValue(p.PeakGB) {
+		return &p.PeakGB
+	}
+	return nil
+}
+
 type memoryRunPeaks struct {
 	RAM  memoryRunPool `json:"ram"`
 	Card memoryRunPool `json:"card"`
@@ -340,14 +347,14 @@ func (q *Queue) recordPoolEvidence(j *Job, r Result) bool {
 	p := r.MemoryPeak
 	if !r.ReleaseOnly && r.Success && !r.Interrupted && !r.Forced && p != nil && !p.constrained() &&
 		!p.PressureUnavailable && p.Learned != nil {
-		if pools.RAM.Learned && p.Learned.RAM.Complete && validMemoryValue(p.Learned.RAM.PeakGB) {
-			q.stagedMemoryEvidence().observeExpected(key, p.Learned.RAM.PeakGB)
-			retainPoolPeaks(j, p.Learned.RAM.PeakGB, 0)
+		if peak := p.Learned.RAM.acceptedGB(); pools.RAM.Learned && peak != nil {
+			q.stagedMemoryEvidence().observeExpected(key, *peak)
+			retainPoolPeaks(j, *peak, 0)
 		}
-		if pools.Card != nil && pools.Card.Learned && p.Learned.Card.Complete && validMemoryValue(p.Learned.Card.PeakGB) {
+		if peak := p.Learned.Card.acceptedGB(); pools.Card != nil && pools.Card.Learned && peak != nil {
 			key.Pool = "card"
-			q.stagedMemoryEvidence().observeExpected(key, p.Learned.Card.PeakGB)
-			retainPoolPeaks(j, 0, p.Learned.Card.PeakGB)
+			q.stagedMemoryEvidence().observeExpected(key, *peak)
+			retainPoolPeaks(j, 0, *peak)
 		}
 	}
 	if !pools.RAM.Learned {

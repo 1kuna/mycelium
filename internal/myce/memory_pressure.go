@@ -48,6 +48,20 @@ func pressureStoppedBefore(j *Job, attempt int) bool {
 	return false
 }
 
+// R5 needs an attributed stop comparison. Keep exclusive-retry custody on
+// pools whose stop or counting rule still awaits qualification.
+func legacyPoolPressureRetry(j *Job, m *Machine) bool {
+	for _, h := range j.AttemptHistory {
+		stop := h.PriorityStop
+		if stop != nil && stop.Cause == memoryPressureCause &&
+			(stop.DevicePool != nil && !learnsExpectedCard(m) ||
+				stop.MemoryPool != nil && !usesAttemptStopForecast(m, "ram")) {
+			return true
+		}
+	}
+	return false
+}
+
 // An attempt that already ran alone after a pressure stop met pressure with no
 // Mycelium peer to blame. Running it alone again would meet the same pressure,
 // so hold it for its owner with the measured peak and the stop comparison.

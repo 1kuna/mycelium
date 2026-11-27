@@ -130,7 +130,16 @@ func TestMemoryExpectedWindowAnd2086(t *testing.T) {
 	if a.Memory.RAM.TypicalGB != 20.99 || a.Memory.RAM.ChargeGB != 20.99 {
 		t.Fatalf("#2086 assignment: %+v", a.Memory.RAM)
 	}
-	r5Clean(t, q, a, memoryRunPool{PeakGB: 20.62, Complete: true}, memoryRunPool{})
+	r := result(a, true)
+	r.MemoryPeak = &AttemptMemoryPeak{CombinedHostGB: shadowGB(47), HostGB: shadowGB(20.62),
+		Learned: &memoryRunPeaks{RAM: memoryRunPool{PeakGB: 20.62, Complete: true}}}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	predictions := efficiencyPredictions(job(t, q, a.ID))
+	if len(predictions) != 1 || predictions[0].AcceptedHostPeakGB == nil || *predictions[0].AcceptedHostPeakGB != 20.62 {
+		t.Fatalf("efficiency used a different counting rule: %+v", predictions)
+	}
 	if got := q.currentMemoryEvidence().expected(key, 46.95, 96, true); got.ChargeGB != 20.62 {
 		t.Fatalf("old peak did not expire: %+v", got)
 	}
@@ -364,4 +373,10 @@ func TestMemoryExpectedRetainsXPUProbeGate(t *testing.T) {
 	if got := q.resolvePooledSize(j, &target).card; got.Learned || !got.Alone || got.ChargeGB != d.BudgetGB {
 		t.Fatalf("ungated XPU telemetry became an estimate before 0b-4: %+v", got)
 	}
+	j.Attempt = 1
+	j.AttemptHistory = []AttemptOutcome{{Attempt: 1, PriorityStop: &PriorityPreemption{Cause: memoryPressureCause, DevicePool: &DevicePoolStop{}}}}
+	if got := q.resolvePooledSize(j, &target).pools.RAM; !got.Alone {
+		t.Fatalf("gated card stop lost its compatibility retry: %+v", got)
+	}
+
 }

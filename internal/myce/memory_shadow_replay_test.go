@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"math"
 	"os"
-	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -106,7 +105,7 @@ func TestMemoryShadowAppendixAReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	clean := map[string][]float64{}
+	evidence := newMemoryEvidence()
 	type replay struct {
 		compared, overshoot        int
 		expectedRatio, legacyRatio float64
@@ -130,10 +129,9 @@ func TestMemoryShadowAppendixAReplay(t *testing.T) {
 		if host == nil {
 			continue
 		}
-		key := strings.Join(r[:7], "\x00")
-		prior := clean[key]
-		if len(prior) > 0 {
-			e := slices.Max(prior)
+		key := memoryEvidenceKey{Platform: platform, Pool: "ram", Family: r[0], Exact: strings.Join(r[:6], "\x00")}
+		if prior := evidence.exact[key.v2()]; len(prior.Peaks) > 0 {
+			e := evidence.expected(key, 0, 0, false).ChargeGB
 			got := results[platform]
 			got.compared++
 			got.expectedRatio += e / *host
@@ -143,10 +141,7 @@ func TestMemoryShadowAppendixAReplay(t *testing.T) {
 			}
 			results[platform] = got
 		}
-		if len(prior) == 20 {
-			prior = prior[1:]
-		}
-		clean[key] = append(prior, *host)
+		evidence.observeExpected(key, *host)
 	}
 	cpu := results[shadowLinuxCPU]
 	if cpu.compared != 21 || cpu.overshoot != 1 || math.Abs(cpu.expectedRatio-(19*20.0/7+20.0/8+8.0/9)) > 1e-9 || cpu.expectedRatio >= cpu.legacyRatio {

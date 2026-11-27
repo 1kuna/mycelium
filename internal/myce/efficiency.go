@@ -956,22 +956,28 @@ func efficiencyPredictions(j *Job) []PredictionError {
 		if j.Efficiency != nil {
 			row.Work = j.Efficiency.Work
 		}
-		if p.HostGB != nil || p.CombinedHostGB != nil {
-			// The scheduler's RAM evidence (appendProjectedMemoryPeaks), without
-			// the cgroup figure's reclaimable page cache (#2184).
-			peak := max(memoryValue(p.HostGB), memoryValue(p.CombinedHostGB))
-			reserved := e.HostGB
-			delta := reserved - peak
-			row.ReservedHostGB, row.AcceptedHostPeakGB, row.HostErrorGB = &reserved, &peak, &delta
+		var hostPeak, devicePeak *float64
+		if p.Learned != nil {
+			hostPeak, devicePeak = p.Learned.RAM.acceptedGB(), p.Learned.Card.acceptedGB()
+		} else {
+			if p.HostGB != nil || p.CombinedHostGB != nil {
+				// Preserve comparisons for assignments using the legacy estimate.
+				peak := max(memoryValue(p.HostGB), memoryValue(p.CombinedHostGB))
+				hostPeak = &peak
+			}
+			devicePeak = p.DeviceGB
+		}
+		if hostPeak != nil {
+			reserved, delta := e.HostGB, e.HostGB-*hostPeak
+			row.ReservedHostGB, row.AcceptedHostPeakGB, row.HostErrorGB = &reserved, hostPeak, &delta
 		}
 		if p.CgroupGB != nil && validMemoryValue(*p.CgroupGB) {
 			cgroup := *p.CgroupGB
 			row.CgroupPeakGB = &cgroup
 		}
-		if p.DeviceGB != nil {
-			reserved, peak := e.DeviceGB, *p.DeviceGB
-			delta := reserved - peak
-			row.ReservedDeviceGB, row.AcceptedDevicePeakGB, row.DeviceErrorGB = &reserved, &peak, &delta
+		if devicePeak != nil {
+			reserved, delta := e.DeviceGB, e.DeviceGB-*devicePeak
+			row.ReservedDeviceGB, row.AcceptedDevicePeakGB, row.DeviceErrorGB = &reserved, devicePeak, &delta
 		}
 		if t := j.Timing; t != nil && t.Execution.Attempt == f.Attempt && t.LastAcceptedSeconds != nil && t.ActualSeconds != nil {
 			delta := *t.LastAcceptedSeconds - *t.ActualSeconds

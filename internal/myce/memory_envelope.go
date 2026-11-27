@@ -129,6 +129,20 @@ func (q *Queue) recordAttemptMemory(j *Job, r Result) {
 	}
 	facts := AttemptMemoryFacts{Attempt: j.Attempt, Machine: j.Machine, Session: j.Session,
 		MemoryPeak: sampledMemoryPeak(nil, r.MemoryPeak), LearningReason: reason}
+	if p := facts.MemoryPeak; p != nil {
+		measured := p.Learned
+		p.Learned = nil // Keep only comparisons that use the assigned counting rule.
+		if j.Memory != nil && (j.Memory.RAM.Learned || j.Memory.Card != nil && j.Memory.Card.Learned) {
+			accepted := &memoryRunPeaks{}
+			if measured != nil && j.Memory.RAM.Learned {
+				accepted.RAM = measured.RAM
+			}
+			if measured != nil && j.Memory.Card != nil && j.Memory.Card.Learned {
+				accepted.Card = measured.Card
+			}
+			p.Learned = accepted
+		}
+	}
 	if facts.MemoryPeak != nil && facts.MemoryPeak.Source != processGroupMemorySource {
 		facts.MemoryPeak.Source = "" // Only publish the known measurement label.
 	}
@@ -149,8 +163,11 @@ func (q *Queue) recordAttemptMemory(j *Job, r Result) {
 					if facts.LearningReason == "infrastructure_interrupted" {
 						facts.MemoryPeak.Constrained = false
 					}
-					if old.MemoryPeak != nil && old.MemoryPeak.Pressure != nil {
-						facts.MemoryPeak.Pressure = old.MemoryPeak.Pressure
+					if old.MemoryPeak != nil {
+						if old.MemoryPeak.Pressure != nil {
+							facts.MemoryPeak.Pressure = old.MemoryPeak.Pressure
+						}
+						facts.MemoryPeak.Learned = old.MemoryPeak.Learned
 					}
 				}
 				j.MemoryAttempts[i] = facts

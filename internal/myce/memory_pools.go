@@ -191,6 +191,7 @@ func (q *Queue) resolvePooledSize(j *Job, m *Machine) pooledCandidateSize {
 	if learn && learnsExpectedRAM(key) {
 		reach, known := q.raiseReach(j, m, key, ramReach, ramKnown)
 		pools.RAM = evidence.expected(key, hostHint, reach, known)
+		pools.RAM.Alone = legacyPoolPressureRetry(j, m)
 	} else {
 		pools.RAM = q.legacyRAMSize(j, m, evidence, key, hostHint)
 	}
