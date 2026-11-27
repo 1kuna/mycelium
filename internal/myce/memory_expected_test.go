@@ -543,6 +543,110 @@ func TestMemoryExpected2240XPUHighWater(t *testing.T) {
 	}
 }
 
+func TestMemoryExpected2240RetainedXPUExtension(t *testing.T) {
+	q, clock := fixture(t)
+	const allowance, card, room = 47.193, 30.046, 14.81
+	m := r5Machine(allowance)
+	m.HostAvailableMemoryGB, m.FreeHostMemoryGB = room, room
+	m.Devices = []MachineDevice{{
+		ID: "0", Platform: "xpu", Identity: "test-card", ExtensionFingerprint: "test-xpu",
+		TotalMemoryGB: card, BudgetGB: card, FreeMemoryGB: card, MemoryMeasured: true,
+	}}
+	ram := r5RAM(allowance, allowance)
+	ram.sum()
+	m.MemoryShadow = &MemoryShadowReport{Pools: []MemoryShadowPool{ram}, stopForecast: true}
+
+	e := compositionExtension(t, false)
+	v := &e.Variants[0]
+	target := m.Devices[0].machine(m)
+	v.Target = machineTarget(&target)
+	v.Needs = ResourceNeeds{CPUCores: 2, Memory: "auto"}
+	work := "extension:" + e.Name
+	ref := WorkReference{InputShape: "shape", Unit: "items", Units: 1}
+	v.References = map[string]WorkReference{work: ref}
+	e = freezeComposition(t, e)
+	spec := Spec{
+		Name: "extension-work", Project: "synthetic", Class: "production", SubmissionKey: "current-item",
+		Extension: extensionKey(e), ExtensionDigest: e.Digest, Needs: ResourceNeeds{Memory: "auto"},
+		Workload: &Workload{InputShape: ref.InputShape, Units: 2}, Args: []string{"current"},
+	}
+	r := newExtensionReport(e, &target, work)
+	r.Setup, r.Qualified, r.CheckID = true, true, "check-fixture"
+	m.Devices[0].ExtensionReports = []ExtensionReport{r}
+	target = m.Devices[0].machine(m)
+	candidate := &Job{Spec: spec, Extensions: []Extension{e}, State: "queued"}
+
+	started := clock.Now()
+	history := state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{m.ID: durableMachine(&m)}}
+	history.Machines[m.ID].Devices[0].ExtensionReports = nil
+	for i, peak := range []float64{7.4, 7.8, 7.6} {
+		id := fmt.Sprintf("prior-%d", i)
+		settled := *candidate
+		settled.ID, settled.Attempt, settled.State, settled.StartedAt = id, 1, "succeeded", &started
+		settled.Machine, settled.Session, settled.AllocatedDevices = m.ID, "prior-worker-session", []string{"0"}
+		settled.Spec.SubmissionKey, settled.Spec.Args = id, []string{id}
+		settled.Spec.Needs = e.Variants[0].Needs
+		settled.Extension = &ExtensionSelection{Name: e.Name, Version: e.Version, Digest: e.Digest}
+		settled.Timing = &WorkTiming{Execution: Execution{ID: id, Attempt: 1}, Machine: m.ID, Session: settled.Session, Key: &ObservationKey{
+			ExtensionDigest: e.Digest, Target: machineTarget(&target), Component: target.Device,
+			Hardware: m.Devices[0].Identity,
+		}}
+		settled.MemoryAttempts = []AttemptMemoryFacts{{
+			Attempt: 1, Machine: m.ID, Session: settled.Session, LearningReason: "eligible",
+			MemoryPeak: &AttemptMemoryPeak{HostGB: shadowGB(peak), CombinedHostGB: shadowGB(41), DeviceGB: shadowGB(5.4)},
+		}}
+		history.Jobs[id] = &settled
+	}
+	// A historical report from a different physical card must not train the
+	// restored allocation, even if its worker reused the old device number.
+	replaced := *history.Jobs["prior-1"]
+	replaced.ID = "replaced"
+	timing := *replaced.Timing
+	identity := *timing.Key
+	timing.Execution.ID, identity.Hardware, timing.Key = replaced.ID, "removed-card", &identity
+	replaced.Timing = &timing
+	replaced.MemoryAttempts = slices.Clone(replaced.MemoryAttempts)
+	replaced.MemoryAttempts[0].MemoryPeak = &AttemptMemoryPeak{HostGB: shadowGB(35)}
+	history.Jobs[replaced.ID] = &replaced
+
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "evidence.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// This disposable fixture starts with the markers from the rollout
+	// that only imported plain commands.
+	if _, err := db.Exec(memoryEvidenceSchema); err != nil {
+		t.Fatal(err)
+	}
+	var markers queueWriteBatch
+	markers.add(`INSERT INTO memory_evidence(kind,key,data) VALUES ('projection','v1','true'), ('projection','xpu-ram-v1','true')`)
+	writer := queueSQLiteWriter{db: db}
+	if err := writer.apply(context.Background(), &markers, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	q.memoryEvidence, err = loadMemoryEvidence(db, history)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sizes := q.memoryCandidates(candidate, &target)
+	if len(sizes) != 1 {
+		t.Fatalf("qualified candidate count = %d", len(sizes))
+	}
+	resolved := memoryPools(sizes[0])
+	if resolved.RAM.ChargeGB != 7.8 || resolved.RAM.Evidence.Level != "family" || resolved.RAM.Evidence.Runs != 0 ||
+		resolved.Card.ChargeGB != card || !resolved.Card.Alone {
+		t.Fatalf("extension sizing at %.2f GiB room: RAM=%+v card=%+v", room, resolved.RAM, resolved.Card)
+	}
+	needs := sizes[0].Spec.Needs
+	if reason := hostFitFailure(&target, needs.MemoryGB, needs.HostMemoryGB); reason != "" {
+		t.Fatalf("queue RAM check refused the extension: %s", reason)
+	}
+	if err := (HostRAMGate{RawGB: room}).check(&target, resolved, true); err != nil {
+		t.Fatalf("extension did not fit in signed room: %v", err)
+	}
+}
+
 func TestMemoryExpectedColdCardGroup(t *testing.T) {
 	q, _ := fixture(t)
 	m := m3Machine()

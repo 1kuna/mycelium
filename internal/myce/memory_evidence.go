@@ -208,25 +208,34 @@ func (w queueSQLiteWriter) loadMemoryEvidence(s state) (*memoryEvidence, error) 
 // settled attempt only when its original allocation can still be identified.
 func (w queueSQLiteWriter) seedXPUHighWater(s state, evidence *memoryEvidence) (*memoryEvidence, error) {
 	var projected bool
-	err := w.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM memory_evidence WHERE kind='projection' AND key='xpu-ram-v1')`).Scan(&projected)
+	err := w.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM memory_evidence WHERE kind='projection' AND key='xpu-ram-v2')`).Scan(&projected)
 	if err != nil || projected {
 		return evidence, err
 	}
 	e := evidence.stage()
 	for _, j := range s.Jobs {
-		if j.Spec.Needs.Memory != "auto" || j.Spec.extensionJob() || len(j.AllocatedDevices) != 1 ||
+		if j.Spec.Needs.Memory != "auto" || len(j.AllocatedDevices) != 1 ||
 			j.StartedAt == nil || (j.State != "succeeded" && j.State != "failed") {
 			continue
 		}
-		worker := s.Machines[j.Machine]
-		if worker == nil || worker.Session != j.Session {
+		m := retainedXPUAllocation(j, s.Machines[j.Machine])
+		if m == nil {
 			continue
 		}
-		m := allocationMachine(worker, j.AllocatedDevices)
-		if m.Device != j.AllocatedDevices[0] || m.GPU != "xpu" {
-			continue
+		var extension *Extension
+		if j.Spec.extensionJob() {
+			// The selected digest and the frozen variant describe the
+			// attempt even when today's qualification has been withdrawn.
+			if j.Extension == nil || j.Extension.Digest == "" {
+				continue
+			}
+			i := slices.IndexFunc(j.Extensions, func(e Extension) bool { return e.Digest == j.Extension.Digest })
+			if i < 0 || !j.Extensions[i].matchesTarget(m) {
+				continue
+			}
+			extension = &j.Extensions[i]
 		}
-		key := pooledEvidenceKey(j, m)
+		key := pooledEvidenceKeyForExtension(j, m, extension)
 		if !xpuAutoRAM(j, key, len(j.AllocatedDevices)) {
 			continue
 		}
@@ -244,12 +253,39 @@ func (w queueSQLiteWriter) seedXPUHighWater(s state, evidence *memoryEvidence) (
 	if err := e.prepareWrite(&batch); err != nil {
 		return nil, err
 	}
-	batch.add(`INSERT INTO memory_evidence(kind,key,data) VALUES ('projection','xpu-ram-v1','true')`)
+	batch.add(`INSERT INTO memory_evidence(kind,key,data) VALUES ('projection','xpu-ram-v2','true')`)
 	if err := w.apply(context.Background(), &batch, nil, nil); err != nil {
 		return nil, err
 	}
 	e.writes = nil
 	return e, nil
+}
+
+func retainedXPUAllocation(j *Job, worker *Machine) *Machine {
+	if worker == nil {
+		return nil
+	}
+	m := allocationMachine(worker, j.AllocatedDevices)
+	if m.Device != j.AllocatedDevices[0] || m.GPU != "xpu" || m.UnifiedMemory {
+		return nil
+	}
+	if worker.Session == j.Session {
+		return m
+	}
+	// A worker restart can change the session without changing the card.
+	// Require the recorded attempt, selection and physical card to agree.
+	t := j.Timing
+	if j.Extension == nil || t == nil || t.Key == nil || t.Machine != j.Machine || t.Session != j.Session ||
+		t.Execution.ID != j.ID || t.Execution.Attempt != j.Attempt || t.Key.Target != machineTarget(m) ||
+		t.Key.ExtensionDigest != j.Extension.Digest || t.Key.Component != m.Device || t.Key.Hardware == "" {
+		return nil
+	}
+	if slices.ContainsFunc(worker.Devices, func(d MachineDevice) bool {
+		return d.ID == m.Device && d.Identity == t.Key.Hardware
+	}) {
+		return m
+	}
+	return nil
 }
 
 func (e *memoryEvidence) readGPUSharing(db *sql.DB) error {
