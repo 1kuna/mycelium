@@ -1,10 +1,67 @@
 package myce
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestReservationListFitsWithRetainedHistory(t *testing.T) {
+	q, clock := fixture(t)
+	now := clock.Now()
+	m := m3Machine()
+	machineCheck(t, q, m)
+	bound := submit(t, q, exclusionSpec(m.ID, "0"))
+	if _, err := q.CreateReservation(reservationRequest("current", "host=machine;devices=0", bound.ID)); err != nil {
+		t.Fatal(err)
+	}
+	// Let the worker's evidence age on the injected clock so the active list
+	// must still project its current draining state.
+	clock.Advance(time.Hour)
+	const retained = 4096
+	if err := q.update(func() error {
+		for i := range retained {
+			id := fmt.Sprintf("released-%04d", i)
+			q.s.Reservations[id] = Reservation{
+				ReservationOptions: reservationRequest(id, "host=machine;devices=0", "").ReservationOptions,
+				CreatedAt:          now, ExpiresAt: now.Add(2 * time.Hour), ReleasedAt: &now, Revision: 2,
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	budgetHost(q, 256<<10, 0)
+	handler := (API{Queue: q, Token: "test"}).Handler()
+	read := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("Authorization", "Bearer test")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		return w
+	}
+	if w := read("/api/reservations"); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "projection_capacity_exceeded") {
+		t.Fatalf("unfiltered history should exceed this request budget, got HTTP %d (%d bytes)", w.Code, w.Body.Len())
+	}
+	for _, test := range []struct{ query, id, state string }{
+		{"view=unreleased", "current", "draining"},
+		{"id=released-4095", "released-4095", "released"},
+	} {
+		w := read("/api/reservations?" + test.query)
+		var records []Reservation
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: HTTP %d: %s", test.query, w.Code, w.Body)
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &records); err != nil || len(records) != 1 || records[0].ID != test.id || records[0].State != test.state {
+			t.Fatalf("%s: list = %+v, decode error = %v", test.query, records, err)
+		}
+	}
+}
 
 func TestReservationBoundJobWithConcurrentCPUPreparation(t *testing.T) {
 	q, clock := fixture(t)

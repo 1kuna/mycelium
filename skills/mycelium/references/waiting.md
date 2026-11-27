@@ -272,9 +272,11 @@ invented project hold or higher class. `myce extension check --reserve` binds
 one; `myce reserve add SELECTOR --job JOB_ID --owner OWNER --reason TEXT` binds
 an existing validation job. Device checks default to their selected device;
 whole-host isolation needs its actual reason. The reservation can withdraw an
-assigned check during sidecar startup and waits for its exact release. After an
-unconfirmed write, inspect `myce reserve list` before retrying the same explicit `--id`; an empty response
-does not confirm a reservation. See
+assigned check during sidecar startup and waits for its exact release.
+`myce reserve list` shows unreleased reservations, including draining ones.
+After an unconfirmed write or to verify release, use `myce reserve list --id ID`
+with the original reservation ID. An empty array supplies no release receipt.
+Use `myce reserve list --history` to include all retained released reservations. See
 [validation reservations](https://github.com/1kuna/mycelium/blob/main/docs/operations.md#reserve-a-host-or-its-devices-for-an-existing-validation-job).
 
 A queued pause keeps the job's key and queue age. A running yield pause uses the

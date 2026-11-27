@@ -116,6 +116,16 @@ uses `reservations`. Each record includes `id`, `job`, the canonical stable
 `selector` and resolved `target`, `owner`, `reason`, `created_at`, `expires_at`,
 `max_lifetime` and `revision`. `text` reads `reserved for OWNER: REASON`.
 
+`myce reserve list` requests `GET /api/reservations?view=unreleased`.
+It shows every unreleased reservation, including draining reservations and
+expired reservations awaiting explicit release. Use `myce reserve list --id ID`
+to inspect one retained reservation, including its release record.
+`myce reserve list --history` and unfiltered `GET /api/reservations` include
+all retained reservations when the response fits the queue's request budget.
+The exact-ID query (`?id=ID`) projects just that record. During a rolling
+upgrade, older queues return the full array for any of these queries, and
+the new CLI filters it locally if the request succeeds.
+
 | State | Meaning |
 | --- | --- |
 | `draining` | Existing work, independent maintenance, missing inventory or fresh worker/cleanup evidence still prevents validation. The reservation never cancels Started work. `pending` names the blockers. |
