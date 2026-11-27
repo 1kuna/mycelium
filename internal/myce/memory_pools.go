@@ -200,7 +200,7 @@ func (q *Queue) resolvePooledSize(j *Job, m *Machine) pooledCandidateSize {
 	learn := m.MemoryShadow != nil && m.MemoryShadow.stopForecast
 	if learn && learnsExpectedRAM(key) {
 		reach, known := q.raiseReach(j, m, key, ramReach, ramKnown)
-		pools.RAM = evidence.expected(key, hostHint, reach, known)
+		pools.RAM = evidence.expected(key, hostHint, reach, known, xpuAutoRAM(j, key, max(1, len(m.groupMembers))))
 		pools.RAM.Alone = legacyPoolPressureRetry(j, m)
 	} else {
 		pools.RAM = q.legacyRAMSize(j, m, evidence, key, hostHint)
@@ -232,7 +232,7 @@ func (q *Queue) resolvePooledSize(j *Job, m *Machine) pooledCandidateSize {
 				Evidence: memoryEstimateEvidence{Level: "unknown"}}
 		default:
 			raiseReach, raiseKnown := q.raiseReach(j, m, key, reach, known)
-			card = evidence.expected(key, 0, raiseReach, raiseKnown)
+			card = evidence.expected(key, 0, raiseReach, raiseKnown, false)
 		}
 		if card.Alone && card.Evidence.Level == "unknown" && deviceHint > m.TotalMemoryGB {
 			// A cold estimate occupies a whole card, but a typed multi-card

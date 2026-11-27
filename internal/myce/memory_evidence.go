@@ -182,7 +182,7 @@ func (w queueSQLiteWriter) loadMemoryEvidence(s state) (*memoryEvidence, error) 
 		if err := evidence.readGPUSharing(db); err != nil {
 			return nil, err
 		}
-		return evidence, nil
+		return w.seedXPUHighWater(s, evidence)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
@@ -200,7 +200,56 @@ func (w queueSQLiteWriter) loadMemoryEvidence(s state) (*memoryEvidence, error) 
 		return nil, err
 	}
 	evidence.writes = nil
-	return evidence, nil
+	return w.seedXPUHighWater(s, evidence)
+}
+
+// Older workers report the RAM peak in the retained attempt even when the
+// coordinator could not use it as a complete R5 footprint. Import the latest
+// settled attempt only when its original allocation can still be identified.
+func (w queueSQLiteWriter) seedXPUHighWater(s state, evidence *memoryEvidence) (*memoryEvidence, error) {
+	var projected bool
+	err := w.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM memory_evidence WHERE kind='projection' AND key='xpu-ram-v1')`).Scan(&projected)
+	if err != nil || projected {
+		return evidence, err
+	}
+	e := evidence.stage()
+	for _, j := range s.Jobs {
+		if j.Spec.Needs.Memory != "auto" || j.Spec.extensionJob() || len(j.AllocatedDevices) != 1 ||
+			j.StartedAt == nil || (j.State != "succeeded" && j.State != "failed") {
+			continue
+		}
+		worker := s.Machines[j.Machine]
+		if worker == nil || worker.Session != j.Session {
+			continue
+		}
+		m := allocationMachine(worker, j.AllocatedDevices)
+		if m.Device != j.AllocatedDevices[0] || m.GPU != "xpu" {
+			continue
+		}
+		key := pooledEvidenceKey(j, m)
+		if !xpuAutoRAM(j, key, len(j.AllocatedDevices)) {
+			continue
+		}
+		for _, fact := range j.MemoryAttempts {
+			if fact.Attempt == j.Attempt && fact.Machine == j.Machine && fact.Session == j.Session &&
+				(fact.LearningReason == "eligible" || fact.LearningReason == "attempt_failed") {
+				if peak := xpuRAMHighWater(fact.MemoryPeak); validRate(peak) {
+					e.observeHighWater(key, peak)
+				}
+				break
+			}
+		}
+	}
+	var batch queueWriteBatch
+	if err := e.prepareWrite(&batch); err != nil {
+		return nil, err
+	}
+	batch.add(`INSERT INTO memory_evidence(kind,key,data) VALUES ('projection','xpu-ram-v1','true')`)
+	if err := w.apply(context.Background(), &batch, nil, nil); err != nil {
+		return nil, err
+	}
+	e.writes = nil
+	return e, nil
 }
 
 func (e *memoryEvidence) readGPUSharing(db *sql.DB) error {

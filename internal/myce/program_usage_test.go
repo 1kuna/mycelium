@@ -76,7 +76,7 @@ printf useful-result > output
 	}
 	q.mu.Lock()
 	key := pooledEvidenceKey(completed, q.s.Machines[completed.Machine])
-	estimate := q.memoryEvidence.expected(key, 0, 64, true)
+	estimate := q.memoryEvidence.expected(key, 0, 64, true, false)
 	q.mu.Unlock()
 	if estimate.Evidence.Level != "exact" || estimate.Evidence.Runs != 1 || estimate.ChargeGB != .5 {
 		t.Fatal("worker measurement did not reach the evidence store", estimate, completed.MemoryAttempts[0].MemoryPeak.Learned)

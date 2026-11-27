@@ -47,9 +47,10 @@ type memoryEstimateEvidence struct {
 }
 
 type memoryEvidenceSeries struct {
-	Peaks []float64
-	Lower float64
-	Raise *memoryRaise `json:",omitempty"`
+	Peaks     []float64
+	Lower     float64
+	Raise     *memoryRaise `json:",omitempty"`
+	HighWater float64      `json:",omitempty"`
 }
 
 type memoryRatioKey struct {

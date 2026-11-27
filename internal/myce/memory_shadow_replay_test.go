@@ -131,7 +131,7 @@ func TestMemoryShadowAppendixAReplay(t *testing.T) {
 		}
 		key := memoryEvidenceKey{Platform: platform, Pool: "ram", Family: r[0], Exact: strings.Join(r[:6], "\x00")}
 		if prior := evidence.exact[key.v2()]; len(prior.Peaks) > 0 {
-			e := evidence.expected(key, 0, 0, false).ChargeGB
+			e := evidence.expected(key, 0, 0, false, false).ChargeGB
 			got := results[platform]
 			got.compared++
 			got.expectedRatio += e / *host
