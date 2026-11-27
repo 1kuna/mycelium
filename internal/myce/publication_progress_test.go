@@ -17,6 +17,78 @@ import (
 	"time"
 )
 
+func TestPublicationTimingsExactAttempt(t *testing.T) {
+	q, clock := fixture(t)
+	client := retentionClient(t, q)
+	_, input := retentionUpload(t, client, "input")
+	_, output := retentionUpload(t, client, "output bytes")
+	spec := spec("experiment")
+	spec.Resumable = false
+	spec.Files = FileManifest{"input": input}
+	spec.Outputs = map[string]string{"output": "results"}
+	queued := submit(t, q, spec)
+	m := machine("publisher", "fake")
+	check(t, q, m, nil)
+	j := check(t, q, m, nil).Job
+	if j == nil || j.ID != queued.ID {
+		t.Fatal("missing attempt")
+	}
+	p := &publicationProgress{}
+	p.resultReady(clock.Now())
+	clock.Advance(time.Second)
+	release := result(j, true)
+	release.ReleaseOnly = true
+	if err := q.Complete(release); err != nil {
+		t.Fatal(err)
+	}
+	p.releaseAcknowledged(clock.Now())
+	manifest := p.begin(clock, "filesystem/output_manifest")
+	clock.Advance(200 * time.Millisecond)
+	manifest()
+	manifest() // A deferred close after an explicit close counts once.
+	clock.Advance(time.Second)
+	create := p.request(clock, "POST", "/api/files/uploads/")
+	clock.Advance(time.Second)
+	create()
+	patch := p.request(clock, "PATCH", "/api/files/uploads/"+output.SHA256)
+	clock.Advance(time.Second)
+	patch()
+	p.confirm(output)
+	p.confirm(output)
+	client.publication = p
+	q.files.syncDir = func(string) error { clock.Advance(2 * time.Second); return nil }
+	finished := result(j, true)
+	finished.OutputRefs = FileManifest{"output": output}
+	if err := client.Call(context.Background(), "POST", "/api/workers/complete", finished, nil); err != nil {
+		t.Fatal(err)
+	}
+	got := job(t, q, j.ID)
+	timing := got.PublicationTimings
+	if timing == nil || len(got.AttemptHistory) != 1 || got.AttemptHistory[0].PublicationTimings == nil {
+		t.Fatalf("timings unavailable for attempt %d: %+v", j.Attempt, timing)
+	}
+	if timing.VerificationSeconds == nil || *timing.VerificationSeconds != 2 || timing.CompletionQueueSeconds != 2 ||
+		timing.ReleaseToAcceptSeconds == nil || *timing.ReleaseToAcceptSeconds != 5.2 {
+		t.Fatalf("wrong queue timings: %+v", timing)
+	}
+	worker := timing.Worker
+	if worker == nil || worker.ResultReadyToReleaseAckSeconds == nil || *worker.ResultReadyToReleaseAckSeconds != 1 ||
+		worker.ManifestSeconds != .2 || worker.UploadCreates != 1 || worker.UploadPatches != 1 ||
+		worker.UploadCreateSeconds != 1 || worker.UploadPatchSeconds != 1 || worker.UploadWindowSeconds != 2 ||
+		worker.PublishedBytes != output.SizeBytes {
+		t.Fatalf("wrong worker timings: %+v", worker)
+	}
+	// A delayed retry cannot overwrite the accepted observation.
+	clock.Advance(time.Second)
+	client.publication = nil
+	if err := client.Call(context.Background(), "POST", "/api/workers/complete", finished, nil); err != nil {
+		t.Fatal(err)
+	}
+	if replay := job(t, q, j.ID).PublicationTimings; replay.Worker == nil || replay.CompletionQueueSeconds != 2 {
+		t.Fatalf("replay overwrote accepted timing: %+v", replay)
+	}
+}
+
 // An old result deliberately cannot finish log replay. Actual queue admission
 // semantics in the fixture withhold a replacement while Recovering is true.
 // A replacement must run in the same session without dropping old custody.

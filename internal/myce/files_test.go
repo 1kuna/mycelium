@@ -60,14 +60,14 @@ func TestFilesOpenHandleSurvivesPathReplacement(t *testing.T) {
 func TestFilesResumableAndHashRefusal(t *testing.T) {
 	t.Parallel()
 	q, _ := fixture(t)
-	if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "store"), 1<<20, true); err != nil {
+	if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "store"), 8*fileUploadChunkSize, true); err != nil {
 		t.Fatal(err)
 	}
 	api := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer api.Close()
 	c := Client{URL: api.URL, Token: "test"}
 	source := filepath.Join(t.TempDir(), "input")
-	data := bytes.Repeat([]byte("verified bytes"), 100)
+	data := bytes.Repeat([]byte("verified bytes"), fileUploadChunkSize/7)
 	if err := os.WriteFile(source, data, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -103,11 +103,24 @@ func TestFilesResumableAndHashRefusal(t *testing.T) {
 		t.Fatal(res.StatusCode)
 	}
 	api.Close()
-	api = httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+	handler := API{Queue: q, Token: "test"}.Handler()
+	var resumed atomic.Int64
+	api = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			resumed.Add(1)
+			if got := r.Header.Get("Upload-Offset"); got != "17" {
+				t.Errorf("streamed job input resumed at %s, want 17", got)
+			}
+		}
+		handler.ServeHTTP(w, r)
+	}))
 	defer api.Close()
 	c.URL = api.URL
-	if err = c.UploadFile(context.Background(), source, ref); err != nil {
+	if err = c.UploadJobInput(context.Background(), source, ref); err != nil {
 		t.Fatal(err)
+	}
+	if n := resumed.Load(); n != 1 {
+		t.Fatalf("resumed input used %d PATCH requests, want one", n)
 	}
 	dest := filepath.Join(t.TempDir(), "download")
 	// Preserve a prefix across an interrupted download and request only the remainder.

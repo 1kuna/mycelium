@@ -633,6 +633,7 @@ type Job struct {
 	AssignedAt            *time.Time                   `json:"assigned_at,omitempty"`
 	StagingTimings        *StagingTimings              `json:"staging_timings,omitempty"`
 	LaunchTimings         *LaunchTimings               `json:"launch_timings,omitempty"`
+	PublicationTimings    *PublicationTimings          `json:"publication_timings,omitempty"`
 	InputsStagedAt        *time.Time                   `json:"inputs_staged_at,omitempty"` // Worker clock; diagnostic only, scoped to this attempt.
 	FinishedAt            *time.Time                   `json:"finished_at,omitempty"`
 	QueueOrder            int                          `json:"queue_order,omitempty"`

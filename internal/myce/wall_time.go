@@ -120,9 +120,19 @@ func wallTimeDiagnosticsAllowed(j *Job, r Result) bool {
 		j.Spec.capturesFailure() && r.Diagnostics != nil
 }
 func (q *Queue) wallTimeVerificationJob(r Result) (*Job, error) {
-	j, err := q.current(r)
-	if err != nil && wallTimeDiagnosticsAllowed(q.s.Jobs[r.ID], r) {
-		return q.touchJob(r.ID), nil
+	j, err := q.completionVerificationJob(r)
+	if err == nil {
+		q.touchJob(r.ID)
 	}
 	return j, err
+}
+
+// The first completion check snapshots validation facts under a read turn.
+// Only the post-verification check allows the transaction to touch the record.
+func (q *Queue) completionVerificationJob(r Result) (*Job, error) {
+	j := q.s.Jobs[r.ID]
+	if wallTimeDiagnosticsAllowed(j, r) || j != nil && (j.State == "running" || j.State == "stopping") && attemptRecordFor(j, j.Machine).ownsResult(&r) {
+		return j, nil
+	}
+	return nil, ErrStale
 }

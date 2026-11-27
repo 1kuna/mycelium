@@ -98,13 +98,22 @@ func (u *rootedUpload) WriteChunk(ctx context.Context, offset int64, src io.Read
 		return 0, err
 	}
 	digest := openUploadDigest(ctx, u.path, offset)
+	diagnostic, _ := ctx.Value(uploadDiagnosticKey{}).(*uploadDiagnostic)
 	var w io.Writer = io.NewOffsetWriter(f, offset)
+	if diagnostic != nil {
+		src = uploadMeasuredReader{src, &diagnostic.bodyRead}
+		w = uploadMeasuredWriter{w, &diagnostic.fileWrite}
+	}
 	if digest.hash != nil {
-		w = hashingWriter{w, digest.hash}
+		var h io.Writer = digest.hash
+		if diagnostic != nil {
+			h = uploadMeasuredWriter{h, &diagnostic.hashBytes}
+		}
+		w = hashingWriter{w, h}
 	}
 	n, err := io.Copy(w, src)
 	u.info.Offset += n
-	digest.record(f, offset+n, u.perm)
+	digest.record(ctx, f, offset+n, u.perm)
 	if err != nil {
 		f.Close()
 		return n, err

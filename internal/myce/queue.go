@@ -1525,6 +1525,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	j.StartedAt = nil
 	j.StagingTimings = nil
 	j.LaunchTimings = nil
+	j.PublicationTimings = nil
 	j.InputsStagedAt = nil
 	j.FinishedAt = nil
 	j.Reason = why
@@ -2435,6 +2436,12 @@ func (q *Queue) Complete(r Result) error {
 // Only current success outputs or opt-in failure diagnostics need verification;
 // release acknowledgements and retransmissions retain their normal handling.
 func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
+	return q.completeContext(ctx, r, nil)
+}
+
+func (q *Queue) completeContext(ctx context.Context, r Result, worker *workerPublicationTimings) error {
+	started := q.clock.Now()
+	timings := PublicationTimings{Worker: worker}
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
 	// Retain validated admission evidence durably before unlocking for bulk
@@ -2448,8 +2455,8 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 		}
 	}
 	quotaFailure := attemptDiskLimitFailure(r)
-	unlockRequest := requestLock(ctx, &q.mu)
-	j, err := q.wallTimeVerificationJob(r)
+	unlockRequest := requestReadLock(ctx, &q.mu)
+	j, err := q.completionVerificationJob(r)
 	readCheckFailure := err == nil && !terminal(j.State) && automaticExtensionCheck(j) != nil && !r.Success && !r.ReleaseOnly
 	if err == nil && parkedStorage(j) && !r.ReleaseOnly {
 		unlockRequest()
@@ -2469,6 +2476,8 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	var outputs map[string]string
 	var keep []KeepFile
 	var host string
+	var store *FileStore
+	var storeReady, sharedStore, verifyStore bool
 	if verify {
 		host = q.executionHost(r.Machine)
 		verify = q.s.Machines[r.Machine] != nil && q.s.Machines[r.Machine].Session == r.Session
@@ -2478,6 +2487,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 				return errors.New("async_nas requires the reserved immutable output manifest")
 			}
 			outputs, keep = maps.Clone(j.Spec.Outputs), slices.Clone(j.Spec.KeepOnFailure)
+			store, storeReady, sharedStore = q.files, q.sharedFilesReady(), q.sharedWriter != nil
 			r.OutputRefs = maps.Clone(r.OutputRefs)
 			if r.Diagnostics != nil {
 				r.Diagnostics = &AttemptDiagnostics{Files: maps.Clone(r.Diagnostics.Files)}
@@ -2520,6 +2530,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 		}
 	}
 	if verify {
+		verifyStarted := q.clock.Now()
 		if r.Success {
 			if err := validateOutputManifest(outputs, r.OutputRefs); err != nil {
 				return err
@@ -2527,19 +2538,22 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 		}
 		verificationCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
-		if r.Success {
-			if err := q.verifyManifest(verificationCtx, r.OutputRefs); err != nil {
-				return err
-			}
-		} else {
+		manifest := r.OutputRefs
+		if !r.Success {
 			if err := validateDiagnosticManifest(keep, r.Diagnostics); err != nil {
 				return err
 			}
-			if err := q.verifyManifest(verificationCtx, r.Diagnostics.Files); err != nil {
+			manifest = r.Diagnostics.Files
+		}
+		verifyStore = !sharedStore || len(manifest) != 0
+		if verifyStore {
+			if err := verifyStoredManifest(verificationCtx, store, storeReady, manifest); err != nil {
 				return err
 			}
 		}
 		ctx = verificationCtx
+		elapsed := max(0, q.clock.Now().Sub(verifyStarted).Seconds())
+		timings.VerificationSeconds = &elapsed
 	}
 	var rejected error
 	err = q.updateRequest(ctx, func() error {
@@ -2556,6 +2570,9 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 			}
 		}
 		if verify {
+			if verifyStore && (q.files != store || !q.sharedFilesReady()) {
+				return queueStopping()
+			}
 			q.retainLaunchCapacityRefusal(r)
 			q.maintainStartDeadlines()
 			j, err := q.wallTimeVerificationJob(r)
@@ -2578,7 +2595,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 		if j := q.s.Jobs[r.ID]; j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session && wallTimeStopped(j) && r.Success && !r.ReleaseOnly {
 			rejected = ErrStale
 		}
-		return q.complete(r, verify, checkFailure)
+		return q.complete(r, verify, checkFailure, &timings, started)
 	}, nil)
 	if err != nil {
 		return err
@@ -2596,7 +2613,7 @@ func (q *Queue) retainLaunchCapacityRefusal(r Result) {
 	}
 }
 
-func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckFailure) error {
+func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckFailure, timings *PublicationTimings, started time.Time) error {
 	if err := q.retainWorkerDataCleanup(r); err != nil {
 		return err
 	}
@@ -2647,7 +2664,14 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 				}
 			}
 		}
-		q.maintain()
+		if j := q.s.Jobs[r.ID]; j != nil && j.FileTransport && j.State == "running" && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session && r.Success && !r.Interrupted {
+			// This successful attempt has no resource to reclaim after release.
+			// Settle time/custody and relations now. Check-in and tick still
+			// plan the waiting set before offering work.
+			q.maintainGate(false)
+		} else {
+			q.maintain()
+		}
 		return nil
 	}
 	if operatorMatched {
@@ -2929,7 +2953,14 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 		outcome.Diagnostics = r.Diagnostics
 	}
 	q.recordAttemptOutcome(j, outcome)
-	q.maintain()
+	if filesVerified && j.FileTransport && j.State == "succeeded" && j.ReleaseConfirmed && !j.Spec.warmPieces() {
+		q.maintainGate(false)
+	} else {
+		q.maintain()
+	}
+	// Requeues may clear the current attempt's fields. Attach the observation
+	// to the exact outcome and expose it on the job only for a terminal result.
+	q.finishPublicationTimings(j, timings, started, r)
 	return nil
 }
 func (q *Queue) Leave(id string, now bool, requestContexts ...context.Context) error {
@@ -3521,6 +3552,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 				}
 				j.StagingTimings = nil
 				j.LaunchTimings = nil
+				j.PublicationTimings = nil
 				j.InputsStagedAt = nil // Recovery adopts a different execution.
 				j.Attempt = copy.Attempt
 				j.Machine = m.ID
@@ -3702,6 +3734,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j.StartedAt = nil
 	j.StagingTimings = nil
 	j.LaunchTimings = nil
+	j.PublicationTimings = nil
 	j.InputsStagedAt = nil
 	j.Timing = nil
 	j.gpuSharingRun = nil

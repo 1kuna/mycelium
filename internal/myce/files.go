@@ -337,7 +337,7 @@ func (s *FileStore) publish(ctx context.Context, ref FileRef) error {
 	if err != nil {
 		return uploadFailure(ctx, "upload_open", err)
 	}
-	if err = errors.Join(f.Sync(), f.Close()); err != nil {
+	if err = errors.Join(uploadSync(ctx, f.Sync), f.Close()); err != nil {
 		return uploadFailure(ctx, "upload_sync", err)
 	}
 	reportPublicationStep(ctx)
@@ -364,7 +364,7 @@ func (s *FileStore) publish(ctx context.Context, ref FileRef) error {
 		return uploadFailure(ctx, "blob_refresh", err)
 	}
 	reportPublicationStep(ctx)
-	if err = s.syncDir(filepath.Join(s.root, "blobs")); err != nil {
+	if err = uploadSync(ctx, func() error { return s.syncDir(filepath.Join(s.root, "blobs")) }); err != nil {
 		return uploadFailure(ctx, "blob_directory_sync", err)
 	}
 	reportPublicationStep(ctx)
@@ -382,7 +382,7 @@ func (s *FileStore) publish(ctx context.Context, ref FileRef) error {
 		return uploadFailure(ctx, "upload_digest_unlink", err)
 	}
 	reportPublicationStep(ctx)
-	if err = s.syncDir(filepath.Join(s.root, "uploads")); err != nil {
+	if err = uploadSync(ctx, func() error { return s.syncDir(filepath.Join(s.root, "uploads")) }); err != nil {
 		return uploadFailure(ctx, "upload_directory_sync", err)
 	}
 	reportPublicationStep(ctx)
@@ -450,7 +450,9 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		diagnostic.length, diagnostic.accepted = info.Size, info.Offset
-		claimCtx, err := s.inputClaim(r.Context(), FileRef{SHA256: id, SizeBytes: info.Size}, true)
+		claimStarted := time.Now()
+		claimCtx, err := s.uploadInputClaim(r.Context(), FileRef{SHA256: id, SizeBytes: info.Size}, true)
+		diagnostic.inputClaim = time.Since(claimStarted)
 		if err != nil {
 			respond(w, nil, err)
 			return
@@ -510,14 +512,14 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	if uploadCancelled(w, r.Context()) {
 		return
 	}
-	claimCtx, claimErr := s.inputClaim(r.Context(), ref, false)
+	claimCtx, claimErr := s.uploadInputClaim(r.Context(), ref, false)
 	if claimErr != nil {
 		respond(w, nil, claimErr)
 		return
 	}
 	r = r.WithContext(claimCtx)
 	if s.verify(r.Context(), ref) == nil {
-		if _, err := s.inputClaim(r.Context(), ref, true); err != nil {
+		if _, err := s.uploadInputClaim(r.Context(), ref, true); err != nil {
 			respond(w, nil, err)
 			return
 		}
@@ -557,7 +559,7 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 			respond(w, nil, inputClaimError())
 			return
 		}
-		if _, err := s.inputClaim(r.Context(), ref, true); err != nil {
+		if _, err := s.uploadInputClaim(r.Context(), ref, true); err != nil {
 			respond(w, nil, err)
 			return
 		}
@@ -594,7 +596,7 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	if uploadCancelled(w, r.Context()) {
 		return
 	}
-	if _, err := s.inputClaim(r.Context(), ref, true); err != nil {
+	if _, err := s.uploadInputClaim(r.Context(), ref, true); err != nil {
 		respond(w, nil, err)
 		return
 	}
@@ -607,6 +609,15 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	if err := s.refreshUpload(hash); err != nil {
 		log.Printf("upload freshness unavailable: %v", err)
 	}
+}
+
+func (s *FileStore) uploadInputClaim(ctx context.Context, ref FileRef, allocate bool) (context.Context, error) {
+	// The attempt was checked at admission, and creation rechecks it before
+	// reserving bytes. An attempt with no input claim has no claim to validate.
+	if ctx.Value(fileStoreAttemptKey{}) != nil && ctx.Value(fileInputClaimKey{}) == nil {
+		return ctx, ctx.Err()
+	}
+	return s.inputClaim(ctx, ref, allocate)
 }
 
 // Successes stream unchanged, including ResponseController capabilities. Only
@@ -931,6 +942,7 @@ type uploadTiming struct {
 	perByte  float64                  // Slowest completed body transfer, nanoseconds per byte.
 	pressure time.Duration
 	progress time.Time // Last accepted upload body (2xx POST or PATCH with bytes).
+	bodyRead time.Time // Local streaming activity, used only to pace retries.
 }
 
 const rfc6298MaxRTO = 60 * time.Second
@@ -993,6 +1005,21 @@ func (t *uploadTiming) lastProgress() time.Time {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return t.progress
+}
+
+func (t *uploadTiming) noteBodyRead(now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.bodyRead = now
+}
+
+func (t *uploadTiming) lastRetryProgress() time.Time {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.bodyRead.After(t.progress) {
+		return t.bodyRead
+	}
 	return t.progress
 }
 
@@ -1541,7 +1568,7 @@ func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileR
 		}
 		// Accepted chunks are progress, not the cost of the request that failed.
 		since := started
-		if progress := c.uploadTiming.lastProgress(); progress.After(since) {
+		if progress := c.uploadTiming.lastRetryProgress(); progress.After(since) {
 			since = progress
 			backoff.progress()
 		}
@@ -1623,14 +1650,25 @@ func (c Client) uploadFileAttempt(ctx context.Context, f io.ReadSeeker, ref File
 	if err = source.start(offset); err != nil {
 		return err
 	}
+	streamInput := purpose == jobInputUploadPurpose && ctx.Value(fileStoreAttemptKey{}) == nil
 	for {
 		if err := c.ownerError(ctx); err != nil {
 			return err
 		}
 		n := min(int64(fileUploadChunkSize), ref.SizeBytes-offset)
+		if streamInput {
+			// tus resumes from the accepted byte offset even when a request is
+			// interrupted mid-body. Stream job inputs without a queue turn and
+			// filesystem sync every 4 MiB. Worker publications keep their
+			// existing request windows and measured progress cadence.
+			n = ref.SizeBytes - offset
+		}
 		// Close synchronizes with any late net/http body reader before a retry
 		// seeks the caller's handle. A failed response may race the writer goroutine.
 		body := &uploadBody{reader: io.LimitReader(source, n)}
+		if streamInput {
+			body.progress = func() { c.uploadTiming.noteBodyRead(c.clock().Now()) }
+		}
 		res, err = c.fileRequest(ctx, "PATCH", endpoint, body, map[string]string{"Tus-Resumable": "1.0.0", "Upload-Offset": strconv.FormatInt(offset, 10), "Content-Type": "application/offset+octet-stream"}, ref.SizeBytes)
 		body.Close()
 		if err != nil {
@@ -1718,8 +1756,9 @@ func (e *uploadPendingError) Unwrap() error { return e.error }
 // net/http may close a request body asynchronously after RoundTrip returns.
 // Fence reads so the next attempt can safely seek the same open source handle.
 type uploadBody struct {
-	mu     sync.Mutex
-	reader io.Reader
+	mu       sync.Mutex
+	reader   io.Reader
+	progress func()
 }
 
 func (b *uploadBody) Read(p []byte) (int, error) {
@@ -1728,7 +1767,11 @@ func (b *uploadBody) Read(p []byte) (int, error) {
 	if b.reader == nil {
 		return 0, io.EOF
 	}
-	return b.reader.Read(p)
+	n, err := b.reader.Read(p)
+	if n > 0 && b.progress != nil {
+		b.progress()
+	}
+	return n, err
 }
 func (b *uploadBody) Close() error {
 	b.mu.Lock()

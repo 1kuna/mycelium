@@ -5,6 +5,7 @@ import (
 	"maps"
 	"net/http"
 	"sync"
+	"time"
 
 	tus "github.com/tus/tusd/v2/pkg/handler"
 )
@@ -54,6 +55,21 @@ func lockUploadContext(ctx context.Context, lock, unlock func()) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (q *Queue) lockUploadRead(ctx context.Context) (func(), error) {
+	started := time.Now()
+	if err := lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock); err != nil {
+		return nil, err
+	}
+	locked := time.Now()
+	return func() {
+		done := time.Now()
+		q.mu.RUnlock()
+		if span := spanFrom(ctx); span != nil {
+			span.observe(locked.Sub(started), done.Sub(locked), done)
+		}
+	}, nil
 }
 
 func (s *FileStore) beginCreation(ctx context.Context, hash string) (func(), error) {

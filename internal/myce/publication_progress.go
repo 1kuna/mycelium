@@ -19,6 +19,8 @@ type publicationProgress struct {
 	published map[string]int64
 	bytes     int64
 	failure   string
+	workerPublicationTimings
+	ready, uploadStart, uploadEnd time.Time
 }
 
 type publicationOperation struct {
@@ -44,7 +46,7 @@ func safeResultPublications(reports []ResultPublication) []ResultPublication {
 	out := make([]ResultPublication, 0, len(reports))
 	for _, r := range reports {
 		switch r.Blocking {
-		case "retry", "filesystem/checkpoint_publication", "filesystem/output_spool", "filesystem/output_path", "filesystem/output_validation",
+		case "retry", "filesystem/checkpoint_publication", "filesystem/output_spool", "filesystem/output_path", "filesystem/output_validation", "filesystem/output_manifest",
 			"filesystem/storage_observation", "filesystem/failure_diagnostics",
 			"POST /api/workers/log", "POST /api/workers/log-batch", "POST /api/workers/complete", "GET /api/jobs/:id", "POST /api/files/result", "POST /api/files/preflight", "POST /api/files/checkpoint",
 			"HEAD /api/files/blobs/:id", "POST /api/files/uploads/", "HEAD /api/files/uploads/:id", "PATCH /api/files/uploads/:id":
@@ -71,7 +73,14 @@ func (p *publicationProgress) begin(clock Clock, name string) func() {
 	}
 	p.active[id] = publicationOperation{name, clock.Now()}
 	p.mu.Unlock()
-	return func() { p.mu.Lock(); delete(p.active, id); p.mu.Unlock() }
+	return func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if op, ok := p.active[id]; ok {
+			p.recordOperation(op, clock.Now())
+			delete(p.active, id)
+		}
+	}
 }
 
 func (p *publicationProgress) request(clock Clock, method, path string) func() {

@@ -45,6 +45,10 @@ func (q *Queue) verifyManifest(ctx context.Context, m FileManifest) error {
 	unlock := requestReadLock(ctx, &q.mu)
 	store, ready := q.files, q.sharedFilesReady()
 	unlock()
+	return verifyStoredManifest(ctx, store, ready, m)
+}
+
+func verifyStoredManifest(ctx context.Context, store *FileStore, ready bool, m FileManifest) error {
 	if !ready {
 		return queueStopping()
 	}
