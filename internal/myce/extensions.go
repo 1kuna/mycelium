@@ -289,17 +289,21 @@ func extensionFromFiles(files map[string][]byte) (Extension, error) {
 	return e, nil
 }
 func ReadExtension(folder string) (Extension, error) {
+	return readExtension(folder, nil)
+}
+
+func readExtension(folder string, include func(string) bool) (Extension, error) {
 	limit, err := extensionByteLimit()
 	if err != nil {
 		return Extension{}, err
 	}
-	files, err := readExtensionFolder(folder, int64(limit), readCapacityFile)
+	files, err := readExtensionFolder(folder, int64(limit), readCapacityFile, include)
 	if err != nil {
 		return Extension{}, err
 	}
 	return extensionFromFiles(files)
 }
-func readExtensionFolder(folder string, limit int64, read func(string, int64) ([]byte, error)) (map[string][]byte, error) {
+func readExtensionFolder(folder string, limit int64, read func(string, int64) ([]byte, error), include func(string) bool) (map[string][]byte, error) {
 	files := map[string][]byte{}
 	total := int64(0)
 	err := filepath.WalkDir(folder, func(p string, d fs.DirEntry, err error) error {
@@ -312,6 +316,14 @@ func readExtensionFolder(folder string, limit int64, read func(string, int64) ([
 		if !d.Type().IsRegular() {
 			return errors.New("extension files must be regular (no symlinks)")
 		}
+		n, err := filepath.Rel(folder, p)
+		if err != nil {
+			return err
+		}
+		n = filepath.ToSlash(n)
+		if include != nil && !include(n) {
+			return nil
+		}
 		info, err := d.Info()
 		if err != nil {
 			return err
@@ -319,16 +331,12 @@ func readExtensionFolder(folder string, limit int64, read func(string, int64) ([
 		if info.Size() > limit-total {
 			return budgetRefusal(int64(limit))
 		}
-		n, err := filepath.Rel(folder, p)
-		if err != nil {
-			return err
-		}
 		b, err := read(p, limit-total)
 		if err != nil {
 			return err
 		}
 		total += int64(len(b))
-		files[filepath.ToSlash(n)] = b
+		files[n] = b
 		return nil
 	})
 	if err != nil {

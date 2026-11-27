@@ -482,7 +482,7 @@ func (w Worker) reconcileExtensionQualification(ctx context.Context, plan Extens
 			return err
 		}
 	}
-	e, err := ReadExtension(extensionFolder(w.ExtensionRoot, Extension{Name: r.Name, Version: r.Version}))
+	e, err := readInstalledExtension(w.ExtensionRoot, Extension{Name: r.Name, Version: r.Version, Digest: r.Digest})
 	if err != nil {
 		return err
 	}

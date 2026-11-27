@@ -233,8 +233,20 @@ func TestNativeExtensionPythonImportQualification(t *testing.T) {
 	v := &e.Variants[0]
 	v.Execution.Main.Command = []string{"{env.main.python}", "{extension}/app.py"}
 	v.Check = []string{"{env.main.python}", "{extension}/check.py"}
+	e.Isolation, e.Reason = "unsandboxed", "Exercise bytecode written by native code into the installed library."
 	e.Files["helper.py"] = []byte("value = 3\n")
-	e.Files["app.py"] = []byte("import helper\nassert helper.value == 3\n")
+	e.Files["app.py"] = []byte(`import helper
+from pathlib import Path
+import py_compile
+import sys
+
+assert helper.value == 3
+library = Path(sys.argv[1]) / sys.argv[2]
+source = Path(__file__).with_name("helper.py")
+# Explicit compilation writes even when ordinary import caching is disabled.
+py_compile.compile(str(source), cfile=str(library / "helper.pyc"), doraise=True)
+py_compile.compile(str(source), cfile=str(library / "__pycache__" / "helper.pyc"), doraise=True)
+`)
 	e.Files["check.py"] = []byte("import os, helper\nwith open(os.environ['MYCE_CHECK_OUTPUT'], 'w') as f: f.write('[%d]\\n' % helper.value)\n")
 	e.Files["baseline/output"] = []byte("[3]\n")
 	e = freezeComposition(t, e)
@@ -260,7 +272,10 @@ func TestNativeExtensionPythonImportQualification(t *testing.T) {
 		quoted := "'" + strings.ReplaceAll(python, "'", "'\"'\"'") + "'"
 		return os.WriteFile(filepath.Join(bin, "python"), []byte("#!/bin/sh\nexec "+quoted+" \"$@\"\n"), 0700)
 	}
-	j := submit(t, q, Spec{Name: "ordinary-import", Project: "test", Extension: extensionKey(e)})
+	// Native attempts run a private copy. Pass the installed folder's parent
+	// and version separately so the payload can exercise writes to the library.
+	library := extensionFolder(w.ExtensionRoot, e)
+	j := submit(t, q, Spec{Name: "ordinary-import", Project: "test", Extension: extensionKey(e), Args: []string{filepath.Dir(library), filepath.Base(library)}})
 	plans := check(t, q, w.Machine, nil).EnvironmentPlan
 	if len(plans) != 1 {
 		t.Fatal("uv extension did not receive preparation")
@@ -287,8 +302,13 @@ func TestNativeExtensionPythonImportQualification(t *testing.T) {
 		}
 		return out.State == "succeeded"
 	})
-	actual, err := ReadExtension(extensionFolder(w.ExtensionRoot, e))
-	if err != nil || actual.Digest != e.Digest {
-		t.Fatal("qualification/import changed digest", err)
+	for _, name := range []string{"helper.pyc", "__pycache__/helper.pyc"} {
+		if info, err := os.Stat(filepath.Join(library, name)); err != nil || info.Size() == 0 {
+			t.Fatalf("extension did not write %s: %v", name, err)
+		}
+	}
+	reports = LocalExtensionReports(w.ExtensionRoot, "fake", w.extensionFingerprint, &w.Machine)
+	if len(reports) != 1 || !reports[0].Qualified || reports[0].Digest != e.Digest {
+		t.Fatalf("extension lost qualification at %s after writing bytecode: %+v", e.Digest, reports)
 	}
 }

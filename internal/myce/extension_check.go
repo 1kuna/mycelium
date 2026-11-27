@@ -63,7 +63,7 @@ func checkExtension(ctx context.Context, root string, e Extension, platform, dev
 	if reason := e.targetUnavailableReason(machineTarget(&m)); reason != "" {
 		return nil, errors.New(reason)
 	}
-	actual, err := ReadExtension(extensionFolder(root, e))
+	actual, err := readInstalledExtension(root, e)
 	if err != nil {
 		return nil, err
 	}

@@ -136,6 +136,51 @@ func TestExtensionFormatFrozenAndMissingBaseline(t *testing.T) {
 		t.Fatal(reports, err)
 	}
 }
+
+func TestInstalledExtensionPreservesAuthoredBytecode(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		name := "new install"
+		if legacy {
+			name = "existing qualification"
+		}
+		t.Run(name, func(t *testing.T) {
+			e := fakeExtension(t)
+			e.Files["bundled.pyc"] = []byte("authored bytecode fixture")
+			e, err := extensionFromFiles(e.Files)
+			if err != nil {
+				t.Fatal(err)
+			}
+			root := t.TempDir()
+			reports := installQualified(t, root, e, "")
+			if legacy {
+				if err := os.Remove(extensionBytecodeManifest(root, e)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			assertQualified := func(want bool) {
+				t.Helper()
+				for _, report := range LocalExtensionReports(root, "fake", reports[0].Fingerprint) {
+					if report.Qualified != want || want && report.Digest != e.Digest {
+						t.Fatalf("qualification at %s: %+v", e.Digest, report)
+					}
+				}
+			}
+			assertQualified(true)
+			folder := extensionFolder(root, e)
+			if err := os.WriteFile(filepath.Join(folder, "runtime.pyc"), []byte("generated"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			assertQualified(true)
+			if err := InstallExtension(root, e); err != nil {
+				t.Fatalf("retry install: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(folder, "bundled.pyc"), []byte("changed"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			assertQualified(false)
+		})
+	}
+}
 func TestExtensionQualificationFailureAndIdentity(t *testing.T) {
 	t.Setenv("MYCE_TOKEN", "must-not-inherit")
 	e := fakeExtension(t)

@@ -92,6 +92,10 @@ sizing. Use a pin only for a [hard requirement](references/submit.md#explicit-pl
   From another host, submit the useful job with `extension: NAME@VERSION`,
   `extension_digest: SHA256` and the required placement. The queue qualifies
   the selected target before starting the job.
+  Put generated files in `MYCE_EXTENSION_CACHE`. Supporting workers ignore
+  runtime-added `*.pyc` and `__pycache__/` files in the installed library
+  when checking qualification. Bundled files still determine the registered
+  digest.
 - [Inputs, checkpoints and pieces](references/submit.md#inputs-checkpoints-and-pieces)
   covers `--input DEST=PATH`, verified local staging of `shared_inputs`,
   runtime bindings, `pieces:` and extension fan-out. Submit known later
