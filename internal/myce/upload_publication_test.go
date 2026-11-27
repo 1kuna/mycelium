@@ -10,10 +10,51 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func TestUploadFinalizationKeepsSlowDataSyncOnOnePATCH(t *testing.T) {
+	q, s := creationStore(t, 1<<20)
+	s.clock = RealClock{}
+	synced := make(chan struct{})
+	s.syncUploadData = func(f *os.File) error {
+		// No progress callback can run inside a single slow fsync.
+		time.Sleep(2 * clientRecoveryPeriod)
+		err := f.Sync()
+		close(synced)
+		return err
+	}
+	var patches atomic.Int32
+	backend := API{Queue: q, Token: "fixture"}.Handler()
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			patches.Add(1)
+		}
+		backend.ServeHTTP(w, r)
+	}))
+	defer api.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), testWaitTimeout)
+	defer cancel()
+	c := Client{URL: api.URL, Token: "fixture", singleAttempt: true}
+	ref := creationRef("verified after a slow data sync")
+	if err := c.uploadFileReader(ctx, strings.NewReader("verified after a slow data sync"), ref, jobInputUploadPurpose); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-synced:
+	default:
+		t.Fatal("upload succeeded before its data sync")
+	}
+	if patches.Load() != 1 {
+		t.Fatalf("sent %d PATCH requests", patches.Load())
+	}
+	if err := s.verify(ctx, ref); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // A failed finish leaves all bytes accepted but no verified blob. tus skips
 // its finish callback for PATCH at offset==length; replay must finish custody

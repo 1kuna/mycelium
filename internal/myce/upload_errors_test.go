@@ -127,15 +127,16 @@ func TestUploadErrorsEnvelope(t *testing.T) {
 				s.publishUpload = func(string, ...context.Context) error { return fail() }
 				status, code = 500, "file_upload_unavailable"
 			case "purpose_interrupted":
-				// PR #2104 quick gate: the purpose commit waited on the queue
-				// mutex until the request ended. That is not a server error.
+				// All bytes reached the store before the purpose commit
+				// lost its request. This is retryable publication, not an
+				// incomplete body that should be reported as 408.
 				interrupted, cancel := context.WithCancel(ctx)
 				r = r.WithContext(interrupted)
 				s.recordUpload = func(string, string, bool, ...context.Context) error {
 					cancel()
 					return interrupted.Err()
 				}
-				status, code = 408, "file_upload_interrupted"
+				status, code = 503, "file_upload_unavailable"
 			case "purpose_stopping":
 				s.recordUpload = func(string, string, bool, ...context.Context) error { return queueStopping() }
 				status, code = 503, "queue_stopping"

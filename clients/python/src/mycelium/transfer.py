@@ -223,10 +223,24 @@ class _TLSContext:
         return _ProgressTLS(sock, self._context, server_hostname, self._adaptive, self._deadline, self._timing)
 
 
+class _UploadResponse(http.client.HTTPResponse):
+    def _read_status(self):
+        # HTTPResponse.begin skips 100 itself. Consume the complete 102
+        # header block here so a publication heartbeat cannot become the
+        # PATCH acknowledgement. Each read still uses the transfer budget.
+        while True:
+            status = super()._read_status()
+            if status[1] != http.client.PROCESSING:
+                return status
+            http.client.parse_headers(self.fp)
+
+
 class ProgressConnection:
     def __init__(self, *args, progress_deadline=None, upload_timing=None, **kwargs):
         self._progress_deadline = progress_deadline
         self._upload_timing = upload_timing
+        if upload_timing is not None:
+            self.response_class = _UploadResponse
         super().__init__(*args, **kwargs)
 
     def getresponse(self):

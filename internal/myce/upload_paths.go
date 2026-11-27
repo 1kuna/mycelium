@@ -21,12 +21,15 @@ import (
 // uploads directory; resolve it there and ignore the recorded path (#2144).
 // Every upload is served as a rootedUpload, which writes at the offset tus
 // checked rather than appending (#2152).
-type rootedUploads struct{ filestore.FileStore }
+type rootedUploads struct {
+	filestore.FileStore
+	store *FileStore
+}
 
 func (s *FileStore) uploads() rootedUploads {
 	fs := filestore.New(filepath.Join(s.root, "uploads"))
 	fs.DirModePerm, fs.FileModePerm = 0700, 0600
-	return rootedUploads{fs}
+	return rootedUploads{FileStore: fs, store: s}
 }
 
 func (s *FileStore) getUpload(ctx context.Context, id string) (tus.Upload, error) {
@@ -46,7 +49,7 @@ func (s rootedUploads) NewUpload(ctx context.Context, info tus.FileInfo) (tus.Up
 	if info, err = upload.GetInfo(ctx); err != nil {
 		return nil, err
 	}
-	return &rootedUpload{info: info, path: filepath.Join(s.Path, info.ID), perm: s.FileModePerm}, nil
+	return &rootedUpload{info: info, path: filepath.Join(s.Path, info.ID), perm: s.FileModePerm, store: s.store}, nil
 }
 
 func (s rootedUploads) GetUpload(ctx context.Context, id string) (tus.Upload, error) {
@@ -72,16 +75,17 @@ func (s rootedUploads) GetUpload(ctx context.Context, id string) (tus.Upload, er
 	}
 	info.Offset = st.Size()
 	info.Storage = map[string]string{"Type": "filestore", filestore.StorageKeyPath: path, filestore.StorageKeyInfoPath: infoPath}
-	return &rootedUpload{info: info, path: path, perm: s.FileModePerm}, nil
+	return &rootedUpload{info: info, path: path, perm: s.FileModePerm, store: s.store}, nil
 }
 
 // The tus core operations of tusd's filestore upload, on the local path. The
 // handler disables termination, concatenation and downloads, and creation
 // refuses deferred lengths, so no extension is ever asked of these uploads.
 type rootedUpload struct {
-	info tus.FileInfo
-	path string
-	perm fs.FileMode
+	info  tus.FileInfo
+	path  string
+	perm  fs.FileMode
+	store *FileStore
 }
 
 func (u *rootedUpload) GetInfo(context.Context) (tus.FileInfo, error) { return u.info, nil }
@@ -113,7 +117,15 @@ func (u *rootedUpload) WriteChunk(ctx context.Context, offset int64, src io.Read
 	}
 	n, err := io.Copy(w, src)
 	u.info.Offset += n
-	digest.record(ctx, f, offset+n, u.perm)
+	record := func(ctx context.Context) error {
+		digest.record(ctx, f, offset+n, u.perm, u.store.syncUploadData)
+		return nil
+	}
+	if err == nil && offset+n == u.info.Size {
+		_ = finalizeUpload(ctx, record)
+	} else {
+		_ = record(ctx)
+	}
 	if err != nil {
 		f.Close()
 		return n, err

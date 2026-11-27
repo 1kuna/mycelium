@@ -172,8 +172,11 @@ and can overlap. The upload window runs from first request to last reply.
 The worker section covers the supervisor's current lifetime. Restarting a
 worker can leave earlier phases unobserved. Older workers can provide
 queue-only timings. The queue's `file_upload` log includes body read, file
-write, hash, fsync, input claim and observed mutex intervals for upload
-requests.
+write, streaming hash, fsync, input claim and observed mutex intervals for
+upload requests. `data_fsync_ms` breaks out the upload data barrier from
+`fsync_ms`. `upload_verify_ms` measures a fallback read of the upload and
+`publication_commit_ms` covers custody and publication bookkeeping, including
+any queue lock waits during that phase.
 
 ### Maintenance holds
 
