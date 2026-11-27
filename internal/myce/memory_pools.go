@@ -224,6 +224,12 @@ func (q *Queue) resolvePooledSize(j *Job, m *Machine) pooledCandidateSize {
 			raiseReach, raiseKnown := q.raiseReach(j, m, key, reach, known)
 			card = evidence.expected(key, 0, raiseReach, raiseKnown)
 		}
+		if card.Alone && card.Evidence.Level == "unknown" && deviceHint > m.TotalMemoryGB {
+			// A cold estimate occupies a whole card, but a typed multi-card
+			// demand must first reach a group that can fit that total.
+			card.TypicalGB = deviceHint / float64(count)
+			card.ChargeGB = card.TypicalGB
+		}
 		card.capacityAt(reach, known)
 		size.card, size.cardGB, size.hasCard = card, card.ChargeGB*float64(count), true
 	}
