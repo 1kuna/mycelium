@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -112,9 +113,11 @@ func NativeExec(args []string) error {
 		}
 	}
 	if p.Namespace {
-		return nativeNamespaceExec(args[2:], env)
+		err = nativeNamespaceExec(args[2:], env)
+	} else {
+		err = unix.Exec(args[2], args[2:], env)
 	}
-	return unix.Exec(args[2], args[2:], env)
+	return fmt.Errorf("native payload exec %q: %w", filepath.Base(args[2]), err)
 }
 
 func nativeApplyLandlock(p nativeLinuxPolicy) error {

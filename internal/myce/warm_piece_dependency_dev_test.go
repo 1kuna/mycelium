@@ -3,7 +3,6 @@ package myce
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -54,18 +53,13 @@ with WarmPieces() as pieces:
         assert previous is None or not previous.exists(), previous
         previous = folder
         segments = item.inputs["segments.json"].read_text()
-        if item.args:
-            Path(item.args[0]).write_text(item.key)
         (item.output_dir / "labels").write_text(segments + ":labels")
         pieces.success()
 `
 
 func warmStageExtension(t *testing.T, name, main string, command ...string) Extension {
 	t.Helper()
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Fatal(err)
-	}
+	python := warmStagePython(t)
 	helper, err := os.ReadFile(filepath.Join("..", "..", "clients", "python", "src", "mycelium", "warm_pieces.py"))
 	if err != nil {
 		t.Fatal(err)
@@ -82,9 +76,8 @@ func warmStageExtension(t *testing.T, name, main string, command ...string) Exte
 	return freezeComposition(t, e)
 }
 
-func startWarmStagesDev(t *testing.T, extensions ...Extension) (*Dev, Client, context.Context) {
+func startWarmStagesDev(t *testing.T, root string, extensions ...Extension) (*Dev, Client, context.Context) {
 	t.Helper()
-	root := newTestStateRoot(t)
 	c := DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"),
 		FileStore: filepath.Join(root, "files"), ExtensionRoot: filepath.Join(root, "extensions"), Token: "warm-stages-fixture",
 		Workers: 2, MemoryGB: 8, Interval: defaultWorkerInterval}
@@ -110,21 +103,7 @@ func startWarmStagesDev(t *testing.T, extensions ...Extension) (*Dev, Client, co
 	})
 	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	t.Cleanup(cancel)
-	t.Cleanup(func() {
-		if !t.Failed() {
-			return
-		}
-		snapshot, err := d.Queue.Snapshot()
-		if err != nil {
-			return
-		}
-		for _, j := range snapshot.Jobs {
-			t.Logf("job %s %s %s attempt=%d reason=%q machine=%s", j.ID, j.Spec.Name, j.State, j.Attempt, j.Reason, j.Machine)
-			if j.FanOut != nil && j.FanOut.Warm != nil {
-				t.Logf("  warm %+v", *j.FanOut.Warm)
-			}
-		}
-	})
+	t.Cleanup(func() { logWarmStageFailures(t, d) })
 	if err := d.WaitReady(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -139,8 +118,18 @@ func warmStageSpec(e Extension, name, machine string, outputs map[string]string)
 		Outputs: outputs, FanOut: &FanOut{}, AllowedMachines: []string{machine}}
 }
 
-func warmDownstreamPiece(producer, key string, args ...string) FanOutPiece {
-	return FanOutPiece{Key: key, Args: args, After: &PieceDependency{Job: producer, Piece: key, Outputs: map[string]string{"segments.json": "out"}}}
+func warmDownstreamPiece(producer, key string) FanOutPiece {
+	return FanOutPiece{Key: key, After: &PieceDependency{Job: producer, Piece: key, Outputs: map[string]string{"segments.json": "out"}}}
+}
+
+// The test drives the producer from its own attempt tree, so neither payload
+// needs to write outside its sandbox or see the host's temporary directory.
+func releaseWarmStage(t *testing.T, root, producer, gate string) {
+	t.Helper()
+	work := attemptStorageRoot(Job{ID: producer, Attempt: 1}, filepath.Join(root, "workers", "fake-1"))
+	if err := os.WriteFile(filepath.Join(work, ".myce-extension", gate), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // A downstream warm parent whose items depend on an upstream warm parent's
@@ -150,8 +139,9 @@ func warmDownstreamPiece(producer, key string, args ...string) FanOutPiece {
 func TestWarmPieceDependenciesDevReadyOrder(t *testing.T) {
 	upstream := warmStageExtension(t, "upstreamstage", warmUpstreamMain)
 	downstream := warmStageExtension(t, "downstreamstage", warmDownstreamMain, "3")
-	_, client, ctx := startWarmStagesDev(t, upstream, downstream)
-	gate := filepath.Join(t.TempDir(), "downstream-received-r3")
+	root := newTestStateRoot(t)
+	_, client, ctx := startWarmStagesDev(t, root, upstream, downstream)
+	const gate = "downstream-accepted-r3"
 
 	up := warmStageSpec(upstream, "upstream", "fake-1", map[string]string{"out": "results", "audio.wav": "results"})
 	up.FanOut.Pieces = []FanOutPiece{{Key: "r3", Args: []string{"-", "ok"}}, {Key: "r1", Args: []string{gate, "ok"}}, {Key: "r2", Args: []string{"-", "fail"}}}
@@ -160,11 +150,23 @@ func TestWarmPieceDependenciesDevReadyOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	down := warmStageSpec(downstream, "downstream", "fake-2", map[string]string{"labels": "results"})
-	down.FanOut.Pieces = []FanOutPiece{warmDownstreamPiece(producer.ID, "r1"), warmDownstreamPiece(producer.ID, "r2"), warmDownstreamPiece(producer.ID, "r3", gate)}
+	down.FanOut.Pieces = []FanOutPiece{warmDownstreamPiece(producer.ID, "r1"), warmDownstreamPiece(producer.ID, "r2"), warmDownstreamPiece(producer.ID, "r3")}
 	consumer, err := client.Submit(ctx, down)
 	if err != nil {
 		t.Fatal(err)
 	}
+	await(t, func() bool {
+		j, err := client.GetJob(ctx, consumer.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if terminal(j.State) {
+			t.Fatalf("downstream ended before r1 was released: %s (%s)", j.State, j.Reason)
+		}
+		_, accepted := j.FanOut.Results["r3"]
+		return accepted
+	})
+	releaseWarmStage(t, root, producer.ID, gate)
 	if final := awaitTerminal(t, ctx, client, producer.ID); final.State != "failed" || len(final.FanOut.Results) != 2 {
 		t.Fatalf("upstream %s (%s) %+v", final.State, final.Reason, final.FanOut)
 	}
@@ -194,8 +196,9 @@ func TestWarmPieceDependenciesDevReadyOrder(t *testing.T) {
 func TestWarmPieceDependenciesDevIdleRequeue(t *testing.T) {
 	upstream := warmStageExtension(t, "upstreamstage", warmUpstreamMain)
 	downstream := warmStageExtension(t, "downstreamstage", warmDownstreamMain, "1")
-	d, client, ctx := startWarmStagesDev(t, upstream, downstream)
-	gate := filepath.Join(t.TempDir(), "release-k2")
+	root := newTestStateRoot(t)
+	d, client, ctx := startWarmStagesDev(t, root, upstream, downstream)
+	const gate = "release-k2"
 
 	up := warmStageSpec(upstream, "upstream", "fake-1", map[string]string{"out": "results", "audio.wav": "results"})
 	up.FanOut.Pieces = []FanOutPiece{{Key: "k1", Args: []string{"-", "ok"}}, {Key: "k2", Args: []string{gate, "ok"}}}
@@ -221,9 +224,7 @@ func TestWarmPieceDependenciesDevIdleRequeue(t *testing.T) {
 		}
 		return false
 	})
-	if err := os.WriteFile(gate, nil, 0600); err != nil {
-		t.Fatal(err)
-	}
+	releaseWarmStage(t, root, producer.ID, gate)
 	final := awaitTerminal(t, ctx, client, consumer.ID)
 	logs := warmDevLogs(t, ctx, client, consumer.ID)
 	if final.State != "succeeded" || final.Attempt != 2 || final.FanOut.Warm.Loads != 2 || final.Losses != 0 || final.InfrastructureRetries != 0 ||
