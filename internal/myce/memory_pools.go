@@ -24,6 +24,16 @@ func (p MemoryPools) capacityWait() bool {
 	return p.RAM.CapacityWait || p.Card != nil && p.Card.CapacityWait
 }
 
+func (p MemoryPools) launchRAMGB() float64 {
+	if p.RAM.Learned && p.RAM.Evidence.Level == "unknown" {
+		// R6 reserves the entire sampled reach for the first run. With no
+		// measured or typed demand, the hand-off only needs startup room
+		// above keep and pending growth. The ledger still holds the reach.
+		return min(p.RAM.TypicalGB, minimumHostMemoryGB)
+	}
+	return p.RAM.TypicalGB
+}
+
 func pooledMemory(j *Job) bool {
 	return j.Memory != nil || j.MemoryEnvelope != nil && j.MemoryEnvelope.Basis == pooledMemoryCapability
 }
@@ -438,7 +448,7 @@ func (q *Queue) poolCapacityFailure(j *Job, m *Machine) string {
 			return memoryCapacityReason("card", *p, reach, owners)
 		}
 		if m.TotalMemoryGB > 0 && j.Spec.Needs.MemoryGB > m.TotalMemoryGB {
-			return fmt.Sprintf("card needs %.3f GiB; card allowance %.3f GiB", p.ChargeGB, reach)
+			return fmt.Sprintf("card needs %.3f GiB (typical %.3f GiB); card allowance %.3f GiB", p.ChargeGB, p.TypicalGB, reach)
 		}
 	}
 	return ""
@@ -698,7 +708,7 @@ func (s HostRAMGate) available(m *Machine, keep float64) float64 {
 }
 
 func (s HostRAMGate) check(m *Machine, pools MemoryPools, known bool) error {
-	return checkMemoryPool(pools.RAM.TypicalGB, s.available(m, pools.KeepGB), pools.KeepGB, s.PendingGB, known)
+	return checkMemoryPool(pools.launchRAMGB(), s.available(m, pools.KeepGB), pools.KeepGB, s.PendingGB, known)
 }
 
 func (s HostRAMGate) physicalRoom(keep float64) float64 {
@@ -762,7 +772,7 @@ func (q *Queue) workerRAMShortfall(j *Job, m *Machine) float64 {
 		return 0
 	}
 	pools := memoryPools(j)
-	return max(0, pools.RAM.TypicalGB+pools.KeepGB+gate.PendingGB-gate.available(worker, pools.KeepGB))
+	return max(0, pools.launchRAMGB()+pools.KeepGB+gate.PendingGB-gate.available(worker, pools.KeepGB))
 }
 
 func (q *Queue) workerRAMGate(j *Job, m *Machine) error {
@@ -777,7 +787,7 @@ func (q *Queue) workerRAMGate(j *Job, m *Machine) error {
 	if wait := j.LaunchCapacityWait[targetKey(m)]; wait.Session == m.Session && wait.Admission != nil && wait.Admission.StartupGB > 0 {
 		// Repeat the full launch requirement after budgeting for the measured
 		// native startup loss. The allowance already charges the full attempt.
-		return checkMemoryPool(pools.RAM.TypicalGB+wait.Admission.StartupGB, gate.RawGB, pools.KeepGB, gate.PendingGB, known)
+		return checkMemoryPool(pools.launchRAMGB()+wait.Admission.StartupGB, gate.RawGB, pools.KeepGB, gate.PendingGB, known)
 	}
 	return nil
 }

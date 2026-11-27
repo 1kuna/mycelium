@@ -426,6 +426,44 @@ func TestLaunchCapacityUnifiedWorkerGateAndNativeStartup(t *testing.T) {
 	}
 }
 
+func TestLaunchCapacityColdRAMReachIsAReservation(t *testing.T) {
+	q, clock := fixture(t)
+	m := r5Machine(32)
+	m.HostAvailableMemoryGB = 24
+	const keep = 2.0
+	m.MemoryObservation = &HostMemoryObservation{TotalGB: 32, UsedGB: 6, ReserveGB: keep}
+	m.HostRAMGate = &HostRAMGate{RawGB: 26}
+	s := cpuSpec(1, 0)
+	s.Needs.Memory = "auto"
+	j := submit(t, q, s)
+	run := assignedJob(r5Check(t, q, m, r5RAM(32, 24)))
+	if run == nil || run.ID != j.ID || run.Attempt != 1 {
+		t.Fatalf("cold job did not receive its first offer: %+v", run)
+	}
+	pools := memoryPools(run)
+	if pools.RAM.ChargeGB != 24 || pools.RAM.Evidence.Level != "unknown" || pools.KeepGB != keep {
+		t.Fatalf("cold job did not reserve its reach above keep: %+v", pools)
+	}
+	raw := 26.0
+	actor := &attemptSupervisor{job: *run}
+	rt := &modelRuntime{machine: m.ID, memoryMachine: m, clock: clock,
+		batchSupervisors:     map[attemptKey]*attemptSupervisor{jobKey(*run): actor},
+		poolHostMemorySource: func(context.Context) (float64, error) { return raw, nil }}
+	stage := HostLaunch{Machine: m.ID, Session: run.Session, Kind: "batch", Key: run.ID, Attempt: "1", NativeStartup: "first_member"}
+	if err := rt.checkBatchLaunchMemory(t.Context(), stage); err != nil {
+		t.Fatal(err)
+	}
+	raw -= 0.01 // A new reading at the native hand-off is 10 MiB lower.
+	stage.NativeStartup = "continuation"
+	if err := rt.checkBatchLaunchMemory(t.Context(), stage); err != nil {
+		t.Fatalf("small drift at hand-off refused the cold launch: %v", err)
+	}
+	raw = keep
+	if err := rt.checkBatchLaunchMemory(t.Context(), stage); err == nil {
+		t.Fatal("cold launch was allowed without startup room above keep")
+	}
+}
+
 func TestLaunchCapacityNativeHelperNeverDiscountsFullDemand(t *testing.T) {
 	for _, reacquire := range []bool{false, true} {
 		_, clock := fixture(t)
