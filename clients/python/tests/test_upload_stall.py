@@ -19,8 +19,11 @@ class UploadStallTests(unittest.TestCase):
     def test_paused_patch_tolerates_or_resumes_accepted_prefix(self):
         # One pause exceeds the old 523ms detector but fits the protocol floor;
         # the other forces a real stall and accepted-offset reconciliation.
-        for pause, lost_ack, delayed_publication in ((.7, False, False), (1.5, False, False), (0, True, False), (0, True, True)):
-            with self.subTest(pause=pause, lost_ack=lost_ack, delayed_publication=delayed_publication):
+        cases = ((.7, False, False, False), (1.5, False, False, False),
+                 (0, True, False, False), (0, True, True, False), (0, False, True, True))
+        for pause, lost_ack, delayed_publication, slow_finalize in cases:
+            with self.subTest(pause=pause, lost_ack=lost_ack, delayed_publication=delayed_publication,
+                              slow_finalize=slow_finalize):
                 body = b"source" * (2 << 20)
                 digest = hashlib.sha256(body).hexdigest()
                 accepted = bytearray()
@@ -72,6 +75,15 @@ class UploadStallTests(unittest.TestCase):
                             lost[0] = True
                             self.close_connection = True
                             return
+                        if slow_finalize:
+                            if self.headers.get("X-Myce-Upload-Finalizing") != "1":
+                                self.send_error(400)
+                                return
+                            for _ in range(7):
+                                time.sleep(.25)
+                                self.send_response_only(102)
+                                self.send_header("X-Myce-Upload-Finalizing", "1")
+                                self.end_headers()
                         if next_offset == len(body):
                             published[0] = True
                         self.send_response(204)
@@ -95,7 +107,7 @@ class UploadStallTests(unittest.TestCase):
                     expected = [0]
                     if pause > 1:
                         expected.append(64 << 10)
-                    if delayed_publication:
+                    if delayed_publication and lost_ack:
                         expected.append(len(body))
                     self.assertEqual(offsets, expected)
                 finally:

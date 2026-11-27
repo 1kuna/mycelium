@@ -471,6 +471,14 @@ local socket writes never count as acknowledgement. Typed integrity, authority
 and storage-policy refusals still return immediately. Retry pacing follows the
 current server `Retry-After` or measured service cost with positive jitter.
 
+Clients that send `X-Myce-Upload-Finalizing: 1` with their progress interval
+can receive HTTP 102 with that header while the queue syncs, verifies or
+commits a complete transfer. A 102 reports that the queue is still handling
+the request. The final tus response still follows verified publication, and
+the caller's transfer deadline still applies. Older peers use the existing
+offset reconciliation. An interrupted finalization is retryable storage
+unavailability (503). A body transfer can still be interrupted with 408.
+
 From the release containing #1170, every `/api/files/uploads/` error uses the
 standard JSON `{"code":"…","error":"…"}` envelope, including errors from the
 resumable-upload handler. HEAD errors expose the code in `X-Myce-Error-Code`

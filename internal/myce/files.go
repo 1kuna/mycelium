@@ -154,6 +154,7 @@ type FileStore struct {
 	explainRefusal              func(context.Context, error) error
 	handler                     http.Handler
 	uploadLocker                tus.Locker
+	syncUploadData              func(*os.File) error              // Fixtures may block the chunk durability barrier.
 	syncDir                     func(string) error                // Durability failure injection.
 	beforeTrash                 func(string)                      // Fixtures may block a collector's move.
 	claimLstat                  func(string) (os.FileInfo, error) // Fixtures may block claim metadata reads.
@@ -218,6 +219,7 @@ func (q *Queue) prepareFileStore(root string, limit int64, reserve uint64, contr
 	}
 	s := &FileStore{inputClaim: q.inputClaimContext, checkAttempt: q.checkFileStoreAttempt, productionReserve: reserve, admit: q.admitFileUpload, admitCreation: q.admitFileCreation, explainRefusal: q.explainFileStoreRefusal, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
 	s.controlFiles = controlFiles
+	s.syncUploadData = (*os.File).Sync
 	if q.sharedWriter != nil {
 		s.inventory = &fileInventory{dirty: map[string]bool{}}
 	}
@@ -249,7 +251,8 @@ func (q *Queue) prepareFileStore(root string, limit int64, reserve uint64, contr
 		},
 		PreFinishResponseCallback: func(e tus.HookEvent) (tus.HTTPResponse, error) {
 			ctx := creationContext(e.Context)
-			return tus.HTTPResponse{}, uploadCallbackError(ctx, s.finishUpload(ctx, e.Upload))
+			err := finalizeUpload(ctx, func(ctx context.Context) error { return s.finishUpload(ctx, e.Upload) })
+			return tus.HTTPResponse{}, uploadFinalizationError(ctx, err)
 		},
 	}
 	if q.configureUploads != nil {
@@ -328,24 +331,35 @@ func (s *FileStore) publish(ctx context.Context, ref FileRef) error {
 	defer s.changed(ref.SHA256)
 	// Each PATCH hashed what it wrote. Only an upload without a matching
 	// digest record is read again here, on the request path (#2155).
+	// The digest is only recorded after the data fsync succeeded. Reuse that
+	// barrier just as we reuse the hash. Fallback verification still has to
+	// sync the file, and both paths sync the publication metadata below.
 	if noModelSymlinks(source, false) != nil || !uploadDigestMatches(source, ref) {
-		if err := verifyFile(ctx, source, ref); err != nil {
+		started := time.Now()
+		err := verifyFile(ctx, source, ref)
+		diagnostic, _ := ctx.Value(uploadDiagnosticKey{}).(*uploadDiagnostic)
+		if diagnostic != nil {
+			diagnostic.uploadVerify = time.Since(started)
+		}
+		if err != nil {
 			return uploadFailure(ctx, "upload_verify", err)
 		}
-	}
-	f, err := os.OpenFile(source, os.O_RDWR, 0600)
-	if err != nil {
-		return uploadFailure(ctx, "upload_open", err)
-	}
-	if err = errors.Join(uploadSync(ctx, f.Sync), f.Close()); err != nil {
-		return uploadFailure(ctx, "upload_sync", err)
+		f, err := os.OpenFile(source, os.O_RDWR, 0600)
+		if err != nil {
+			return uploadFailure(ctx, "upload_open", err)
+		}
+		err = uploadDataSync(ctx, f.Sync)
+		if err = errors.Join(err, f.Close()); err != nil {
+			return uploadFailure(ctx, "upload_sync", err)
+		}
 	}
 	reportPublicationStep(ctx)
 	// The blob is now the verified upload itself: a link to it, or the file
 	// renamed. An existing blob was verified when it was placed, and HEAD and
 	// GET recheck its bytes before certifying or serving them, so only its
 	// shape is checked here. The lifecycle fence keeps it from trash meanwhile.
-	if err = s.moveBlob(source, s.blob(ref), ref.SHA256); os.IsExist(err) {
+	err := s.moveBlob(source, s.blob(ref), ref.SHA256)
+	if os.IsExist(err) {
 		if st, e := os.Lstat(s.blob(ref)); e != nil {
 			err = e
 		} else if !st.Mode().IsRegular() || st.Size() != ref.SizeBytes {
@@ -409,7 +423,8 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		r.Body = requestBodyEnd{r.Body, &response.bodyDone}
 	}
 	w = response
-	r = s.uploadVerificationProgress(w, r)
+	r = s.uploadVerificationProgress(response, r)
+	r = withUploadFinalization(response, r)
 	defer response.finish()
 	defer func() { diagnostic.log(r, response.status, response.Header(), response.body.Bytes()) }()
 	var err error
@@ -626,8 +641,24 @@ func (s *FileStore) uploadInputClaim(ctx context.Context, ref FileRef, allocate 
 type uploadResponse struct {
 	http.ResponseWriter
 	bodyDone atomic.Bool
+	infoMu   sync.Mutex
 	status   int
 	body     bytes.Buffer
+}
+
+// The finalization operation and its heartbeat may both emit interim
+// responses. Final headers are only written after the operation has joined.
+func (w *uploadResponse) informational(headers ...string) {
+	w.infoMu.Lock()
+	defer w.infoMu.Unlock()
+	h := w.Header()
+	for i := 0; i < len(headers); i += 2 {
+		h.Set(headers[i], headers[i+1])
+	}
+	w.WriteHeader(http.StatusProcessing)
+	for i := 0; i < len(headers); i += 2 {
+		h.Del(headers[i])
+	}
 }
 
 // requestBodyEnd marks the end of the request body for uploadResponse.
@@ -725,6 +756,9 @@ func (w *uploadResponse) finish() {
 			envelope.Code, envelope.Error = "file_upload_locked", "upload session is locked"
 		case 500, 502, 503, 504:
 			envelope.Code, envelope.Error = "file_upload_unavailable", "upload storage unavailable"
+			if bytes.HasPrefix(body, []byte("ERR_UPLOAD_FINALIZATION_INTERRUPTED:")) {
+				envelope.Error = "upload publication interrupted; reconcile the accepted offset"
+			}
 		}
 		body, _ = json.Marshal(envelope)
 	}
@@ -1288,6 +1322,12 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 			if code != http.StatusProcessing {
 				return nil
 			}
+			if header.Get(uploadFinalizingHeader) == "1" {
+				if conn := progressConn.Load(); conn != nil && conn.timing != nil {
+					conn.awaitResponse()
+				}
+				return nil
+			}
 			if raw := header.Get(uploadQueueServiceHeader); raw != "" {
 				service, err := time.ParseDuration(raw)
 				if err != nil || service <= 0 {
@@ -1346,6 +1386,7 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 		// Four actual-read reports fit inside the learned idle window. This
 		// keeps full-blob verification distinct from a stalled network peer.
 		req.Header.Set("X-Myce-Upload-Progress", (max(c.transferIdle, c.uploadTiming.window(route, 0)) / 4).String())
+		req.Header.Set(uploadFinalizingHeader, "1")
 		if c.transferIdle == 0 {
 			req.Header.Set(uploadQueueServiceHeader, "1")
 		}

@@ -193,6 +193,10 @@ uses the declared NAS source even when an ordinary shared-input cache holds a co
   to split release-to-accept latency into worker upload and queue processing.
   Current Go and Python job-input clients stream the remaining bytes in one
   resumable request and reconcile the queue's accepted offset after interruption.
+  Supporting clients can hear from the queue during final upload sync and
+  verification. Wait for the final verified acknowledgement before using the
+  file. For a retryable publication failure, keep the same bytes and receipt
+  and inspect the queue's `file_upload` data sync, verification and commit times.
   For `checkpoint_floor_missing`, restore a complete NAS checkpoint at or
   above the generation in the hold and run `myce resume JOB_ID`. To start
   from scratch, submit with a new submission key.

@@ -777,6 +777,9 @@ class Client:
         """size is the blob the queue may verify before replying; 0 when none."""
         budget = self._transfer_idle
         headers = dict(headers or {})
+        if method == "PATCH" and timing is not None:
+            headers["X-Myce-Upload-Finalizing"] = "1"
+            headers["X-Myce-Upload-Progress"] = f"{timing.window() / 4:.6f}s"
         if isinstance(data, bytes):
             headers["Content-Length"] = str(len(data))
             data = io.BytesIO(data)

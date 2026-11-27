@@ -20,6 +20,53 @@ type uploadDiagnosticKey struct{}
 
 const uploadQueueServiceHeader = "X-Myce-Upload-Queue-Service"
 
+const uploadFinalizingHeader = "X-Myce-Upload-Finalizing"
+
+type uploadFinalizationKey struct{}
+
+// Opted-in clients distinguish a live finalization from a silent transport.
+// The interim response certifies neither durability nor verification. The
+// final response still comes from the original operation with its locks and
+// request cancellation intact. A blocked syscall can't report I/O progress,
+// so report this phase independently of the verification-read observer.
+func withUploadFinalization(w *uploadResponse, r *http.Request) *http.Request {
+	if r.Header.Get(uploadFinalizingHeader) != "1" {
+		return r
+	}
+	period, err := time.ParseDuration(r.Header.Get("X-Myce-Upload-Progress"))
+	if err != nil || period <= 0 {
+		return r
+	}
+	period = max(period, clientRecoveryPeriod/4)
+	run := func(ctx context.Context, work func(context.Context) error) error {
+		ticker := time.NewTicker(period)
+		defer ticker.Stop()
+		done := make(chan error, 1)
+		go func() { done <- work(ctx) }()
+		cancelled := ctx.Done()
+		for {
+			select {
+			case err := <-done:
+				return err
+			case <-cancelled:
+				// Join work before releasing the upload and lifecycle fences.
+				cancelled = nil
+				ticker.Stop()
+			case <-ticker.C:
+				w.informational(uploadFinalizingHeader, "1")
+			}
+		}
+	}
+	return r.WithContext(context.WithValue(r.Context(), uploadFinalizationKey{}, run))
+}
+
+func finalizeUpload(ctx context.Context, work func(context.Context) error) error {
+	if run, ok := ctx.Value(uploadFinalizationKey{}).(func(context.Context, func(context.Context) error) error); ok {
+		return run(ctx, work)
+	}
+	return work(ctx)
+}
+
 // Keep the peak across two short buckets so a burst of fast check-ins cannot
 // immediately erase contention. Evidence ages out after 15–30 seconds, roughly
 // one to three turns at the measured 11-second p95 wait under production load.
@@ -121,6 +168,7 @@ type uploadDiagnostic struct {
 	hash, operation, failure                             string
 	length, accepted                                     int64
 	bodyRead, fileWrite, hashBytes, fileSync, inputClaim time.Duration
+	dataSync, uploadVerify, publicationCommit            time.Duration
 }
 
 type uploadMeasuredReader struct {
@@ -156,6 +204,14 @@ func uploadSync(ctx context.Context, sync func() error) error {
 	return err
 }
 
+func uploadDataSync(ctx context.Context, sync func() error) error {
+	if d, ok := ctx.Value(uploadDiagnosticKey{}).(*uploadDiagnostic); ok {
+		before := d.fileSync
+		defer func() { d.dataSync += d.fileSync - before }()
+	}
+	return uploadSync(ctx, sync)
+}
+
 func uploadRequestDiagnostic(r *http.Request) (*http.Request, *uploadDiagnostic) {
 	d := &uploadDiagnostic{hash: strings.TrimPrefix(r.URL.Path, "/api/files/uploads/"), length: -1, accepted: -1, started: time.Now()}
 	return r.WithContext(context.WithValue(r.Context(), uploadDiagnosticKey{}, d)), d
@@ -175,7 +231,7 @@ const publicationStepsHeader = "X-Myce-Publication-Steps"
 
 type publicationStepKey struct{}
 
-func (s *FileStore) uploadVerificationProgress(w http.ResponseWriter, r *http.Request) *http.Request {
+func (s *FileStore) uploadVerificationProgress(w *uploadResponse, r *http.Request) *http.Request {
 	period, err := time.ParseDuration(r.Header.Get("X-Myce-Upload-Progress"))
 	if err != nil || period <= 0 || r.Method != "PATCH" && r.Method != "POST" {
 		return r
@@ -191,11 +247,8 @@ func (s *FileStore) uploadVerificationProgress(w http.ResponseWriter, r *http.Re
 			return
 		}
 		last = now
-		w.Header().Set("X-Myce-Verification-Reads", strconv.FormatUint(operations, 10))
-		w.Header().Set(publicationStepsHeader, strconv.FormatUint(steps, 10))
-		w.WriteHeader(http.StatusProcessing)
-		w.Header().Del("X-Myce-Verification-Reads")
-		w.Header().Del(publicationStepsHeader)
+		w.informational("X-Myce-Verification-Reads", strconv.FormatUint(operations, 10),
+			publicationStepsHeader, strconv.FormatUint(steps, 10))
 	}
 	previous, _ := r.Context().Value(ioProgressKey{}).(func())
 	read := func() {
@@ -254,9 +307,10 @@ func (d *uploadDiagnostic) log(r *http.Request, status int, headers http.Header,
 		wait, hold = span.wait, span.hold
 		span.mu.Unlock()
 	}
-	log.Printf("event=file_upload method=%s upload=%s job=%s attempt=%d status=%d requested_offset=%d accepted_offset=%d length=%d operation=%s error_class=%s tus_code=%s duration_ms=%.3f body_read_ms=%.3f file_write_ms=%.3f hash_ms=%.3f fsync_ms=%.3f input_claim_ms=%.3f mutex_wait_ms=%.3f mutex_hold_ms=%.3f",
+	log.Printf("event=file_upload method=%s upload=%s job=%s attempt=%d status=%d requested_offset=%d accepted_offset=%d length=%d operation=%s error_class=%s tus_code=%s duration_ms=%.3f body_read_ms=%.3f file_write_ms=%.3f hash_ms=%.3f fsync_ms=%.3f data_fsync_ms=%.3f upload_verify_ms=%.3f publication_commit_ms=%.3f input_claim_ms=%.3f mutex_wait_ms=%.3f mutex_hold_ms=%.3f",
 		r.Method, d.hash, job, attempt.Attempt, status, requested, d.accepted, d.length, d.operation, d.failure, code,
-		holdMS(time.Since(d.started)), holdMS(d.bodyRead), holdMS(d.fileWrite), holdMS(d.hashBytes), holdMS(d.fileSync), holdMS(d.inputClaim), holdMS(wait), holdMS(hold))
+		holdMS(time.Since(d.started)), holdMS(d.bodyRead), holdMS(d.fileWrite), holdMS(d.hashBytes), holdMS(d.fileSync),
+		holdMS(d.dataSync), holdMS(d.uploadVerify), holdMS(d.publicationCommit), holdMS(d.inputClaim), holdMS(wait), holdMS(hold))
 }
 
 // tus answers any other callback error with 500. A queue wait that ended
@@ -278,15 +332,31 @@ func uploadCallbackError(ctx context.Context, err error) error {
 	return err
 }
 
+func uploadFinalizationError(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return tus.NewError("ERR_UPLOAD_FINALIZATION_INTERRUPTED", "upload publication was interrupted; reconcile the accepted offset", http.StatusServiceUnavailable)
+	}
+	// Preserve a storage error even if the client disconnected meanwhile.
+	return uploadCallbackError(context.WithoutCancel(ctx), err)
+}
+
 // Both ordinary completion and an accepted-end retry run the same durability
 // and purpose/custody barriers. No queue mutex is held during file I/O.
 func (s *FileStore) finishUpload(ctx context.Context, info tus.FileInfo) error {
-	if d, ok := ctx.Value(uploadDiagnosticKey{}).(*uploadDiagnostic); ok {
+	d, _ := ctx.Value(uploadDiagnosticKey{}).(*uploadDiagnostic)
+	if d != nil {
 		d.length, d.accepted = info.Size, info.Offset
 	}
 	ref := FileRef{info.MetaData["sha256"], info.Size}
 	if err := s.publish(ctx, ref); err != nil {
 		return err
+	}
+	if d != nil {
+		started := time.Now()
+		defer func() { d.publicationCommit = time.Since(started) }()
 	}
 	// An internal writer may have created the same blob after POST. Honor the
 	// import's custody even when publication deduplicates it.
@@ -340,12 +410,14 @@ func (s *FileStore) resumeUploadPublication(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "upload state changed", http.StatusConflict)
 		return
 	}
-	err = uploadFailure(ctx, "upload_finish", upload.FinishUpload(ctx))
-	if err == nil {
-		err = s.finishUpload(ctx, info)
-	}
+	err = finalizeUpload(ctx, func(ctx context.Context) error {
+		if err := uploadFailure(ctx, "upload_finish", upload.FinishUpload(ctx)); err != nil {
+			return err
+		}
+		return s.finishUpload(ctx, info)
+	})
 	var refusal tus.Error
-	if errors.As(uploadCallbackError(ctx, err), &refusal) {
+	if errors.As(uploadFinalizationError(ctx, err), &refusal) {
 		for name, value := range refusal.HTTPResponse.Header {
 			w.Header().Set(name, value)
 		}
