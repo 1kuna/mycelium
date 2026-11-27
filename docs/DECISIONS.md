@@ -241,7 +241,7 @@ Every NAS input, whatever its size, is transferred to the executing machine's lo
 
 <details><summary>Sources</summary>
 
-- MY-47, 2026-11-11, maintainer, answering the orchestrator's question after the queue host reached 97% disk with job files kept until explicit release: “keep finished job files for 3 days but clear out whatever’s stale right now so we can make space”.
+- MY-47, 2026-11-11, maintainer, answering the orchestrator's question after the queue host reached 97% disk with job files kept until explicit release: “keep finished job files for 3 days but clear out whatever’s stale right now so we can make space”. Reaffirmed 2026-11-27, after the orchestrator showed that 48 h would free up to 10.5 GiB and 24 h up to 33.5 GiB on the queue host: “ill keep it at 3 days”.
 
 </details>
 
