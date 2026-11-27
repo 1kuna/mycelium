@@ -547,7 +547,7 @@ func TestMemoryExpected2240RetainedXPUExtension(t *testing.T) {
 	q, clock := fixture(t)
 	const allowance, card, room = 47.193, 30.046, 14.81
 	m := r5Machine(allowance)
-	m.HostAvailableMemoryGB = room
+	m.HostAvailableMemoryGB, m.FreeHostMemoryGB = room, room
 	m.Devices = []MachineDevice{{
 		ID: "0", Platform: "xpu", Identity: "test-card", ExtensionFingerprint: "test-xpu",
 		TotalMemoryGB: card, BudgetGB: card, FreeMemoryGB: card, MemoryMeasured: true,
@@ -637,6 +637,10 @@ func TestMemoryExpected2240RetainedXPUExtension(t *testing.T) {
 	if resolved.RAM.ChargeGB != 7.8 || resolved.RAM.Evidence.Level != "family" || resolved.RAM.Evidence.Runs != 0 ||
 		resolved.Card.ChargeGB != card || !resolved.Card.Alone {
 		t.Fatalf("extension sizing at %.2f GiB room: RAM=%+v card=%+v", room, resolved.RAM, resolved.Card)
+	}
+	needs := sizes[0].Spec.Needs
+	if reason := hostFitFailure(&target, needs.MemoryGB, needs.HostMemoryGB); reason != "" {
+		t.Fatalf("queue RAM check refused the extension: %s", reason)
 	}
 	if err := (HostRAMGate{RawGB: room}).check(&target, resolved, true); err != nil {
 		t.Fatalf("extension did not fit in signed room: %v", err)
