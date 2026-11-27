@@ -2,10 +2,245 @@ package myce
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 )
+
+func measuredCPUWorker(id string, cores int, ram float64) Machine {
+	m := guardedCPUMachine(id, id, "cpu", cores, ram)
+	m.Devices = []MachineDevice{}
+	m.CPUExtensionFingerprint = "runtime-v1"
+	m.HostMemoryBudgetGB = ram
+	return m
+}
+
+func measuredCPUPull(t *testing.T, q *Queue, m Machine, active []*Job) *Job {
+	t.Helper()
+	c := Checkin{Machine: m, period: time.Second, AttemptProtocol: keyedAttemptProtocol}
+	for _, j := range active {
+		c.Attempts = append(c.Attempts, AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Started: true})
+	}
+	reply, err := q.Checkin(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range reply.Attempts {
+		if a.Job != nil && a.Job.StartedAt == nil {
+			if err := q.Started(result(a.Job, true)); err != nil {
+				t.Fatal(err)
+			}
+			return a.Job
+		}
+	}
+	return nil
+}
+
+func replayMeasuredCPUBacklog(t *testing.T, measured bool) (time.Duration, [3]int) {
+	t.Helper()
+	q, clock := fixture(t)
+	// The fastest host has two slots and is the most valuable host by
+	// inventory. Each slower host can fit the whole small backlog at once.
+	workers := []Machine{
+		measuredCPUWorker("slow-a", 16, 24),
+		measuredCPUWorker("slow-b", 16, 32),
+		measuredCPUWorker("fast", 16, 64),
+	}
+	durations := []time.Duration{150 * time.Second, 210 * time.Second, 30 * time.Second}
+	s := cpuSpec(1, 2)
+	// Model a two-slot owner budget with a fit vector that leaves the fastest
+	// host larger than the other two for the legacy least-valuable ordering.
+	workers[2].CPUBudgetCores = 2
+	for i, m := range workers {
+		if measured {
+			teachDuration(t, q, clock, m, s, durations[i])
+		} else {
+			check(t, q, m, nil)
+		}
+	}
+	for _, m := range workers {
+		check(t, q, m, nil)
+	}
+	const pieces = 6
+	for i := range pieces {
+		s.SubmissionKey = fmt.Sprintf("piece-%d", i)
+		submit(t, q, s)
+	}
+	type running struct {
+		job *Job
+		end time.Time
+	}
+	active := make([][]running, len(workers))
+	var placements [3]int
+	started, finished := 0, 0
+	start := clock.Now()
+	for finished < pieces && clock.Now().Sub(start) < 2*durations[1] {
+		for i := range workers {
+			var reports []*Job
+			pending := active[i][:0]
+			for _, attempt := range active[i] {
+				if clock.Now().Before(attempt.end) {
+					pending = append(pending, attempt)
+					reports = append(reports, attempt.job)
+				} else {
+					finish(t, q, attempt.job, true)
+					finished++
+				}
+			}
+			active[i] = pending
+			if j := measuredCPUPull(t, q, workers[i], reports); j != nil {
+				placements[i]++
+				started++
+				active[i] = append(active[i], running{j, clock.Now().Add(durations[i])})
+			}
+		}
+		if finished < pieces {
+			clock.Advance(5 * time.Second)
+		}
+	}
+	if started != pieces || finished != pieces {
+		t.Fatalf("started %d and finished %d of %d pieces; placements %v", started, finished, pieces, placements)
+	}
+	return clock.Now().Sub(start), placements
+}
+
+func TestCompletionMeasuredCPUBacklog(t *testing.T) {
+	legacy, legacyPlacements := replayMeasuredCPUBacklog(t, false)
+	measured, measuredPlacements := replayMeasuredCPUBacklog(t, true)
+	t.Logf("legacy %s %v, measured %s %v (5x slower, 7x slower, fast)", legacy, legacyPlacements, measured, measuredPlacements)
+	if legacyPlacements != [3]int{3, 2, 1} || legacy != 215*time.Second {
+		t.Fatal("unmeasured work changed least-valuable placement", legacy, legacyPlacements)
+	}
+	if measured >= legacy || measuredPlacements != [3]int{1, 0, 5} {
+		t.Fatal("measured placement did not improve the backlog", measured, measuredPlacements)
+	}
+}
+
+func TestCompletionSlowCPUFinishesBeforeFastRelease(t *testing.T) {
+	q, clock := fixture(t)
+	slow, fast := measuredCPUWorker("slow", 16, 24), measuredCPUWorker("fast", 1, 64)
+	short, long := cpuSpec(1, 2), cpuSpec(1, 2)
+	long.Name = "long command"
+	teachDuration(t, q, clock, slow, short, 15*time.Second)
+	teachDuration(t, q, clock, fast, short, 10*time.Second)
+	teachDuration(t, q, clock, fast, long, 60*time.Second)
+	check(t, q, slow, nil)
+	long.AllowedMachines = []string{fast.ID}
+	_ = startObservation(t, q, fast, long)
+	j := submit(t, q, short)
+	run := measuredCPUPull(t, q, slow, nil)
+	if run == nil || run.ID != j.ID {
+		t.Fatal("slow host should take work it can finish before the fast slot is free", run)
+	}
+}
+
+func TestCompletionCPUWaitsOnlyForFutureMeasuredRelease(t *testing.T) {
+	q, clock := fixture(t)
+	slow, fast := measuredCPUWorker("slow", 16, 24), measuredCPUWorker("fast", 1, 64)
+	s := cpuSpec(1, 2)
+	teachDuration(t, q, clock, slow, s, 70*time.Second)
+	teachDuration(t, q, clock, fast, s, 10*time.Second)
+	check(t, q, slow, nil)
+	pinned := s
+	pinned.AllowedMachines = []string{fast.ID}
+	holder := startObservation(t, q, fast, pinned)
+	check(t, q, fast, &holder)
+	j := submit(t, q, s)
+	if got := measuredCPUPull(t, q, slow, nil); got != nil {
+		t.Fatal("slow worker took a piece that would finish sooner after the fast release", got.ID)
+	}
+	clock.Advance(10 * time.Second)
+	check(t, q, fast, &holder)
+	if got := measuredCPUPull(t, q, slow, nil); got == nil || got.ID != j.ID {
+		t.Fatal("missed release estimate continued to withhold work", got)
+	}
+}
+
+// Run the check-in assignment planner with the same measured live work and
+// different retained history sizes. Setup and persistence are outside timing.
+func BenchmarkCompletionAssignment(b *testing.B) {
+	for _, waiting := range []int{3, 150, 500} {
+		for _, retained := range []int{0, 12000} {
+			b.Run(fmt.Sprintf("waiting=%d/history=%d", waiting, retained), func(b *testing.B) {
+				q, clock := fixture(b)
+				s := cpuSpec(1, 2)
+				var workers []Machine
+				for i, seconds := range []float64{150, 210, 30} {
+					m := measuredCPUWorker(fmt.Sprintf("worker-%d", i), 16, float64(24+8*i))
+					if i == 2 {
+						m.CPUBudgetCores = 1
+					}
+					workers = append(workers, m)
+					check(b, q, m, nil)
+					pinned := s
+					pinned.AllowedMachines = []string{m.ID}
+					submit(b, q, pinned)
+					j := check(b, q, m, nil).Job
+					if j == nil {
+						b.Fatal("calibration was not assigned")
+					}
+					if err := q.Started(result(j, true)); err != nil {
+						b.Fatal(err)
+					}
+					clock.Advance(time.Duration(seconds) * time.Second)
+					if err := q.Complete(result(j, true)); err != nil {
+						b.Fatal(err)
+					}
+				}
+				for _, m := range workers {
+					check(b, q, m, nil)
+				}
+				pinned := s
+				fast := workers[2]
+				pinned.AllowedMachines = []string{fast.ID}
+				submit(b, q, pinned)
+				holder := check(b, q, fast, nil).Job
+				if holder == nil {
+					b.Fatal("holder was not assigned")
+				}
+				if err := q.Started(result(holder, true)); err != nil {
+					b.Fatal(err)
+				}
+				template := submit(b, q, s)
+				drainAdmissionWait(b, q)
+				q.mu.Lock()
+				for i := 1; i < waiting; i++ {
+					id := fmt.Sprintf("queued-%d", i)
+					j := cloneJob(template)
+					j.ID = id
+					q.s.Jobs[id] = &j
+				}
+				for i := range retained {
+					id := fmt.Sprintf("retained-%d", i)
+					q.s.WorkObservations[id] = WorkObservation{Key: ObservationKey{Work: id}, LastSeconds: 3, Samples: 1}
+				}
+				q.mu.Unlock()
+				if err := q.update(func() error { return nil }); err != nil {
+					b.Fatal(err)
+				}
+				drainAdmissionWait(b, q)
+				q.mu.Lock()
+				defer q.mu.Unlock()
+				q.observationLive = q.records.live
+				defer func() { q.observationLive = nil }()
+				want := 2
+				if waiting == 3 {
+					want = 0
+				}
+				scan := q.placementScan()
+				if plan := q.assignmentPlan(scan); len(plan) != want {
+					b.Fatalf("wanted %d immediate assignments, got %d from %d live jobs and %d targets", want, len(plan), len(q.liveJobs()), len(scan.machines))
+				}
+				b.ReportAllocs()
+				b.ResetTimer()
+				for b.Loop() {
+					q.assignmentPlan(q.placementScan())
+				}
+			})
+		}
+	}
+}
 
 func completionFixture(t *testing.T) (*Queue, *fakeClock, Machine, Machine, Spec) {
 	t.Helper()

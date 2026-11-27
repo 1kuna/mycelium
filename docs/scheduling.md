@@ -35,9 +35,13 @@ hosts directly without first occupying the scarce host.
 - [Declare requirements and inspect portability](#declare-requirements-let-mycelium-place)
 
 Declared independent pieces are a current contract in the [spec](design-proposal.md)
-and [jobs reference](jobs.md). Placement keeps one measured record per kind of
-work, its last accepted duration and peak (MY-49); there are no throughput
-curves, benchmarks, completion forecasts or batch plans.
+and [jobs reference](jobs.md). Placement keeps the last accepted duration and
+peak for each comparable work and target identity (MY-49). Comparable
+durations can steer the same fair winner to a faster ready target. For a
+comparable CPU command backlog, placement can leave a slower worker idle when
+a faster lane is expected to finish the entire waiting tail sooner. Larger or
+mixed backlogs can use slower capacity under the normal placement rules. See
+[measured completion placement](design-proposal.md#measured-work-and-completion-aware-placement).
 [Scarce-host yield](design-proposal.md#scarce-host-yield) can requeue portable
 work for a hard requirement that only one physical host can satisfy. General
 workflow orchestration remains outside that mechanism. A job no single card holds

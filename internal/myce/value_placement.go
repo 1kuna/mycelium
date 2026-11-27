@@ -182,6 +182,10 @@ type placementScan struct {
 	memory          *memoryPlanningCache
 	hostBackfill    map[string]*hostBackfillDemand
 	unreleasableCPU map[batchCPUKey]int
+	completion      *completionScan
+	// Placement policy can use retained storage evidence. Reuse each CPU
+	// route's answer from candidate building when projecting a release.
+	measuredRoutes map[*Machine]map[string]bool
 }
 
 func (q *Queue) placementScan(scans ...*placementScan) *placementScan {
@@ -266,6 +270,9 @@ func (q *Queue) assignmentPlan(scan *placementScan) map[string]*Job {
 	}
 	scan.planBuilds++
 	scan.assignments = map[string]*Job{}
+	if len(q.s.WorkObservations) != 0 && len(scan.machines) > 1 {
+		scan.measuredRoutes = map[*Machine]map[string]bool{}
+	}
 	q.placementValues(scan)
 	q.placementLiveness(scan)
 	sets := make([]*candidateSet, 0, len(scan.machines))
@@ -285,16 +292,21 @@ func (q *Queue) assignmentPlan(scan *placementScan) map[string]*Job {
 		if hasStages {
 			j, selected = q.readyPipelineStage(j, selected, sets, excluded, scan)
 		}
-		excluded[j.ID] = true
 		// Keep production's existing preparation turn, and honor a target
 		// whose release this demand already requested. Both have passed this
 		// scan's candidate eligibility checks; stale custody alone cannot
 		// withhold capacity. Other cold winners leave room for ready work.
 		if !q.admissionGate(j, selected.m, environmentReady(j, selected.m) || preparationOwnsTurn(j), predicateEnvironment) {
+			excluded[j.ID] = true
 			continue
 		}
-		scan.assignments[targetKey(selected.m)] = j
-		q.recordAdmissionPlacementElsewhere(j, selected.m)
+		if faster := q.fasterMeasuredLane(j, selected.m, scan); faster != nil {
+			q.recordAdmissionPlacementElsewhere(j, faster)
+		} else {
+			excluded[j.ID] = true
+			scan.assignments[targetKey(selected.m)] = j
+			q.recordAdmissionPlacementElsewhere(j, selected.m)
+		}
 		remaining := sets[:0]
 		for _, s := range sets {
 			// A check-in offers one next attempt, even on a multi-device worker.
@@ -348,6 +360,7 @@ func (q *Queue) readyPipelineStage(root *Job, selected *candidateSet, sets []*ca
 func (q *Queue) nextProjection(sets []*candidateSet, excluded map[string]bool, scan *placementScan, immediate bool) (*Job, *candidateSet) {
 	var best *Job
 	var selected *candidateSet
+	var peers []completionPeer
 	for _, set := range sets {
 		winner := set.pick(excluded, immediate)
 		if winner == nil {
@@ -358,9 +371,15 @@ func (q *Queue) nextProjection(sets []*candidateSet, excluded map[string]bool, s
 		if immediate && !q.immediateProjectionFits(winner, set.m, scan) {
 			continue
 		}
+		if immediate && len(q.s.WorkObservations) != 0 {
+			peers = append(peers, completionPeer{winner, set})
+		}
 		if best == nil || winner.ID != best.ID && set.before(winner, best) || winner.ID == best.ID && q.projectionTargetBetter(winner, set.m, selected.m, scan, immediate) {
 			best, selected = winner, set
 		}
+	}
+	if len(peers) > 1 {
+		return q.fasterReadyTarget(best, selected, peers)
 	}
 	return best, selected
 }

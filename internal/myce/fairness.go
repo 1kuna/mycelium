@@ -282,6 +282,13 @@ func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[ba
 	if j.State != "queued" || len(m.groupMembers) > 0 && !q.admissionPass(j, m, q.mayNeedCards(j, m), predicateCardGroup) || !q.placementAllowed(j, m) || !q.admissionPass(j, m, q.checkpointReady(j, m), predicateCheckpoint) {
 		return nil
 	}
+	if len(scans) > 0 && scans[0].measuredRoutes != nil && m.GPU == "cpu" && plainCommandWork(j.Spec) {
+		routes := scans[0].measuredRoutes
+		if routes[m] == nil {
+			routes[m] = map[string]bool{}
+		}
+		routes[m][j.ID] = true
+	}
 	if start := q.fleetStartReservation(j); start != nil && (!q.fleetStartReserves(start, m) || !q.fleetProofFresh(m.Fleet) || !q.batchSlotFree(m, j) || !fits(j, m, m.FreeMemoryGB)) {
 		return nil
 	}
