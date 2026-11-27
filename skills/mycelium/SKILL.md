@@ -25,7 +25,9 @@ cat accepted/result.txt
 ```
 
 A one-off runs with installed tools in an empty worker directory. Use `--cpu N`
-for logical cores. For CPU jobs, `--mem 8G` sizes host RAM. With
+for logical cores. On an installed Linux queue host, CPU admission leaves room
+for the measured queue, worker and attempt custodian load. Machine status
+reports that load as `control_plane_cpu_cores` when a sample is available. For CPU jobs, `--mem 8G` sizes host RAM. With
 `--gpu cuda|xpu|metal`, `--mem` sizes device memory and `--host-mem` sizes
 additional host RAM. Omit memory to use automatic sizing. In a plain spec or
 entry, size CPU RAM with `needs.memory_gb` and additional GPU host RAM with

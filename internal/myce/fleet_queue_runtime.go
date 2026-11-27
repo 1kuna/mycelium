@@ -12,11 +12,13 @@ func (q *Queue) ConfigureFleetService(c ServiceConfig) error {
 	if c.Role != "queue" || c.HostID == "" || c.Config == "" || c.Binary == "" || c.Service == "" {
 		return errors.New("fleet queue requires saved installed settings")
 	}
+	sampler := installedControlCPUSampler(c)
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	copy := c
 	q.fleetService = &copy
 	q.diskHost = c.HostID
+	q.controlCPUSampler, q.controlCPU = sampler, controlCPUObservation{}
 	q.fleetQueue = &fleetQueueRuntime{Session: ID(), Host: c.HostID, OS: c.Detection.OS, Arch: c.Detection.Arch}
 	q.republishReads()
 	return nil

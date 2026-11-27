@@ -709,6 +709,9 @@ type Machine struct {
 	DockerCause            retiredField `json:"docker_cause,omitzero"`      // Previous release only (MY-49).
 	BenchmarkPending       retiredField `json:"benchmark_pending,omitzero"` // Previous release only (MY-49).
 
+	ControlPlaneCPUCores     float64 `json:"control_plane_cpu_cores,omitempty"`
+	cpuCapacityBeforeControl int
+
 	CachedSharedInputs  []string             `json:"cached_shared_inputs,omitempty"`
 	ModelSnapshots      []string             `json:"model_snapshots,omitempty" jsonschema:"description=Identities of declared model snapshots held in this host's model snapshot cache."`
 	ModelSnapshotBytes  map[string]uint64    `json:"model_snapshot_bytes,omitempty" jsonschema:"description=Verified size of each model snapshot identity this host has resolved; uncached hosts are charged this size on their file-cache volume."`

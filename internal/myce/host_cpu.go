@@ -80,15 +80,22 @@ func cpuCapacity(m *Machine) (int, string) {
 // Each physical host has one vector, projected onto its worker views. R1 still
 // runs one batch per worker; R2 can admit a collection against this same ledger.
 func (q *Queue) refreshHostCPU() {
+	controlFresh := !q.controlCPU.at.IsZero() && q.clock.Now().Sub(q.controlCPU.at) <= controlCPUWindow
 	for _, m := range q.s.Machines {
-		capacity, reason := cpuCapacity(m)
+		baseline, reason := cpuCapacity(m)
+		var control float64
+		if controlFresh && hostID(m) == q.diskHost {
+			control = q.controlCPU.cores
+		}
+		capacity := controlCPUJobCapacity(m, baseline, control)
 		policy := q.s.HostMaintenance[hostID(m)]
 		for _, other := range q.s.Machines {
 			if hostID(other) != hostID(m) || other.Gone {
 				continue
 			}
 			n, why := cpuCapacity(other)
-			capacity = min(capacity, n)
+			baseline = min(baseline, n)
+			capacity = min(capacity, controlCPUJobCapacity(other, n, control))
 			if why != "" {
 				reason = why
 			}
@@ -97,10 +104,12 @@ func (q *Queue) refreshHostCPU() {
 			}
 		}
 		if policy.CPUBudgetCores != nil && *policy.CPUBudgetCores > 0 {
+			baseline = min(baseline, *policy.CPUBudgetCores)
 			capacity = min(capacity, *policy.CPUBudgetCores)
 		}
 		used := q.hostCPUInUse(m, nil, nil, false)
 		m.cpuLedger = true
+		m.cpuCapacityBeforeControl, m.ControlPlaneCPUCores = baseline, control
 		m.EffectiveCPUCores, m.CPUInUseCores = capacity, used
 		m.FreeCPUCores, m.CPUCapacityReason = max(0, capacity-used), reason
 	}
@@ -167,9 +176,21 @@ func cpuFits(j *Job, m *Machine) bool {
 		return reason == "" && capacity >= jobCPUCharge(j, m)
 	}
 	if j.State == "running" || j.State == "stopping" {
-		return m.CPUInUseCores <= m.EffectiveCPUCores
+		return cpuKeepsReservation(m)
 	}
 	return m.FreeCPUCores >= jobCPUCharge(j, m)
+}
+
+// A changing control-plane estimate constrains new admission. Exact attempts
+// already charged to the host retain their CPU reservation.
+func cpuKeepsReservation(m *Machine) bool {
+	return m.CPUInUseCores <= m.configuredCPUAllowance()
+}
+
+// Historical work and hardware identity use the configured allowance. A
+// transient control-plane sample changes current admission only.
+func (m *Machine) configuredCPUAllowance() int {
+	return max(m.EffectiveCPUCores, m.cpuCapacityBeforeControl)
 }
 
 type batchCPUKey struct {

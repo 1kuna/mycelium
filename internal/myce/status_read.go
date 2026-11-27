@@ -345,11 +345,12 @@ type observationState struct {
 // Capture it by value alongside the public inputs, then restore only into the
 // detached machines. Probe facts and runtime preparation/secrets are worker-only.
 type observationMachineLedger struct {
-	healthDelivery         *hostHealthDelivery
-	toolInventory          *toolInventory
-	cpuLedger              bool
-	modelReservationDebtGB float64
-	hostReservationDebtGB  float64
+	healthDelivery           *hostHealthDelivery
+	toolInventory            *toolInventory
+	cpuLedger                bool
+	cpuCapacityBeforeControl int
+	modelReservationDebtGB   float64
+	hostReservationDebtGB    float64
 }
 
 // A committed cold job changes only through the record journal. Keep its
@@ -583,7 +584,7 @@ func (q *Queue) captureObservationInputs(id string, options *statusOptions, borr
 	machineLedgers := make(map[string]observationMachineLedger, len(s.Machines))
 	for key, m := range s.Machines {
 		machineLedgers[key] = observationMachineLedger{healthDelivery: q.freezeHostHealthDelivery(m),
-			toolInventory: m.toolInventory, cpuLedger: m.cpuLedger,
+			toolInventory: m.toolInventory, cpuLedger: m.cpuLedger, cpuCapacityBeforeControl: m.cpuCapacityBeforeControl,
 			modelReservationDebtGB: m.modelReservationDebtGB, hostReservationDebtGB: m.hostReservationDebtGB,
 		}
 	}
@@ -692,6 +693,7 @@ func (q *Queue) captureObservationInputs(id string, options *statusOptions, borr
 			m.HostHealth.delivery = ledger.healthDelivery
 		}
 		m.cpuLedger = ledger.cpuLedger
+		m.cpuCapacityBeforeControl = ledger.cpuCapacityBeforeControl
 		m.modelReservationDebtGB, m.hostReservationDebtGB = ledger.modelReservationDebtGB, ledger.hostReservationDebtGB
 	}
 	for key := range gatherWait {

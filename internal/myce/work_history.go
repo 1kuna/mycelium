@@ -251,7 +251,7 @@ func referenceObservationKey(e Extension, m *Machine, ref WorkReference, work st
 		HostAllowance, DeviceAllowance, DeviceReserve float64
 		Power, Mode                                   string
 		Arguments                                     string
-	}{needs, m.CPUReserveCores, m.EffectiveCPUCores, m.EffectiveHostMemoryBudgetGB, m.TotalMemoryGB, m.ReservedMemoryGB, power, mode, identityHash(struct {
+	}{needs, m.CPUReserveCores, m.configuredCPUAllowance(), m.EffectiveHostMemoryBudgetGB, m.TotalMemoryGB, m.ReservedMemoryGB, power, mode, identityHash(struct {
 		Args    []string
 		Program *Program
 	}{args, program})})

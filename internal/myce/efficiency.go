@@ -601,7 +601,7 @@ func efficiencyHostIdentity(machines []*Machine) string {
 	}
 	inventory := make([]member, 0, len(machines))
 	for _, m := range machines {
-		inventory = append(inventory, member{m.ID, m.ExtensionFingerprint, m.CPUExtensionFingerprint, m.EffectiveCPUCores, m.EffectiveHostMemoryBudgetGB})
+		inventory = append(inventory, member{m.ID, m.ExtensionFingerprint, m.CPUExtensionFingerprint, m.configuredCPUAllowance(), m.EffectiveHostMemoryBudgetGB})
 	}
 	slices.SortFunc(inventory, func(a, b member) int { return strings.Compare(a.ID, b.ID) })
 	return identityHash(inventory)

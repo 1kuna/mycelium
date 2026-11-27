@@ -139,7 +139,9 @@ type Queue struct {
 	uploadLocks             tus.Locker         // A shared member's in-memory tus locks; nil uses lock files.
 	configureUploads        func(*tus.Config)  // Tests shorten tusd's socket timeouts; nil keeps its defaults.
 	diskHost                string             // Physical hostname for co-located disk relief.
-	startupTrace            func(string)       // Startup only; controlled phase names, no state values.
+	controlCPUSampler       *controlCPUSampler
+	controlCPU              controlCPUObservation // q.mu; local queue host only.
+	startupTrace            func(string)          // Startup only; controlled phase names, no state values.
 	startupReadWorkers      int
 	readInvalidations       map[string]bool // q.mu; applied atomically with capture publication.
 	readDependenciesInvalid bool
@@ -1823,8 +1825,12 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 	// File-store health belongs to existing maintenance, not every control
 	// transaction. Snapshot under the lock, then perform bounded I/O outside it.
 	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
-	files := q.files
+	files, cpuSampler := q.files, q.controlCPUSampler
 	requestUnlock1()
+	var cpu controlCPUObservation
+	if cpuSampler != nil {
+		cpu = cpuSampler.sample(q.clock)
+	}
 	fileAvailable := true
 	if q.sharedWriter != nil {
 		fileAvailable = files != nil && !q.sharedWriter.storageFault.Load()
@@ -1837,6 +1843,9 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 		delay := q.healthStorageDelay
 		if delay <= 0 {
 			delay = DefaultHealthStorageDelay
+		}
+		if cpu.at.After(q.controlCPU.at) {
+			q.controlCPU = cpu
 		}
 		q.applyRequestHealth(traffic)
 		q.applyEfficiencyDiagnostics(diagnostics)
