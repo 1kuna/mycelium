@@ -259,10 +259,10 @@ func TestMemoryCeilingTierScores(t *testing.T) {
 		match PriorityMatch
 		want  int
 	}{
-		{PriorityMatch{Tier: "production", Index: 0}, 0},
+		{PriorityMatch{Tier: "production", Index: 0}, 500},
 		{PriorityMatch{Tier: "deadline", Index: 1}, 1000},
 		{PriorityMatch{Tier: "experiment", Index: 2}, 1000},
-		{PriorityMatch{Tier: "owner-top", Index: 0}, 0},
+		{PriorityMatch{Tier: "owner-top", Index: 0}, 500},
 		{PriorityMatch{Tier: "owner-lower", Index: 12}, 1000},
 	} {
 		j := Job{Spec: Spec{Priority: "production"}, PriorityPolicy: tc.match}
@@ -297,7 +297,7 @@ func TestMemoryCeilingTierScores(t *testing.T) {
 				}
 				class, want := "test", "1000"
 				if tier == "highest" || tier == "refused promotion" {
-					class, want = "production", "200"
+					class, want = "production", "500"
 				}
 				var pid int
 				var err error
@@ -358,12 +358,12 @@ func TestMemoryCeilingTierScores(t *testing.T) {
 					if err := update(1000); err != nil {
 						t.Fatal("demotion failed:", err)
 					}
-					err = update(0)
+					err = update(500)
 					fs.mu.Lock()
 					writes := fmt.Sprint(fs.writes)
 					fs.mu.Unlock()
-					if writes != "[1000 200]" {
-						t.Fatalf("demotion/promotion wrote %s, want [1000 200]", writes)
+					if writes != "[500 1000 500]" {
+						t.Fatalf("demotion/promotion wrote %s, want [500 1000 500]", writes)
 					}
 				}
 				if tier == "refused raise" || tier == "refused promotion" {
@@ -877,7 +877,7 @@ func TestMemoryCeilingLinuxIntegration(t *testing.T) {
 			t.Fatalf("production allocation: %q %v", line, err)
 		}
 		// A loaded model can be promoted without being restarted. Verify that
-		// the unprivileged owner can lower its earlier score back to zero.
+		// the unprivileged owner can restore the production bias.
 		if err := protected.updateOOMScore(attemptOOMScore(Job{PriorityPolicy: PriorityMatch{Tier: "production", Index: 0}})); err != nil {
 			t.Fatal(err)
 		}

@@ -39,6 +39,7 @@ func (w Worker) detachesAssignedAttempts() bool {
 
 type custodianRequest struct {
 	CompactNativeLaunch bool        `json:"compact_native_launch,omitempty"`
+	MemoryStop          bool        `json:"memory_stop,omitempty"`
 	Protocol            int         `json:"protocol"`
 	ID                  string      `json:"id"`
 	Machine             Machine     `json:"machine"`
@@ -262,6 +263,7 @@ func (w Worker) startCustodian(ctx context.Context, s *workerStore, j Job) (*pro
 	state := s.state
 	state.Job, state.Custodian = &j, ""
 	r := custodianRequest{Protocol: custodianProtocol, ID: id, Machine: w.Machine, State: state, CompactNativeLaunch: w.compactNativeLaunch}
+	r.MemoryStop = w.supportsMemoryStops() && len(memoryStopProbes) > 0
 	if w.memoryCeilings != nil {
 		r.AccountingRoots = []string{w.memoryCeilings.root}
 	}
@@ -568,6 +570,7 @@ func (w Worker) runCustodian(stop context.Context) error {
 	}
 	w.Machine = req.Machine
 	w.compactNativeLaunch = req.CompactNativeLaunch
+	w.custodianMemoryStop = req.MemoryStop
 	if w.Interval <= 0 {
 		w.Interval = time.Second
 	}

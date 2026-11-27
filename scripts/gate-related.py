@@ -20,9 +20,11 @@ SUPPLEMENTAL_CONSUMERS = {
 # The pool replay suite exercises the shared placement, admission and memory
 # sample plumbing by way of real queue and worker entry points.
 for _source in ('memory_planning', 'memory_pools', 'memory_room', 'memory_pressure',
-                'shared_gpu_pressure', 'launch_capacity', 'host_backfill'):
+                'memory_pressure_compat', 'launch_capacity', 'host_backfill'):
     SUPPLEMENTAL_CONSUMERS[f'internal/myce/{_source}.go'] = (
         'memory_pools_test.go', 'memory_pressure_test.go')
+
+SUPPLEMENTAL_CONSUMERS['internal/myce/memory_stop_worker.go'] = ('memory_stop_test.go', 'rss_guard_test.go')
 
 SUPPLEMENTAL_CONSUMERS['internal/myce/memory_learning.go'] = ('storage_envelope_test.go',)
 

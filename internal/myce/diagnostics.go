@@ -180,7 +180,7 @@ func (c RuntimeCause) String() string {
 			text += "; " + d.String()
 		}
 	}
-	if c.Class == rssLimitExceeded {
+	if c.Class == rssLimitExceeded || c.Class == memoryPressureCause {
 		if e := safeRSSLimit(c.RSSLimit); e != nil {
 			text += "; " + e.String()
 		}
@@ -374,6 +374,9 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 	}
 	out.RSSLimit = nil
 	if c.Class == rssLimitExceeded {
+		out.RSSLimit = safeRSSLimit(c.RSSLimit)
+	}
+	if c.Class == memoryPressureCause && c.RSSLimit.pool() != "" {
 		out.RSSLimit = safeRSSLimit(c.RSSLimit)
 	}
 	out.Host, out.MissingTools = "", nil

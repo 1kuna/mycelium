@@ -2039,9 +2039,17 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			m.MemoryShadow, m.memoryShadowOrder = old.MemoryShadow, old.memoryShadowOrder
 		} else if m.MemoryShadow != nil {
 			defer func() {
-				reply.MemoryShadowSettings = &memoryShadowSettings{KeepGB: q.pooledKeep(&m), GraceSeconds: q.preemptionGrace().Seconds()}
+				reply.MemoryShadowSettings = &memoryShadowSettings{KeepGB: q.pooledBaseKeep(&m), GraceSeconds: q.preemptionGrace().Seconds()}
 				shadow = q.shadowObservation(&m, memoryReceivedAt)
 			}()
+		}
+		if m.MemoryShadow != nil && m.MemoryShadow.stopForecast {
+			for i := range m.Devices {
+				d := &m.Devices[i]
+				if !d.UnifiedMemory {
+					d.FreeMemoryGB = max(0, d.FreeMemoryGB-cardStopKeep(d.Platform))
+				}
+			}
 		}
 		if m.HostRAMGate != nil && !m.HostRAMGate.valid() {
 			m.HostRAMGate = nil
@@ -2242,6 +2250,9 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		q.withdrawUnavailable(&m)
 		q.acceptFaultEvidence(&m)
 		q.quarantineDeviceAttempts(&m)
+		if m.memoryShadowOrder == healthReportOrder {
+			q.stopShortMemoryPool(&m, memoryReceivedAt, c.period)
+		}
 		body.next("checkin_maintain")
 		q.observeRestartService(c.contact)
 		// The periodic tick refreshes compact startup explanations. Detailed
@@ -2250,7 +2261,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		body.next("checkin_attempts")
 		reply.FleetInstructionProtocol, reply.FleetInstructionWaiting = fleetInstructionProtocol, q.fleetInstructionWaiting(hostID(&m))
 		reply.CustodianProtocol = custodianProtocol
-		q.guardSharedGPU(&m)
+		q.guardLegacyCardPressure(&m)
 		defer func() {
 			body.next("checkin_plans")
 			budget, _ := q.measuredHostMemoryBudget(&m, *q.s.HostMaintenance[hostID(&m)].MemoryBudget)
@@ -3386,6 +3397,10 @@ func cloneMachine(m *Machine) Machine {
 	out.toolInventory = m.toolInventory
 	if out.HostHealth != nil {
 		out.HostHealth.delivery = m.HostHealth.delivery
+	}
+	if out.MemoryShadow != nil {
+		out.MemoryShadow.stopForecast = m.MemoryShadow.stopForecast
+		out.MemoryShadow.sampleAge = m.MemoryShadow.sampleAge
 	}
 	return out
 }

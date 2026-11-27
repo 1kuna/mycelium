@@ -17,6 +17,7 @@ import (
 // is per platform: it follows what the process probe costs to run.
 const processMemoryGrace = 2 * processMemorySamplePeriod
 const rssLimitExceeded = "rss_limit_exceeded"
+const poolFootprintLimitSuffix = "_pool_footprint"
 const darwinRSSGuardStatus = "sampled RSS guard (native CPU); no kernel memory ceiling"
 
 type RSSLimitEvidence struct {
@@ -26,7 +27,25 @@ type RSSLimitEvidence struct {
 	MemoryRoom    *MemoryRoomDecision `json:"memory_room,omitempty"`
 }
 
+func (e *RSSLimitEvidence) pool() string {
+	if e != nil {
+		switch e.Quality {
+		case "ram" + poolFootprintLimitSuffix:
+			return "ram"
+		case "card" + poolFootprintLimitSuffix:
+			return "card"
+		}
+	}
+	return ""
+}
+
 func safeRSSLimit(e *RSSLimitEvidence) *RSSLimitEvidence {
+	if e.pool() != "" {
+		if e.LimitBytes < 0 || e.ObservedBytes <= uint64(e.LimitBytes) {
+			return nil
+		}
+		return &RSSLimitEvidence{ObservedBytes: e.ObservedBytes, LimitBytes: e.LimitBytes, Quality: e.Quality}
+	}
 	if e == nil || e.LimitBytes < 0 || e.LimitBytes == 0 && (safeMemoryRoom(e.MemoryRoom) == nil || e.MemoryRoom.RoomGB > 0) || e.ObservedBytes <= uint64(e.LimitBytes) || e.Quality != "owned_session_rss" && e.Quality != "cgroup_current" && e.Quality != footprintGuardQuality {
 		return nil
 	}
@@ -36,6 +55,9 @@ func safeRSSLimit(e *RSSLimitEvidence) *RSSLimitEvidence {
 }
 
 func (e *RSSLimitEvidence) String() string {
+	if pool := e.pool(); pool != "" {
+		return fmt.Sprintf("%s pool below keep with sampled footprint %d bytes above expected %d bytes", pool, e.ObservedBytes, e.LimitBytes)
+	}
 	if d := e.MemoryRoom; d != nil {
 		return fmt.Sprintf("sampled memory %d bytes exceeded capacity bound %d bytes (computed room %g GiB; capacity %g GiB from %s; charges %g GiB; pending %g GiB)", e.ObservedBytes, e.LimitBytes, d.RoomGB, d.CapacityGB, d.CapacitySource, d.ChargeGB, d.PendingGB)
 	}

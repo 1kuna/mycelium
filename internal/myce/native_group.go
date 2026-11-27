@@ -148,7 +148,8 @@ func (g *nativeGroup) stopLocked(now time.Time, grace time.Duration, kill bool) 
 	if p.stopAt == nil || deadline.Before(*p.stopAt) || cancelChanged {
 		p.stopAt = &deadline
 		g.custody.StopAt = &deadline
-		if err := saveWorkerJSON(g.dir, "attempt-"+g.identity+".json", g.custody); err != nil {
+		if err := saveWorkerJSON(g.dir, "attempt-"+g.identity+".json", g.custody); err != nil &&
+			!(kill && p.outcome.RSSLimit.pool() != "") {
 			// Failed stop persistence cannot authorize additional execution.
 			if p.stopGroup {
 				g.signalLocked(nil, syscall.SIGTERM)

@@ -451,6 +451,14 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		}
 		c.fleetProofIssue = safeFleetProofIssue(FleetProofIssue(r.Header.Get(fleetProofIssueHeader)))
 		c.ephemeralRefusal = safeEphemeralRefusal(ephemeralRefusal(r.Header.Get(ephemeralRefusalHeader)))
+		if c.Machine.MemoryShadow != nil {
+			report := c.Machine.MemoryShadow
+			report.stopForecast = r.Header.Get(memoryStopHeader) == memoryStopProtocol
+			report.sampleAge = -1
+			if age, err := time.ParseDuration(r.Header.Get(memoryStopSampleAgeHeader)); err == nil && age >= 0 {
+				report.sampleAge = age
+			}
+		}
 		accepted := false
 		contact, settle := a.Queue.trackWorkerCheckin(c.Machine.ID, c.Machine.Session, c.period, true, r.Context())
 		c.contact = contact
@@ -590,6 +598,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			w.Header().Set(launchTimingsHeader, launchTimingsWire)
 			w.Header().Set(hostRAMGateHeader, hostRAMGateProtocol)
 			w.Header().Set(memoryShadowHeader, memoryShadowProtocol)
+			w.Header().Set(memoryStopHeader, memoryStopProtocol)
 		}
 		// Liveness is a fixed-size authenticated response, not a projection.
 		// A progress probe must not wait on the OS memory observation used to
@@ -796,6 +805,7 @@ type Client struct {
 	faultWire        *atomic.Bool
 	hostRAMGateWire  *atomic.Bool
 	memoryShadowWire *atomic.Bool
+	memoryStopWire   *atomic.Bool
 	URL              string
 	Token            string
 	endpoints        *queueEndpoints
@@ -933,6 +943,12 @@ func (c Client) callOnceShared(ctx context.Context, method, path string, in, out
 		}
 	}
 	if workerCheckin {
+		if checkin.Machine.MemoryShadow != nil && c.memoryStopWire != nil && c.memoryStopWire.Load() {
+			req.Header.Set(memoryStopHeader, memoryStopProtocol)
+			if at := checkin.Machine.MemoryShadow.sampledAt; !at.IsZero() && c.Clock != nil {
+				req.Header.Set(memoryStopSampleAgeHeader, c.Clock.Now().Sub(at).String())
+			}
+		}
 		if checkin.period > 0 {
 			req.Header.Set(checkinPeriodHeader, checkin.period.String())
 		}
@@ -994,6 +1010,9 @@ func (c Client) callOnceShared(ctx context.Context, method, path string, in, out
 	}
 	if c.memoryShadowWire != nil && advertisesWorkerProtocol {
 		c.memoryShadowWire.Store(res.Header.Get(memoryShadowHeader) == memoryShadowProtocol)
+	}
+	if c.memoryStopWire != nil && advertisesWorkerProtocol {
+		c.memoryStopWire.Store(res.Header.Get(memoryStopHeader) == memoryStopProtocol)
 	}
 	if c.hostRAMGateWire != nil && workerProtocolEndpoint(path) {
 		c.hostRAMGateWire.Store(res.Header.Get(hostRAMGateHeader) == hostRAMGateProtocol)

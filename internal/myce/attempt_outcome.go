@@ -240,6 +240,10 @@ func classifyAttemptOutcome(result Result, facts attemptCause) Result {
 	if e := safeRSSLimit(facts.RSSLimit); e != nil {
 		result.Success, result.OutOfMemory = false, true
 		result.ExecutionCause = &RuntimeCause{Operation: "command", Class: rssLimitExceeded, RSSLimit: e}
+		if e.pool() != "" {
+			result.OutOfMemory = false
+			result.ExecutionCause.Class = memoryPressureCause
+		}
 		result.Error = e.String()
 	}
 	result.OutOfMemory = result.OutOfMemory || facts.OutOfMemory
