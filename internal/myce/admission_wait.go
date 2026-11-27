@@ -246,7 +246,6 @@ func (q *Queue) finishAdmissionWait(b *admissionWaitBuilder, c *admissionWaitCap
 	source.admissionWaitDecisions = c.decisions
 	source.hostMemoryLedgers = c.ledgers
 	source.admissionTrace = &admissionTrace{jobs: c.admissions}
-	source.memoryPlanning = newMemoryPlanningCache()
 	refresh := func(at time.Time) {
 		if at.After(source.clock.Now()) && (c.refresh.IsZero() || at.Before(c.refresh)) {
 			c.refresh = at
@@ -711,6 +710,12 @@ func (q *Queue) waitHolder(o HostObligation, demand *Job, now time.Time) Admissi
 // No status/read path records evidence, and no OS, network or storage I/O runs.
 func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration, last map[string]admissionWaitEvaluation, build uint64) map[string]admissionWaitEvaluation {
 	defer q.memoizeExtensionQualifications(scan.machines)()
+	// Candidate discovery and the serial projection use the same immutable
+	// planning inputs. Reuse sizing already done for the same job and target.
+	if scan.memory == nil {
+		scan.memory = newMemoryPlanningCache()
+	}
+	q.memoryPlanning = scan.memory
 	now := q.clock.Now()
 	started := holdNow(q.holdClock)
 	waiting := []*Job{}
@@ -756,7 +761,13 @@ func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration, 
 		budget = (report.BudgetBytes - min(report.BudgetBytes, used)) / uint64(max(1, len(waiting)))
 		unknown = false
 	}
+	type holderKey struct {
+		host     string
+		tier     int
+		deadline bool
+	}
 	obligations := map[string][]HostObligation{}
+	holders := map[holderKey][]AdmissionWaitHolder{}
 	candidates := map[string]map[string]*Job{}
 	for _, j := range waiting {
 		// One ordinary measured control transaction is the observational work
@@ -790,11 +801,15 @@ func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration, 
 					resolution = "serial_diagnostic_projection"
 					template := j
 					if j.Spec.childFanOut() {
+						// The fallback describes the serial template, without
+						// the planner's piece-specific arguments and sizing.
 						template = q.fanOutTemplate(j)
 					}
-					for _, c := range q.memoryCandidates(template, m) {
+					for i, c := range extensionJobs(template, m, true) {
+						// Memory sizing cannot change these structural checks.
+						// Only the first matching variant supplies the wait row.
 						if memorySizingTargetFits(c, m) {
-							candidate = c
+							candidate = q.sizeQualifiedCandidate(template, c, m, i)
 							break
 						}
 					}
@@ -875,12 +890,25 @@ func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration, 
 				if placement := j.PreemptionPlacement; placement != nil && placement.Machine == m.ID && placement.Session == m.Session && placement.Device == m.Device && len(placement.Releases) > 0 {
 					target.ReleaseCommitment = q.preemptionReleasesPending(j)
 				}
-				if _, ok := obligations[hostID(m)]; !ok {
-					obligations[hostID(m)] = q.hostObligations(hostID(m))
+				// In this frozen view, only the demand's tier and deadline
+				// cooperative-stop rule affect a holder's evidence.
+				hk := holderKey{target.Host, q.priorityMatch(j.Spec).Index, j.Spec.Priority == "deadline"}
+				rows, ok := holders[hk]
+				if !ok {
+					owned, ok := obligations[target.Host]
+					if !ok {
+						owned = q.hostObligations(target.Host)
+						obligations[target.Host] = owned
+					}
+					if len(owned) > 0 {
+						rows = make([]AdmissionWaitHolder, 0, len(owned))
+						for _, o := range owned {
+							rows = append(rows, q.waitHolder(o, j, now))
+						}
+					}
+					holders[hk] = rows
 				}
-				for _, o := range obligations[hostID(m)] {
-					target.Holders = append(target.Holders, q.waitHolder(o, j, now))
-				}
+				target.Holders = rows
 				snapshot.Targets = append(snapshot.Targets, target)
 			}
 			if len(snapshot.Targets) == 0 {
@@ -915,7 +943,7 @@ func retainAdmissionWait(old *AdmissionWaitEvidence, next *AdmissionWaitSnapshot
 		out.First = old.First
 	}
 	out.Dropped, out.CaptureGaps = old.Dropped, old.CaptureGaps
-	out.Transitions = slices.Clone(old.Transitions)
+	out.Transitions = old.Transitions // Immutable until a distinct transition is appended below.
 	out.HistoryBytes = old.HistoryBytes
 	if old.Latest != nil && old.Latest != next && (old.First == nil || !old.Latest.At.Equal(old.First.At)) && !sameAdmissionWait(old.Latest, next) {
 		data, _ := json.Marshal(old.Latest)
@@ -925,7 +953,7 @@ func retainAdmissionWait(old *AdmissionWaitEvidence, next *AdmissionWaitSnapshot
 			out.HistoryBytes++
 		}
 		out.HistoryBytes += uint64(len(data))
-		out.Transitions = append(out.Transitions, old.Latest)
+		out.Transitions = append(slices.Clip(out.Transitions), old.Latest)
 	}
 	first := 0
 	for first < len(out.Transitions) && (unknown || out.HistoryBytes > budget) {
