@@ -21,7 +21,7 @@ var rejectionMessages = map[string]string{
 	"recovery_verification_failed":          "recovery bytes are missing or do not match SHA-256 and size",
 	"recovery_unknown":                      "recovered result not found",
 	"native_workdir_containment":            "native isolation requires workdir beneath {work}; stage source with inputs or a profile",
-	"shared_queue_control_retry":            "shared queue control is waiting for the current coordinator or worker contact; retry the request",
+	"shared_queue_control_retry":            "queue control is waiting for the current coordinator or worker contact; retry the request",
 	"shared_file_store_unready":             "shared queue file storage is unavailable; retry the request",
 	"queue_stopping":                        "queue is shutting down; retry the request",
 	"shared_input_cache_capacity":           "declared shared inputs exceed every enabled worker cache capacity",

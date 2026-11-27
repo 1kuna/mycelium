@@ -272,8 +272,11 @@ func (q *Queue) NativeCustody(r NativeCustodyReport, requestContexts ...context.
 		}
 		if r.Phase != "released" {
 			q.maintainStartDeadlines()
-			if j.State != "running" || cancelled(j) {
+			if j.State != "running" || cancelled(j) || j.ReleaseConfirmed {
 				return ErrStale
+			}
+			if q.workerAwaitingLaunchCheckin(q.s.Machines[r.Machine], r.Session, true) {
+				return sharedQueueControlRetry()
 			}
 			predicate := "host_launch"
 			if q.assignedLaunchAllowed(q.s.Machines[r.Machine], r.Session, j) {

@@ -3496,7 +3496,7 @@ func (q *Queue) startedWithCustody(ctx context.Context, request workerStartedReq
 			return nil
 		}
 		m := q.s.Machines[r.Machine]
-		if q.sharedWorkerAwaitingCheckin(m, r.Session) {
+		if q.workerAwaitingLaunchCheckin(m, r.Session, true) {
 			return sharedQueueControlRetry()
 		}
 		if j.StartedAt == nil && q.sharedFileHold(j) {

@@ -100,7 +100,7 @@ func TestWorkerStartHandoffCapacity(t *testing.T) {
 }
 
 func TestWorkerStartHandoffQueueWait(t *testing.T) {
-	for _, state := range []string{"current", "cancelled", "lost-reply", "cancel-after-commit", "outage-after-commit"} {
+	for _, state := range []string{"current", "cancelled", "lost-reply", "cancel-after-commit", "outage-after-commit", "queue-restart"} {
 		// "current" replays the incident on wall time over real HTTP: the
 		// exec-receipt pipe deadline re-armed after Started is OS-poller time,
 		// which synctest cannot advance. The other states run the same handler,
@@ -112,6 +112,9 @@ func TestWorkerStartHandoffQueueWait(t *testing.T) {
 			m := machine("one", "fake")
 			s := spec("production")
 			s.Resumable = false
+			if state == "queue-restart" {
+				s.StartWindow = "5m"
+			}
 			s.Run.Command = []string{"sh", "-c", `printf x >> "$MARKER"`}
 			s.Run.Env = map[string]string{"MARKER": "{work}/executions"}
 			submit(t, q, s)
@@ -119,7 +122,7 @@ func TestWorkerStartHandoffQueueWait(t *testing.T) {
 			handler := (API{Queue: q, Token: "test"}).Handler()
 			var calls atomic.Int32
 			server := http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/api/workers/started" && calls.Add(1) == 1 && state != "lost-reply" && state != "cancel-after-commit" && state != "outage-after-commit" {
+				if r.URL.Path == "/api/workers/started" && calls.Add(1) == 1 && (state == "current" || state == "cancelled") {
 					q.mu.Lock()
 					select {
 					case <-time.After(3300 * time.Millisecond):
@@ -184,7 +187,39 @@ func TestWorkerStartHandoffQueueWait(t *testing.T) {
 					}
 					return response, err
 				})}
-				w.Client.Pause = func(context.Context, time.Duration) error { return nil }
+				w.Client.Pause = func(context.Context, time.Duration) error {
+					if state == "outage-after-commit" && dropped.Load() {
+						clock.Advance(RestartGrace)
+					}
+					return nil
+				}
+			}
+			if state == "queue-restart" {
+				var dialFailed bool
+				w.Client.HTTP = &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+					if r.URL.Path == "/api/workers/started" && !dialFailed {
+						dialFailed = true
+						return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+					}
+					return handlerTestTransport(server).RoundTrip(r)
+				})}
+				w.Client.Pause = func(context.Context, time.Duration) error {
+					if calls.Load() == 0 {
+						clock.Advance(RestartGrace - time.Second)
+						q = reopenQueue(t, q, clock)
+						handler = (API{Queue: q, Token: "test"}).Handler()
+						return nil
+					}
+					if got := job(t, q, a.ID); got.StartedAt != nil || got.State != "running" {
+						t.Fatalf("handoff was settled before worker reconciliation: state=%s started=%v", got.State, got.StartedAt)
+					}
+					report := AttemptReport{Execution: Execution{ID: a.ID, Attempt: a.Attempt}, Session: a.Session}
+					reply, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{report}})
+					if err != nil || len(reply.Attempts) != 1 || reply.Attempts[0].Stop || reply.Attempts[0].Attempt != a.Attempt {
+						t.Fatalf("restarted queue did not recognize gated custody: %+v %v", reply.Attempts, err)
+					}
+					return nil
+				}
 			}
 			store, err := w.openStore()
 			if err != nil {
@@ -198,7 +233,7 @@ func TestWorkerStartHandoffQueueWait(t *testing.T) {
 			}
 			select {
 			case f := <-p.done:
-				if f.result.Success != (state == "current" || state == "lost-reply") {
+				if f.result.Success != (state == "current" || state == "lost-reply" || state == "queue-restart") {
 					t.Fatalf("delayed %s execution: %+v", state, f.result)
 				}
 				if state == "cancel-after-commit" {
@@ -232,14 +267,14 @@ func TestWorkerStartHandoffQueueWait(t *testing.T) {
 			}
 			got := job(t, q, a.ID)
 			wantCalls := int32(1)
-			if state == "lost-reply" {
+			if state == "lost-reply" || state == "queue-restart" {
 				wantCalls = 2
 			}
-			if calls.Load() != wantCalls || got.Starts != 1 || state != "outage-after-commit" && (got.Losses != 0 || got.InfrastructureRetries != 0 || (got.StartedAt != nil) != (state != "cancelled")) {
+			if calls.Load() != wantCalls || got.Starts != 1 || state != "outage-after-commit" && (got.Attempt != a.Attempt || got.Session != a.Session || got.Losses != 0 || got.InfrastructureRetries != 0 || (got.StartedAt != nil) != (state != "cancelled")) {
 				t.Fatalf("handoff duplicated or escaped its fence: calls=%d job=%+v", calls.Load(), got)
 			}
 			data, err := os.ReadFile(filepath.Join(p.job.Spec.Run.Workdir, "executions"))
-			if (state == "current" || state == "lost-reply") && (err != nil || string(data) != "x") || (state == "cancelled" || state == "cancel-after-commit" || state == "outage-after-commit") && !os.IsNotExist(err) {
+			if (state == "current" || state == "lost-reply" || state == "queue-restart") && (err != nil || string(data) != "x") || (state == "cancelled" || state == "cancel-after-commit" || state == "outage-after-commit") && !os.IsNotExist(err) {
 				t.Fatalf("wrong payload execution count: state=%s marker=%q err=%v", state, data, err)
 			}
 			// An old session cannot obtain an additional positive hand-off.
@@ -436,12 +471,15 @@ func TestWorkerControlHandshakeReconciliation(t *testing.T) {
 }
 
 func TestWorkerHandshakeRefusalAfterLostStarted(t *testing.T) {
-	for _, fence := range []string{"cancel", "session", "attempt"} {
+	for _, fence := range []string{"cancel", "session", "attempt", "worker-lost"} {
 		t.Run(fence, func(t *testing.T) {
 			q, clock := fixture(t)
 			m := machine("worker", "fake")
 			s := spec("production")
 			s.WallTime = "1m"
+			if fence == "worker-lost" {
+				s.WallTime = "10m"
+			}
 			submit(t, q, s)
 			j := check(t, q, m, nil).Job
 			calls := 0
@@ -466,6 +504,15 @@ func TestWorkerHandshakeRefusalAfterLostStarted(t *testing.T) {
 						t.Fatal(err)
 					}
 					check(t, q, m, nil)
+				case "worker-lost":
+					q = reopenQueue(t, q, clock)
+					handler = (API{Queue: q, Token: "test"}).Handler()
+					peer := machine("peer", "fake")
+					check(t, q, peer, nil)
+					advanceReportingPeer(t, q, clock, peer, RestartGrace+LossAfter)
+					if got := job(t, q, j.ID); got.Losses != 1 || !q.s.Machines[m.ID].Gone {
+						t.Fatalf("queue did not record worker loss: %+v", got)
+					}
 				}
 				return nil
 			}

@@ -386,11 +386,11 @@ func TestMaintenancePlannedStopsDoNotConsumeRetries(t *testing.T) {
 	}
 }
 func TestMaintenanceQueueOutageAndWithdrawnStart(t *testing.T) {
-	q, _ := fixture(t)
+	q, clock := fixture(t)
 	a, _ := maintenanceMachines()
 	j := maintenanceAssign(t, q, a, "experiment")
 	server := httptest.NewServer((API{Queue: q, Token: "test"}).Handler())
-	w := Worker{Machine: a, Client: Client{URL: server.URL, Token: "test"}}
+	w := Worker{Machine: a, Clock: clock, Client: Client{URL: server.URL, Token: "test", Pause: func(context.Context, time.Duration) error { clock.Advance(RestartGrace); return nil }}}
 	server.Close()
 	if err := w.authorizeStart(*j, a.Session); !errors.Is(err, errWorkerControlUnreachable) {
 		t.Fatal("queue outage did not return its typed cause", err)

@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 )
 
 type stagingTimeoutReader struct{}
@@ -33,6 +34,19 @@ func TestInputStagingOutageSurvivesAcknowledgementAndReopen(t *testing.T) {
 	w := harnessWorker(t, h)
 	marker := filepath.Join(w.StateDir, "job-files", j.ID, "1", "launched")
 	var gets atomic.Int32
+	clock := &workerFakeClock{now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
+	w.Client.Clock = clock
+	w.Client.Pause = func(ctx context.Context, d time.Duration) error {
+		if ctx.Value(inputTransferRecoveryKey{}) != nil {
+			if gets.Load() == 2 {
+				clock.Advance(RestartGrace) // This outage outlasted the attempt's reconnect window.
+			} else {
+				clock.Advance(d)
+			}
+			return ctx.Err()
+		}
+		return waitStatusPause(ctx, d)
+	}
 	w.Client.HTTP = &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
 		if strings.HasPrefix(r.URL.Path, "/api/files/blobs/") {
 			if r.Method == "HEAD" {
@@ -103,8 +117,8 @@ func TestInputStagingOutageSurvivesAcknowledgementAndReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// #1045: the idle stall resumes within the attempt; a subsequent completed
-	// dial failure still ends it as infrastructure and retains its exact cause.
+	// #1045: the idle stall resumes within the attempt; an outage beyond the
+	// reconnect window ends it as infrastructure and retains its exact cause.
 	if got.Attempt != j.Attempt || got.State != "queued" || got.Losses != 0 || got.InfrastructureRetries != 0 || len(got.AttemptHistory) != 1 || !strings.Contains(got.AttemptHistory[0].Reason, "operation=cache_download error=storage_unreachable") || got.StartedAt != nil || got.ExecutionCause == nil || got.ExecutionCause.Operation != "input_staging" || got.ExecutionCause.ExitCode != nil || got.ExecutionCause.Staging == nil {
 		t.Fatalf("GET lost exact prelaunch diagnosis: %+v", got)
 	}

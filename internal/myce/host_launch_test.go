@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -276,8 +277,9 @@ func TestNativeLaunchCustodyFences(t *testing.T) {
 				// Simulate a lost reply after each durable write. Reopening the
 				// queue preserves custody but requires the same worker to report.
 				restart()
-				if err := q.authorizeLaunchWithCustody(t.Context(), launch); !errors.Is(err, ErrStale) {
-					t.Fatal("unreported session received launch permission", err)
+				var waiting *HTTPError
+				if err := q.authorizeLaunchWithCustody(t.Context(), launch); !errors.As(err, &waiting) || waiting.Status != http.StatusServiceUnavailable || waiting.Code != "shared_queue_control_retry" {
+					t.Fatal("launch did not wait for the unreported session", err)
 				}
 				check(t, q, m, a)
 				if err := q.authorizeLaunchWithCustody(t.Context(), launch); err != nil {

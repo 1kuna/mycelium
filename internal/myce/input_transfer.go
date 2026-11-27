@@ -39,6 +39,15 @@ func (c Client) recoverInputTransfer(ctx context.Context, ref FileRef, operation
 	}
 	one := c.WithoutRetries()
 	pace := ClientPace{}
+	var outage queueDialRecovery
+	wait, _ := ctx.Value(sharedInputWaitKey{}).(func(time.Duration))
+	if wait != nil {
+		defer func() {
+			if outage.err != nil {
+				wait(checkpointAvailabilityStallBudget)
+			}
+		}()
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -49,6 +58,9 @@ func (c Client) recoverInputTransfer(ctx context.Context, ref FileRef, operation
 			return context.DeadlineExceeded
 		}
 		started := c.clock().Now()
+		if outage.err != nil && !started.Before(outage.until) {
+			return outage.err
+		}
 		err := read(one)
 		if stopped := ctx.Err(); stopped != nil {
 			return stopped
@@ -61,17 +73,34 @@ func (c Client) recoverInputTransfer(ctx context.Context, ref FileRef, operation
 		if errors.Is(err, errFileTransferLocal) {
 			return err
 		}
-		// Do not turn a real queue outage into an endless preparation wait.
-		// Unlike a reset/lost body, a completed dial failure has no live peer.
+		transient := retryTransient(err)
 		var transport *net.OpError
 		if errors.Is(err, errFileTransferDial) || errors.As(err, &transport) && transport.Op == "dial" {
-			return fmt.Errorf("%w: %w", errInputTransferUnreachable, err)
+			unreachable := fmt.Errorf("%w: %w", errInputTransferUnreachable, err)
+			if pending == nil || operation == "nas_read" || !transient && !errors.Is(err, context.DeadlineExceeded) {
+				return unreachable
+			}
+			transient = true
+			// An assigned attempt can keep its verified prefix during a queue
+			// restart. The shared-stage watchdog must allow that same window
+			// without mistaking a reconnect pause for a blocked filesystem call.
+			outage.observe(started, unreachable)
+			if wait != nil {
+				wait(max(0, outage.until.Sub(c.clock().Now())) + checkpointAvailabilityStallBudget)
+			}
 		}
-		if !retryTransient(err) {
+		if !transient {
 			return err
 		}
-		pace.Observe(c.clock().Now().Sub(started), false)
-		delay := pace.Delay(c.clock().Now(), time.Time{}, err, c.Jitter)
+		now := c.clock().Now()
+		pace.Observe(now.Sub(started), false)
+		delay := pace.Delay(now, time.Time{}, err, c.Jitter)
+		if outage.err != nil {
+			delay = min(delay, outage.until.Sub(now))
+			if delay <= 0 {
+				return outage.err
+			}
+		}
 		if end, ok := ctx.Deadline(); ok {
 			if !c.clock().Now().Before(end) {
 				return context.DeadlineExceeded

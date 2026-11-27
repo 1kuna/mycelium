@@ -255,7 +255,7 @@ func syncModelDirectoryContext(ctx context.Context, root string) error {
 		if e != nil {
 			return e
 		}
-		err := errors.Join(f.Sync(), f.Close())
+		err := errors.Join(syncSharedInput(ctx, f.Sync), f.Close())
 		if err != nil {
 			return err
 		}

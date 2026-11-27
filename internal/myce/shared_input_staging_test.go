@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -87,20 +88,19 @@ func TestSharedInputStagingArchiveProgressAndCancellation(t *testing.T) {
 // #364: stop must reach the actor while a NAS syscall has not returned. Use
 // the real queue/actor/cache locks, but block only the source-I/O fault seam.
 func TestWorkerStagingCancellationAndPreemption(t *testing.T) {
-	for _, mode := range []string{"cancel", "production_preemption", "normal"} {
+	for _, mode := range []string{"cancel", "production_preemption", "normal", "queue_restart"} {
 		t.Run(mode, func(t *testing.T) {
-			q, initial := fixture(t)
-			clock := &workerFakeClock{now: initial.Now()}
-			q.clock = clock
+			q, clock := fixture(t)
 			preemptionPolicy(t, q)
 			w := recoveryWorker(t)
 			w.Clock = clock
 			w.Machine.Capabilities = append(w.Machine.Capabilities, "shared_inputs_v1")
 			w.control = &processControl{clock: clock}
-			handler := API{Queue: q, Token: "test"}.Handler()
+			var handler atomic.Value
+			handler.Store(API{Queue: q, Token: "test"}.Handler())
 			w.Client = Client{URL: "http://worker-test.invalid", Token: "test", HTTP: &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
 				recorder := httptest.NewRecorder()
-				handler.ServeHTTP(recorder, r)
+				handler.Load().(http.Handler).ServeHTTP(recorder, r)
 				return recorder.Result(), nil
 			})}}
 			nas := t.TempDir()
@@ -134,7 +134,16 @@ func TestWorkerStagingCancellationAndPreemption(t *testing.T) {
 			}
 			entered, unblock := make(chan struct{}), make(chan struct{})
 			var once sync.Once
-			cache.beforeStage = func(context.Context) { once.Do(func() { close(entered); <-unblock }) }
+			cache.beforeStage = func(ctx context.Context) {
+				once.Do(func() {
+					block := func() error { close(entered); <-unblock; return nil }
+					if mode == "queue_restart" {
+						_ = syncSharedInput(ctx, block)
+					} else {
+						_ = block()
+					}
+				})
+			}
 			ctx, cancel := context.WithCancel(context.Background())
 			a := &attemptSupervisor{store: store, job: *assigned, worker: w, connected: true, wake: make(chan struct{}, 1), done: make(chan struct{})}
 			go a.run(ctx)
@@ -176,16 +185,28 @@ func TestWorkerStagingCancellationAndPreemption(t *testing.T) {
 				demand = submit(t, q, high)
 			case "normal":
 				release()
+			case "queue_restart":
+				clock.Advance(RestartGrace - time.Second) // Past the old 30s I/O stall bound.
+				select {
+				case <-a.done:
+					t.Fatal("staging exited while its local sync was still pending")
+				case <-time.After(30 * time.Millisecond): // Let the real watchdog observe the fake clock.
+				}
+				q = reopenQueue(t, q, clock)
+				handler.Store(API{Queue: q, Token: "test"}.Handler())
 			}
 			if mode != "normal" {
 				reply, err := q.Checkin(Checkin{Machine: w.Machine, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: Execution{ID: assigned.ID, Attempt: assigned.Attempt}, Session: assigned.Session}}})
 				if err != nil {
 					t.Fatal(err)
 				}
-				if len(reply.Attempts) != 1 || !reply.Attempts[0].Stop {
-					t.Fatalf("missing stop: %+v", reply)
+				if len(reply.Attempts) != 1 || reply.Attempts[0].Attempt != assigned.Attempt || reply.Attempts[0].Stop != (mode != "queue_restart") {
+					t.Fatalf("wrong attempt directive: %+v", reply)
 				}
 				a.update(w, reply.Attempts[0], true, false)
+			}
+			if mode == "queue_restart" {
+				release()
 			}
 			// A copy can finish just after the actor sees it pending. Its
 			// preparation/publication retry is paced by this injected clock.
@@ -206,9 +227,9 @@ func TestWorkerStagingCancellationAndPreemption(t *testing.T) {
 			if !got.ReleaseConfirmed {
 				t.Fatalf("queue retained reservation: %+v", got)
 			}
-			if mode == "normal" {
-				if got.State != "succeeded" || got.StartedAt == nil || got.InputsStagedAt == nil {
-					t.Fatalf("normal staging changed: %+v", got)
+			if mode == "normal" || mode == "queue_restart" {
+				if got.State != "succeeded" || got.StartedAt == nil || got.InputsStagedAt == nil || got.Attempt != assigned.Attempt || got.Session != assigned.Session || got.Losses != 0 || got.InfrastructureRetries != 0 {
+					t.Fatalf("original staging attempt did not finish: %+v", got)
 				}
 				if _, err := os.Stat(marker); err != nil {
 					t.Fatal(err)
