@@ -664,6 +664,8 @@ type Job struct {
 	CheckpointInputExpiries []CheckpointInputExpiry `json:"checkpoint_input_expiries,omitempty"`
 }
 type Machine struct {
+	MemoryShadow      *MemoryShadowReport `json:"memory_shadow,omitempty"`
+	memoryShadowOrder uint64
 	qualificationMemo map[extensionQualificationKey]string // One scheduling/observation pass; never persisted.
 	InventoryProbe    *InventoryObservation                `json:"inventory_probe,omitempty"`
 	// Durable identity, enrolment, settings and session fence, plus the
@@ -836,6 +838,7 @@ type Checkin struct {
 	Running                  *Execution               `json:"running,omitempty"`
 }
 type Reply struct {
+	MemoryShadowSettings       *memoryShadowSettings        `json:"memory_shadow_settings,omitempty"`
 	NativeLaunchProtocol       string                       `json:"native_launch_protocol,omitempty"`
 	DeviceRecoveryProtocol     string                       `json:"device_recovery_protocol,omitempty"`
 	DeviceHealthProtocol       string                       `json:"device_health_protocol,omitempty"`
@@ -895,6 +898,7 @@ type Reply struct {
 // AttemptReport binds heartbeat, progress and Started to an exact execution.
 // Collections have no wire cardinality limit; admission remains in the planner.
 type AttemptReport struct {
+	memoryShadow              *shadowAttemptReading
 	LocalCheckpointGeneration int64             `json:"local_checkpoint_generation,omitempty"`
 	Resources                 *AttemptResources `json:"resources,omitempty"`
 	Liveness                  *LivenessReport   `json:"liveness,omitempty"`

@@ -43,17 +43,27 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	c, expirySent := w.checkpointExpiryCheckin(c)
 	// Client.Call sends the gate only to a queue that advertised it.
 	gateSent := c.Machine.HostRAMGate != nil && w.Client.hostRAMGateWire != nil && w.Client.hostRAMGateWire.Load()
+	shadowSent := c.Machine.MemoryShadow != nil && w.Client.memoryShadowWire != nil && w.Client.memoryShadowWire.Load()
+	if !shadowSent {
+		c.Machine.MemoryShadow = nil
+	}
 	var reply Reply
 	err := w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
+	if shadowSent && gateSent && w.Client.hostRAMGateWire.Load() && !w.Client.memoryShadowWire.Load() && requestDecodeRefused(err) {
+		// The immediately preceding queue may know the RAM gate and inventory.
+		// Keep its legacy admission inputs when only the shadow field is new.
+		c.Machine.MemoryShadow, shadowSent = nil, false
+		err = w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
+	}
 	var refusal *HTTPError
-	if (c.Machine.InventoryProbe != nil || gateSent) && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
+	if (c.Machine.InventoryProbe != nil || gateSent || shadowSent) && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
 		// Rolling upgrades: predecessor queues still consume device reasons
 		// and the ordinary ledger. A sent gate means the queue was replaced
 		// since it advertised the gate; drop both in this one retry.
 		if c.Machine.InventoryProbe != nil && w.Client.inventoryWire != nil {
 			w.Client.inventoryWire.Store(false)
 		}
-		c.Machine.InventoryProbe, c.Machine.HostRAMGate = nil, nil
+		c.Machine.InventoryProbe, c.Machine.HostRAMGate, c.Machine.MemoryShadow = nil, nil, nil
 		err = w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
 	}
 	if len(c.Machine.ResultPublications) > 0 && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {

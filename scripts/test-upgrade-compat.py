@@ -74,6 +74,18 @@ class SupervisorTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 compat.validate_inventory_receipts(rows, True)
 
+    def test_shadow_downgrade_keeps_the_negotiated_legacy_fields(self):
+        same = dict(session="session", attempt_protocol="keyed-attempt-v1", hash="inventory",
+                    rollback_baseline_sha256="same-request", inventory_probe_fields=True,
+                    host_ram_gate_fields=True, disk_budget_fields=True, checkpoint_expiry_fields=True)
+        refused = dict(same, status=400, memory_shadow_fields=True,
+                       error=json.dumps(dict(code="request_invalid", error='json: unknown field "memory_shadow"')))
+        accepted = dict(same, status=200, memory_shadow_fields=False)
+        compat.validate_inventory_receipts([refused, accepted], True)
+        for key in ("memory_shadow_fields", "inventory_probe_fields", "host_ram_gate_fields"):
+            with self.assertRaises(AssertionError):
+                compat.validate_inventory_receipts([refused, dict(accepted, **{key: not accepted[key]})], True)
+
     def test_sigterm_reaps_detached_command_before_scratch_cleanup(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -315,6 +315,7 @@ type Queue struct {
 	memoryEvidencePending *memoryEvidence      // Staged with the result transaction.
 	poolAvailability      map[string]poolAvailability
 	poolLastStop          map[string]time.Time
+	memoryShadow          shadowQueueMonitor
 }
 
 func ID() string {
@@ -1960,6 +1961,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		}
 	}
 	var releaseStops []AttemptDirective
+	var shadow shadowObservation
 	err = q.updateRequest(ctx, func() error {
 		body := q.startBodyPhase("checkin_inventory")
 		defer body.finish()
@@ -2022,6 +2024,15 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			return errors.New("invalid machine report")
 		}
 		old := q.s.Machines[m.ID]
+		m.memoryShadowOrder = healthReportOrder
+		if old != nil && old.Session == m.Session && old.memoryShadowOrder > healthReportOrder {
+			m.MemoryShadow, m.memoryShadowOrder = old.MemoryShadow, old.memoryShadowOrder
+		} else if m.MemoryShadow != nil {
+			defer func() {
+				reply.MemoryShadowSettings = &memoryShadowSettings{KeepGB: q.pooledKeep(&m), GraceSeconds: q.preemptionGrace().Seconds()}
+				shadow = q.shadowObservation(&m, memoryReceivedAt)
+			}()
+		}
 		if m.HostRAMGate != nil && !m.HostRAMGate.valid() {
 			m.HostRAMGate = nil
 		}
@@ -2382,6 +2393,9 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		q.settleMaintenance()
 		return nil
 	}, nil)
+	if err == nil && shadow.report != nil {
+		q.memoryShadow.observe(shadow)
+	}
 	for i := range reply.Attempts {
 		if j := reply.Attempts[i].Job; j != nil {
 			relative, e := filepath.Rel(q.root, j.Checkpoint)

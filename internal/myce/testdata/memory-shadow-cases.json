@@ -1,0 +1,15 @@
+[
+  {"case":"oversized legacy charge","at":0,"capacity":96,"free":70,"LegacyCharge":47,"attempts":[{"expected":21,"used":20.5,"peak":20.5}],"slack":69.5,"reach":90.5,"request":60,"fits":true},
+  {"case":"overshoot retry","at":1,"capacity":96,"free":4,"attempts":[{"expected":60,"used":80,"peak":80,"growth":5}],"slack":4,"reach":84,"short":true,"RaisedTo":84},
+  {"case":"inside-estimate load","at":2,"capacity":96,"free":50.6,"attempts":[{"expected":88,"used":63,"peak":63,"growth":8.06}],"slack":8,"reach":96},
+  {"case":"combined reading overshoot","at":3,"capacity":96,"free":-2,"attempts":[{"expected":87,"used":97,"peak":97}],"slack":-2,"reach":95,"short":true},
+  {"case":"no exclusive retry state","at":4,"capacity":96,"free":76,"attempts":[{"expected":40,"used":20,"peak":20}],"slack":56,"reach":96,"request":24,"fits":true},
+  {"case":"reservation comparison","at":5,"capacity":96,"free":62,"LegacyCharge":80,"attempts":[{"expected":30,"used":28,"peak":28}],"slack":60,"reach":90},
+  {"case":"unified space does not predict throughput","at":6,"capacity":96,"free":70,"attempts":[{"expected":24,"used":21,"peak":21}],"slack":67,"reach":91,"request":24,"fits":true},
+  {"case":"card attribution unavailable","at":7,"pool":"card/0","capacity":24,"free":16,"attempts":[{"expected":24}]},
+  {"case":"typed holder uncontained","at":8,"capacity":96,"free":12.6,"attempts":[{"expected":16,"used":0.8,"peak":4}],"slack":-2.6,"reach":13.4,"request":9.76},
+  {"case":"typed holder after containment qualification","at":9,"capacity":96,"free":12.6,"attempts":[{"expected":16,"used":0.8,"peak":4,"lent":true}],"slack":9.4,"reach":13.4,"request":9.76},
+  {"case":"head's window leaves room for short work","at":10,"capacity":96,"free":40.6,"attempts":[{"expected":20,"used":20,"peak":20,"ends":15},{"expected":35,"used":35,"peak":35,"ends":20}],"slack":40.6,"reach":95.6,"head":90,"HeadStart":20,"SmallJob":4,"SmallDuration":6},
+  {"case":"restart sample incomplete","at":11,"capacity":96,"free":45,"attempts":[{"expected":25}]},
+  {"case":"restart sample complete","at":12,"capacity":96,"free":45,"attempts":[{"expected":25,"used":20,"peak":23}],"slack":40,"reach":65,"request":20,"fits":true}
+]

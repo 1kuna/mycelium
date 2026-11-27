@@ -108,11 +108,13 @@ type PriorityPreemption struct {
 	Policy     PriorityMatch   `json:"policy"`
 }
 
+const defaultPreemptionGrace = 10 * time.Second
+
 func (q *Queue) preemptionGrace() time.Duration {
 	if q.productionGrace > 0 {
 		return q.productionGrace
 	}
-	return 10 * time.Second
+	return defaultPreemptionGrace
 }
 
 // Keep accelerator teardown inside the 150s production window: at most 15s

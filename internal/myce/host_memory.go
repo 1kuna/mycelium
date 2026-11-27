@@ -458,6 +458,7 @@ type hostMemorySample struct {
 	devicePeakGB             float64 // Attempt high water of fresh device samples.
 	residentGB               float64
 	pinnedGB                 float64
+	pinnedKnown              bool
 	growthGB, deviceGrowthGB float64
 	rateGB, deviceRateGB     float64
 	at, deviceAt             time.Time

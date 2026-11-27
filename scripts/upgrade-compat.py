@@ -365,6 +365,18 @@ def validate_inventory_receipts(rows, allow_additive_retry=False):
     refused = [i for i, row in enumerate(rows) if row["status"] != 200]
     if not refused:
         return
+    # A queue that still supports the RAM gate may reject only the newly
+    # negotiated shadow field. The retry preserves all legacy inputs.
+    if allow_additive_retry and refused == [0] and rows[0]["status"] == 400 and rows[0].get("memory_shadow_fields"):
+        error = json.loads(rows[0].get("error", "{}"))
+        assert error.get("code") == "request_invalid", error
+        assert error.get("error") in ("body must be one JSON object with known fields and valid field types", 'json: unknown field "memory_shadow"'), error
+        if len(rows) > 1:
+            assert not rows[1].get("memory_shadow_fields"), "shadow retry retained rejected field"
+            for key in ("session", "attempt_protocol", "hash", "rollback_baseline_sha256",
+                        "inventory_probe_fields", "host_ram_gate_fields", "disk_budget_fields", "checkpoint_expiry_fields"):
+                assert rows[1].get(key) == rows[0].get(key), "shadow-only retry changed " + key
+        return
     # A candidate worker advertises inventory observations before it knows the
     # queue version, including after rollback. The strict predecessor rejects it once;
     # the retry must remove only that field and preserve the complete baseline.
@@ -514,7 +526,19 @@ esac
 ''')
         launchctl = manager_dir / "launchctl"
         launchctl.write_text('#!/bin/sh\n[ "$1" = print ] && exit 113\nexit 1\n')
-        for manager in (systemctl, launchctl):
+        # The disposable binaries are ad-hoc signed. Exercise the installer's
+        # same-identity check with the synthetic signing evidence used by the
+        # onboarding fixtures, without accessing a real signing key.
+        codesign = manager_dir / "codesign"
+        codesign.write_text("""#!/bin/sh
+case "$1" in
+  --verify) :;;
+  -dv) printf '%s\n' 'Identifier=io.github.1kuna.mycelium' 'Authority=Developer ID Application: synthetic' 'flags=0x10000(runtime)';;
+  -dr) printf '%s\n' 'designated => identifier "io.github.1kuna.mycelium" and anchor apple generic and certificate leaf[subject.OU] = "SYNTHETIC"';;
+  *) exit 99;;
+esac
+""")
+        for manager in (systemctl, launchctl, codesign):
             manager.chmod(0o700)
         service = Path(saved["service"])
         env.update(PATH=str(manager_dir) + os.pathsep + env["PATH"],

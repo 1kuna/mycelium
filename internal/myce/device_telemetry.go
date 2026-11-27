@@ -13,6 +13,7 @@ const deviceTelemetryProtocol = "device-activity-v1"
 // mean unknown, including when a driver/tool prints N/A. At is the beginning
 // of the observation, so slow probes cannot renew old evidence.
 type DeviceTelemetry struct {
+	rawFreeGB     *float64  // Worker-local reading before the device reserve.
 	At            time.Time `json:"at"`
 	AgeSeconds    float64   `json:"age_seconds"`
 	FreeGB        *float64  `json:"free_gb,omitempty"`
@@ -148,6 +149,8 @@ func (w Worker) sampleXPUTelemetry(ctx context.Context, p MachineProbe, devices 
 			}
 		}
 		if ok {
+			raw := free
+			s.rawFreeGB = &raw
 			free = max(0, free-d.ReserveMemoryGB)
 			s.FreeGB = &free
 		}

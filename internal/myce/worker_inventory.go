@@ -14,6 +14,7 @@ import (
 
 // MachineDevice is one accelerator's capacity, never an additional host pool.
 type MachineDevice struct {
+	rawFreeGB                *float64             // Worker-local physical VRAM; the planner keeps the capped reading.
 	InventoryProbeFailedScan *time.Time           `json:"inventory_probe_failed_scan,omitempty"`
 	InventoryProbeAfter      *time.Time           `json:"inventory_probe_after,omitempty"` // Queue-owned launch failure fence.
 	FaultEvidence            []*FaultEvidence     `json:"fault_evidence,omitempty"`
@@ -565,7 +566,8 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 			d.Reason = "device_budget_unavailable"
 			continue
 		}
-		source, e := newDeviceMemorySource(d.Platform, d.Selector, budget, reserve, d.MemoryMode, probe.OS, probe.ReadFile, probe.Command)
+		physicalFree := -1.0
+		source, e := newDeviceMemorySource(d.Platform, d.Selector, budget, reserve, d.MemoryMode, probe.OS, probe.ReadFile, probe.Command, &physicalFree)
 		if e != nil {
 			d.Reason = "device_memory_unavailable"
 			continue
@@ -574,6 +576,9 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 		if e != nil {
 			d.Reason = "device_memory_unavailable"
 			d.FreeMemoryGB = 0
+		}
+		if e == nil && validMemoryValue(physicalFree) {
+			d.rawFreeGB = &physicalFree
 		}
 		d.MemoryMeasured = d.MemoryMode != "fixed" && !backendFor(d.Platform).simulated
 		if d.UnifiedMemory && configured.Machine.FreeMemoryGB == 0 {
