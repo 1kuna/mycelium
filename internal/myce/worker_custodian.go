@@ -153,11 +153,13 @@ func (c *custodianControl) requestStop(deadline time.Time, kill, userCancel bool
 
 type attemptCustodian struct {
 	dir, id      string
+	spool        string
 	mu           sync.Mutex
 	last         custodianSnapshot
 	observed     bool
 	control      custodianControl
 	controlSaved bool
+	teardown     []time.Time
 	cancel       context.CancelFunc
 }
 
@@ -308,7 +310,7 @@ func (w Worker) adoptCustodian(s *workerStore) (*process, error) {
 	if !a.ownsState(s.state) {
 		return nil, errors.New("invalid detached attempt custody")
 	}
-	g := &attemptCustodian{dir: custodianDir(s.dir), id: id}
+	g := &attemptCustodian{dir: custodianDir(s.dir), id: id, spool: s.dir}
 	if err := g.read(*s.state.Job); err != nil {
 		if recoveryErr := w.recoverUnstartedCustodian(s); recoveryErr != nil {
 			return nil, fmt.Errorf("detached attempt adoption unconfirmed; custody retained: %w", errors.Join(err, recoveryErr))
@@ -317,8 +319,8 @@ func (w Worker) adoptCustodian(s *workerStore) (*process, error) {
 			return nil, fmt.Errorf("detached attempt recovery unconfirmed; custody retained: %w", err)
 		}
 	}
+	v := g.snapshot()
 	if s.state.Result != nil {
-		v := g.snapshot()
 		if !v.Finished || !a.ownsResult(s.state.Result) || v.State.Identity != s.state.Identity {
 			return nil, errors.New("saved publication conflicts with detached custody")
 		}
@@ -332,6 +334,9 @@ func (w Worker) adoptCustodian(s *workerStore) (*process, error) {
 			}
 		}
 		return nil, nil
+	}
+	if !v.Finished {
+		g.teardown = detachedTeardownTimes(s.dir, v.State)
 	}
 	g.updateStore(s)
 	p := &process{job: *s.state.Job, custodian: g, done: make(chan workerFinish, 1), savePriorityStop: s.priorityStopRecorder()}
@@ -403,8 +408,60 @@ func (g *attemptCustodian) acceptFinished(v custodianSnapshot, j Job) error {
 	if !v.Finished || !v.belongsTo(g.id, a) || !a.ownsResult(v.State.Result) {
 		return errors.New("detached result identity mismatch")
 	}
+	if g.spool != "" {
+		times := detachedTeardownTimes(g.spool, v.State)
+		g.mu.Lock()
+		g.teardown = append(g.teardown, times...)
+		g.mu.Unlock()
+	}
 	g.observe(v)
 	return nil
+}
+
+// The helper already persists its signal and exit receipts beside the physical
+// execution. Read the validated snapshot's identity, never a PID or queue deadline.
+func detachedTeardownTimes(spool string, state workerState) []time.Time {
+	if state.Job == nil || state.Job.Spec.Needs.cpuOnly() || !validAttemptIdentity(state.Identity) {
+		return nil
+	}
+	var times []time.Time
+	var native nativeOutcomeRecord
+	if readCustodianJSON(spool, "native-"+state.Identity+".json", &native) == nil && native.Identity == state.Identity {
+		times = appendTeardownTimes(times, native.Outcome)
+		for _, member := range native.Members {
+			if member != nil {
+				times = appendTeardownTimes(times, member.memberOutcome)
+			}
+		}
+	}
+	var command memberOutcome
+	if readCustodianJSON(spool, state.Identity+".outcome.json", &command) == nil {
+		times = appendTeardownTimes(times, command)
+	}
+	return times
+}
+
+func recoveredCustodianTeardown(s *workerStore, now time.Time) teardownMark {
+	j, id := s.state.Job, s.state.Custodian
+	if j == nil || j.Spec.Needs.cpuOnly() || !validCustodianID(id) {
+		return teardownMark{}
+	}
+	a := attemptRecordFor(j, j.Machine)
+	var v custodianSnapshot
+	if readCustodianJSON(custodianDir(s.dir), custodianName(id, "snapshot"), &v) != nil ||
+		!v.belongsTo(id, a) || !v.Started || (v.Finished && !a.ownsResult(v.State.Result)) {
+		return teardownMark{}
+	}
+	mark := teardownMark{attempt: faultAttempt(*j), devices: j.AllocatedDevices}
+	for _, at := range detachedTeardownTimes(s.dir, v.State) {
+		if elapsed := now.Sub(at); elapsed >= 0 && elapsed <= teardownRetention {
+			mark.times = append(mark.times, at)
+			if until := at.Add(teardownRetention); until.After(mark.until) {
+				mark.until = until
+			}
+		}
+	}
+	return mark
 }
 
 func (g *attemptCustodian) observe(v custodianSnapshot) {
@@ -487,6 +544,9 @@ func (g *attemptCustodian) stopLocked(p *process, now time.Time, grace time.Dura
 		return
 	}
 	g.controlSaved = saveWorkerJSON(g.dir, custodianName(g.id, "control"), g.control) == nil
+	if g.controlSaved && g.last.Started && !g.last.Finished && p.stopRequested.IsZero() {
+		p.stopRequested = now
+	}
 }
 
 func (p *process) started() bool {

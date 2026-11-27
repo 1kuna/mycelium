@@ -135,6 +135,10 @@ func cudaAllocationKernelFault(d MachineDevice, line string) (string, string) {
 	return "nvrm_allocation", "cuda_candidates_no_kernel_device"
 }
 
+func faultAttempt(j Job) FaultAttempt {
+	return FaultAttempt{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, AssignedAt: j.AssignedAt}
+}
+
 func (w *Worker) captureFault(d MachineDevice, line KernelLogLine, key, kind, attribution string) *FaultEvidence {
 	started := time.Now() // Measurement only; event/decision times use Clock.
 	e := &FaultEvidence{Event: key, Kind: kind, Device: d.ID, KernelAt: line.At, CapturedAt: w.Clock.Now(), DeviceAttribution: attribution}
@@ -156,7 +160,7 @@ func (w *Worker) captureFault(d MachineDevice, line KernelLogLine, key, kind, at
 		if j.Spec.Needs.cpuOnly() || !slices.Contains(j.AllocatedDevices, d.ID) {
 			continue
 		}
-		a := FaultAttempt{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, AssignedAt: j.AssignedAt}
+		a := faultAttempt(j)
 		p.mu.Lock()
 		memory := p.memory
 		roots := p.rssRootsLocked()

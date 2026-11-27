@@ -3,8 +3,10 @@
 Linux machine workers read the current boot's kernel journal from the worker's
 start time, then follow the journal cursor every five seconds using the injected
 worker clock. They never read the whole boot: a large boot journal can take far
-longer than the two-second read budget. Faults logged while no worker was running
-are not replayed; quarantine recorded before a restart persists. `journalctl -k -b`
+longer than the two-second read budget. On same-boot takeover, the startup scan
+can read back to recent teardown receipts for recovered detached attempts. It
+uses older lines only when their timestamps match a receipt on the same card.
+Quarantine recorded before a restart persists. `journalctl -k -b`
 runs as the worker account, without sudo; a readable `/dev/kmsg` is the fallback.
 The account needs ordinary kernel-journal read permission (for example, membership
 in `systemd-journal` where configured). If neither source is readable, the worker
@@ -17,8 +19,12 @@ A fault within one second of a stop request, delivered signal or exit of an
 attempt on the same device is teardown, not a card fault. Payloads that exit while
 device work is in flight can fault the driver (#154). The worker logs
 `device fault attributed to teardown`, records the event in its local quarantine
-state and leaves the device usable. Released attempts' timestamps are kept for one
-minute. A fault seen less than a second after it was logged waits one scan, so an
+state and leaves the device usable. For detached attempts, the worker reads the
+helper's saved signal and exit records and keeps the attempt, session and card
+with their timestamps for one minute after release. This covers the incident in
+#2231, where the Xe reset was 703 ms after TERM and the scan arrived about 22 s
+later. Kernel event time identifies candidate executions.
+A fault seen less than a second after it was logged waits one scan, so an
 exit recorded just after it still counts. A card fault that crashes its job also
 falls in that window, so the third teardown incident on one device within an hour
 quarantines it (`repeated teardown faults escalated to quarantine`); fault lines

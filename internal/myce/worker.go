@@ -65,7 +65,8 @@ type Worker struct {
 	DeviceHealthReportProbe DeviceHealthReportProbe
 	DeviceFaultMatchers     map[string]DeviceFaultMatcher
 	faults                  *deviceQuarantine
-	faultSince              time.Time       // Kernel records before worker start are not read (#595).
+	faultSince              time.Time       // Worker start, the ordinary kernel scan cutoff (#595).
+	faultTakeover           []teardownMark  // Recent durable receipts of recovered custodians.
 	faultPending            []KernelLogLine // Matched faults too recent to rule out teardown.
 	faultTeardowns          map[string][]time.Time
 	faultRecovery           map[string]deviceRecoveryObservation
@@ -1556,7 +1557,7 @@ func (w Worker) Run(stop context.Context) error {
 	if err = w.initInventory(stop, s); err != nil {
 		return err
 	}
-	if err = w.initDeviceFaults(stop, s); err != nil {
+	if err = w.initDeviceFaults(stop, s, stores...); err != nil {
 		return err
 	}
 	if err = w.prepareEnrollment(stop, s); err != nil {

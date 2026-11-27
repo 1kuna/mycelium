@@ -73,7 +73,7 @@ func deviceFaultReason(s string) bool {
 	return false
 }
 
-func (w *Worker) initDeviceFaults(ctx context.Context, root *workerStore) error {
+func (w *Worker) initDeviceFaults(ctx context.Context, root *workerStore, recovered ...*workerStore) error {
 	w.faults = &deviceQuarantine{}
 	// Read from worker start, not the whole boot (#595). Faults while no worker
 	// ran are not replayed; quarantine already recorded persists below.
@@ -90,6 +90,13 @@ func (w *Worker) initDeviceFaults(ctx context.Context, root *workerStore) error 
 	}
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
+	}
+	if w.faults.BootID != "" {
+		for _, s := range recovered {
+			if mark := recoveredCustodianTeardown(s, w.faultSince); len(mark.times) > 0 {
+				w.faultTakeover = append(w.faultTakeover, mark)
+			}
+		}
 	}
 	if w.DeviceFaultMatchers == nil {
 		w.DeviceFaultMatchers = map[string]DeviceFaultMatcher{}
@@ -171,6 +178,14 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 	// prevent kernel fault detection on the other cards or block heartbeats.
 	health := w.quarantineHealth(ctx, root)
 	source, since, clock := w.DeviceFaultSource, w.faultSince, w.Clock
+	w.faultTakeover = slices.DeleteFunc(w.faultTakeover, func(m teardownMark) bool { return clock.Now().After(m.until) })
+	for _, mark := range w.faultTakeover {
+		for _, at := range mark.times {
+			if start := at.Add(-teardownFaultWindow); start.Before(since) {
+				since = start
+			}
+		}
+	}
 	read := func() (KernelLogSnapshot, error) {
 		started := clock.Now()
 		snapshot, err := source(ctx, since)
@@ -224,6 +239,7 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 		}
 		lines = append(w.faultPending, lines...)
 	} else {
+		w.faultTakeover = nil
 		clear(w.faultRecovery)
 		clear(w.faultHealth)
 		w.faultHealthAfter = w.Clock.Now()
@@ -251,6 +267,11 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 			if kind == "" {
 				continue
 			}
+			takeover := matchingTeardowns(nil, w.faultTakeover, d.ID, line.At)
+			historical := since.Before(w.faultSince) && !line.At.IsZero() && line.At.Before(w.faultSince)
+			if historical && (reason == "" || len(takeover) == 0) {
+				continue // Historical reads are only for evidenced same-boot teardown.
+			}
 			monotonic, _ := strconv.ParseUint(line.ID, 10, 64)
 			if reason == "" && monotonic > 0 && monotonic <= next.AllocationThrough[deviceFaultKey(d)] {
 				continue
@@ -268,9 +289,9 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 				e = faultAtLine(base, line, key, kind, attribution)
 				line.evidence[deviceFaultKey(d)] = e
 			}
-			next.Evidence[deviceFaultKey(d)] = retainFaultEvidence(next.Evidence[deviceFaultKey(d)], e)
-			changed = true
 			if reason == "" {
+				next.Evidence[deviceFaultKey(d)] = retainFaultEvidence(next.Evidence[deviceFaultKey(d)], e)
+				changed = true
 				if monotonic > 0 {
 					next.AllocationThrough[deviceFaultKey(d)] = monotonic
 				} else {
@@ -279,10 +300,20 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 				continue // Allocation evidence never quarantines.
 			}
 			// An exit just after the fault may not be recorded yet; decide next scan.
-			if !line.At.IsZero() && now.Sub(line.At) < teardownFaultWindow {
+			if !historical && !line.At.IsZero() && now.Sub(line.At) < teardownFaultWindow {
 				w.faultPending = append(w.faultPending, line)
 				continue
 			}
+			attempts := append(takeover, w.control.teardownAttempts(d.ID, line.At)...)
+			for _, a := range attempts {
+				if !slices.ContainsFunc(e.Attempts, func(b FaultAttempt) bool {
+					return b.Execution == a.Execution && b.Session == a.Session
+				}) {
+					e.Attempts = append(e.Attempts, a)
+				}
+			}
+			boundFaultEvidence(e)
+			next.Evidence[deviceFaultKey(d)] = retainFaultEvidence(next.Evidence[deviceFaultKey(d)], e)
 			fault := deviceFault{Reason: reason, Event: key, At: line.At}
 			if fault.At.IsZero() || fault.At.After(now) {
 				fault.At = now
@@ -290,7 +321,7 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 			delete(w.faultRecovery, deviceFaultKey(d))
 			delete(health, deviceFaultKey(d)) // Even teardown is a new matching fault.
 			next.Seen[key], changed = true, true
-			if !line.At.IsZero() && w.control.teardownNear(d.ID, line.At) {
+			if len(attempts) > 0 {
 				if next.Devices[deviceFaultKey(d)].Reason != "" || !w.repeatedTeardownFault(deviceFaultKey(d), line.At) {
 					next.Teardowns[deviceFaultKey(d)] = fault
 					log.Printf("device fault attributed to teardown: device=%s pci=%s reason=%s fault_event=%s", d.ID, d.pciAddress, reason, key)
@@ -445,6 +476,8 @@ func cudaKernelFault(d MachineDevice, line string) string {
 // #595: a fault within this window of a same-device stop request, signal or
 // exit is teardown, not a card fault. Observed: 273 ms after TERM and 1 ms
 // before the exit was recorded (#300); a card fault quarantine would cut capacity.
+// The detached preemption in #2231 reset 703 ms after TERM. The same
+// window applies to kernel event time even when capture runs 22 s later.
 const teardownFaultWindow = time.Second
 
 // Released attempts keep evidence past the five-second scan interval and a late
@@ -477,6 +510,7 @@ func (w *Worker) repeatedTeardownFault(device string, at time.Time) bool {
 }
 
 type teardownMark struct {
+	attempt FaultAttempt
 	devices []string
 	times   []time.Time
 	until   time.Time
@@ -487,24 +521,37 @@ func (p *process) teardownTimes() []time.Time {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	var times []time.Time
-	add := func(o memberOutcome) {
-		for _, s := range o.Signals {
-			times = append(times, s.At)
-		}
-		if o.Exit != nil && !o.Exit.ObservedAt.IsZero() {
-			times = append(times, o.Exit.ObservedAt)
-		}
-	}
 	if !p.stopRequested.IsZero() {
 		times = append(times, p.stopRequested)
 	}
-	add(p.outcome)
+	if p.custodian != nil {
+		p.custodian.mu.Lock()
+		times = append(times, p.custodian.teardown...)
+		p.custodian.mu.Unlock()
+	}
+	times = appendTeardownTimes(times, p.outcome)
 	if p.native != nil {
 		for _, m := range p.native.members {
-			add(m.memberOutcome)
+			times = appendTeardownTimes(times, m.memberOutcome)
 		}
 	}
 	return times
+}
+
+func appendTeardownTimes(times []time.Time, o memberOutcome) []time.Time {
+	for _, s := range o.Signals {
+		if !s.At.IsZero() && (s.Signal == "TERM" || s.Signal == "KILL") {
+			times = append(times, s.At)
+		}
+	}
+	if o.Exit != nil && !o.Exit.ObservedAt.IsZero() {
+		times = append(times, o.Exit.ObservedAt)
+	}
+	return times
+}
+
+func (p *process) teardownMark() teardownMark {
+	return teardownMark{attempt: faultAttempt(p.job), devices: p.job.AllocatedDevices, times: p.teardownTimes()}
 }
 
 // Caller holds c.mu.
@@ -513,30 +560,39 @@ func (c *processControl) pruneTeardowns() {
 	c.retired = slices.DeleteFunc(c.retired, func(m teardownMark) bool { return now.After(m.until) })
 }
 
-func (c *processControl) teardownNear(device string, at time.Time) bool {
-	if c == nil {
-		return false
+func (c *processControl) teardownAttempts(device string, at time.Time) []FaultAttempt {
+	if c == nil || at.IsZero() {
+		return nil
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.pruneTeardowns()
-	marks := slices.Clone(c.retired)
+	attempts := matchingTeardowns(nil, c.retired, device, at)
 	for _, p := range c.processes {
-		if !p.job.Spec.Needs.cpuOnly() {
-			marks = append(marks, teardownMark{devices: p.job.AllocatedDevices, times: p.teardownTimes()})
+		if !p.job.Spec.Needs.cpuOnly() && slices.Contains(p.job.AllocatedDevices, device) {
+			mark := p.teardownMark()
+			attempts = matchingTeardowns(attempts, []teardownMark{mark}, device, at)
 		}
 	}
+	return attempts
+}
+
+func matchingTeardowns(attempts []FaultAttempt, marks []teardownMark, device string, at time.Time) []FaultAttempt {
+	if at.IsZero() {
+		return attempts
+	}
 	for _, m := range marks {
-		if !slices.Contains(m.devices, device) {
+		if !slices.Contains(m.devices, device) || m.attempt.AssignedAt != nil && at.Before(*m.attempt.AssignedAt) {
 			continue
 		}
 		for _, t := range m.times {
 			if d := at.Sub(t); d <= teardownFaultWindow && d >= -teardownFaultWindow {
-				return true
+				attempts = append(attempts, m.attempt)
+				break
 			}
 		}
 	}
-	return false
+	return attempts
 }
 
 // Called inside Checkin's existing transaction; all kernel I/O stays in workers.

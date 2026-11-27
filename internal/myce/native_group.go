@@ -115,15 +115,17 @@ func (g *nativeGroup) save() error {
 	return g.saveLocked()
 }
 
+type nativeOutcomeRecord struct {
+	Identity string          `json:"identity"`
+	Members  []*nativeMember `json:"members"`
+	Outcome  memberOutcome   `json:"outcome"`
+}
+
 func (g *nativeGroup) saveLocked() error {
 	if err := saveWorkerJSON(g.dir, "attempt-"+g.identity+".json", g.custody); err != nil {
 		return err
 	}
-	return saveWorkerJSON(g.dir, "native-"+g.identity+".json", struct {
-		Identity string          `json:"identity"`
-		Members  []*nativeMember `json:"members"`
-		Outcome  memberOutcome   `json:"outcome"`
-	}{g.identity, g.members, g.p.outcome})
+	return saveWorkerJSON(g.dir, "native-"+g.identity+".json", nativeOutcomeRecord{g.identity, g.members, g.p.outcome})
 }
 
 // Called under p.mu, also held across fork/persistence and opening the exec

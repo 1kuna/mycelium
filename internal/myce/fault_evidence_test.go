@@ -228,7 +228,7 @@ func TestSignalEvidencePublishesExitBeforeBlockedCapture(t *testing.T) {
 			t.Error("blocked metadata hid exit fact", times)
 		}
 		c := &processControl{clock: clock, processes: map[attemptKey]*process{{job: "job"}: p}}
-		if !c.teardownNear("0", at) {
+		if len(c.teardownAttempts("0", at)) != 1 {
 			t.Error("concurrent fault would quarantine teardown")
 		}
 		close(release)
