@@ -50,12 +50,24 @@ Use a progress callback or external I/O controls when bounding an online copy;
 use the [stopped-state backup procedure](../operations.md#queue-backup-restore-and-relocation)
 for a complete queue recovery generation.
 
-Queue mutations commit under the queue mutex with WAL and `synchronous=FULL`.
-Synchronization and automatic checkpoints can delay other control calls.
-Unlocking before commit would break durable publication/rollback semantics.
+Queue mutations commit with WAL and `synchronous=FULL`. The writer keeps its
+turn through the SQLite transaction, even when the physical mutex is released.
+Synchronization and automatic checkpoints can delay subsequent turns. Committed
+read views can coexist with the flush. Publishing before commit would break
+durable publication and rollback semantics.
 Mutable state and WAL checkpointing can cause sustained write amplification
 without database growth. Process counters do not distinguish database, WAL,
 logs and payload writes; whole-disk averages do not establish a safe I/O ceiling.
+
+In the [#2245](https://github.com/1kuna/mycelium/issues/2245) incident, I/O PSI
+`full avg60` was 54%. One sampled check-in spent 3.64 s inside SQLite commit
+out of a 4.43 s writer turn. Another check-in waited 48.7 s for its turn.
+`persist_sync_commit_ms` includes SQLite work as well as the sync. The 429
+requires a queued mutex wait beyond the learned uncontended interval and a
+competing observation in flight. It can therefore occur while the writer is
+blocked on storage. Ordinary status, including `--sections machines` with the
+current jobs, can use the committed publication without that admission step.
+The failed release capture itself had no completed phase measurement.
 
 ## Slow check-in body attribution (#1568)
 
@@ -110,10 +122,10 @@ macOS rejects nonzero values rather than silently claiming enforcement.
 A worker weight of 10 versus the queue's system default 100 is an initial
 relative-priority candidate, **not a measured latency guarantee**. Weighting
 costs competing jobs throughput under contention; measure the ratio natively.
-The aggregate service policy covers preparation, output collection and existing
-attempt descendants, without adding more share per additional job. It also
-lowers worker control-file write priority; qualify contact and those writes too.
-Configure every worker service instance sharing the device through the installer.
+The worker **service** policy covers preparation and output collection in its
+cgroup. Installed detached attempts run in independent scopes under the
+worker's jobs slice, outside the service. Apply aggregate payload policy at the
+jobs slice so each new attempt shares one device budget.
 
 Weights require an available/enabled cgroup-v2 I/O controller and an effective
 weighting implementation such as BFQ or configured io.cost. `none`/`mq-deadline`
@@ -122,13 +134,71 @@ weights compare siblings and do not prioritize a service over an uncontrolled
 competing branch. A `systemctl show` property is not enforcement evidence.
 An SSH backup outside the worker subtree is not covered by its policy.
 
-If effective weights miss the existing deadline, use standard `io.max`/systemd
-`IOWriteBandwidthMax` and `IOReadBandwidthMax` at the aggregate worker subtree
-on the actual backing device. Derive caps from a measured latency sweep under
-representative read/write bursts and fsync, rather than advertised sequential
-bandwidth. Caps cost stage time: measure that too. Put bulk operator tools in
-controlled scopes or keep them off that disk. No unmeasured cap is proposed.
-For relocation, use the [queue recovery procedure](../operations.md#queue-backup-restore-and-relocation).
+### Bound detached job writes on a shared device
+
+On cgroup v2, `IOWriteBandwidthMax` programs `io.max` even with the `none`
+scheduler. Use it when detached jobs are the competing writers and effective
+weighting is unavailable. Installed Linux workers put their custodian scopes
+under `myce-jobs.slice` by default. For a custom worker slice, confirm the jobs
+slice using the writer's `/proc/PID/cgroup`. Confirm the queue is outside that
+slice. Locate the queue and job-files backing device with `findmnt --target`
+and `lsblk`. Verify the actual device number against the jobs slice's `io.stat`
+while buffered writes are active. Linux needs filesystem writeback attribution
+to charge those writes to their originating cgroup.
+
+The user service manager needs the `io` controller delegated. Check
+`systemctl show "user@$(id -u).service" -p DelegateControllers` and the jobs
+slice's kernel files. If `io` is missing, the system administrator can add a
+drop-in for the service account's `user@UID.service`, with `[Service]` and
+`Delegate=cpu io memory pids` on separate lines for a manager currently delegated
+`cpu memory pids`. Retain any other controllers already delegated. Reload the
+system manager and activate the change during an approved idle maintenance
+window. A user manager restart can terminate its queue, worker and attempt
+units. Check delegation and active attempt scope membership again afterward.
+
+On a disposable queue first, sweep write rates using representative buffered
+writes and fsync bursts. Pick a rate from observed queue commit and read latency
+on the backing device. Record job throughput at each rate. Begin with a runtime
+property on the jobs slice, run as the installed service user:
+
+```sh
+# Set jobs_slice, device and bytes_per_second from the checks above.
+systemctl --user set-property --runtime "$jobs_slice" \
+  "IOWriteBandwidthMax=$device $bytes_per_second"
+group=$(systemctl --user show "$jobs_slice" -p ControlGroup --value)
+cat "/sys/fs/cgroup$group/io.max"
+cat "/sys/fs/cgroup$group/io.stat"
+```
+
+Check `wbps` on the expected device and measure the change in buffered write
+throughput. On a disposable Linux ext4 system with the `none` scheduler, a
+60,000,000 B/s trial yielded 60.0 MB/s for a buffered writer with `fdatasync`.
+The virtual disk and short uncapped write window qualify enforcement only.
+Record any existing device caps before a sweep so they can be restored.
+For a previously uncapped slice, use `IOWriteBandwidthMax=` to roll back and
+verify that `wbps` is `max` or that the device has no row. Persist a qualified
+cap with the same property without `--runtime` and verify it after the next
+startup. If another branch is the writer, scope the limit to that branch. #2245
+requires at least 40 MB/s of job throughput alongside the read latency target.
+For physical isolation use the
+[queue recovery procedure](../operations.md#queue-backup-restore-and-relocation).
+
+Measure the baseline before deployment and the qualified policy afterward in
+comparable windows. Use existing authorized job traffic or a separately
+authorized bounded writer on the same device. Measure each window's writer
+`io.stat` byte deltas over wall time (at least 40 MB/s), disk `w_await`, I/O PSI,
+and the queue journal's `off_lock_write_ms`, `persist_sync_commit_ms` and request
+wait times. From an authenticated client, time `myce status --json` and
+`myce status --sections machines --json` once at a time at spaced intervals.
+Record the maximum elapsed time and any 429 or 503. Each must finish in under
+two seconds during the write window. Time one `myce status --history --json`
+capture during that window, writing to a private file on a separate device or
+the client. Check exit status, parse the complete JSON and verify the returned
+job count matches `jobs_page.returned` and `jobs_page.total`, and the priority
+policy is present. Use
+the [release after-check](../operations.md#upgrade-the-approved-release) to
+compare retained jobs and attempt custody. Keep #2245 open until the live
+measurements are recorded.
 
 ## Laptop experiment and native acceptance
 

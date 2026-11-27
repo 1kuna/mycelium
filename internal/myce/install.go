@@ -336,8 +336,8 @@ func (c ServiceConfig) ServiceText() string {
 		}
 		settings := ""
 		if c.IOWeight != 0 {
-			// Relative service-subtree policy, including payload preparation and
-			// descendants. Native controller/scheduler qualification is separate.
+			// Relative service-subtree policy. Installed detached attempts live
+			// in a separate jobs slice. Native I/O qualification is separate.
 			settings += fmt.Sprintf("IOAccounting=yes\nIOWeight=%d\n", c.IOWeight)
 		}
 		if c.EnvironmentFile != "" {

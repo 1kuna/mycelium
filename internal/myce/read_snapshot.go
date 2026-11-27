@@ -937,6 +937,9 @@ func (q *Queue) captureReadObservation(id string, options *statusOptions, contex
 	}
 	imported := capture != nil && q.unpublishedRecords()
 	if capture == nil {
+		if err := admitObservationProjection(ctx); err != nil {
+			return nil, fileStoreObservation{}, err
+		}
 		unlock, err := requestObservationLock(ctx, &q.mu)
 		if err != nil {
 			return nil, fileStoreObservation{}, err
@@ -954,6 +957,9 @@ func (q *Queue) captureReadObservation(id string, options *statusOptions, contex
 		return nil, fileStoreObservation{}, err
 	}
 	if imported || capture.generation == nil {
+		if err := admitObservationProjection(ctx); err != nil {
+			return nil, fileStoreObservation{}, err
+		}
 		return q.captureStatusObservation(id, options, ctx)
 	}
 	source, err := capture.readQueue(ctx, id, readAt, q)
