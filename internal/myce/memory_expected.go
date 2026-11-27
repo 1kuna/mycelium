@@ -69,10 +69,53 @@ func (e *memoryEvidence) observeExpected(key memoryEvidenceKey, peak float64) {
 	}
 	exact.Peaks = appendMemoryValue(exact.Peaks, peak, memoryPeakWindow)
 	exact.Raise = nil
+	exact.HighWater = 0
 	family.Peaks = appendMemoryValue(family.Peaks, peak, memoryPeakWindow)
+	family.HighWater = 0
 	e.exact[key], e.family[familyKey] = exact, family
 	e.write(memoryEvidenceRowKey{kind: "exact", key: key}, exact)
 	e.write(memoryEvidenceRowKey{kind: "family", key: familyKey}, family)
+}
+
+// Only single-card XPU auto RAM uses measured attempts before the first
+// qualified run. Card sizing still waits for its own attribution probe.
+func xpuAutoRAM(j *Job, key memoryEvidenceKey, cards int) bool {
+	return j.Spec.Needs.Memory == "auto" && key.Platform == "linux/xpu/discrete" && cards == 1
+}
+
+// An adjacent worker can report its sampled cgroup high-water without the R5
+// footprint pair. When attribution is incomplete keep the measured portion.
+// CombinedHostGB can include a host-wide MemAvailable drop.
+func xpuRAMHighWater(p *AttemptMemoryPeak) float64 {
+	if p == nil {
+		return 0
+	}
+	host := memoryValue(p.HostGB)
+	if p.Learned != nil {
+		ram := p.Learned.RAM
+		if peak := ram.acceptedGB(); peak != nil && *peak > 0 {
+			return *peak
+		}
+		if validMemoryValue(ram.PeakGB) {
+			host = max(host, ram.PeakGB)
+		}
+	}
+	return host
+}
+
+func (e *memoryEvidence) observeHighWater(key memoryEvidenceKey, peak float64) {
+	key = key.v2()
+	update := func(kind string, key memoryEvidenceKey, series map[memoryEvidenceKey]memoryEvidenceSeries) {
+		s := series[key]
+		if len(s.Peaks) > 0 || peak <= s.HighWater {
+			return
+		}
+		s.HighWater = peak
+		series[key] = s
+		e.write(memoryEvidenceRowKey{kind: kind, key: key}, s)
+	}
+	update("exact", key, e.exact)
+	update("family", key.familyKey(), e.family)
 }
 
 func (e *memoryEvidence) raiseExpected(key memoryEvidenceKey, peak, expected float64) {
@@ -88,15 +131,19 @@ func (e *memoryEvidence) raiseExpected(key memoryEvidenceKey, peak, expected flo
 	e.write(memoryEvidenceRowKey{kind: "exact", key: key}, exact)
 }
 
-func (e *memoryEvidence) expected(key memoryEvidenceKey, hint, reach float64, known bool) memoryPoolEstimate {
+func (e *memoryEvidence) expected(key memoryEvidenceKey, hint, reach float64, known, useHighWater bool) memoryPoolEstimate {
 	key = key.v2()
 	exact, family, first := e.exact[key], e.family[key.familyKey()], e.first[key.platformKey()]
 	p := memoryPoolEstimate{Learned: true}
 	switch {
 	case len(exact.Peaks) > 0:
 		p.ChargeGB, p.Evidence = slices.Max(exact.Peaks), memoryEstimateEvidence{Level: "exact", Runs: len(exact.Peaks)}
+	case useHighWater && exact.HighWater > 0:
+		p.ChargeGB, p.Evidence.Level = exact.HighWater, "exact"
 	case len(family.Peaks) > 0:
 		p.ChargeGB, p.Evidence = slices.Max(family.Peaks), memoryEstimateEvidence{Level: "family", Runs: len(family.Peaks)}
+	case useHighWater && family.HighWater > 0:
+		p.ChargeGB, p.Evidence.Level = family.HighWater, "family"
 	case key.Pool == "card":
 		p.ChargeGB, p.Evidence.Level = reach, "unknown"
 		p.Alone = true // Preserve the existing missing-device-evidence custody.
@@ -352,9 +399,17 @@ func (q *Queue) recordPoolEvidence(j *Job, r Result) bool {
 			retainPoolPeaks(j, *peak, 0)
 		}
 		if peak := p.Learned.Card.acceptedGB(); pools.Card != nil && pools.Card.Learned && peak != nil {
-			key.Pool = "card"
-			q.stagedMemoryEvidence().observeExpected(key, *peak)
+			cardKey := key
+			cardKey.Pool = "card"
+			q.stagedMemoryEvidence().observeExpected(cardKey, *peak)
 			retainPoolPeaks(j, 0, *peak)
+		}
+	}
+	if xpuAutoRAM(j, key, len(j.AllocatedDevices)) && !r.Interrupted && !r.Forced && memoryConstraintResult(true, r) {
+		peak := xpuRAMHighWater(p)
+		exact := q.currentMemoryEvidence().exact[key.v2()]
+		if len(exact.Peaks) == 0 && peak > exact.HighWater {
+			q.stagedMemoryEvidence().observeHighWater(key, peak)
 		}
 	}
 	if !pools.RAM.Learned {
@@ -405,12 +460,20 @@ func (q *Queue) learnMemoryStop(j *Job, r Result, m *Machine, key memoryEvidence
 			peak = max(peak, reading.PeakGB)
 		}
 	}
+	xpuRAM := pool == "ram" && xpuAutoRAM(j, key, len(j.AllocatedDevices))
+	if xpuRAM {
+		peak = max(peak, xpuRAMHighWater(p))
+	}
 	if !validMemoryValue(peak) || !validMemoryValue(sample.ExpectedGB) {
 		return false
 	}
 	key.Pool = pool
 	if kernelKill || peak > sample.ExpectedGB {
-		q.stagedMemoryEvidence().raiseExpected(key, peak, sample.ExpectedGB)
+		e := q.stagedMemoryEvidence()
+		if xpuRAM && validRate(peak) {
+			e.observeHighWater(key, peak)
+		}
+		e.raiseExpected(key, peak, sample.ExpectedGB)
 	} else if validRate(sample.OwnersPeakGB) && validMemoryValue(sample.OwnersGB) {
 		e := q.stagedMemoryEvidence()
 		key := ownersKey(m, poolName)

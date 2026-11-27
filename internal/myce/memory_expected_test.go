@@ -1,9 +1,13 @@
 package myce
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"math"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -123,7 +127,7 @@ func TestMemoryExpectedWindowAnd2086(t *testing.T) {
 	run(70, false)
 	key := pooledEvidenceKey(&Job{Spec: s}, &m)
 	e := q.currentMemoryEvidence()
-	if got := e.expected(key, 46.95, 96, true); got.ChargeGB != 20.99 || got.Evidence.Runs != 20 {
+	if got := e.expected(key, 46.95, 96, true, false); got.ChargeGB != 20.99 || got.Evidence.Runs != 20 {
 		t.Fatalf("#2086 max of last 20 clean runs: %+v", got)
 	}
 	j := submit(t, q, s)
@@ -141,7 +145,7 @@ func TestMemoryExpectedWindowAnd2086(t *testing.T) {
 	if len(predictions) != 1 || predictions[0].AcceptedHostPeakGB == nil || *predictions[0].AcceptedHostPeakGB != 20.62 {
 		t.Fatalf("efficiency used a different counting rule: %+v", predictions)
 	}
-	if got := q.currentMemoryEvidence().expected(key, 46.95, 96, true); got.ChargeGB != 20.62 {
+	if got := q.currentMemoryEvidence().expected(key, 46.95, 96, true, false); got.ChargeGB != 20.62 {
 		t.Fatalf("old peak did not expire: %+v", got)
 	}
 }
@@ -364,7 +368,7 @@ func TestMemoryExpectedDRMUnitsAndPCI(t *testing.T) {
 func TestMemoryExpectedFirstRunFallbacks(t *testing.T) {
 	e := newMemoryEvidence()
 	first := memoryEvidenceKey{Platform: "linux/cpu/host", Pool: "ram", Family: "a", Exact: "1"}
-	if got := e.expected(first, 0, 96, true); got.ChargeGB != 96 || got.Evidence.Level != "unknown" {
+	if got := e.expected(first, 0, 96, true, false); got.ChargeGB != 96 || got.Evidence.Level != "unknown" {
 		t.Fatalf("first platform run = %+v", got)
 	}
 	e.observeExpected(first, 7)
@@ -388,7 +392,7 @@ func TestMemoryExpectedFirstRunFallbacks(t *testing.T) {
 		if tc.key.Pool == "card" {
 			reach = 24
 		}
-		if got := e.expected(tc.key, tc.hint, reach, true); got.ChargeGB != tc.peak || got.Evidence.Level != tc.level {
+		if got := e.expected(tc.key, tc.hint, reach, true, false); got.ChargeGB != tc.peak || got.Evidence.Level != tc.level {
 			t.Errorf("%+v with hint %.2f: got %+v, want %.2f from %s", tc.key, tc.hint, got, tc.peak, tc.level)
 		}
 	}
@@ -414,6 +418,129 @@ func TestMemoryExpectedRetainsXPUProbeGate(t *testing.T) {
 		t.Fatalf("gated card stop lost its compatibility retry: %+v", got)
 	}
 
+}
+
+func TestMemoryExpected2240XPUHighWater(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		success bool
+		learned bool
+	}{
+		{name: "adjacent worker successful cells", success: true},
+		{name: "application failures with incomplete counters", learned: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, clock := fixture(t)
+			const allowance = 44.83
+			m := m3Machine()
+			m.GPU, m.CapabilityProfile.LogicalCPUs = "xpu", 16
+			m.CapabilityProfile.Accelerators[0].Type = "xpu"
+			m.HostMemoryBudgetGB, m.HostMemoryBudgetMeasured, m.HostAvailableMemoryGB = allowance, true, 46
+			for i := range m.Devices {
+				m.Devices[i].Platform = "xpu"
+			}
+			cell := func(arg, card string) Spec {
+				s := sharedSpec("experiment", 0)
+				s.Run.Command = append(s.Run.Command, arg)
+				s.Needs.CPUCores, s.Needs.HostMemoryGB, s.Needs.Memory = 2, 0, "auto"
+				s.Needs.Platform = Platform{Required: []string{"xpu"}}
+				s.Needs.GPU = &GPUSelection{Devices: []string{card}}
+				return s
+			}
+			free := r5RAM(allowance, 46)
+			history := state{Machines: map[string]*Machine{m.ID: &m}, Jobs: map[string]*Job{}}
+			for i, peak := range []float64{7.8, 7.2, 7.4} {
+				s := cell(fmt.Sprint(i%2), "0")
+				j := submit(t, q, s)
+				a := r5Start(t, q, r5Check(t, q, m, free), j.ID)
+				if i == 0 && a.Memory.RAM.ChargeGB != allowance {
+					t.Fatalf("a genuinely cold run reserved %.2f GiB", a.Memory.RAM.ChargeGB)
+				}
+				clock.Advance(time.Second)
+				r := result(a, tc.success)
+				r.MemoryPeak = &AttemptMemoryPeak{HostGB: shadowGB(peak), CombinedHostGB: shadowGB(38)}
+				if tc.learned {
+					r.MemoryPeak.Learned = &memoryRunPeaks{RAM: memoryRunPool{PeakGB: peak}}
+				}
+				if err := q.Complete(r); err != nil {
+					t.Fatal(err)
+				}
+				state := "failed"
+				if tc.success {
+					state = "succeeded"
+				}
+				requireState(t, q, j.ID, state)
+				history.Jobs[j.ID] = job(t, q, j.ID)
+			}
+
+			// Simulate opening a database with retained attempt facts and no
+			// R6 evidence rows, then reopen it without the underlying jobs.
+			db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "evidence.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			for _, snapshot := range []state{history, {}} {
+				e, err := loadMemoryEvidence(db, snapshot)
+				if err != nil {
+					t.Fatal(err)
+				}
+				target := m.Devices[0].machine(m)
+				for _, variant := range []struct{ arg, level string }{{"0", "exact"}, {"new sibling", "family"}} {
+					key := pooledEvidenceKey(&Job{Spec: cell(variant.arg, "0")}, &target)
+					got := e.expected(key, 0, allowance, true, true)
+					if got.ChargeGB != 7.8 || got.Evidence.Level != variant.level || got.Evidence.Runs != 0 {
+						t.Fatalf("retained %s evidence did not survive startup: %+v", variant.level, got)
+					}
+				}
+			}
+
+			m.HostAvailableMemoryGB = 43
+			free = r5RAM(allowance, 43)
+			one := submit(t, q, cell("0", "0"))
+			first := r5Start(t, q, r5Check(t, q, m, free), one.ID)
+			if first.Memory.RAM.ChargeGB != 7.8 || first.Memory.RAM.Evidence.Level != "exact" {
+				t.Fatalf("repeat reserved beyond the exact high-water: %+v", first.Memory.RAM)
+			}
+			two := submit(t, q, cell("new sibling", "1"))
+			second := r5Start(t, q, r5Check(t, q, m, free, first), two.ID)
+			for i, a := range []*Job{first, second} {
+				if !slices.Equal(a.AllocatedDevices, []string{fmt.Sprint(i)}) ||
+					!a.Memory.RAM.Learned || a.Memory.RAM.ChargeGB != 7.8 || a.Memory.RAM.Evidence.Runs != 0 ||
+					!a.Memory.Card.Alone {
+					t.Fatalf("XPU offer %d: devices=%v memory=%+v", i, a.AllocatedDevices, a.Memory)
+				}
+			}
+			cpu := submit(t, q, cpuSpec(2, 8))
+			third := r5Start(t, q, r5Check(t, q, m, free, first, second), cpu.ID)
+			if third.Memory.RAM.ChargeGB != 8 || len(third.AllocatedDevices) != 0 {
+				t.Fatalf("CPU offer: devices=%v memory=%+v", third.AllocatedDevices, third.Memory)
+			}
+			w := Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) {
+				return m.HostAvailableMemoryGB, nil
+			}}
+			if err := localAttemptAdmission(w, []Job{*first}, *second, nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := localAttemptAdmission(w, []Job{*first, *second}, *third, nil); err != nil {
+				t.Fatal(err)
+			}
+
+			finish(t, q, second, true)
+			finish(t, q, third, true)
+			r5Stop(t, q, clock, m, first, r5RAM(allowance, 34), 7.8, 9, false)
+			retry := r5Start(t, q, r5Check(t, q, m, free), one.ID)
+			if got := retry.Memory.RAM; got.ChargeGB != 18 || got.Evidence.Level != "raised" {
+				t.Fatalf("over-E stop did not double the measured peak: %+v", got)
+			}
+			r5Clean(t, q, retry, memoryRunPool{PeakGB: 8, Complete: true}, memoryRunPool{})
+			repeat := submit(t, q, cell("0", "0"))
+			clean := r5Start(t, q, r5Check(t, q, m, free), repeat.ID)
+			if got := clean.Memory.RAM; got.ChargeGB != 8 || got.Evidence.Runs != 1 {
+				t.Fatalf("qualified run did not restore the clean window: %+v", got)
+			}
+		})
+	}
 }
 
 func TestMemoryExpectedColdCardGroup(t *testing.T) {
