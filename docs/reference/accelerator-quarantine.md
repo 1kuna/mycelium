@@ -23,7 +23,7 @@ state and leaves the device usable. For detached attempts, the worker reads the
 helper's saved signal and exit records and keeps the attempt, session and card
 with their timestamps for one minute after release. This covers the incident in
 #2231, where the Xe reset was 703 ms after TERM and the scan arrived about 22 s
-later. Correlation uses kernel event time and does not identify a GuC context.
+later. Kernel event time identifies candidate executions.
 A fault seen less than a second after it was logged waits one scan, so an
 exit recorded just after it still counts. A card fault that crashes its job also
 falls in that window, so the third teardown incident on one device within an hour
