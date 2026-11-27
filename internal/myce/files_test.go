@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -60,14 +61,14 @@ func TestFilesOpenHandleSurvivesPathReplacement(t *testing.T) {
 func TestFilesResumableAndHashRefusal(t *testing.T) {
 	t.Parallel()
 	q, _ := fixture(t)
-	if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "store"), 1<<20, true); err != nil {
+	if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "store"), 8*fileUploadChunkSize, true); err != nil {
 		t.Fatal(err)
 	}
 	api := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer api.Close()
 	c := Client{URL: api.URL, Token: "test"}
 	source := filepath.Join(t.TempDir(), "input")
-	data := bytes.Repeat([]byte("verified bytes"), 100)
+	data := bytes.Repeat([]byte("verified bytes"), fileUploadChunkSize/7)
 	if err := os.WriteFile(source, data, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -103,11 +104,24 @@ func TestFilesResumableAndHashRefusal(t *testing.T) {
 		t.Fatal(res.StatusCode)
 	}
 	api.Close()
-	api = httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+	handler := API{Queue: q, Token: "test"}.Handler()
+	var resumed atomic.Int64
+	api = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			resumed.Add(1)
+			if got := r.Header.Get("Upload-Offset"); got != "17" {
+				t.Errorf("streamed job input resumed at %s, want 17", got)
+			}
+		}
+		handler.ServeHTTP(w, r)
+	}))
 	defer api.Close()
 	c.URL = api.URL
-	if err = c.UploadFile(context.Background(), source, ref); err != nil {
+	if err = c.UploadJobInput(context.Background(), source, ref); err != nil {
 		t.Fatal(err)
+	}
+	if n := resumed.Load(); n != 1 {
+		t.Fatalf("resumed input used %d PATCH requests, want one", n)
 	}
 	dest := filepath.Join(t.TempDir(), "download")
 	// Preserve a prefix across an interrupted download and request only the remainder.
@@ -700,6 +714,15 @@ func TestFilesTransientInputRetryReconcilesAcceptedOffset(t *testing.T) {
 		if r.Method == "PATCH" {
 			offsets = append(offsets, r.Header.Get("Upload-Offset"))
 			if len(offsets) == 1 {
+				// The connection failed partway through the streamed PATCH.
+				// Let the real queue persist only the bytes that arrived.
+				r.Body = struct {
+					io.Reader
+					io.Closer
+				}{io.LimitReader(r.Body, fileUploadChunkSize), r.Body}
+				r.ContentLength = fileUploadChunkSize
+				r.Header.Del("X-Myce-Upload-Progress")
+				r.Header.Del(uploadQueueServiceHeader)
 				accepted := httptest.NewRecorder()
 				backend.ServeHTTP(accepted, r)
 				if accepted.Code != 204 {
@@ -739,7 +762,7 @@ func TestFilesTransientInputRetryReconcilesAcceptedOffset(t *testing.T) {
 		}
 		return one.UploadJobInput(ctx, path, ref)
 	}, func(error, time.Duration) { reports++ })
-	if err != nil || reports != 1 || len(offsets) != 2 || offsets[0] != "0" || offsets[1] != "4194304" {
+	if err != nil || reports != 1 || len(offsets) != 2 || offsets[0] != "0" || offsets[1] != strconv.Itoa(fileUploadChunkSize) {
 		t.Fatal("upload did not reconcile", err, reports, offsets)
 	}
 	if err := c.HasFile(ctx, ref); err != nil {

@@ -20,6 +20,8 @@ class ExtensionClientTests(unittest.TestCase):
             calls.append(method)
             if method == "HEAD" and "/blobs/" in endpoint and calls.count("HEAD") <= 2:
                 raise APIError(404, "missing")
+            if method == "PATCH":
+                self.assertEqual(data.read(size), b"data")
             response = io.BytesIO()
             response.headers = {"Upload-Offset": str(size if method == "PATCH" else 0), "Upload-Length": "4",
                                 "Content-Length": "4", "ETag": '"' + hashlib.sha256(b"data").hexdigest() + '"'}
@@ -47,6 +49,8 @@ class ExtensionClientTests(unittest.TestCase):
                 self.assertIn("purpose am9iLWlucHV0", headers["Upload-Metadata"])
             if (method, endpoint) == ("HEAD", blob) and calls.count(("HEAD", blob)) <= 2:
                 raise APIError(410, '{"code":"result_expired","error":"expired"}')
+            if method == "PATCH":
+                self.assertEqual(data.read(size), body)
             response = io.BytesIO()
             response.headers = {"Upload-Offset": str(len(body) if method == "PATCH" else 0),
                                 "Upload-Length": str(len(body)), "Content-Length": str(len(body)), "ETag": '"' + sha + '"'}
@@ -98,6 +102,7 @@ class ExtensionClientTests(unittest.TestCase):
                                 published = outcome not in ("pending", "absent")
                                 raise APIError(404, '{"code":"file_upload_not_found","error":"missing"}')
                         if method == "PATCH":
+                            self.assertEqual(data.read(size), b"data")
                             published = True
                         return reply
 
@@ -146,8 +151,8 @@ class ExtensionClientTests(unittest.TestCase):
                         # opened source before its PATCH body is captured.
                         source.write_bytes(changed)
                     elif method == "PATCH":
-                        sent.append(data)
-                        self.assertEqual(data, changed[:4])
+                        sent.append(data.read(size))
+                        self.assertEqual(sent[-1], changed[:4])
                         # Another uploader completes the original bytes. A fresh
                         # rehash after the 404 must not hide what this one sent.
                         published = True

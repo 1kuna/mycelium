@@ -507,7 +507,8 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		if !decode(w, r, &c) {
 			return
 		}
-		respondOperation(w, map[string]bool{"ok": true}, a.Queue.CompleteContext(r.Context(), c), "worker_complete_invalid")
+		timings := parsePublicationTimings(r.Header.Get(publicationTimingsHeader))
+		respondOperation(w, map[string]bool{"ok": true}, a.Queue.completeContext(r.Context(), c, timings), "worker_complete_invalid")
 	})
 	mux.HandleFunc("POST /api/workers/environment-log", func(w http.ResponseWriter, r *http.Request) {
 		var c EnvironmentLog
@@ -926,6 +927,11 @@ func (c Client) callOnceShared(ctx context.Context, method, path string, in, out
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "myce/"+BuildVersion)
+	if path == "/api/workers/complete" {
+		if value := c.publication.timingHeader(); value != "" {
+			req.Header.Set(publicationTimingsHeader, value)
+		}
+	}
 	if workerCheckin {
 		if checkin.period > 0 {
 			req.Header.Set(checkinPeriodHeader, checkin.period.String())

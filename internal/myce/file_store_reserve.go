@@ -97,11 +97,12 @@ func (q *Queue) checkFileStoreAttempt(ctx context.Context) error {
 	if ctx.Value(fileStoreAttemptKey{}) == nil {
 		return nil
 	}
-	if err := lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock); err != nil {
+	unlock, err := q.lockUploadRead(ctx)
+	if err != nil {
 		return err
 	}
-	defer q.mu.RUnlock()
-	_, err := q.fileStoreAttemptJob(ctx, false)
+	defer unlock()
+	_, err = q.fileStoreAttemptJob(ctx, false)
 	return err
 }
 func (q *Queue) nonProductionFileStoreFree(status FileStoreStatus, productionReserved uint64) uint64 {

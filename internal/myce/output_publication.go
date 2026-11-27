@@ -208,7 +208,9 @@ func (w Worker) publishOutputFilesAt(ctx context.Context, j Job, parent, root st
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
+	done := w.Client.publication.begin(w.Client.clock(), "filesystem/output_manifest")
 	p, terminal, err := w.outputPublication(ctx, j, root, step, outputName)
+	done()
 	if err != nil {
 		if ctx.Err() != nil {
 			terminal = false

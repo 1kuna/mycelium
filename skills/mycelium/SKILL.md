@@ -188,6 +188,10 @@ uses the declared NAS source even when an ordinary shared-input cache holds a co
   capacity versus coverage, memory, storage and device evidence. Route owner
   actions with the job ID, attempt and typed reason. Keep full history reads
   out of loops.
+  Use [attempt publication timings](https://github.com/1kuna/mycelium/blob/main/docs/status.md#attempt-publication-timings)
+  to split release-to-accept latency into worker upload and queue processing.
+  Current Go and Python job-input clients stream the remaining bytes in one
+  resumable request and reconcile the queue's accepted offset after interruption.
   For `checkpoint_floor_missing`, restore a complete NAS checkpoint at or
   above the generation in the hold and run `myce resume JOB_ID`. To start
   from scratch, submit with a new submission key.

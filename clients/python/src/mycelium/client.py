@@ -61,6 +61,25 @@ class TransferStalledError(TimeoutError):
         self.code = code
 
 
+class _UploadBody:
+    """A bounded-memory HTTP body whose reads also verify the upload source."""
+
+    def __init__(self, read: Callable[[int], bytes], length: int, progress: Callable[[], None]):
+        self._read = read
+        self._progress = progress
+        self.remaining = length
+
+    def read(self, count: int) -> bytes:
+        if self.remaining == 0:
+            return b""
+        value = self._read(min(count, self.remaining))
+        if not value:
+            raise ValueError("upload source size or SHA-256 mismatch")
+        self.remaining -= len(value)
+        self._progress()
+        return value
+
+
 class QueueStalledError(TimeoutError):
     """The queue stopped making progress while this call waited.
 
@@ -753,16 +772,17 @@ class Client:
         return self._request(attempt, policy="read" if retry and method in {"GET", "HEAD"} else "none",
                              end=end, expired=lambda: TransferStalledError("file transfer owner timeout"))
 
-    def _file_request_once(self, method: str, path: str, data: bytes | None = None,
+    def _file_request_once(self, method: str, path: str, data: bytes | _UploadBody | None = None,
                       headers: Mapping[str, str] | None = None, size: int = 0, owner_timeout=None, timing=None):
         """size is the blob the queue may verify before replying; 0 when none."""
         budget = self._transfer_idle
         headers = dict(headers or {})
-        if data is not None:
+        if isinstance(data, bytes):
             headers["Content-Length"] = str(len(data))
-        # Bound memory used by http.client; the transfer connection also sends
-        # partial buffers separately so no sendall has a cumulative timeout.
-        request = Request(self.url + path, data=None if data is None else io.BytesIO(data),
+            data = io.BytesIO(data)
+        # http.client reads the stream a block at a time. The transfer
+        # connection also sends partial blocks separately.
+        request = Request(self.url + path, data=data,
                           method=method, headers={"Authorization": "Bearer " + self.token, **headers})
         request._mycelium_file_transfer = True
         request._mycelium_upload_timing = timing if method == "PATCH" else None
@@ -787,6 +807,7 @@ class Client:
         """Upload a job input, eligible for retention if never submitted."""
         from .transfer import UploadTiming
         timing = UploadTiming()
+        last_body_read = 0.0
         end = None if self.transfer_timeout is None else self._clock.monotonic() + self.transfer_timeout
         def request(*args, **kwargs):
             return self._file_request(*args, **kwargs, timing=timing, deadline=end, retry=False)
@@ -840,16 +861,18 @@ class Client:
                 if not chunk:
                     raise ValueError("input changed during upload")
                 prefix -= len(chunk)
-            while offset < size:
-                chunk = read(min(1024 * 1024, size - offset))
-                if not chunk:
-                    raise ValueError("input changed during upload")
-                with request("PATCH", endpoint, chunk, {
-                        **headers, "Content-Type": "application/offset+octet-stream",
-                        "Upload-Offset": str(offset)}, size) as response:
-                    if int(response.headers["Upload-Offset"]) != offset + len(chunk):
-                        raise ValueError("invalid upload acknowledgement")
-                offset += len(chunk)
+            # A final offset can still need publication after a lost reply.
+            # In that case retry publication with an empty PATCH.
+            length = size - offset
+            def body_progress():
+                nonlocal last_body_read
+                last_body_read = self._clock.monotonic()
+            body = _UploadBody(read, length, body_progress)
+            with request("PATCH", endpoint, body, {
+                    **headers, "Content-Type": "application/offset+octet-stream",
+                    "Content-Length": str(length), "Upload-Offset": str(offset)}, size) as response:
+                if body.remaining or int(response.headers["Upload-Offset"]) != size:
+                    raise ValueError("invalid upload acknowledgement")
             return verified_blob()
 
         def reconciled_attempt():
@@ -896,7 +919,7 @@ class Client:
 
         return self._request(lambda remaining: reconciled_attempt(), policy="upload", end=end,
                              expired=lambda: TransferStalledError("file transfer owner timeout"),
-                             progress=lambda: timing.progress)
+                             progress=lambda: max(timing.progress or 0, last_body_read))
 
     def recover_result(self, job_id: str, *, files: Mapping[str, str | Path],
                        key: str, requested_by: str, reason: str,

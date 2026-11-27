@@ -25,6 +25,7 @@ class UploadStallTests(unittest.TestCase):
                 digest = hashlib.sha256(body).hexdigest()
                 accepted = bytearray()
                 offsets = []
+                lost = [False]
                 published = [not delayed_publication]
                 lock = threading.Lock()
                 class Handler(BaseHTTPRequestHandler):
@@ -37,11 +38,6 @@ class UploadStallTests(unittest.TestCase):
                                 self.send_header("Content-Length", str(len(body)))
                                 self.send_header("ETag", '"' + digest + '"')
                             else:
-                                if delayed_publication and len(accepted) == len(body):
-                                    published[0] = True
-                                    self.send_response(404)
-                                    self.end_headers()
-                                    return
                                 self.send_response(200)
                                 self.send_header("Upload-Offset", str(len(accepted)))
                                 self.send_header("Upload-Length", str(len(body)))
@@ -72,9 +68,12 @@ class UploadStallTests(unittest.TestCase):
                         with lock:
                             accepted.extend(rest)
                             next_offset = len(accepted)
-                        if lost_ack and next_offset == len(body):
+                        if lost_ack and next_offset == len(body) and not lost[0]:
+                            lost[0] = True
                             self.close_connection = True
                             return
+                        if next_offset == len(body):
+                            published[0] = True
                         self.send_response(204)
                         self.send_header("Upload-Offset", str(next_offset))
                         self.end_headers()
@@ -93,9 +92,12 @@ class UploadStallTests(unittest.TestCase):
                         with patch.object(http.client.HTTPConnection, "connect", small_buffer):
                             self.assertEqual(client.upload_file(source), {"sha256": digest, "size_bytes": len(body)})
                     self.assertEqual(accepted, body)
-                    self.assertEqual(len(offsets), 12 if pause < 1 else 13)
+                    expected = [0]
                     if pause > 1:
-                        self.assertEqual(offsets[1], 64 << 10)
+                        expected.append(64 << 10)
+                    if delayed_publication:
+                        expected.append(len(body))
+                    self.assertEqual(offsets, expected)
                 finally:
                     server.shutdown()
                     server.server_close()
@@ -189,13 +191,13 @@ class UploadTimingRegressionTests(unittest.TestCase):
                 return _Reply({})
             if method == "HEAD":
                 return _Reply({"Upload-Offset": str(state["accepted"]), "Upload-Length": str(len(body))})
-            if state["accepted"] + len(data) == len(body) and not state["stalled"]:
+            while chunk := data.read(1 << 20):
+                state["accepted"] += len(chunk)
+                clock.now += 60
+            if not state["stalled"]:
                 state["stalled"] = True
                 clock.now += timing.window()
-                state["accepted"] += len(data)  # The server finishes it anyway.
                 raise TransferStalledError("file transfer made no network progress")
-            clock.now += 60
-            state["accepted"] += len(data)
             return _Reply({"Upload-Offset": str(state["accepted"])})
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory, "source")

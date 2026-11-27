@@ -232,6 +232,12 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 	}()
 	tick := time.NewTicker(min(initial.Interval, 100*time.Millisecond))
 	defer tick.Stop()
+	s.fileFinish.onReady = func() {
+		select {
+		case a.wake <- struct{}{}:
+		default:
+		}
+	}
 	wait := func() {
 		select {
 		case <-ctx.Done():
@@ -496,6 +502,9 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			diagnostics.FileTransferError = inputTransferRecoveringReason
 		}
 		canRelease := record.readyToRelease(s.state.Result, p != nil)
+		if p == nil && s.state.Result != nil {
+			a.publication.resultReady(w.Clock.Now())
+		}
 		floorRefusal := s.state.Result != nil && s.state.Result.CheckpointFloorMissing != nil
 		if floorRefusal {
 			report.Progress = -1 // A declined launch has no running checkpoint writer.
@@ -575,6 +584,9 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					if canRelease && !releaseSent && !warmResult {
 						err = w.ackAttemptRelease(ioCtx, *s.state.Result)
 						releaseSent = err == nil
+						if releaseSent {
+							a.publication.releaseAcknowledged(w.Clock.Now())
+						}
 						if stale(err) {
 							err = nil
 						}

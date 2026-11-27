@@ -11,32 +11,33 @@ import (
 // DeviceFault is queue-owned retry eligibility evidence. Other fields remain
 // diagnostic evidence, never release proof or a retry/accounting input.
 type AttemptOutcome struct {
-	WorkerDataCleanup *WorkerDataCleanup      `json:"worker_data_cleanup,omitempty"`
-	FaultEvidence     []*FaultEvidence        `json:"fault_evidence,omitempty"`
-	SignalEvidence    *SignalEvidence         `json:"signal_evidence,omitempty"`
-	DeviceFault       *DeviceFaultLoss        `json:"device_fault,omitempty"`
-	ExecutionEvidence *ExecutionEvidence      `json:"execution_evidence,omitempty"`
-	StopObservation   *AttemptStopObservation `json:"stop_observation,omitempty"`
-	StagingTimings    *StagingTimings         `json:"staging_timings,omitempty"`
-	LaunchTimings     *LaunchTimings          `json:"launch_timings,omitempty"`
-	inputsStaged      bool                    // transient positive staging evidence; not part of the wire/history shape.
-	Placement         *PlacementDecision      `json:"placement,omitempty"`
-	Diagnostics       *AttemptDiagnostics     `json:"diagnostics,omitempty"`
-	Attempt           int                     `json:"attempt"`
-	Machine           string                  `json:"machine"`
-	Session           string                  `json:"session"`
-	EndedAt           time.Time               `json:"ended_at"`
-	State             string                  `json:"state"`
-	Reason            string                  `json:"reason,omitempty"`
-	ExecutionCause    *RuntimeCause           `json:"execution_cause,omitempty"`
-	CleanupCause      *RuntimeCause           `json:"cleanup_cause,omitempty"`
-	Forced            bool                    `json:"forced,omitempty"`
-	Interrupted       bool                    `json:"interrupted,omitempty"`
-	AdmissionRequeue  bool                    `json:"admission_requeue,omitempty"`
-	OutOfMemory       bool                    `json:"out_of_memory,omitempty"`
-	PoliteStop        bool                    `json:"polite_stop,omitempty"`
-	OperatorStop      bool                    `json:"operator_stop,omitempty"`
-	PriorityStop      *PriorityPreemption     `json:"priority_stop,omitempty"`
+	WorkerDataCleanup  *WorkerDataCleanup      `json:"worker_data_cleanup,omitempty"`
+	FaultEvidence      []*FaultEvidence        `json:"fault_evidence,omitempty"`
+	SignalEvidence     *SignalEvidence         `json:"signal_evidence,omitempty"`
+	DeviceFault        *DeviceFaultLoss        `json:"device_fault,omitempty"`
+	ExecutionEvidence  *ExecutionEvidence      `json:"execution_evidence,omitempty"`
+	StopObservation    *AttemptStopObservation `json:"stop_observation,omitempty"`
+	StagingTimings     *StagingTimings         `json:"staging_timings,omitempty"`
+	LaunchTimings      *LaunchTimings          `json:"launch_timings,omitempty"`
+	PublicationTimings *PublicationTimings     `json:"publication_timings,omitempty"`
+	inputsStaged       bool                    // transient positive staging evidence; not part of the wire/history shape.
+	Placement          *PlacementDecision      `json:"placement,omitempty"`
+	Diagnostics        *AttemptDiagnostics     `json:"diagnostics,omitempty"`
+	Attempt            int                     `json:"attempt"`
+	Machine            string                  `json:"machine"`
+	Session            string                  `json:"session"`
+	EndedAt            time.Time               `json:"ended_at"`
+	State              string                  `json:"state"`
+	Reason             string                  `json:"reason,omitempty"`
+	ExecutionCause     *RuntimeCause           `json:"execution_cause,omitempty"`
+	CleanupCause       *RuntimeCause           `json:"cleanup_cause,omitempty"`
+	Forced             bool                    `json:"forced,omitempty"`
+	Interrupted        bool                    `json:"interrupted,omitempty"`
+	AdmissionRequeue   bool                    `json:"admission_requeue,omitempty"`
+	OutOfMemory        bool                    `json:"out_of_memory,omitempty"`
+	PoliteStop         bool                    `json:"polite_stop,omitempty"`
+	OperatorStop       bool                    `json:"operator_stop,omitempty"`
+	PriorityStop       *PriorityPreemption     `json:"priority_stop,omitempty"`
 }
 
 // These are queue-written stop records, not worker error text. This diagnostic
@@ -100,6 +101,9 @@ func (q *Queue) recordAttemptOutcome(j *Job, outcome AttemptOutcome) {
 			}
 			if outcome.StagingTimings == nil {
 				outcome.StagingTimings = old.StagingTimings
+			}
+			if outcome.PublicationTimings == nil {
+				outcome.PublicationTimings = old.PublicationTimings
 			}
 			break
 		}

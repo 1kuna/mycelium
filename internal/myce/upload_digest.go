@@ -101,8 +101,8 @@ func openUploadDigest(ctx context.Context, data string, offset int64) uploadDige
 // record names the digest of [0, end) once f's bytes are durable, unless
 // another writer replaced the record during this write. Otherwise it removes
 // the record, so no later writer resumes from one that may not match the file.
-func (d uploadDigest) record(f *os.File, end int64, perm os.FileMode) {
-	if d.hash != nil && f.Sync() == nil {
+func (d uploadDigest) record(ctx context.Context, f *os.File, end int64, perm os.FileMode) {
+	if d.hash != nil && uploadSync(ctx, f.Sync) == nil {
 		current, err := os.ReadFile(d.path)
 		if (err == nil || os.IsNotExist(err)) && bytes.Equal(current, d.loaded) {
 			if b, err := encodeUploadDigest(end, d.hash); err == nil && os.WriteFile(d.path, b, perm) == nil {
@@ -115,7 +115,7 @@ func (d uploadDigest) record(f *os.File, end int64, perm os.FileMode) {
 
 type hashingWriter struct {
 	w io.Writer
-	h hash.Hash
+	h io.Writer
 }
 
 // Hash only what reached the file: a short write must not advance the record.

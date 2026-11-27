@@ -69,10 +69,10 @@ func (q *Queue) recordFileUpload(hash, purpose string, created bool, requestCont
 	if purpose == attemptOutputUploadPurpose {
 		return q.recordAttemptOutputUpload(hash, created, requestCtx)
 	}
-	if err := lockUploadContext(requestCtx, q.mu.RLock, q.mu.RUnlock); err != nil {
+	unlockRequest, err := q.lockUploadRead(requestCtx)
+	if err != nil {
 		return err
 	}
-	unlockRequest := q.mu.RUnlock
 	_, output := q.s.AttemptOutputUploads[hash]
 	_, marked := q.s.JobInputUploads[hash]
 	_, bundle := q.s.BundleUploads[hash]
@@ -99,10 +99,10 @@ func (q *Queue) recordFileUpload(hash, purpose string, created bool, requestCont
 
 func (q *Queue) publishFileUpload(hash string, requestContexts ...context.Context) error {
 	requestCtx := requestContext(requestContexts)
-	if err := lockUploadContext(requestCtx, q.mu.RLock, q.mu.RUnlock); err != nil {
+	unlockRequest, err := q.lockUploadRead(requestCtx)
+	if err != nil {
 		return err
 	}
-	unlockRequest := q.mu.RUnlock
 	published, marked := q.jobUploadMarker(hash)
 	unchanged := !marked || published.Equal(q.clock.Now())
 	unlockRequest()

@@ -117,12 +117,47 @@ func (q *Queue) reportUploadQueueService(w http.ResponseWriter, r *http.Request)
 }
 
 type uploadDiagnostic struct {
-	hash, operation, failure string
-	length, accepted         int64
+	started                                              time.Time
+	hash, operation, failure                             string
+	length, accepted                                     int64
+	bodyRead, fileWrite, hashBytes, fileSync, inputClaim time.Duration
+}
+
+type uploadMeasuredReader struct {
+	source  io.Reader
+	elapsed *time.Duration
+}
+
+func (r uploadMeasuredReader) Read(p []byte) (int, error) {
+	start := time.Now()
+	n, err := r.source.Read(p)
+	*r.elapsed += time.Since(start)
+	return n, err
+}
+
+type uploadMeasuredWriter struct {
+	destination io.Writer
+	elapsed     *time.Duration
+}
+
+func (w uploadMeasuredWriter) Write(p []byte) (int, error) {
+	start := time.Now()
+	n, err := w.destination.Write(p)
+	*w.elapsed += time.Since(start)
+	return n, err
+}
+
+func uploadSync(ctx context.Context, sync func() error) error {
+	start := time.Now()
+	err := sync()
+	if d, ok := ctx.Value(uploadDiagnosticKey{}).(*uploadDiagnostic); ok {
+		d.fileSync += time.Since(start)
+	}
+	return err
 }
 
 func uploadRequestDiagnostic(r *http.Request) (*http.Request, *uploadDiagnostic) {
-	d := &uploadDiagnostic{hash: strings.TrimPrefix(r.URL.Path, "/api/files/uploads/"), length: -1, accepted: -1}
+	d := &uploadDiagnostic{hash: strings.TrimPrefix(r.URL.Path, "/api/files/uploads/"), length: -1, accepted: -1, started: time.Now()}
 	return r.WithContext(context.WithValue(r.Context(), uploadDiagnosticKey{}, d)), d
 }
 
@@ -213,8 +248,15 @@ func (d *uploadDiagnostic) log(r *http.Request, status int, headers http.Header,
 	if _, err := hex.DecodeString(job); err != nil || len(job) != 32 {
 		job = ""
 	}
-	log.Printf("event=file_upload method=%s upload=%s job=%s attempt=%d status=%d requested_offset=%d accepted_offset=%d length=%d operation=%s error_class=%s tus_code=%s",
-		r.Method, d.hash, job, attempt.Attempt, status, requested, d.accepted, d.length, d.operation, d.failure, code)
+	var wait, hold time.Duration
+	if span := spanFrom(r.Context()); span != nil {
+		span.mu.Lock()
+		wait, hold = span.wait, span.hold
+		span.mu.Unlock()
+	}
+	log.Printf("event=file_upload method=%s upload=%s job=%s attempt=%d status=%d requested_offset=%d accepted_offset=%d length=%d operation=%s error_class=%s tus_code=%s duration_ms=%.3f body_read_ms=%.3f file_write_ms=%.3f hash_ms=%.3f fsync_ms=%.3f input_claim_ms=%.3f mutex_wait_ms=%.3f mutex_hold_ms=%.3f",
+		r.Method, d.hash, job, attempt.Attempt, status, requested, d.accepted, d.length, d.operation, d.failure, code,
+		holdMS(time.Since(d.started)), holdMS(d.bodyRead), holdMS(d.fileWrite), holdMS(d.hashBytes), holdMS(d.fileSync), holdMS(d.inputClaim), holdMS(wait), holdMS(hold))
 }
 
 // tus answers any other callback error with 500. A queue wait that ended

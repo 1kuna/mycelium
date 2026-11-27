@@ -33,6 +33,7 @@ type checkpointIO[T any] struct {
 	key     string
 	pending *checkpointIOResult[T]
 	timeout time.Duration // Negative: the sequence context owns per-operation deadlines.
+	onReady func()        // Optional wake for the single owner, after the result is readable.
 }
 type checkpointIOResult[T any] struct {
 	discard    bool // A timed-out/cancelled result is never reusable.
@@ -109,7 +110,14 @@ func (n *checkpointIO[T]) runBounded(parent context.Context, key string, fn func
 			n.key = key
 			r := &checkpointIOResult[T]{done: make(chan struct{}), progressed: time.Now()}
 			n.pending = r
-			go func() { r.value, r.err = fn(); close(r.done) }()
+			notify := n.onReady
+			go func() {
+				r.value, r.err = fn()
+				close(r.done)
+				if notify != nil {
+					notify()
+				}
+			}()
 		}
 		pending := n.pending
 		n.mu.Unlock()
