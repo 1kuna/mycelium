@@ -92,7 +92,7 @@ func (w Worker) finishFileResult(j Job, result Result, parent string, metadata .
 	return w.finishFileResultContext(context.Background(), j, result, parent, metadata...)
 }
 
-func (q *Queue) reclaimJobFiles() error { return q.reclaimJobFilesContext(context.Background()) }
+func (q *Queue) reclaimJobFiles() error { return q.reclaimJobFilesContext(context.Background(), true) }
 
 func (q *Queue) reclaimPublishedFiles() error {
 	return q.reclaimPublishedFilesContext(context.Background())

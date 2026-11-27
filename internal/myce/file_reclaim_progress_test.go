@@ -200,7 +200,7 @@ func TestInterruptedUploadSweepProgressesUnderControlPressure(t *testing.T) {
 	}
 	for pass := 0; pass < len(refs) && left() > 0; pass++ {
 		before := left()
-		if err := q.reclaimInterruptedUploads(context.Background()); err != nil {
+		if err := q.reclaimInterruptedUploads(context.Background(), true); err != nil {
 			t.Fatal(err)
 		}
 		if left() >= before {

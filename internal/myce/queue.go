@@ -1864,7 +1864,7 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 	if q.sharedWriter != nil && !fileAvailable {
 		return errors.Join(evidenceErr, q.pruneBatchLogs(requestCtx), q.pruneJobHistory(requestCtx))
 	}
-	return errors.Join(evidenceErr, q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx))
+	return errors.Join(evidenceErr, q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx, true), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx))
 }
 func (q *Queue) CheckinKeyed(c Checkin) (Reply, error) {
 	return q.CheckinKeyedContext(context.Background(), c)

@@ -329,7 +329,7 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 		if p.upload {
 			status.OpenUploadBytes = addDiskBytes(status.OpenUploadBytes, p.size)
 			_, output := v.outputMarkers[hash]
-			owned := marked && at.IsZero() || !marked && p.jobInput && allocatedInputClaim(claims, int64(p.length))
+			owned := marked && at.IsZero() || !marked && p.jobInput && legacyInputAllocation(claims, int64(p.length))
 			if owned && !referenced[hash] && (!output || len(claims) == 0) && v.age.interruptedUploadIdle(p.modified, claims) {
 				status.ReclaimableBytes = addDiskBytes(status.ReclaimableBytes, p.size)
 			}
@@ -387,7 +387,7 @@ func (q *Queue) PreflightFileStore(ctx context.Context, files FileManifest) erro
 	if err := files.validate(); err != nil {
 		return err
 	}
-	if err := q.reclaimJobFilesContext(ctx); err != nil {
+	if err := q.reclaimJobFilesContext(ctx, false); err != nil {
 		log.Printf("file retention deferred: %v", err)
 	}
 	requestUnlock1 := requestReadLock(ctx, &q.mu)
@@ -468,6 +468,10 @@ func jobInputUpload(info tus.FileInfo, hash string) bool {
 	return info.ID == hash && info.MetaData["sha256"] == hash && info.MetaData["purpose"] == jobInputUploadPurpose && !info.SizeIsDeferred
 }
 
+func legacyInputAllocation(claims []FileInputClaim, length int64) bool {
+	return len(claims) == 0 || allocatedInputClaim(claims, length)
+}
+
 func (a filePublicationAge) interruptedUploadIdle(modified time.Time, claims []FileInputClaim) bool {
 	cutoff := a.now.Add(-a.retention)
 	if a.retention == 0 || modified.After(cutoff) {
@@ -489,8 +493,7 @@ func (a filePublicationAge) interruptedUploadIdle(modified time.Time, claims []F
 // syscall (#2117). A transfer that resumes in that gap had been idle past its
 // window; it fails and the client uploads again. Only upload paths are
 // removed here, never a blob.
-func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) error {
-	requestCtx := requestContext(requestContexts)
+func (q *Queue) reclaimInterruptedUploads(requestCtx context.Context, discoverLegacy bool) error {
 	if !q.fileCollection.TryLock() {
 		return nil
 	}
@@ -529,15 +532,29 @@ func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) er
 	requestUnlock1()
 	// Completed legacy claims can outnumber interrupted transfers. Intersect
 	// with the upload directory before taking the write fence for any of them.
-	if len(legacy) != 0 {
+	// Discover uploads whose older claim and marker have both gone once per
+	// store open. New job-input creates record their marker before making files.
+	discover := discoverLegacy && store.legacyUnclaimedUploads == nil
+	if len(legacy) != 0 || discover {
 		entries, err := os.ReadDir(filepath.Join(store.root, "uploads"))
 		if err != nil {
 			log.Printf("file retention deferred: upload inventory unavailable: %v", err)
+		} else if discover {
+			unclaimed, err := store.findLegacyUnclaimedUploads(requestCtx, entries, markers)
+			if err != nil {
+				return err
+			}
+			store.legacyUnclaimedUploads = unclaimed
 		}
 		for _, entry := range entries {
 			if hash, ok := strings.CutSuffix(entry.Name(), ".info"); ok && legacy[hash] {
 				candidates[hash] = true
 			}
+		}
+	}
+	for hash := range store.legacyUnclaimedUploads {
+		if _, marked := markers[hash]; !marked && !referenced[hash] && age.interruptedUploadIdle(time.Time{}, claims[hash]) {
+			candidates[hash] = true
 		}
 	}
 	attempted := false
@@ -577,11 +594,39 @@ func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) er
 	return nil
 }
 
+// Read only upload metadata outside the queue mutex. Positive original
+// job-input metadata is needed even for a full-length but unpublished upload.
+// Generic imports and missing or unreadable pairs have no legacy authority.
+func (s *FileStore) findLegacyUnclaimedUploads(ctx context.Context, entries []os.DirEntry, markers map[string]time.Time) (map[string]bool, error) {
+	out := map[string]bool{}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		hash, meta := strings.CutSuffix(entry.Name(), ".info")
+		if !meta || !entry.Type().IsRegular() || (FileRef{SHA256: hash}).validate() != nil {
+			continue
+		}
+		if _, marked := markers[hash]; marked {
+			continue
+		}
+		path := filepath.Join(s.root, "uploads", hash)
+		if st, err := os.Lstat(path); err == nil && st.Mode().IsRegular() {
+			payload, err := s.storedPayloadAt(ctx, "uploads", hash, st)
+			if err == nil && payload.upload && payload.jobInput {
+				out[hash] = true
+			}
+		}
+	}
+	return out, nil
+}
+
 // Disk checks and removal hold neither q.mu nor the lifecycle fence.
 func (q *Queue) reclaimInterruptedUpload(ctx context.Context, store *FileStore, hash string, age filePublicationAge, claims []FileInputClaim, marked bool) error {
 	var published time.Time
 	if st, err := os.Lstat(store.blob(FileRef{SHA256: hash})); err == nil {
 		if !marked || !st.Mode().IsRegular() {
+			delete(store.legacyUnclaimedUploads, hash)
 			return nil
 		}
 		// Recover a publish/link crash using the blob's original freshness.
@@ -605,6 +650,7 @@ func (q *Queue) reclaimInterruptedUpload(ctx context.Context, store *FileStore, 
 	if !marked {
 		upload, err := store.getUpload(ctx, hash)
 		if errors.Is(err, tus.ErrNotFound) {
+			delete(store.legacyUnclaimedUploads, hash)
 			return nil
 		}
 		if err != nil {
@@ -614,7 +660,11 @@ func (q *Queue) reclaimInterruptedUpload(ctx context.Context, store *FileStore, 
 		if err != nil {
 			return err
 		}
-		if !jobInputUpload(info, hash) || !allocatedInputClaim(claims, info.Size) {
+		if !jobInputUpload(info, hash) || info.Offset > info.Size {
+			delete(store.legacyUnclaimedUploads, hash)
+			return nil
+		}
+		if !legacyInputAllocation(claims, info.Size) {
 			return nil
 		}
 		// Persist ownership before consuming the legacy metadata. A restart
@@ -639,6 +689,7 @@ func (q *Queue) reclaimInterruptedUpload(ctx context.Context, store *FileStore, 
 	if err := store.syncDir(filepath.Dir(path)); err != nil {
 		return err
 	}
+	delete(store.legacyUnclaimedUploads, hash)
 	return q.updateRequest(ctx, func() error {
 		if published.IsZero() {
 			cutoff := age.now.Add(-age.retention)
