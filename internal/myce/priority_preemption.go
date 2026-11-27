@@ -100,12 +100,13 @@ func (q *Queue) preemptionPlacementAllows(j *Job, m *Machine) bool {
 // PriorityPreemption is planned intent, not proof of delivery or release. D5's
 // member facts still decide whether the command completed or was interrupted.
 type PriorityPreemption struct {
-	MemoryPool *MemoryPoolStop `json:"memory_pool,omitempty"`
-	DevicePool *DevicePoolStop `json:"device_pool,omitempty"`
-	Cause      string          `json:"cause"`
-	Demand     string          `json:"demand"`
-	Victim     string          `json:"victim"`
-	Policy     PriorityMatch   `json:"policy"`
+	MemorySample *memoryStopSample `json:"memory_sample,omitempty"`
+	MemoryPool   *MemoryPoolStop   `json:"memory_pool,omitempty"`
+	DevicePool   *DevicePoolStop   `json:"device_pool,omitempty"`
+	Cause        string            `json:"cause"`
+	Demand       string            `json:"demand"`
+	Victim       string            `json:"victim"`
+	Policy       PriorityMatch     `json:"policy"`
 }
 
 const defaultPreemptionGrace = 10 * time.Second

@@ -159,6 +159,9 @@ func reconcilePCI(pci []pciAccelerator, runtime []MachineDevice) (map[string]pci
 func normalizePCIAddress(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	parts := strings.Split(s, ":")
+	if len(parts) == 2 {
+		parts = append([]string{"0000"}, parts...)
+	}
 	if len(parts) == 3 {
 		if domain, e := strconv.ParseUint(parts[0], 16, 32); e == nil {
 			return fmt.Sprintf("%04x:%s:%s", domain, parts[1], parts[2])

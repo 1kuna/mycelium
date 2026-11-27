@@ -345,6 +345,7 @@ type observationState struct {
 // Capture it by value alongside the public inputs, then restore only into the
 // detached machines. Probe facts and runtime preparation/secrets are worker-only.
 type observationMachineLedger struct {
+	memoryShadow             *MemoryShadowReport
 	healthDelivery           *hostHealthDelivery
 	toolInventory            *toolInventory
 	cpuLedger                bool
@@ -585,6 +586,7 @@ func (q *Queue) captureObservationInputs(id string, options *statusOptions, borr
 	for key, m := range s.Machines {
 		machineLedgers[key] = observationMachineLedger{healthDelivery: q.freezeHostHealthDelivery(m),
 			toolInventory: m.toolInventory, cpuLedger: m.cpuLedger, cpuCapacityBeforeControl: m.cpuCapacityBeforeControl,
+			memoryShadow:           m.MemoryShadow,
 			modelReservationDebtGB: m.modelReservationDebtGB, hostReservationDebtGB: m.hostReservationDebtGB,
 		}
 	}
@@ -694,6 +696,7 @@ func (q *Queue) captureObservationInputs(id string, options *statusOptions, borr
 		}
 		m.cpuLedger = ledger.cpuLedger
 		m.cpuCapacityBeforeControl = ledger.cpuCapacityBeforeControl
+		m.MemoryShadow = ledger.memoryShadow
 		m.modelReservationDebtGB, m.hostReservationDebtGB = ledger.modelReservationDebtGB, ledger.hostReservationDebtGB
 	}
 	for key := range gatherWait {

@@ -267,7 +267,9 @@ func (w Worker) observeProcessMemoryWith(groups func() []int, sink attemptMemory
 		if err != nil || members == 0 {
 			growth = processMemoryGrowth{}
 			if attempt != nil {
-				attempt.shadowMemory.observe(clock.Now(), nil, nil, processMemorySamplePeriod)
+				if enforce {
+					attempt.shadowMemory.observe(clock.Now(), nil, nil, processMemorySamplePeriod)
+				}
 				attempt.rssMemory.Store(nil)
 			}
 			if sink != nil && enforce {
@@ -316,6 +318,9 @@ func (w Worker) observeProcessMemoryWith(groups func() []int, sink attemptMemory
 			cancel()
 			<-done
 			sample(false)
+			if attempt != nil {
+				peak = attempt.shadowMemory.finishPeak(peak, clock.Now(), processMemorySamplePeriod)
+			}
 		})
 		return peak
 	}
@@ -371,9 +376,12 @@ func (w Worker) observeAttemptMemoryWith(a *memoryAttempt, j Job, groups func() 
 	if len(attempts) != 0 && attempts[0] != nil {
 		shadow = &attempts[0].shadowMemory
 		shadow.platform = shadowPlatform(w, j, true)
-		immediateRAM, immediateCard = w.immediateRAMStop(j), w.immediateCardStop()
+		immediateRAM, immediateCard = w.immediateRAMStop(j), w.immediateCardStop(j)
 	}
 	peak := a.peak()
+	if shadow != nil && peak != nil {
+		shadow.observe(clock.Now(), peak.HostGB, a.device.Load(), attemptMemorySamplePeriod)
+	}
 	hostDone := make(chan struct{})
 	go func() {
 		defer close(hostDone)
@@ -430,6 +438,9 @@ func (w Worker) observeAttemptMemoryWith(a *memoryAttempt, j Job, groups func() 
 				case <-deadline.C:
 					peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryTimeout})
 				}
+			}
+			if shadow != nil {
+				peak = shadow.finishPeak(peak, clock.Now(), attemptMemorySamplePeriod)
 			}
 		})
 		return peak
@@ -529,6 +540,8 @@ func cudaAttemptMemoryReading(b []byte, selector string, ids map[int]bool, resid
 
 func drmAttemptMemory(b []byte, pci string) (string, float64, float64, error) {
 	client, pdev := "", ""
+	pci = normalizePCIAddress(pci)
+	var invalid bool
 	var total float64
 	host := -1.0
 	found := false
@@ -550,16 +563,18 @@ func drmAttemptMemory(b []byte, pci string) (string, float64, float64, error) {
 		default:
 			if strings.HasPrefix(key, "drm-resident-vram") {
 				gb, ok := drmMemoryGB(val)
-				if !ok {
-					return "", 0, 0, errAttemptMemoryUnsupported
-				}
+				invalid = invalid || !ok
 				total += gb
 				found = true
 			}
 		}
 	}
-	if !found || client == "" || normalizePCIAddress(pdev) != normalizePCIAddress(pci) {
+	pdev = normalizePCIAddress(pdev)
+	if !found || client == "" || pci == "" || pdev != pci {
 		return "", 0, 0, errAttemptMemoryPending
+	}
+	if invalid {
+		return "", 0, 0, errAttemptMemoryUnsupported
 	}
 	return pdev + "/" + client, total, host, nil
 }
@@ -572,10 +587,13 @@ func drmMemoryGB(value string) (float64, bool) {
 	scale := float64(1)
 	if len(fields) == 2 {
 		switch fields[1] {
+		case "B", "bytes":
 		case "KiB":
 			scale = 1 << 10
 		case "MiB":
 			scale = 1 << 20
+		case "GiB":
+			scale = 1 << 30
 		default:
 			return 0, false
 		}
@@ -668,6 +686,7 @@ func (w Worker) observeDeviceMemoryWith(ctx context.Context, inventory func() (m
 				}
 				if errors.Is(err, errDeviceMemoryNotReported) {
 					unreported = true
+					sampling.incomplete = true
 					report(&AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNotReported})
 					continue
 				}

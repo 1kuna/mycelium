@@ -122,6 +122,17 @@ func (e *memoryEvidence) prepareWrite(batch *queueWriteBatch) error {
 		return nil
 	}
 	for row, value := range e.writes {
+		if row.kind == "projection" {
+			// The adjacent reader skips projection rows. Keep R5's pool holds
+			// through rollback without extending its closed evidence kinds.
+			data, err := json.Marshal(value)
+			if err != nil {
+				return err
+			}
+			batch.add(`INSERT INTO memory_evidence(kind,key,data) VALUES('projection',?,?)
+				ON CONFLICT(kind,key) DO UPDATE SET data=excluded.data`, ownersRowPrefix+row.key.Family+"/"+row.key.Pool, data)
+			continue
+		}
 		var key any = row.key
 		if row.kind == "ratio" {
 			key = row.ratio
@@ -171,10 +182,7 @@ func (w queueSQLiteWriter) loadMemoryEvidence(s state) (*memoryEvidence, error) 
 		if err := evidence.readGPUSharing(db); err != nil {
 			return nil, err
 		}
-		if w.shared != nil {
-			return w.repairMemoryEvidence(evidence, s)
-		}
-		return repairMemoryEvidence(db, evidence, s)
+		return evidence, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
@@ -223,7 +231,7 @@ func readMemoryEvidence(db *sql.DB) (*memoryEvidence, error) {
 		return nil, err
 	}
 	e := newMemoryEvidence()
-	rows, err := db.Query(`SELECT kind,key,data FROM memory_evidence WHERE kind!='projection'`)
+	rows, err := db.Query(`SELECT kind,key,data FROM memory_evidence WHERE kind!='projection' OR key LIKE 'owners-v2/%'`)
 	if err != nil {
 		return nil, err
 	}
@@ -242,6 +250,13 @@ func readMemoryEvidence(db *sql.DB) (*memoryEvidence, error) {
 }
 
 func (e *memoryEvidence) readMemoryEvidenceRow(kind, key string, data []byte) error {
+	if kind == "projection" {
+		host, pool, ok := strings.Cut(strings.TrimPrefix(key, ownersRowPrefix), "/")
+		if !ok {
+			return errors.New("invalid owners hold key")
+		}
+		return decodeQueueRecord(e.owners, memoryEvidenceKey{Family: host, Pool: pool}, data)
+	}
 	if kind == "feedback" {
 		return json.Unmarshal(data, &e.feedback)
 	}

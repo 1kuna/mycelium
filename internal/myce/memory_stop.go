@@ -78,7 +78,10 @@ func (q *Queue) stopShortMemoryPool(m *Machine, received time.Time, period time.
 		if jobClass(j.Spec) == "production" && production < 2 {
 			continue
 		}
-		stop := PriorityPreemption{Demand: "host/" + host}
+		stop := PriorityPreemption{Demand: "host/" + host, MemorySample: &memoryStopSample{
+			ExpectedGB: a.ExpectedGB, PeakGB: max(a.HighWaterGB, *a.FootprintGB),
+			OwnersGB: pool.OwnersGB, OwnersPeakGB: max(pool.OwnersGB, pool.OwnersForecastGB),
+		}}
 		free := 0.0
 		if pool.FreeGB != nil {
 			free = *pool.FreeGB

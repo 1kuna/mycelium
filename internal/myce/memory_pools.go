@@ -20,6 +20,10 @@ type MemoryPools struct {
 	LimitGB float64             `json:"limit_gb,omitempty"`
 }
 
+func (p MemoryPools) capacityWait() bool {
+	return p.RAM.CapacityWait || p.Card != nil && p.Card.CapacityWait
+}
+
 func pooledMemory(j *Job) bool {
 	return j.Memory != nil || j.MemoryEnvelope != nil && j.MemoryEnvelope.Basis == pooledMemoryCapability
 }
@@ -180,55 +184,72 @@ func (q *Queue) resolvePooledSize(j *Job, m *Machine) pooledCandidateSize {
 	if !n.cpuOnly() && m.UnifiedMemory {
 		hostHint += deviceHint
 	}
-	evidence := q.memoryEvidence
-	if evidence == nil {
-		evidence = &memoryEvidence{}
-	}
-	confidence := evidence.confidence()
-	pools := MemoryPools{RAM: evidence.estimate(key, hostHint, confidence), KeepGB: q.pooledKeep(m)}
-	if !n.cpuOnly() && pools.RAM.Alone {
-		// A cold accelerator job shares RAM. Missing device evidence can
-		// require a discrete card to itself, but never the entire host.
-		if pools.RAM.TypicalGB == 0 {
-			cpu := memoryEvidenceKey{Platform: memoryPlatform(ExecutionTarget{OS: machineTarget(m).OS, Platform: "cpu"}, false), Pool: "ram"}
-			prior := evidence.first[key.platformKey()]
-			if len(prior) == 0 {
-				prior = evidence.first[cpu]
-			}
-			if len(prior) > 0 {
-				pools.RAM = memoryPoolEstimate{TypicalGB: memoryMedian(prior), ChargeGB: slices.Max(prior),
-					Evidence: memoryEstimateEvidence{Level: "platform", Runs: len(prior)}}
-			}
-		}
-		pools.RAM.Alone = false
-		pools.RAM.TypicalGB = max(pools.RAM.TypicalGB, minimumHostMemoryGB)
-		pools.RAM.ChargeGB = max(pools.RAM.ChargeGB, pools.RAM.TypicalGB)
-	}
-	if pressureStoppedBefore(j, j.Attempt+1) {
-		pools.RAM.Alone = true // The charge itself is unchanged (#2091).
+	evidence := q.currentMemoryEvidence()
+	ramReach, _, ramKnown := q.memoryReach(m, "ram")
+	pools := MemoryPools{KeepGB: q.pooledKeep(m)}
+	learn := m.MemoryShadow != nil && m.MemoryShadow.stopForecast
+	if learn && learnsExpectedRAM(key) {
+		reach, known := q.raiseReach(j, m, key, ramReach, ramKnown)
+		pools.RAM = evidence.expected(key, hostHint, reach, known)
+		pools.RAM.Alone = legacyPoolPressureRetry(j, m)
+	} else {
+		pools.RAM = q.legacyRAMSize(j, m, evidence, key, hostHint)
 	}
 	if j.Spec.MemoryLimitGB != nil {
 		pools.LimitGB = *j.Spec.MemoryLimitGB
-		pools.RAM.TypicalGB = min(pools.RAM.TypicalGB, pools.LimitGB)
-		pools.RAM.ChargeGB = min(pools.RAM.ChargeGB, pools.LimitGB)
+		if !pools.RAM.Learned || n.cpuOnly() && strings.HasPrefix(key.Platform, "linux/") {
+			pools.RAM.TypicalGB = min(pools.RAM.TypicalGB, pools.LimitGB)
+			pools.RAM.ChargeGB = min(pools.RAM.ChargeGB, pools.LimitGB)
+		}
 	}
 	if gb := j.HostMemoryOverrideGB; gb > 0 {
-		// An owner resize fixes both the reservation and the hard ceiling.
-		// Card sizing still uses its independent evidence on discrete hosts.
 		pools.LimitGB = gb
-		pools.RAM = memoryPoolEstimate{TypicalGB: gb, ChargeGB: gb}
-	} else {
-		fitPoolCharge(&pools.RAM, q.poolAllowance(m), evidence.exact[key].Lower)
+		pools.RAM = memoryPoolEstimate{TypicalGB: gb, ChargeGB: gb, Learned: pools.RAM.Learned}
 	}
+	pools.RAM.capacityAt(ramReach, ramKnown)
 	size := pooledCandidateSize{pools: pools}
 	if !n.cpuOnly() && !m.UnifiedMemory {
 		key.Pool = "card"
 		count := max(1, len(m.groupMembers))
-		card := evidence.estimate(key, deviceHint/float64(count), confidence)
-		fitPoolCharge(&card, m.TotalMemoryGB/float64(count), evidence.exact[key].Lower)
+		reach, known := q.cardMemoryReach(m)
+		var card memoryPoolEstimate
+		switch {
+		case !learn || count > 1:
+			card = evidence.estimate(key, deviceHint/float64(count), evidence.confidence())
+			fitPoolCharge(&card, m.TotalMemoryGB/float64(count), evidence.exact[key].Lower)
+		case !learnsExpectedCard(m):
+			card = memoryPoolEstimate{TypicalGB: reach, ChargeGB: reach, Alone: true,
+				Evidence: memoryEstimateEvidence{Level: "unknown"}}
+		default:
+			raiseReach, raiseKnown := q.raiseReach(j, m, key, reach, known)
+			card = evidence.expected(key, 0, raiseReach, raiseKnown)
+		}
+		card.capacityAt(reach, known)
 		size.card, size.cardGB, size.hasCard = card, card.ChargeGB*float64(count), true
 	}
 	return size
+}
+
+// Unified CUDA keeps its current sizing path while attribution probe 0b-1
+// is outstanding. This is also the source of its old retry floor.
+func (q *Queue) legacyRAMSize(j *Job, m *Machine, e *memoryEvidence, key memoryEvidenceKey, hint float64) memoryPoolEstimate {
+	p := e.estimate(key, hint, e.confidence())
+	if !j.Spec.Needs.cpuOnly() && p.Alone {
+		prior := e.first[key.platformKey()]
+		if len(prior) == 0 {
+			prior = e.first[memoryEvidenceKey{Platform: memoryPlatform(ExecutionTarget{OS: machineTarget(m).OS, Platform: "cpu"}, false), Pool: "ram"}]
+		}
+		if p.TypicalGB == 0 && len(prior) > 0 {
+			p = memoryPoolEstimate{TypicalGB: memoryMedian(prior), ChargeGB: slices.Max(prior),
+				Evidence: memoryEstimateEvidence{Level: "platform", Runs: len(prior)}}
+		}
+		p.Alone = false
+		p.TypicalGB = max(p.TypicalGB, minimumHostMemoryGB)
+		p.ChargeGB = max(p.ChargeGB, p.TypicalGB)
+	}
+	p.Alone = p.Alone || pressureStoppedBefore(j, j.Attempt+1)
+	fitPoolCharge(&p, q.poolAllowance(m), e.exact[key].Lower)
+	return p
 }
 
 func (q *Queue) applyPooledSize(j *Job, m *Machine, size pooledCandidateSize) *Job {
@@ -396,12 +417,23 @@ func (q *Queue) poolBackfillFits(j *Job, m *Machine, head *hostBackfillDemand) b
 func (q *Queue) poolCapacityFailure(j *Job, m *Machine) string {
 	pools := memoryPools(j)
 	allowance := q.poolAllowance(m)
-	if (allowance > 0 || m.HostMemoryBudgetMeasured) && j.Spec.Needs.HostMemoryGB > allowance {
+	if pools.RAM.Learned {
+		if reach, owners, known := q.memoryReach(m, "ram"); known &&
+			(pools.RAM.ChargeGB > reach || pools.RAM.RetryFloorGB > 0 && pools.RAM.RetryFloorGB >= reach) {
+			return memoryCapacityReason("RAM", pools.RAM, reach, owners)
+		}
+	} else if (allowance > 0 || m.HostMemoryBudgetMeasured) && j.Spec.Needs.HostMemoryGB > allowance {
 		return fmt.Sprintf("RAM needs %.3f GiB (typical %.3f GiB); host allowance %.3f GiB", j.Spec.Needs.HostMemoryGB, pools.RAM.TypicalGB, allowance)
 	}
-	if pools.Card != nil && m.TotalMemoryGB > 0 && j.Spec.Needs.MemoryGB > m.TotalMemoryGB {
-		count := float64(max(1, len(m.groupMembers)))
-		return fmt.Sprintf("card needs %.3f GiB (typical %.3f GiB); card allowance %.3f GiB", pools.Card.ChargeGB, pools.Card.TypicalGB, m.TotalMemoryGB/count)
+	if p := pools.Card; p != nil {
+		reach, known := q.cardMemoryReach(m)
+		if p.Learned && known && (p.ChargeGB > reach || p.RetryFloorGB > 0 && p.RetryFloorGB >= reach) {
+			_, owners := q.ownersMemory(m, "card/"+m.Device)
+			return memoryCapacityReason("card", *p, reach, owners)
+		}
+		if m.TotalMemoryGB > 0 && j.Spec.Needs.MemoryGB > m.TotalMemoryGB {
+			return fmt.Sprintf("card needs %.3f GiB; card allowance %.3f GiB", p.ChargeGB, reach)
+		}
 	}
 	return ""
 }
@@ -534,7 +566,7 @@ func retainPoolPeaks(j *Job, host, device float64) {
 	j.Memory = &p
 }
 
-func (q *Queue) recordPoolEvidence(j *Job, r Result) {
+func (q *Queue) recordLegacyPoolEvidence(j *Job, r Result) {
 	pressure := j.Reason == memoryPressureCause || r.ExecutionCause != nil && r.ExecutionCause.Class == memoryPressureCause
 	if q.memoryEvidence == nil || r.ReleaseOnly || r.MemoryPeak == nil || j.StartedAt == nil || !r.Success && !r.OutOfMemory && !pressure {
 		return
@@ -560,6 +592,9 @@ func (q *Queue) recordPoolEvidence(j *Job, r Result) {
 	}
 	evidence := q.stagedMemoryEvidence()
 	for _, point := range points {
+		if point.Key.Pool == "card" && m.MemoryShadow != nil && m.MemoryShadow.stopForecast {
+			continue
+		}
 		if pooledMemory(j) {
 			pools := memoryPools(j)
 			estimate := pools.RAM
@@ -592,7 +627,7 @@ func pooledSampleLimited(p *AttemptMemoryPeak) bool {
 	return memoryValue(p.SwapGB) > 0 || p.Pressure != nil && p.Pressure.CgroupSwapOutPages > 0 || e != nil && (e.Max > 0 || e.OOM > 0 || e.OOMKill > 0 || e.OOMGroupKill > 0)
 }
 
-func (q *Queue) requeueMemoryPressure(j *Job) {
+func (q *Queue) requeueLegacyMemoryPressure(j *Job) {
 	if q.holdAlonePressure(j) {
 		return
 	}

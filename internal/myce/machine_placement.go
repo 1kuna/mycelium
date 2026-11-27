@@ -61,7 +61,8 @@ func (q *Queue) machineTargets(m *Machine) []*Machine {
 			}
 		}
 		target.modelReservationDebtGB = max(0, reserved-d.BudgetGB)
-		target.FreeMemoryGB = min(target.FreeMemoryGB, max(0, d.BudgetGB-reserved))
+		hold, _ := q.ownersMemory(m, "card/"+d.ID)
+		target.FreeMemoryGB = max(0, min(target.FreeMemoryGB, max(0, d.BudgetGB-reserved))-hold)
 		out = append(out, &target)
 	}
 	slices.SortFunc(out, func(a, b *Machine) int { return strings.Compare(a.Device, b.Device) })
