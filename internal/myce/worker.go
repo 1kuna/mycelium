@@ -1381,6 +1381,9 @@ func (w Worker) replayWithProgress(ctx context.Context, s *workerStore, acknowle
 	// Persist each chunk boundary before upload, so lost acknowledgements
 	// replay identical bytes at the same offset even if the output grows.
 	limit := info.Size()
+	if s.state.Offset >= limit {
+		return nil
+	}
 	buf := make([]byte, logReplayBatchSize)
 	batchRecords, legacy := logReplayBatchRecords, false
 	for s.state.Offset < limit {

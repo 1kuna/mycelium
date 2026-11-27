@@ -594,3 +594,15 @@ func TestMemoryPoolOverrunWithoutShortage(t *testing.T) {
 	growthCheck(t, q, m, []*Job{run}, []float64{50}, 0)
 	requireState(t, q, run.ID, "running")
 }
+
+func BenchmarkPooledEvidenceKeyPlain(b *testing.B) {
+	j := &Job{Spec: cpuSpec(2, 0)}
+	j.Spec.Project, j.Spec.Name = "fixture", "command"
+	j.Spec.Run.Command = []string{"echo", "fixture"}
+	j.Spec.Args = []string{"item"}
+	m := machine("worker", "cpu")
+	b.ReportAllocs()
+	for b.Loop() {
+		pooledEvidenceKey(j, &m)
+	}
+}

@@ -127,6 +127,10 @@ func LocalExtensions(root string) ([]Extension, error) {
 // Worker reports keep evidence for independently validated registrations even
 // when a different version in the local cache fails to load.
 func readLocalExtensions(root string, keepValid bool) ([]Extension, error) {
+	return readLocalExtensionsWith(root, keepValid, ReadExtension)
+}
+
+func readLocalExtensionsWith(root string, keepValid bool, read func(string) (Extension, error)) ([]Extension, error) {
 	out := []Extension{}
 	var firstErr error
 	names, err := os.ReadDir(filepath.Join(root, "library"))
@@ -152,7 +156,7 @@ func readLocalExtensions(root string, keepValid bool) ([]Extension, error) {
 			if !v.IsDir() || strings.HasPrefix(v.Name(), ".") {
 				continue
 			}
-			e, err := ReadExtension(filepath.Join(root, "library", n.Name(), v.Name()))
+			e, err := read(filepath.Join(root, "library", n.Name(), v.Name()))
 			if err == nil && (e.Name != n.Name() || e.Version != v.Name()) {
 				err = errors.New("extension folder identity mismatch")
 			}
@@ -311,12 +315,64 @@ func LocalExtensionReports(root, platform, fingerprint string, machines ...*Mach
 	return localExtensionReports(root, platform, fingerprint, extensions, err, machines...)
 }
 
-func collectWorkerExtensionReports(root string, now time.Time, retention time.Duration, m *Machine) {
-	extensions, err := readLocalExtensions(root, true)
+type extensionReportRegistration struct {
+	extension Extension
+	signature string
+	bytes     int64
+}
+
+type extensionReportLibrary map[string]extensionReportRegistration
+
+// Reuse validated report metadata only while every entry in the registration
+// tree has the same inode, change time, size and mode. A full read still
+// applies on changes and on filesystems without the required file metadata.
+func (library *extensionReportLibrary) read(root string) ([]Extension, error) {
+	next := extensionReportLibrary{}
+	extensions, err := readLocalExtensionsWith(root, true, func(folder string) (Extension, error) {
+		signature, signatureErr := sharedSignature(folder)
+		if cached, ok := (*library)[folder]; ok && signatureErr == nil && signature == cached.signature {
+			limit, err := extensionByteLimit()
+			if err != nil {
+				return Extension{}, err
+			}
+			if cached.bytes > int64(limit) {
+				return Extension{}, budgetRefusal(int64(limit))
+			}
+			next[folder] = cached
+			return cached.extension, nil
+		}
+		e, err := ReadExtension(folder)
+		if err != nil {
+			return Extension{}, err
+		}
+		var size int64
+		for _, payload := range e.Files {
+			size += int64(len(payload))
+		}
+		e.Files = nil // Reports use the parsed declaration and digest.
+		if signatureErr == nil {
+			if after, err := sharedSignature(folder); err == nil && after == signature {
+				next[folder] = extensionReportRegistration{extension: e, signature: signature, bytes: size}
+			}
+		}
+		return e, nil
+	})
+	*library = next
+	return extensions, err
+}
+
+func collectWorkerExtensionReports(root string, now time.Time, retention time.Duration, m *Machine, library *extensionReportLibrary) {
+	extensions, err := library.read(root)
 	if err == nil {
 		removed := pruneUnusedExtensions(root, now, retention, extensions)
 		if len(removed) > 0 {
-			extensions = slices.DeleteFunc(extensions, func(e Extension) bool { return slices.Contains(removed, extensionKey(e)) })
+			extensions = slices.DeleteFunc(extensions, func(e Extension) bool {
+				if !slices.Contains(removed, extensionKey(e)) {
+					return false
+				}
+				delete(*library, extensionFolder(root, e))
+				return true
+			})
 		}
 	}
 	cpu := *m

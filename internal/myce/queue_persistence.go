@@ -498,6 +498,24 @@ func fieldPrefix(key string) string {
 	return "fields/" + base64.RawURLEncoding.EncodeToString([]byte(key)) + "/"
 }
 func persistenceFields(data []byte, pageBytes int) (map[string]json.RawMessage, error) {
+	// The queue's record codec puts the reference table first. It can be
+	// many pages of immutable history. Borrow that value from the already
+	// encoded record instead of decoding and copying it into a RawMessage.
+	if bytes.HasPrefix(data, jobRecordRefsPrefix) {
+		start := len(jobRecordRefsPrefix) - 1
+		end, ok := skipJSONValue(data, start)
+		if ok && data[end] == ',' && end-start > pageBytes {
+			body := make([]byte, 1, len(data)-end)
+			body[0] = '{'
+			body = append(body, data[end+1:]...)
+			fields, err := persistenceFields(body, pageBytes)
+			if err != nil {
+				return nil, err
+			}
+			fields[base64.RawURLEncoding.EncodeToString([]byte("$refs"))] = data[start:end]
+			return fields, nil
+		}
+	}
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal(data, &object); err != nil {
 		return nil, err

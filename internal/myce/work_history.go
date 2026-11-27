@@ -195,10 +195,18 @@ func profileMemoryWork(s Spec) bool {
 }
 
 func profileMemoryIdentity(j *Job) string {
+	return profileMemoryIdentityForConfiguration(j, "")
+}
+
+func profileMemoryIdentityForConfiguration(j *Job, configuration string) string {
 	if j.planningMemoryIdentity != "" {
 		return j.planningMemoryIdentity
 	}
-	base := plainMemoryIdentity(j)
+	if configuration == "" {
+		s := j.Spec
+		configuration = memoryConfiguration(s.Needs, s.Args, s.Program)
+	}
+	base := plainMemoryIdentity(j, configuration)
 	if !j.Spec.warmPieces() {
 		return base
 	}
@@ -212,14 +220,14 @@ func profileMemoryIdentity(j *Job) string {
 	}{base, j.Spec.FanOut.Pieces, j.Spec.Files, j.Spec.ModelSnapshots})
 }
 
-func plainMemoryIdentity(j *Job) string {
+func plainMemoryIdentity(j *Job, configuration string) string {
 	s := j.Spec
 	if s.ProfileMemory != "" {
 		return "profile:" + identityHash(struct {
 			Project, Name, Configuration, Profile string
 			Environment                           Environment
 			Recipes                               map[string]EnvironmentRecipe
-		}{s.Project, s.Name, memoryConfiguration(s.Needs, s.Args, s.Program), s.ProfileMemory, s.Environment, j.EnvironmentRecipes})
+		}{s.Project, s.Name, configuration, s.ProfileMemory, s.Environment, j.EnvironmentRecipes})
 	}
 	inputs := FileManifest{}
 	for name, ref := range s.Files {
@@ -233,7 +241,7 @@ func plainMemoryIdentity(j *Job) string {
 		Environment                  Environment
 		Recipes                      map[string]EnvironmentRecipe
 		Inputs                       FileManifest
-	}{s.Project, s.Name, memoryConfiguration(s.Needs, s.Args, s.Program), s.Run, s.Environment, j.EnvironmentRecipes, inputs})
+	}{s.Project, s.Name, configuration, s.Run, s.Environment, j.EnvironmentRecipes, inputs})
 }
 
 func referenceObservationKey(e Extension, m *Machine, ref WorkReference, work string, needs ResourceNeeds, args []string, program *Program, component, hardware string) (*ObservationKey, string) {

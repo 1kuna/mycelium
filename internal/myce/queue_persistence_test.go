@@ -356,3 +356,48 @@ func TestQueuePersistenceRetiredFormatsRefused(t *testing.T) {
 		})
 	}
 }
+
+func TestQueuePersistenceSplitDiagnosticMatchesGeneralSplitter(t *testing.T) {
+	page := 4096
+	refs, err := json.Marshal([]any{strings.Repeat(`"\],{`, page), map[string]any{"x": []int{1, 2}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := append([]byte(`{"$refs":`), refs...)
+	data = append(data, []byte(`,"id":"fixture","admission_wait":{"capture_gaps":1}}`)...)
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil {
+		t.Fatal(err)
+	}
+	want, err := splitPersistenceFields(object, page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := persistenceFields(data, page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatal("optimized field split differs from the storage format")
+	}
+}
+
+func BenchmarkQueuePersistenceSplitDiagnostic(b *testing.B) {
+	page := 4096
+	history := make([]uint64, 120000)
+	for i := range history {
+		history[i] = uint64(i)
+	}
+	data, err := json.Marshal(map[string]any{"$refs": []any{history}, "id": "fixture", "admission_wait": map[string]any{"capture_gaps": 1}})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.SetBytes(int64(len(data)))
+	for b.Loop() {
+		fields, err := persistenceFields(data, page)
+		if err != nil || len(fields) != 2 {
+			b.Fatalf("split: %d fields, %v", len(fields), err)
+		}
+	}
+}

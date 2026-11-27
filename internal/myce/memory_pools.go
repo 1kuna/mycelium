@@ -130,7 +130,7 @@ func pooledEvidenceKeyForExtension(j *Job, m *Machine, extension *Extension) mem
 		key.Work = evidenceWork(j.Spec)
 		key.Check = j.Spec.ExtensionCheck != nil
 	} else {
-		key.Work = profileMemoryIdentity(j)
+		key.Work = profileMemoryIdentityForConfiguration(j, configuration)
 	}
 	if len(m.groupMembers) > 1 || len(j.AllocatedDevices) > 1 {
 		key.Concurrency = max(len(m.groupMembers), len(j.AllocatedDevices))
