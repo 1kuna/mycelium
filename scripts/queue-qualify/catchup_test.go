@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -15,7 +16,7 @@ import (
 func TestSnapshotIsWriteOnlyAndCopyHashesAndProjects(t *testing.T) {
 	share, local := t.TempDir(), t.TempDir()
 	os.WriteFile(filepath.Join(share, "snapshot.bin"), []byte("someone else's"), 0o644)
-	made, err := createSnapshot(context.Background(), share, 8<<20, 0)
+	made, err := createSnapshot(context.Background(), share, 8<<20, 0, plentyFree)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +27,7 @@ func TestSnapshotIsWriteOnlyAndCopyHashesAndProjects(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(share, "snapshot.bin")); string(b) != "someone else's" {
 		t.Fatal("snapshot creation touched a file outside its run directory")
 	}
-	again, err := createSnapshot(context.Background(), share, 8<<20, 0)
+	again, err := createSnapshot(context.Background(), share, 8<<20, 0, plentyFree)
 	if err != nil || again.path == made.path {
 		t.Fatalf("a second snapshot must get its own directory: %v", err)
 	}
@@ -50,6 +51,16 @@ func TestSnapshotIsWriteOnlyAndCopyHashesAndProjects(t *testing.T) {
 	}
 	if err := requireLocalDisk(local); err != nil {
 		t.Fatalf("a temporary directory is a local disk: %v", err)
+	}
+}
+
+func TestSnapshotRefusesBelowProportionalFloor(t *testing.T) {
+	free := func(string) (uint64, uint64, error) {
+		return 90 << 20, 1000 << 20, nil
+	}
+	_, err := createSnapshot(context.Background(), t.TempDir(), 8<<20, 0, free)
+	if err == nil || !strings.Contains(err.Error(), "floor") {
+		t.Fatalf("snapshot creation did not enforce the proportional floor: %v", err)
 	}
 }
 

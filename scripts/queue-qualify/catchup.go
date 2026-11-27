@@ -108,7 +108,7 @@ func cmdCatchup(ctx context.Context, args []string, out io.Writer) error {
 		if err != nil || size <= 0 {
 			return errors.New("--create-in needs a positive --create-bytes")
 		}
-		made, err := createSnapshot(ctx, *createIn, size, shareFloor)
+		made, err := createSnapshot(ctx, *createIn, size, shareFloor, statfsFree)
 		if made != nil {
 			fmt.Fprintln(out, made.leftover())
 		}
@@ -151,9 +151,9 @@ func cmdCatchup(ctx context.Context, args []string, out io.Writer) error {
 // with every bound the load generator has: the byte cap, the free-space
 // floor watched during the write, and a bounded stop. It never deletes; a
 // partial snapshot stays for the storage owner.
-func createSnapshot(ctx context.Context, parent string, size, floor int64) (*loadResults, error) {
+func createSnapshot(ctx context.Context, parent string, size, floor int64, free func(string) (uint64, uint64, error)) (*loadResults, error) {
 	res, err := runLoad(ctx, loadOptions{dir: parent, kind: "snapshot", oneFile: snapshotFile, maxBytes: size,
-		minFree: floor, minFreePct: 10, duration: maxLoadRuntime, writers: 1, free: statfsFree, create: createExclusive})
+		minFree: floor, minFreePct: 10, duration: maxLoadRuntime, writers: 1, free: free, create: createExclusive})
 	if err != nil {
 		return res, err
 	}
