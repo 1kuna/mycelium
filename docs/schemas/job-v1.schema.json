@@ -950,6 +950,9 @@
         "priority_stop": {
           "$ref": "#/$defs/PriorityPreemption"
         },
+        "publication_timings": {
+          "$ref": "#/$defs/PublicationTimings"
+        },
         "reason": {
           "type": "string"
         },
@@ -4042,6 +4045,10 @@
           "type": "integer",
           "x-contract": "diagnostic"
         },
+        "publication_timings": {
+          "$ref": "#/$defs/PublicationTimings",
+          "x-contract": "diagnostic"
+        },
         "queue_order": {
           "type": "integer",
           "x-contract": "diagnostic"
@@ -5915,6 +5922,26 @@
       "required": [
         "type",
         "file"
+      ],
+      "type": "object"
+    },
+    "PublicationTimings": {
+      "properties": {
+        "completion_queue_seconds": {
+          "type": "number"
+        },
+        "release_to_accept_seconds": {
+          "type": "number"
+        },
+        "verification_seconds": {
+          "type": "number"
+        },
+        "worker": {
+          "$ref": "#/$defs/workerPublicationTimings"
+        }
+      },
+      "required": [
+        "completion_queue_seconds"
       ],
       "type": "object"
     },
@@ -7795,6 +7822,44 @@
     },
     "retiredField": {
       "properties": {},
+      "type": "object"
+    },
+    "workerPublicationTimings": {
+      "properties": {
+        "manifest_seconds": {
+          "type": "number"
+        },
+        "published_bytes": {
+          "type": "integer"
+        },
+        "result_ready_to_release_ack_seconds": {
+          "type": "number"
+        },
+        "upload_create_seconds": {
+          "type": "number"
+        },
+        "upload_creates": {
+          "type": "integer"
+        },
+        "upload_patch_seconds": {
+          "type": "number"
+        },
+        "upload_patches": {
+          "type": "integer"
+        },
+        "upload_window_seconds": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "manifest_seconds",
+        "upload_create_seconds",
+        "upload_patch_seconds",
+        "upload_window_seconds",
+        "upload_creates",
+        "upload_patches",
+        "published_bytes"
+      ],
       "type": "object"
     }
   },
