@@ -48,14 +48,17 @@ func pressureStoppedBefore(j *Job, attempt int) bool {
 	return false
 }
 
-// R5 needs an attributed stop comparison. Keep exclusive-retry custody on
-// pools whose stop or counting rule still awaits qualification.
+// Keep exclusive-retry custody for legacy XPU card stops and RAM pools
+// where the attempt stop forecast is unavailable.
 func legacyPoolPressureRetry(j *Job, m *Machine) bool {
 	for _, h := range j.AttemptHistory {
 		stop := h.PriorityStop
-		if stop != nil && stop.Cause == memoryPressureCause &&
-			(stop.DevicePool != nil && !learnsExpectedCard(m) ||
-				stop.MemoryPool != nil && !usesAttemptStopForecast(m, "ram")) {
+		if stop == nil || stop.Cause != memoryPressureCause {
+			continue
+		}
+		legacyXPUCard := stop.DevicePool != nil && m.GPU == "xpu" &&
+			(stop.MemorySample == nil || len(m.groupMembers) > 1)
+		if legacyXPUCard || stop.MemoryPool != nil && !usesAttemptStopForecast(m, "ram") {
 			return true
 		}
 	}

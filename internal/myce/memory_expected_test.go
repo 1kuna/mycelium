@@ -398,26 +398,60 @@ func TestMemoryExpectedFirstRunFallbacks(t *testing.T) {
 	}
 }
 
-func TestMemoryExpectedRetainsXPUProbeGate(t *testing.T) {
-	q, _ := fixture(t)
+func TestMemoryExpectedXPUCardSharing(t *testing.T) {
+	q, clock := fixture(t)
+	const budget, peak = 30.046, 9.506
 	m := sharedDiscreteMachine("xpu")
-	d := m.Devices[0]
-	m.MemoryShadow = &MemoryShadowReport{stopForecast: true}
-	target := d.machine(m)
-	s := sharedSpec("experiment", d.BudgetGB)
-	j := &Job{Spec: s}
-	key := pooledEvidenceKey(j, &target)
-	key.Pool = "card"
-	q.memoryEvidence.observeExpected(key, 3)
-	if got := q.resolvePooledSize(j, &target).card; got.Learned || !got.Alone || got.ChargeGB != d.BudgetGB {
-		t.Fatalf("ungated XPU telemetry became an estimate before 0b-4: %+v", got)
+	d := &m.Devices[0]
+	d.TotalMemoryGB, d.BudgetGB, d.FreeMemoryGB = budget, budget, budget
+	pool := MemoryShadowPool{Name: "card/0", CapacityGB: budget, FreeGB: shadowGB(budget)}
+	s := sharedSpec("experiment", budget)
+	s.Needs.Platform = Platform{Required: []string{"xpu"}}
+	check := func(runs ...*Job) Reply {
+		clock.Advance(time.Second)
+		return r5Check(t, q, m, pool, runs...)
 	}
-	j.Attempt = 1
-	j.AttemptHistory = []AttemptOutcome{{Attempt: 1, PriorityStop: &PriorityPreemption{Cause: memoryPressureCause, DevicePool: &DevicePoolStop{}}}}
-	if got := q.resolvePooledSize(j, &target).pools.RAM; !got.Alone {
-		t.Fatalf("gated card stop lost its compatibility retry: %+v", got)
+	ram := memoryRunPool{PeakGB: 1, Complete: true}
+	for _, complete := range []bool{false, true} {
+		cold := submit(t, q, s)
+		run := r5Start(t, q, check(), cold.ID)
+		if card := run.Memory.Card; card == nil || !card.Alone || card.ChargeGB != budget || card.Evidence.Runs != 0 {
+			t.Fatalf("card estimate without a complete prior run: %+v", card)
+		}
+		r5Clean(t, q, run, ram, memoryRunPool{PeakGB: peak, Complete: complete})
 	}
 
+	var running []*Job
+	for range 3 {
+		j := submit(t, q, s)
+		run := r5Start(t, q, check(running...), j.ID)
+		card := run.Memory.Card
+		if !slices.Equal(run.AllocatedDevices, []string{"0"}) || card == nil ||
+			!card.Learned || card.Alone || card.ChargeGB != peak || card.Evidence.Runs != 1 {
+			t.Fatalf("co-tenant %d: cards %v, estimate %+v", len(running)+1, run.AllocatedDevices, card)
+		}
+		running = append(running, run)
+	}
+	exclusive := s
+	exclusive.Advanced = &Advanced{ExclusiveDevice: true}
+	wantsAlone := submit(t, q, exclusive)
+	for _, run := range running[1:] {
+		finish(t, q, run, true)
+	}
+	if got := assignedJob(check(running[0])); got != nil {
+		t.Fatalf("exclusive job joined a held card: %s", got.ID)
+	}
+	finish(t, q, running[0], true)
+	alone := r5Start(t, q, check(), wantsAlone.ID)
+	if !alone.Spec.ExclusiveDevice || alone.Memory.Card.Evidence.Runs != 1 {
+		t.Fatalf("exclusive offer did not use the learned workload: %+v", alone.Memory)
+	}
+	peer := submit(t, q, s)
+	if got := assignedJob(check(alone)); got != nil {
+		t.Fatalf("job joined a card held by an exclusive job: %s", got.ID)
+	}
+	finish(t, q, alone, true)
+	r5Start(t, q, check(), peer.ID)
 }
 
 func TestMemoryExpected2240XPUHighWater(t *testing.T) {

@@ -37,14 +37,8 @@ func (k memoryEvidenceKey) v2() memoryEvidenceKey {
 	return k
 }
 
-const xpuCardAttributionQualified = false // Probe 0b-4.
-
 func learnsExpectedRAM(k memoryEvidenceKey) bool {
 	return !strings.HasSuffix(k.Platform, "linux/cuda/unified") || unifiedStopAttributionQualified
-}
-
-func learnsExpectedCard(m *Machine) bool {
-	return m.GPU != "xpu" || xpuCardAttributionQualified
 }
 
 func (q *Queue) currentMemoryEvidence() *memoryEvidence {
@@ -78,7 +72,7 @@ func (e *memoryEvidence) observeExpected(key memoryEvidenceKey, peak float64) {
 }
 
 // Only single-card XPU auto RAM uses measured attempts before the first
-// qualified run. Card sizing still waits for its own attribution probe.
+// qualified run.
 func xpuAutoRAM(j *Job, key memoryEvidenceKey, cards int) bool {
 	return j.Spec.Needs.Memory == "auto" && key.Platform == "linux/xpu/discrete" && cards == 1
 }
