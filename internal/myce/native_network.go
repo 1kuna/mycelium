@@ -19,11 +19,14 @@ func nativeNetworkFits(j *Job, m *Machine) bool {
 }
 
 const ephemeralRequirements = "ephemeral worker data requires Linux PID/mount user namespaces and a qualified core route"
+const ephemeralDarwinCustodyReason = "macOS has no qualified kernel boundary for attempt descendants and orphans"
 
 func ephemeralHostReason(m *Machine) string {
 	switch m.EphemeralRefusal {
 	case ephemeralLinuxRequired:
 		return "ephemeral worker data is supported only on Linux"
+	case ephemeralDarwinCustodyUnqualified:
+		return ephemeralDarwinCustodyReason
 	case ephemeralCoreRouteUnqualified:
 		return "the Linux core route is unqualified"
 	case ephemeralDetachedUnqualified:
