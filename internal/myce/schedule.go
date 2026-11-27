@@ -51,6 +51,7 @@ func fitsTargetResourcesChecked(j *Job, m *Machine, memory float64, report *targ
 		report.check(executionTargetMatches(j.Spec, m), "target") &&
 		report.check(nativeNetworkFits(j, m), "native network isolation") &&
 		report.check(j.MemoryEnvelope == nil || j.MemoryEnvelope.Refusal == "", "memory envelope") &&
+		report.check(!pooledMemory(j) || !memoryPools(j).capacityWait(), "memory_capacity") &&
 		report.check(!m.Recovering, "recovering") &&
 		report.check(deviceAllowed(j, m), "device") &&
 		report.check(j.Spec.Needs.cpuOnly() || m.GPU != "cpu" || j.Spec.cpuFallback(), "platform") &&

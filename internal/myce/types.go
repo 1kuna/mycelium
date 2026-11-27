@@ -667,6 +667,7 @@ type Job struct {
 type Machine struct {
 	MemoryShadow      *MemoryShadowReport `json:"memory_shadow,omitempty"`
 	memoryShadowOrder uint64
+	memoryShadowAt    time.Time
 	qualificationMemo map[extensionQualificationKey]string // One scheduling/observation pass; never persisted.
 	InventoryProbe    *InventoryObservation                `json:"inventory_probe,omitempty"`
 	// Durable identity, enrolment, settings and session fence, plus the

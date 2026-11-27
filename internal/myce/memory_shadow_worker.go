@@ -10,10 +10,11 @@ import (
 )
 
 type shadowFootprintSampler struct {
-	platform  string
-	state     atomic.Pointer[shadowAttemptReading]
-	deviceAt  time.Time // owned by the RAM sampler
-	pairedRAM shadowMemoryReading
+	platform   string
+	state      atomic.Pointer[shadowAttemptReading]
+	ramMissing bool
+	deviceAt   time.Time // owned by the RAM sampler
+	pairedRAM  shadowMemoryReading
 }
 
 // This sampler borrows raw readings from the existing attempt observers and
@@ -23,6 +24,9 @@ func (s *shadowFootprintSampler) observe(at time.Time, host *float64, device *ho
 	current := shadowAttemptReading{}
 	if previous := s.state.Load(); previous != nil {
 		current = *previous
+	}
+	if host == nil || !validMemoryValue(*host) || !current.RAM.At.IsZero() && at.Sub(current.RAM.At) >= 2*hostPeriod {
+		s.ramMissing = true
 	}
 	counters := shadowMemoryCounters{host: host}
 	period := hostPeriod
@@ -35,6 +39,7 @@ func (s *shadowFootprintSampler) observe(at time.Time, host *float64, device *ho
 			}
 			ram, card := shadowFootprint(s.platform, counters)
 			if device.at.After(s.deviceAt) {
+				s.ramMissing = s.ramMissing || ram == nil
 				current.Card = current.Card.observe(device.at, card, period)
 				s.pairedRAM = s.pairedRAM.observe(at, ram, period)
 				s.deviceAt = device.at
@@ -206,9 +211,7 @@ func (s *workerMemoryShadow) sample(w Worker, m *Machine, raw float64, jobs []Jo
 					card = shadowMemoryReading{}
 				}
 				p := &report.Pools[index]
-				// Learning card E belongs to stage 2. With no shadow clean
-				// history, R6 keeps the whole card.
-				p.Attempts = append(p.Attempts, shadowAttempt(j, p.CapacityGB, card, at, deviceMemorySamplePeriod))
+				p.Attempts = append(p.Attempts, shadowAttempt(j, stopExpectedCard(j, p.CapacityGB), card, at, deviceMemorySamplePeriod))
 				if !card.At.IsZero() || card.Fastest > 0 {
 					s.fastest[label+"/card"] = max(s.fastest[label+"/card"], card.Fastest)
 				}
@@ -249,7 +252,6 @@ func (s *workerMemoryShadow) sample(w Worker, m *Machine, raw float64, jobs []Jo
 }
 
 func stopExpectedRAM(j Job, local *Machine) float64 {
-	// Stage 1 uses the same provisional E as stage 0, until stage 2 learns E.
 	if pooledMemory(&j) && memoryPools(&j).RAM.TypicalGB > 0 {
 		return memoryPools(&j).RAM.TypicalGB
 	}
@@ -262,4 +264,33 @@ func shadowAttempt(j Job, expected float64, reading shadowMemoryReading, at time
 		a.FootprintGB, a.Growth = &reading.GB, reading.Rate
 	}
 	return a
+}
+
+func stopExpectedCard(j Job, capacity float64) float64 {
+	if pooledMemory(&j) {
+		if card := memoryPools(&j).Card; card != nil && card.Learned {
+			return card.ChargeGB
+		}
+	}
+	return capacity
+}
+
+func (s *shadowFootprintSampler) finishPeak(peak *AttemptMemoryPeak, end time.Time, period time.Duration) *AttemptMemoryPeak {
+	r := s.state.Load()
+	if peak == nil || r == nil {
+		return peak
+	}
+	out := *peak
+	device := peak.DeviceSampling
+	completeDevice := device != nil && device.Complete
+	ram := memoryRunPool{PeakGB: r.RAM.PeakGB, Complete: r.RAM.fresh(end, period) && !s.ramMissing}
+	card := memoryRunPool{PeakGB: r.Card.PeakGB, Complete: completeDevice && r.Card.fresh(end, deviceMemorySamplePeriod)}
+	if s.platform == shadowLinuxUnified || s.platform == shadowLinuxDiscrete {
+		ram.Complete = ram.Complete && completeDevice && !s.pairedRAM.At.IsZero()
+	}
+	if card.Complete {
+		card.PeakGB = max(card.PeakGB, device.MaxGB)
+	}
+	out.Learned = &memoryRunPeaks{RAM: ram, Card: card}
+	return &out
 }

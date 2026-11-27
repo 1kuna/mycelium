@@ -30,12 +30,15 @@ type memoryEvidencePoint struct {
 }
 
 type memoryPoolEstimate struct {
-	TypicalGB float64                `json:"typical_gb"`
-	ChargeGB  float64                `json:"charge_gb"`
-	Evidence  memoryEstimateEvidence `json:"evidence"`
-	Alone     bool                   `json:"alone,omitempty"`
-	HeldGB    float64                `json:"held_gb,omitempty"`
-	PeakGB    float64                `json:"peak_gb,omitempty"`
+	TypicalGB    float64                `json:"typical_gb"`
+	ChargeGB     float64                `json:"charge_gb"`
+	Evidence     memoryEstimateEvidence `json:"evidence"`
+	Alone        bool                   `json:"alone,omitempty"`
+	HeldGB       float64                `json:"held_gb,omitempty"`
+	PeakGB       float64                `json:"peak_gb,omitempty"`
+	Learned      bool                   `json:"learned,omitempty"`
+	RetryFloorGB float64                `json:"-"`
+	CapacityWait bool                   `json:"-"`
 }
 
 type memoryEstimateEvidence struct {
@@ -46,6 +49,7 @@ type memoryEstimateEvidence struct {
 type memoryEvidenceSeries struct {
 	Peaks []float64
 	Lower float64
+	Raise *memoryRaise `json:",omitempty"`
 }
 
 type memoryRatioKey struct {
@@ -64,6 +68,7 @@ type memoryEvidence struct {
 	foreign          map[memoryEvidenceKey]map[string]bool
 	writes           map[memoryEvidenceRowKey]any
 	feedback         []float64
+	owners           map[memoryEvidenceKey]memoryOwnersHold
 	gpuSharing       map[gpuSharingKey]gpuSharingHistory
 	gpuSharingWrites map[gpuSharingKey]gpuSharingHistory
 }
@@ -73,6 +78,7 @@ func (e *memoryEvidence) stage() *memoryEvidence {
 		exact: maps.Clone(e.exact), family: maps.Clone(e.family), first: maps.Clone(e.first),
 		ratios: maps.Clone(e.ratios), foreign: maps.Clone(e.foreign), writes: map[memoryEvidenceRowKey]any{},
 		feedback:   e.feedback,
+		owners:     maps.Clone(e.owners),
 		gpuSharing: e.gpuSharing,
 	}
 }
@@ -116,6 +122,7 @@ func newMemoryEvidence() *memoryEvidence {
 		first:      map[memoryEvidenceKey][]float64{},
 		ratios:     map[memoryRatioKey][]float64{},
 		foreign:    map[memoryEvidenceKey]map[string]bool{},
+		owners:     map[memoryEvidenceKey]memoryOwnersHold{},
 		gpuSharing: map[gpuSharingKey]gpuSharingHistory{},
 	}
 }

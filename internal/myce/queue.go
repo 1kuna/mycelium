@@ -2036,7 +2036,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		old := q.s.Machines[m.ID]
 		m.memoryShadowOrder = healthReportOrder
 		if old != nil && old.Session == m.Session && old.memoryShadowOrder > healthReportOrder {
-			m.MemoryShadow, m.memoryShadowOrder = old.MemoryShadow, old.memoryShadowOrder
+			m.MemoryShadow, m.memoryShadowOrder, m.memoryShadowAt = old.MemoryShadow, old.memoryShadowOrder, old.memoryShadowAt
 		} else if m.MemoryShadow != nil {
 			defer func() {
 				reply.MemoryShadowSettings = &memoryShadowSettings{KeepGB: q.pooledBaseKeep(&m), GraceSeconds: q.preemptionGrace().Seconds()}
@@ -2221,6 +2221,9 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		}
 		body.next("checkin_memory")
 		q.recordExternalMemory(&m)
+		if m.memoryShadowOrder == healthReportOrder {
+			q.observeMemoryOwners(&m, old, memoryReceivedAt, c.period)
+		}
 		q.observePoolAvailability(&m, c.period, memoryReceivedAt)
 		if sample := q.poolAvailability[m.ID]; sample.session == m.Session && sample.at.Equal(memoryReceivedAt) {
 			q.maintenance.memoryCheckin = m.ID
@@ -2669,7 +2672,15 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 					}
 					q.recordSharedHostLatencyStop(j, r)
 					// A release can settle a pressure stop before its result.
-					if j.Reason != memoryPressureCause || !q.holdAlonePressure(j) {
+					r = classifyAttemptResourceFailure(j, r)
+					learned := q.recordPoolEvidence(j, r)
+					if r.OutOfMemory && pooledMemory(j) && memoryPools(j).LimitGB > 0 {
+						j.State, j.Reason = "failed", "command exceeded explicit memory limit"
+						now := q.clock.Now()
+						j.FinishedAt = &now
+					} else if learned {
+						q.retryMemoryStop(j, true)
+					} else if j.Reason != memoryPressureCause || !q.holdAlonePressure(j) {
 						q.retry(j, j.Reason)
 					}
 				}
@@ -2781,7 +2792,7 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 	outcome := attemptOutcome(j, r)
 	q.recordAttemptStorage(j, r)
 	q.recordAttemptMemory(j, r) // Preserve facts before retry clears the envelope.
-	q.recordPoolEvidence(j, r)
+	learnedMemoryStop := q.recordPoolEvidence(j, r)
 	j.ExecutionEvidence = safeExecutionEvidence(r.ExecutionEvidence, j.Attempt)
 	j.ExecutionCause = safeRuntimeCause(r.ExecutionCause)
 	j.CleanupCause = safeRuntimeCause(r.CleanupCause)
@@ -2839,7 +2850,7 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 			admissionRequeueOutcome(&outcome)
 		}
 	} else if poolPressure && (!r.Success || warmTail) && !oomFailure {
-		q.requeueMemoryPressure(j)
+		q.retryMemoryStop(j, learnedMemoryStop)
 	} else if !r.Success && !oomFailure && cancelledPreparation(r) {
 		// Started is an authorization fence, not proof main executed. A worker
 		// lifecycle cancellation with exact no-main evidence spends no budget.
@@ -2877,8 +2888,8 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 	} else if oomFailure {
 		if pooledMemory(j) && memoryPools(j).LimitGB > 0 {
 			j.State, j.Reason = "failed", "command exceeded explicit memory limit"
-		} else if j.StartedAt != nil && (r.MemoryPeak != nil || poolPressure) {
-			q.requeueMemoryPressure(j)
+		} else if j.StartedAt != nil && (learnedMemoryStop || r.MemoryPeak != nil || poolPressure) {
+			q.retryMemoryStop(j, learnedMemoryStop)
 		} else {
 			j.State, j.Reason = "failed", "command failed: "+r.Error
 		}

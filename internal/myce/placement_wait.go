@@ -51,7 +51,7 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 					// These are actionable blockers to explain below. All other
 					// failures at permanent capacity exclude this target, including
 					// undersized CPUs/devices and unsupported execution runtimes.
-				case "GPU memory", "hardware capacity":
+				case "GPU memory", "hardware capacity", "memory_capacity":
 					// A pool that cannot fit even when empty is actionable
 					// evidence. Keep only otherwise compatible targets.
 					if poolFailure == "" || candidate.OOMCapacity != nil {

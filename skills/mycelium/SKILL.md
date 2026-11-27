@@ -216,11 +216,12 @@ uses the declared NAS source even when an ordinary shared-input cache holds a co
   grace when its footprint exceeds its expected peak below the pool's keep,
   including a production attempt. The `memory_pressure` execution cause carries
   the footprint and expected peak in `rss_limit` for this immediate stop.
-  After a `memory_pressure` stop, the job's next
-  attempt keeps its charge but waits to run alone on the host's memory pool.
-  If it is stopped for pressure again while alone, it is paused with a
-  `memory_capacity:` reason giving the measured peak and the stop comparison.
-  Resume it to run alone again, or change its memory or work first.
+  Where the pool learns expected memory from clean runs, a stop over the
+  expected peak raises the retry's estimate up to the eligible pool's reach.
+  A stop within that peak keeps the estimate and can reserve room for the
+  pool's other owners. A queued `memory_capacity` hold shows the peak and
+  reach and clears when a pool can fit the retry. Pools on the compatibility
+  path still retry alone and can pause after another pressure stop.
   A unified-memory GPU can run one attempt per work family when measured
   overlap lowers that family's throughput. Other families can use remaining
   room under the ordinary memory and tier rules. Keep queued peers on their

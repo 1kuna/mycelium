@@ -125,7 +125,7 @@ func (w Worker) cardStopReserve(d MachineDevice) float64 {
 	return 0
 }
 
-func (w Worker) immediateCardStop() immediateMemoryStop {
+func (w Worker) immediateCardStop(j Job) immediateMemoryStop {
 	d := w.selectedDevice
 	if d == nil || d.UnifiedMemory || len(w.selectedDevices) > 1 || !validRate(d.TotalMemoryGB) {
 		return immediateMemoryStop{}
@@ -147,7 +147,7 @@ func (w Worker) immediateCardStop() immediateMemoryStop {
 	if err != nil {
 		return immediateMemoryStop{}
 	}
-	return immediateMemoryStop{pool: "card", keep: d.ReserveMemoryGB + term, expected: d.TotalMemoryGB, free: free}
+	return immediateMemoryStop{pool: "card", keep: d.ReserveMemoryGB + term, expected: stopExpectedCard(j, d.TotalMemoryGB), free: free}
 }
 
 func (w Worker) supportsMemoryStops() bool {

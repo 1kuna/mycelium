@@ -14,6 +14,7 @@ import (
 // Without cgroup accounting (macOS), HostGB is the sampled process-group RSS
 // and Source names that unenforced measurement.
 type AttemptMemoryPeak struct {
+	Learned *memoryRunPeaks `json:"pool_peaks,omitempty"`
 	// CombinedHostGB is the maximum per-attempt resident-plus-outside figure.
 	// Component maxima below remain diagnostics and must not be added across runs.
 	// GrowthGB is the largest observed positive memory growth over a sampling
@@ -260,6 +261,9 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 			n := **pair[1]
 			*pair[0] = &n
 		}
+	}
+	if next.Learned != nil {
+		out.Learned = next.Learned
 	}
 	if next.DeviceSource == ownedFootprintSource {
 		out.DeviceSource = ownedFootprintSource

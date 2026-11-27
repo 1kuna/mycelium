@@ -80,7 +80,8 @@ func (q *Queue) refreshHostMemory() {
 		m.HostMemoryInUseGB = reserved
 		// Full charges consume the allowance; only unused growth consumes live RAM.
 		capacity, available, availableKnown, observedAt := q.hostLiveCapacity(m)
-		room := q.hostMemoryRoom(m, capacity, reserved, growth)
+		ownersHold, _ := q.ownersMemory(m, "ram")
+		room := q.hostMemoryRoom(m, capacity, reserved, growth) - ownersHold
 		m.hostReservationDebtGB = max(0, -room)
 		m.FreeHostMemoryGB = max(0, room)
 		ledger.AvailableGB, ledger.CapacityGB, ledger.AllowanceGB = available, capacity, m.EffectiveHostMemoryBudgetGB
