@@ -415,3 +415,15 @@ func TestMemoryExpectedRetainsXPUProbeGate(t *testing.T) {
 	}
 
 }
+
+func TestMemoryExpectedColdCardGroup(t *testing.T) {
+	q, _ := fixture(t)
+	m := m3Machine()
+	m.HostMemoryBudgetGB = 32
+	s := bigSpec("experiment", 12)
+	j := submit(t, q, s)
+	a := r5Start(t, q, r5Check(t, q, m, r5RAM(32, 32)), j.ID)
+	if len(a.AllocatedDevices) != 2 || a.Spec.Needs.MemoryGB != 12 {
+		t.Fatalf("typed demand that cannot fit one cold card: devices=%v memory=%g", a.AllocatedDevices, a.Spec.Needs.MemoryGB)
+	}
+}

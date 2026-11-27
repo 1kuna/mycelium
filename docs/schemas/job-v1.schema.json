@@ -870,6 +870,9 @@
         "nonreclaimable_gb": {
           "type": "number"
         },
+        "pool_peaks": {
+          "$ref": "#/$defs/memoryRunPeaks"
+        },
         "pressure": {
           "$ref": "#/$defs/MemoryPressureEvidence"
         },
@@ -5870,6 +5873,9 @@
         "memory_pool": {
           "$ref": "#/$defs/MemoryPoolStop"
         },
+        "memory_sample": {
+          "$ref": "#/$defs/memoryStopSample"
+        },
         "policy": {
           "$ref": "#/$defs/PriorityMatch"
         },
@@ -7806,6 +7812,9 @@
         "held_gb": {
           "type": "number"
         },
+        "learned": {
+          "type": "boolean"
+        },
         "peak_gb": {
           "type": "number"
         },
@@ -7817,6 +7826,59 @@
         "typical_gb",
         "charge_gb",
         "evidence"
+      ],
+      "type": "object"
+    },
+    "memoryRunPeaks": {
+      "properties": {
+        "card": {
+          "$ref": "#/$defs/memoryRunPool"
+        },
+        "ram": {
+          "$ref": "#/$defs/memoryRunPool"
+        }
+      },
+      "required": [
+        "ram",
+        "card"
+      ],
+      "type": "object"
+    },
+    "memoryRunPool": {
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "peak_gb": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "peak_gb",
+        "complete"
+      ],
+      "type": "object"
+    },
+    "memoryStopSample": {
+      "properties": {
+        "expected_gb": {
+          "type": "number"
+        },
+        "owners_gb": {
+          "type": "number"
+        },
+        "owners_peak_gb": {
+          "type": "number"
+        },
+        "peak_gb": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "expected_gb",
+        "peak_gb",
+        "owners_gb",
+        "owners_peak_gb"
       ],
       "type": "object"
     },
