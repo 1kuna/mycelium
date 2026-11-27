@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -18,7 +19,7 @@ import (
 // does, so its progress rate limit sees the steps' real spacing.
 func TestUploadFinalPatchPublicationProgress(t *testing.T) {
 	const step = 700 * time.Millisecond
-	setup := func(t *testing.T, sync func(dir string, original func(string) error) error) (Client, FileRef) {
+	setup := func(t *testing.T, heartbeat bool, sync func(dir string, original func(string) error) error) (Client, FileRef) {
 		q, s := creationStore(t, 32)
 		clock := q.clock.(*fakeClock)
 		original := s.syncDir
@@ -30,7 +31,13 @@ func TestUploadFinalPatchPublicationProgress(t *testing.T) {
 			clock.Advance(step)
 			return err
 		}
-		api := httptest.NewServer(API{Queue: q, Token: "fixture"}.Handler())
+		backend := API{Queue: q, Token: "fixture"}.Handler()
+		api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !heartbeat {
+				r.Header.Del(uploadFinalizingHeader)
+			}
+			backend.ServeHTTP(w, r)
+		}))
 		t.Cleanup(api.Close)
 		c := Client{URL: api.URL, Token: "fixture", publication: &publicationProgress{},
 			Pause: func(context.Context, time.Duration) error { return context.Canceled }}
@@ -42,7 +49,7 @@ func TestUploadFinalPatchPublicationProgress(t *testing.T) {
 	}
 
 	t.Run("publishing", func(t *testing.T) {
-		c, ref := setup(t, func(dir string, original func(string) error) error {
+		c, ref := setup(t, false, func(dir string, original func(string) error) error {
 			time.Sleep(step)
 			return original(dir)
 		})
@@ -52,9 +59,9 @@ func TestUploadFinalPatchPublicationProgress(t *testing.T) {
 		}
 	})
 
-	t.Run("silent", func(t *testing.T) {
+	t.Run("silent legacy peer", func(t *testing.T) {
 		release := make(chan struct{})
-		c, ref := setup(t, func(dir string, original func(string) error) error {
+		c, ref := setup(t, false, func(dir string, original func(string) error) error {
 			<-release // A sync that never completes reports nothing.
 			return original(dir)
 		})
@@ -71,6 +78,30 @@ func TestUploadFinalPatchPublicationProgress(t *testing.T) {
 		// One window after the last completed step, plus scheduling slack.
 		if elapsed < clientRecoveryPeriod || elapsed > 3*clientRecoveryPeriod {
 			t.Fatalf("silent publication given up after %s, want about %s", elapsed.Round(time.Millisecond), clientRecoveryPeriod)
+		}
+	})
+
+	t.Run("caller deadline during heartbeat", func(t *testing.T) {
+		release := make(chan struct{})
+		entered := make(chan struct{})
+		c, ref := setup(t, true, func(dir string, original func(string) error) error {
+			if strings.HasSuffix(dir, "blobs") {
+				close(entered)
+				<-release
+			}
+			return original(dir)
+		})
+		defer close(release)
+		ctx, cancel := context.WithTimeout(t.Context(), 2*clientRecoveryPeriod)
+		defer cancel()
+		err := c.uploadFileReader(ctx, strings.NewReader("final"), ref, "")
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("owner deadline did not interrupt finalization: %v", err)
+		}
+		select {
+		case <-entered:
+		default:
+			t.Fatal("deadline expired before the final publication barrier")
 		}
 	})
 }
