@@ -481,7 +481,10 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	jobs := map[string]myce.Job{}
 	for _, m := range snapshot.Machines {
 		spec := myce.Spec{Name: "rollout-command-" + m.ID, Project: "fleet-test", Priority: "production", AllowedMachines: []string{m.ID}}
-		spec.Needs.MemoryGB, spec.Needs.HostMemoryGB, spec.Needs.Platform.Any = 1, 1, true
+		// These shell commands only need RAM. A cold accelerator command
+		// reserves the whole card, leaving no room for the concurrent stream.
+		spec.Needs.HostMemoryGB = 1
+		spec.Needs.Platform.Required = []string{"cpu"}
 		// The command controls its own completion; the rollout never signals it.
 		spec.Run.Command = []string{"sh", "-c", `printf 'myce fixture work: %s\n' "$PWD"; printf 'myce fixture checkpoint: %s\n' "$MYCE_CHECKPOINT_DIR"; test -z "${MYCE_TOKEN:-}" || exit 91; printf '%s\n' "$MYCE_ATTEMPT" >> "$MYCE_CHECKPOINT_DIR/starts-$2" || exit 92; while ! test -f "$1/finish-$2"; do sleep 0.05; done; printf 'completed naturally\n'`, "fleet-command", "{work}", m.ID}
 		var job myce.Job
@@ -501,6 +504,9 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 				return false
 			}
 			jobs[id] = *j
+			if len(j.AllocatedDevices) != 0 || j.Memory != nil && j.Memory.Card != nil {
+				t.Fatalf("rollout command %s reserved accelerator capacity needed by the stream: devices=%v memory=%+v", j.Spec.Name, j.AllocatedDevices, j.Memory)
+			}
 			work := commandFixturePath(t, ctx, client, id, "work")
 			checkpoint := commandFixturePath(t, ctx, client, id, "checkpoint")
 			if work == "" || checkpoint == "" {
