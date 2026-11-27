@@ -2570,7 +2570,8 @@ func (q *Queue) completeContext(ctx context.Context, r Result, worker *workerPub
 		timings.VerificationSeconds = &elapsed
 	}
 	var rejected error
-	err = q.updateRequest(ctx, func() error {
+	var settledCheckpoint string
+	err = q.updateTransaction(ctx, func() error {
 		if finalPath != "" {
 			if current, e := q.current(r); e == nil && attemptCheckpoint(*current) == finalPath && finalGeneration >= 0 {
 				current = q.touchJob(current.ID)
@@ -2610,11 +2611,17 @@ func (q *Queue) completeContext(ctx context.Context, r Result, worker *workerPub
 			rejected = ErrStale
 		}
 		return q.complete(r, verify, checkFailure, &timings, started)
-	}, nil)
+	}, nil, false, func() {
+		// Snapshot committed state on the existing writer turn. Cache cleanup
+		// takes a different mutex and runs after releasing q.mu.
+		if j := q.s.Jobs[r.ID]; j != nil && terminal(j.State) {
+			settledCheckpoint = j.Checkpoint
+		}
+	})
 	if err != nil {
 		return err
 	}
-	q.forgetSettledCheckpointProgress(r.ID)
+	q.nasProgress.forgetSettled(settledCheckpoint)
 	return rejected
 }
 func (q *Queue) retainLaunchCapacityRefusal(r Result) {
