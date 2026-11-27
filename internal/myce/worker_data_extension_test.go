@@ -172,6 +172,22 @@ while :; do sleep .01; done
 				}
 				// Census the actual payload copies before finalization, including
 				// both group members' writes and their single combined log.
+				private := ephemeralRoot(store.dir, *assigned)
+				for path, mode := range map[string]fs.FileMode{
+					private:                              0700,
+					work:                                 0700,
+					filepath.Join(private, "checkpoint"): 0700,
+					filepath.Join(store.dir, "ephemeral-logs"): 0700,
+					filepath.Join(store.dir, store.state.Log):  0600,
+				} {
+					info, err := os.Lstat(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if info.Mode().Perm() != mode {
+						t.Errorf("%s permissions = %o, want %o", filepath.Base(path), info.Mode().Perm(), mode)
+					}
+				}
 				for _, path := range []string{"input", ".myce-extension/derived", ".home/main", ".home/side", ".tmp/main", ".tmp/side", ".scratch/main", ".scratch/side", "side-work/data", "out.txt"} {
 					if data, err := os.ReadFile(filepath.Join(work, path)); err != nil || string(data) != payload {
 						t.Fatal("missing custody sentinel", path, err)
