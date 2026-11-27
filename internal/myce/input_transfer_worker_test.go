@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -19,11 +21,14 @@ import (
 // The production queue and real exec gate must see one preparation attempt,
 // with no payload or loss/retry charge while its immutable dependency recovers.
 func TestInputTransferProductionPreparationRetainsAttempt(t *testing.T) {
-	for _, mode := range []string{"headers", "resume", "cancel"} {
+	for _, mode := range []string{"headers", "resume", "cancel", "queue-restart"} {
 		t.Run(mode, func(t *testing.T) {
 			q, clock := fixture(t)
 			s := submitVerificationInput(t, q)
 			s.Priority, s.Resumable = "production", false
+			if mode == "queue-restart" {
+				s.StartWindow = "5m"
+			}
 			s.Needs = ResourceNeeds{CPUCores: 1, MemoryGB: 1}
 			s.Run.Command = []string{"sh", "-ec", `test "$(cat input)" = 'small verified input'; printf once >> launched`}
 			j := submit(t, q, s)
@@ -32,7 +37,11 @@ func TestInputTransferProductionPreparationRetainsAttempt(t *testing.T) {
 			if assigned == nil {
 				t.Fatal("production input not assigned", job(t, q, j.ID))
 			}
-			server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+			var handler atomic.Value
+			handler.Store(API{Queue: q, Token: "test"}.Handler())
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handler.Load().(http.Handler).ServeHTTP(w, r)
+			}))
 			defer server.Close()
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -41,7 +50,10 @@ func TestInputTransferProductionPreparationRetainsAttempt(t *testing.T) {
 			unblock := func() { once.Do(func() { close(release) }) }
 			defer unblock()
 			var gets atomic.Int32
-			c := Client{URL: server.URL, Token: "test", Jitter: func() float64 { return 0 }, Pause: func(ctx context.Context, _ time.Duration) error {
+			c := Client{URL: server.URL, Token: "test", Clock: clock, Jitter: func() float64 { return 0 }, Pause: func(ctx context.Context, _ time.Duration) error {
+				if mode == "queue-restart" && gets.Load() < 2 {
+					return nil // The saved prefix precedes the refused reconnect.
+				}
 				close(entered)
 				select {
 				case <-release:
@@ -67,6 +79,9 @@ func TestInputTransferProductionPreparationRetainsAttempt(t *testing.T) {
 						}
 					} else if r.Header.Get("Range") != "bytes=6-" {
 						t.Error("did not resume saved dependency prefix", r.Header)
+					}
+					if mode == "queue-restart" && n == 2 {
+						return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
 					}
 				}
 				return http.DefaultTransport.RoundTrip(r)
@@ -112,6 +127,21 @@ func TestInputTransferProductionPreparationRetainsAttempt(t *testing.T) {
 			assertUnstarted()
 			if mode != "headers" && !store.inputTransferRecovering.Load() {
 				t.Fatal("missing recovering observation")
+			}
+			if mode == "queue-restart" {
+				clock.Advance(RestartGrace - time.Second)
+				fileRoot := q.files.root
+				q = reopenQueue(t, q, clock)
+				if err := q.ConfigureFileStore(fileRoot, 1<<20, true); err != nil {
+					t.Fatal(err)
+				}
+				handler.Store(API{Queue: q, Token: "test"}.Handler())
+				report := AttemptReport{Execution: Execution{ID: assigned.ID, Attempt: assigned.Attempt}, Session: assigned.Session}
+				reply, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{report}})
+				if err != nil || len(reply.Attempts) != 1 || reply.Attempts[0].Stop {
+					t.Fatalf("restarted queue did not recognize staging custody: %+v %v", reply.Attempts, err)
+				}
+				assertUnstarted()
 			}
 			if mode == "cancel" {
 				if err := q.Cancel(j.ID); err != nil {

@@ -140,7 +140,7 @@ func copyNASInput(ctx context.Context, client Client, source, target string, exp
 			err = tracedSharedCopyError(ctx, err)
 		}
 		traceSharedInput(ctx, "sync", "cache")
-		if syncErr := out.Sync(); syncErr != nil {
+		if syncErr := syncSharedInput(ctx, out.Sync); syncErr != nil {
 			err = errors.Join(errFileTransferLocal, tracedSharedError(ctx, syncErr))
 		}
 		traceSharedInput(ctx, "close", "cache")

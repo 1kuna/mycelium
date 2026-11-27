@@ -18,6 +18,22 @@ var errWorkerControlUnreachable = errors.New("queue control endpoint unreachable
 // used by adapters to keep control-plane failures out of stage-failure paths.
 var errWorkerStartHandoff = fmt.Errorf("queue start hand-off unavailable: %w", errWorkerStartAuthorization)
 
+// A failed dial only says that this request did not reach the queue. Give the
+// original operation the existing restart window to reconnect. The queue's
+// exact session, attempt and native custody checks still decide whether it can
+// proceed. An outage that outlasts the window goes through normal cleanup.
+type queueDialRecovery struct {
+	until time.Time
+	err   error
+}
+
+func (r *queueDialRecovery) observe(started time.Time, err error) {
+	if r.until.IsZero() {
+		r.until = started.Add(RestartGrace)
+	}
+	r.err = err
+}
+
 // Completed control-request RTTs share the estimator used by queue contact.
 // Worker value copies share this state; sensor validity and report gaps are not
 // request latency. No estimate is used as a refusal or release deadline.
@@ -63,11 +79,15 @@ func (w Worker) controlHandshake(path string, in, out any) (time.Time, error) {
 	if base <= 0 {
 		base = defaultWorkerInterval
 	}
+	var outage queueDialRecovery
 	for {
 		if err := ctx.Err(); err != nil {
 			return time.Time{}, err
 		}
 		started := c.clock().Now()
+		if outage.err != nil && !started.Before(outage.until) {
+			return time.Time{}, outage.err
+		}
 		var body json.RawMessage
 		// In shared mode each retry probes a fresh turn. The mutation
 		// remains exact-custody and idempotent if its prior reply was lost.
@@ -81,21 +101,34 @@ func (w Worker) controlHandshake(path string, in, out any) (time.Time, error) {
 			// authorization fields behind for a later incomplete response.
 			return started, json.Unmarshal(body, out)
 		}
-		// A completed dial failure means this request never reached the queue.
-		// Stop with positive outage evidence so launch cleanup can run.
-		// This does not prove any earlier request uncommitted,
-		// nor release custody; the caller still cleans its exact local process.
+		transient := retryTransient(err)
 		var connect *net.OpError
 		if errors.As(err, &connect) && connect.Op == "dial" {
-			return time.Time{}, fmt.Errorf("%w: %w", errWorkerControlUnreachable, err)
+			unreachable := fmt.Errorf("%w: %w", errWorkerControlUnreachable, err)
+			if !transient && !errors.Is(err, context.DeadlineExceeded) {
+				return time.Time{}, unreachable
+			}
+			outage.observe(started, unreachable)
+		}
+		var refusal *HTTPError
+		if outage.err != nil && errors.As(err, &refusal) && refusal.Code == "shared_queue_control_retry" {
+			outage = queueDialRecovery{} // The replacement answered; check-in still owns reconciliation.
 		}
 		// A per-request transport deadline is not the attempt owner's deadline.
 		// Typed refusals (including stale custody) and protocol errors stop now.
-		if !retryTransient(err) && !errors.Is(err, context.DeadlineExceeded) {
+		if !transient && !errors.Is(err, context.DeadlineExceeded) {
 			return time.Time{}, err
 		}
+		now := c.clock().Now()
 		pace := ClientPace{cost: max(base, measured)}
-		if err := c.pause(ctx, pace.Delay(c.clock().Now(), time.Time{}, err, c.Jitter)); err != nil {
+		delay := pace.Delay(now, time.Time{}, err, c.Jitter)
+		if outage.err != nil {
+			delay = min(delay, outage.until.Sub(now))
+			if delay <= 0 {
+				return time.Time{}, outage.err
+			}
+		}
+		if err := c.pause(ctx, delay); err != nil {
 			return time.Time{}, err
 		}
 	}

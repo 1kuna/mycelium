@@ -13,7 +13,21 @@ type sharedInputStaging struct {
 	done      chan struct{}
 	ctx       context.Context
 	withdrawn bool
-	progress  atomic.Int64
+	deadline  atomic.Int64
+}
+
+type sharedInputWaitKey struct{}
+
+// A local sync can be in progress without reporting bytes, particularly while
+// a colocated queue shuts down or opens its database. Keep the original writer
+// and its build lock for one restart window beyond the ordinary stall budget.
+// A failed sync still returns its errno and publication still requires success.
+func syncSharedInput(ctx context.Context, sync func() error) error {
+	if wait, ok := ctx.Value(sharedInputWaitKey{}).(func(time.Duration)); ok {
+		wait(checkpointAvailabilityStallBudget + RestartGrace)
+		defer wait(checkpointAvailabilityStallBudget)
+	}
+	return sync()
 }
 
 func sharedInputProgress(ctx context.Context) error {
@@ -76,9 +90,11 @@ func (c *SharedInputCache) stageInputNamed(parent context.Context, key string, p
 			c.afterStageCancel()
 		}
 	}()
-	progress := func() { b.progress.Store(c.cache.Clock.Now().UnixNano()) }
+	wait := func(d time.Duration) { b.deadline.Store(c.cache.Clock.Now().Add(d).UnixNano()) }
+	progress := func() { wait(checkpointAvailabilityStallBudget) }
 	progress()
 	ctx = context.WithValue(ctx, ioProgressKey{}, progress)
+	ctx = context.WithValue(ctx, sharedInputWaitKey{}, wait)
 	// Named stages retain resumable immutable prefixes. Anonymous test/scratch
 	// stages keep the original disposable lifecycle. Each writer owns its build
 	// lock through detached cancellation tails, independently of execution.
@@ -149,7 +165,7 @@ func (c *SharedInputCache) stageInputNamed(parent context.Context, key string, p
 			traceSharedInput(ctx, "publish", "cache")
 			return publish(stage)
 		case <-tick.C:
-			if c.cache.Clock.Now().Sub(time.Unix(0, b.progress.Load())) >= checkpointAvailabilityStallBudget {
+			if c.cache.Clock.Now().UnixNano() >= b.deadline.Load() {
 				return tracedSharedError(ctx, errCheckpointIOTimeout)
 			}
 		}

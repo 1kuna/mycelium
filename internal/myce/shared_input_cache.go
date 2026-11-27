@@ -601,7 +601,7 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 		}
 	}
 	traceSharedInput(ctx, "sync", "cache")
-	return syncWorkerDir(stage)
+	return syncSharedInput(ctx, func() error { return syncWorkerDir(stage) })
 }
 
 func writeSharedReady(ctx context.Context, stage string, b []byte) error {
@@ -617,7 +617,7 @@ func writeSharedReady(ctx context.Context, stage string, b []byte) error {
 	}
 	if err == nil {
 		traceSharedInput(ctx, "sync", "cache")
-		err = f.Sync()
+		err = syncSharedInput(ctx, f.Sync)
 	}
 	// Snapshot a sync failure before tracing the subsequent close boundary.
 	err = tracedSharedError(ctx, err)
@@ -629,7 +629,7 @@ func writeSharedReady(ctx context.Context, stage string, b []byte) error {
 	}
 	if err == nil {
 		traceSharedInput(ctx, "sync", "cache")
-		err = syncWorkerDir(stage)
+		err = syncSharedInput(ctx, func() error { return syncWorkerDir(stage) })
 	}
 	return err
 }

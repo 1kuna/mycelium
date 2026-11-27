@@ -1943,7 +1943,7 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) (sta
 	traceSharedInput(ctx, "sync", "cache")
 	err = copyErr
 	syncDone := stagingMeasure(ctx, stageCachePublish)
-	syncErr := f.Sync()
+	syncErr := syncSharedInput(ctx, f.Sync)
 	syncDone(syncErr)
 	if syncErr != nil {
 		err = fmt.Errorf("%w: %w", errFileTransferLocal, tracedSharedError(ctx, syncErr))

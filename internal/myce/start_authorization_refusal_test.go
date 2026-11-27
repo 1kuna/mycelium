@@ -253,7 +253,7 @@ func TestStartControlUnreachableAccounting(t *testing.T) {
 				}
 			}
 			calls := 0
-			w := Worker{Clock: clock, Machine: m, Client: Client{URL: "http://queue.invalid", Token: "test", HTTP: &http.Client{Transport: clientTestTransport(func(*http.Request) (*http.Response, error) {
+			w := Worker{Clock: clock, Machine: m, Client: Client{URL: "http://queue.invalid", Token: "test", Pause: func(context.Context, time.Duration) error { clock.Advance(RestartGrace); return nil }, HTTP: &http.Client{Transport: clientTestTransport(func(*http.Request) (*http.Response, error) {
 				calls++
 				return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
 			})}}}
