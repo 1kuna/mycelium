@@ -96,11 +96,13 @@ sizing. Use a pin only for a [hard requirement](references/submit.md#explicit-pl
   accelerator by default. For a compatible plain command, set
   `advanced: {allow_cpu_fallback: true}` only when CPU results are acceptable.
   For extension work, declare a CPU variant.
-- Measured single-card attempts may share an accelerator card. If your output
-  is only qualified on an exclusive card, set `advanced: {exclusive_device: true}`
-  so the attempt keeps its whole card until you have measured co-residency
-  parity. An older queue refuses the field as unknown (`request_invalid`);
-  those queues never share a card, so drop it only there.
+- Measured single-card attempts may share an accelerator card. On discrete
+  XPU, the queue learns a card charge from complete device peaks on clean runs.
+  Without comparable device evidence, the job reserves the whole card.
+  Same-tier attempts can share when their charges fit the card and the host
+  has room. If your workload requires a card to itself, set
+  `advanced: {exclusive_device: true}` to reserve it exclusively. Queues that
+  predate this field reject it with `request_invalid`.
 - For an explicit exact-digest runtime check, run
   `myce extension check --gpu PLATFORM --device DEVICE --digest SHA256 NAME@VERSION`
   on the target worker as its installation owner. Omit `--device` for CPU.

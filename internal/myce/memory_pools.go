@@ -227,9 +227,6 @@ func (q *Queue) resolvePooledSize(j *Job, m *Machine) pooledCandidateSize {
 		case !learn || count > 1:
 			card = evidence.estimate(key, deviceHint/float64(count), evidence.confidence())
 			fitPoolCharge(&card, m.TotalMemoryGB/float64(count), evidence.exact[key].Lower)
-		case !learnsExpectedCard(m):
-			card = memoryPoolEstimate{TypicalGB: reach, ChargeGB: reach, Alone: true,
-				Evidence: memoryEstimateEvidence{Level: "unknown"}}
 		default:
 			raiseReach, raiseKnown := q.raiseReach(j, m, key, reach, known)
 			card = evidence.expected(key, 0, raiseReach, raiseKnown, false)
