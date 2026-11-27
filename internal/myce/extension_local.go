@@ -77,6 +77,95 @@ func extensionRecords(root string, e Extension, platform string) string {
 	return filepath.Join(extensionCache(root, e, platform), "qualification.json")
 }
 
+func extensionBytecodePath(name string) bool {
+	return strings.HasSuffix(name, ".pyc") || strings.Contains("/"+name, "/__pycache__/")
+}
+
+func extensionBytecodeManifest(root string, e Extension) string {
+	return filepath.Join(root, "cache", e.Name, e.Version, "authored-bytecode.json")
+}
+
+func rememberAuthoredBytecode(root string, e Extension) error {
+	var paths []string
+	for name := range e.Files {
+		if extensionBytecodePath(name) {
+			paths = append(paths, name)
+		}
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	slices.Sort(paths)
+	data, err := json.Marshal(paths)
+	if err != nil {
+		return err
+	}
+	path := extensionBytecodeManifest(root, e)
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	return writeFileAtomic(path, data)
+}
+
+func readInstalledExtension(root string, expected Extension) (Extension, error) {
+	folder := extensionFolder(root, expected)
+	var authored []string
+	data, err := os.ReadFile(extensionBytecodeManifest(root, expected))
+	if err == nil {
+		if err := json.Unmarshal(data, &authored); err != nil {
+			return Extension{}, err
+		}
+	} else if !os.IsNotExist(err) {
+		return Extension{}, err
+	}
+	excluded := false
+	clean, err := readExtension(folder, func(name string) bool {
+		if !extensionBytecodePath(name) {
+			return true
+		}
+		if slices.Contains(authored, name) {
+			return true
+		}
+		if _, ok := expected.Files[name]; authored == nil && ok {
+			return true
+		}
+		excluded = true
+		return false
+	})
+	if !excluded || authored != nil || err == nil && clean.Digest == expected.Digest {
+		return clean, err
+	}
+
+	// Older installs have no authored-path manifest. Preserve an existing
+	// registered or qualified full-tree digest when it proves those files
+	// were actually bundled. Subsequent scans can then ignore new bytecode.
+	known := func(e Extension) bool {
+		if expected.Digest != "" {
+			return e.Digest == expected.Digest
+		}
+		for _, platform := range e.platforms() {
+			for _, report := range readExtensionReports(root, expected, platform) {
+				if report.Digest == e.Digest {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if err == nil && known(clean) {
+		return clean, nil
+	}
+	if full, fullErr := ReadExtension(folder); fullErr == nil && known(full) {
+		_ = rememberAuthoredBytecode(root, full)
+		return full, nil
+	}
+	return clean, err
+}
+
+func installedExtensionIdentity(folder string) Extension {
+	return Extension{Name: filepath.Base(filepath.Dir(folder)), Version: filepath.Base(folder)}
+}
+
 func InstallExtension(root string, e Extension) error {
 	checked, err := extensionFromFiles(e.Files)
 	if err != nil {
@@ -87,14 +176,14 @@ func InstallExtension(root string, e Extension) error {
 	}
 	dir := extensionFolder(root, checked)
 	if _, err := os.Stat(dir); err == nil {
-		old, err := ReadExtension(dir)
+		old, err := readInstalledExtension(root, checked)
 		if err != nil {
 			return err
 		}
 		if old.Digest != checked.Digest {
 			return frozenExtensionConflict(extensionKey(checked), old.Digest, checked.Digest)
 		}
-		return nil
+		return rememberAuthoredBytecode(root, checked)
 	} else if !os.IsNotExist(err) {
 		return err
 	}
@@ -118,7 +207,7 @@ func InstallExtension(root string, e Extension) error {
 	if err := renameStoragePath(context.Background(), tmp, dir); err != nil {
 		return err
 	}
-	return nil
+	return rememberAuthoredBytecode(root, checked)
 }
 func LocalExtensions(root string) ([]Extension, error) {
 	return readLocalExtensions(root, false)
@@ -127,7 +216,9 @@ func LocalExtensions(root string) ([]Extension, error) {
 // Worker reports keep evidence for independently validated registrations even
 // when a different version in the local cache fails to load.
 func readLocalExtensions(root string, keepValid bool) ([]Extension, error) {
-	return readLocalExtensionsWith(root, keepValid, ReadExtension)
+	return readLocalExtensionsWith(root, keepValid, func(folder string) (Extension, error) {
+		return readInstalledExtension(root, installedExtensionIdentity(folder))
+	})
 }
 
 func readLocalExtensionsWith(root string, keepValid bool, read func(string) (Extension, error)) ([]Extension, error) {
@@ -329,7 +420,8 @@ type extensionReportLibrary map[string]extensionReportRegistration
 func (library *extensionReportLibrary) read(root string) ([]Extension, error) {
 	next := extensionReportLibrary{}
 	extensions, err := readLocalExtensionsWith(root, true, func(folder string) (Extension, error) {
-		signature, signatureErr := sharedSignature(folder)
+		identity := installedExtensionIdentity(folder)
+		signature, signatureErr := extensionLibrarySignature(root, folder, identity)
 		if cached, ok := (*library)[folder]; ok && signatureErr == nil && signature == cached.signature {
 			limit, err := extensionByteLimit()
 			if err != nil {
@@ -341,7 +433,7 @@ func (library *extensionReportLibrary) read(root string) ([]Extension, error) {
 			next[folder] = cached
 			return cached.extension, nil
 		}
-		e, err := ReadExtension(folder)
+		e, err := readInstalledExtension(root, identity)
 		if err != nil {
 			return Extension{}, err
 		}
@@ -351,7 +443,7 @@ func (library *extensionReportLibrary) read(root string) ([]Extension, error) {
 		}
 		e.Files = nil // Reports use the parsed declaration and digest.
 		if signatureErr == nil {
-			if after, err := sharedSignature(folder); err == nil && after == signature {
+			if after, err := extensionLibrarySignature(root, folder, identity); err == nil && after == signature {
 				next[folder] = extensionReportRegistration{extension: e, signature: signature, bytes: size}
 			}
 		}
@@ -359,6 +451,21 @@ func (library *extensionReportLibrary) read(root string) ([]Extension, error) {
 	})
 	*library = next
 	return extensions, err
+}
+
+func extensionLibrarySignature(root, folder string, e Extension) (string, error) {
+	signature, err := sharedSignature(folder)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(extensionBytecodeManifest(root, e))
+	if os.IsNotExist(err) {
+		return signature, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return signature + "/" + identityHash(info.Sys()), nil
 }
 
 func collectWorkerExtensionReports(root string, now time.Time, retention time.Duration, m *Machine, library *extensionReportLibrary) {
@@ -523,7 +630,7 @@ func PrepareExtension(ctx context.Context, root string, e Extension, platform, d
 	if !slices.Contains(e.platforms(), platform) {
 		return nil, errors.New("extension does not support this platform; no CPU fallback")
 	}
-	actual, err := ReadExtension(extensionFolder(root, e))
+	actual, err := readInstalledExtension(root, e)
 	if err != nil {
 		return nil, err
 	}
@@ -664,7 +771,7 @@ func (w Worker) prepareExtensionExecution(j *Job) (envOut map[string]string, rel
 	if e == nil || j.Extension == nil || j.Extension.Digest != e.Digest {
 		return nil, nil, errors.New("extension is not qualified for this attempt")
 	}
-	actual, err := ReadExtension(extensionFolder(w.ExtensionRoot, *e))
+	actual, err := readInstalledExtension(w.ExtensionRoot, *e)
 	if err != nil {
 		return nil, nil, err
 	}

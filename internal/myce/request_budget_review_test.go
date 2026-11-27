@@ -125,7 +125,7 @@ func TestRequestBudgetGrowingFolderUsesActualBytes(t *testing.T) {
 		}
 	}
 	reads := 0
-	_, err := readExtensionFolder(folder, 100, func(_ string, remaining int64) ([]byte, error) { reads++; return make([]byte, remaining), nil })
+	_, err := readExtensionFolder(folder, 100, func(_ string, remaining int64) ([]byte, error) { reads++; return make([]byte, remaining), nil }, nil)
 	if err == nil || reads != 1 {
 		t.Fatal("second growing file exceeded aggregate allowance", reads, err)
 	}
