@@ -46,8 +46,13 @@ printf useful-result > output
 	s.Run.Env = map[string]string{"MYCE_USAGE_FILE": "payload-must-not-choose-report"}
 	j := submit(t, q, s)
 	ctx, cancel := context.WithCancel(context.Background())
-	w := Worker{EnvironmentLimit: 1 << 30, Client: Client{URL: server.URL, Token: "throwaway"}, Machine: machine("fake-hypha", "fake"), ExtensionRoot: root, JobFileRoot: shared, StateDir: newTestStateRoot(t), Interval: 5 * time.Millisecond}
+	w := Worker{EnvironmentLimit: 1 << 30, Client: Client{URL: server.URL, Token: "throwaway"}, Machine: machine("fake-hypha", "fake"), ExtensionRoot: root, JobFileRoot: shared, StateDir: newTestStateRoot(t), Interval: 5 * time.Millisecond, devEnvironmentSizing: true}
 	w.processMemory = programUsageMemoryProbe()
+	// R5 learns the complete worker footprint, including on a hardware-free
+	// dev worker. The script's self-reported 2 GiB is a separate diagnostic.
+	w.processMemory.OwnedFootprint = func(roots map[int]string) (uint64, uint64, int, error) {
+		return 512 << 20, 0, len(roots), nil
+	}
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
 	t.Cleanup(func() {
@@ -71,10 +76,10 @@ printf useful-result > output
 	}
 	q.mu.Lock()
 	key := pooledEvidenceKey(completed, q.s.Machines[completed.Machine])
-	peaks := q.memoryEvidence.exact[key].Peaks
+	estimate := q.memoryEvidence.expected(key, 0, 64, true)
 	q.mu.Unlock()
-	if len(peaks) != 1 || peaks[0] < .5 {
-		t.Fatal("worker measurement did not reach the evidence store", peaks)
+	if estimate.Evidence.Level != "exact" || estimate.Evidence.Runs != 1 || estimate.ChargeGB != .5 {
+		t.Fatal("worker measurement did not reach the evidence store", estimate, completed.MemoryAttempts[0].MemoryPeak.Learned)
 	}
 	data, err := os.ReadFile(filepath.Join(shared, completed.OutputFiles["output"]))
 	if err != nil || string(data) != "useful-result" {

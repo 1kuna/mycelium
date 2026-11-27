@@ -1164,7 +1164,7 @@ func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostL
 		}
 	}
 	if d, ok := refusal.(*admissionError); ok && known && measured && launch.NativeStartup == "continuation" &&
-		actor.nativeStartupRAM != nil && pools.RAM.TypicalGB > room {
+		actor.nativeStartupRAM != nil && d.detail.Required > room {
 		// Charge only startup growth supported by both the exact cgroup
 		// and the decline in physical room after pending peer growth.
 		first := actor.nativeStartupRAM
