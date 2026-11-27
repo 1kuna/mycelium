@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -503,16 +504,61 @@ func (q *Queue) reservations() []Reservation {
 }
 
 func (q *Queue) Reservations(contexts ...context.Context) ([]Reservation, error) {
-	v, _, err := q.captureObservation("", contexts...)
+	return q.listReservations(requestContext(contexts), false, "")
+}
+
+func (q *Queue) listReservations(ctx context.Context, unreleasedOnly bool, id string) ([]Reservation, error) {
+	unlock, err := requestObservationLock(ctx, &q.mu)
 	if err != nil {
 		return nil, err
 	}
-	return v.reservations(), nil
+	out, err := q.projectReservations(ctx, unreleasedOnly, id)
+	unlock()
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(out, func(a, b Reservation) int { return strings.Compare(a.ID, b.ID) })
+	return out, ctx.Err()
+}
+
+// Read only the selected reservations and their in-memory custody evidence.
+// In particular, the default CLI list never copies released rows or job history.
+func (q *Queue) projectReservations(ctx context.Context, unreleasedOnly bool, id string) ([]Reservation, error) {
+	out := []Reservation{}
+	appendRecord := func(r Reservation) error {
+		if unreleasedOnly && !r.active() {
+			return nil
+		}
+		projected := q.projectReservation(r)
+		if err := chargeProjectionValue(ctx, projected); err != nil {
+			return err
+		}
+		out = append(out, copyObservationValue(reflect.ValueOf(projected)).Interface().(Reservation))
+		return nil
+	}
+	if id != "" {
+		if r, ok := q.s.Reservations[id]; ok {
+			if err := appendRecord(r); err != nil {
+				return nil, err
+			}
+		}
+		return out, nil
+	}
+	for _, r := range q.s.Reservations {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := appendRecord(r); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 func (a API) registerReservations(mux *requestMux) {
 	mux.HandleFunc("GET /api/reservations", func(w http.ResponseWriter, r *http.Request) {
-		out, err := a.Queue.Reservations(r.Context())
+		query := r.URL.Query()
+		out, err := a.Queue.listReservations(r.Context(), query.Get("view") == "unreleased", query.Get("id"))
 		respondOperation(w, out, err, "reservation_invalid")
 	})
 	mux.HandleFunc("POST /api/reservations", func(w http.ResponseWriter, r *http.Request) {

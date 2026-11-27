@@ -88,6 +88,18 @@ func TestReserveCLI(t *testing.T) {
 	if err := call("release", r.ID, "--if-revision", "1", "--reason", "abandoned check"); err != nil || !strings.Contains(out.String(), `"state":"released"`) {
 		t.Fatal(out.String(), err)
 	}
+	for _, args := range [][]string{{"list"}, {"list", "--history"}, {"list", "--id", r.ID}, {"list", "--id", "missing"}} {
+		if err := call(args...); err != nil {
+			t.Fatal(args, err)
+		}
+		if len(args) == 1 || args[len(args)-1] == "missing" {
+			if out.String() != "[]\n" {
+				t.Fatal(args, out.String())
+			}
+		} else if !strings.Contains(out.String(), `"state":"released"`) {
+			t.Fatal(args, out.String())
+		}
+	}
 	if err := call("release", r.ID, "--if-revision", "1", "--reason", "stale"); err == nil {
 		t.Fatal("stale release succeeded")
 	}

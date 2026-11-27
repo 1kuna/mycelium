@@ -275,6 +275,7 @@ def run(args):
             (tools / f"native-tool-{i:06d}").chmod(0o700)
         failures = []
         cases = [
+            ("reservation list across versions", lambda: reservation_lists(candidate, previous, scratch)),
             ("candidate queue + candidate worker", lambda: pairing("same-source suffix", candidate[0], candidate[0], scratch / "same", tools, large=True)),
             ("candidate queue + previous worker", lambda: pairing("previous worker", candidate[0], previous[0], scratch / "old-worker", tools)),
             ("previous queue + candidate worker", lambda: pairing("previous queue", previous[0], candidate[0], scratch / "previous-queue", tools, allow_additive_retry=True)),
@@ -297,6 +298,29 @@ def run(args):
                 print(f"upgrade-compat: FAIL {name}: {error}", flush=True)
         if failures:
             raise RuntimeError("failed cases: " + ", ".join(failures))
+
+
+def reservation_lists(candidate, previous, scratch):
+    for name, queue, cli, expected in (
+        ("previous CLI with candidate queue", candidate, previous, ["current", "released"]),
+        ("candidate CLI with previous queue", previous, candidate, ["current"]),
+    ):
+        root = scratch / name.replace(" ", "-")
+        with process(queue[0], "queue-reservations", root) as child:
+            url = await_file(root / "url", child)
+            env = {key: value for key, value in os.environ.items() if not key.startswith("MYCE_")}
+            env.update(HOME=str(root / "home"), XDG_CONFIG_HOME=str(root / "home" / ".config"))
+
+            def ids(*flags):
+                output = command([str(cli[1]), "reserve", "list", "--queue", url,
+                                  "--token", "upgrade-fixture", *flags], env=env)
+                return [record["id"] for record in json.loads(output)]
+
+            assert ids() == expected, name
+            if cli is candidate:
+                assert ids("--history") == ["current", "released"], name
+                assert ids("--id", "released") == ["released"], name
+            print(f"upgrade-compat: PASS {name}", flush=True)
 
 
 def inventory_restarts(candidate, previous, scratch, tools):

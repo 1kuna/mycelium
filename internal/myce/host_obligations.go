@@ -68,28 +68,36 @@ func (q *Queue) hostObligations(host string) []HostObligation {
 func (q *Queue) collectHostObligations(host string) []HostObligation {
 	pending := map[string]HostObligation{}
 	add := func(p HostObligation) { pending[obligationKey(p)] = p }
-	jobs := map[string]*Job{}
-	for id, j := range q.liveJobs() {
-		jobs[id] = j
-	}
-	if q.records == nil || !q.records.updating {
-		for _, r := range q.s.Submissions {
-			if r.Job != nil && jobs[r.JobID] == nil {
-				jobs[r.JobID] = r.Job
-			}
-		}
-	}
-	if q.records != nil {
-		for id, j := range q.records.removed {
-			jobs[id] = j
-		}
-	}
-	for _, j := range jobs {
+	// Keep the borrowed job maps in place: a read can see retained history,
+	// but only copies with outstanding custody contribute to the result.
+	addJob := func(j *Job) {
 		for _, c := range j.Copies {
 			if !c.ReleaseConfirmed && q.executionHost(c.Machine) == host {
 				add(HostObligation{Result: Result{Machine: c.Machine, Session: c.Session, Execution: Execution{ID: j.ID, Attempt: c.Attempt}}})
 			}
 		}
+	}
+	jobs := q.liveJobs()
+	var removed map[string]*Job
+	if q.records != nil {
+		removed = q.records.removed
+	}
+	for id, j := range jobs {
+		if removed[id] == nil {
+			addJob(j)
+		}
+	}
+	if q.records == nil || !q.records.updating {
+		keyed := map[string]*Job{}
+		for _, r := range q.s.Submissions {
+			if r.Job != nil && jobs[r.JobID] == nil && removed[r.JobID] == nil && keyed[r.JobID] == nil {
+				keyed[r.JobID] = r.Job
+				addJob(r.Job)
+			}
+		}
+	}
+	for _, j := range removed {
+		addJob(j)
 	}
 	for _, r := range q.s.HostReleases {
 		if r.Host == host {

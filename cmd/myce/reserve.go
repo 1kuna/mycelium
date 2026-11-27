@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -17,13 +18,14 @@ import (
 var errReservationResponseInvalid = errors.New("reservation_response_invalid")
 
 func reserveCommand(ctx context.Context, args []string, out io.Writer) error {
-	usage := errors.New("usage: myce reserve add SELECTOR --job ID --owner OWNER --reason TEXT [--whole-host] [--id ID] [--max-lifetime 2h] | list | release ID --if-revision N --reason TEXT")
+	usage := errors.New("usage: myce reserve add SELECTOR --job ID --owner OWNER --reason TEXT [--whole-host] [--id ID] [--max-lifetime 2h] | list [--history] [--id ID] | release ID --if-revision N --reason TEXT")
 	if len(args) == 0 || args[0] != "add" && args[0] != "list" && args[0] != "release" {
 		return usage
 	}
 	f := flag.NewFlagSet("reserve "+args[0], flag.ContinueOnError)
 	authority := installedClientFlags(f)
-	id := f.String("id", "", "stable reservation identity (generated if omitted)")
+	id := f.String("id", "", "reservation identity (generated on add; list includes released records for this ID)")
+	history := f.Bool("history", false, "include released reservations in the list")
 	job := f.String("job", "", "existing validation job/check ID")
 	owner := f.String("owner", "", "operator attribution, not a separate authentication identity")
 	reason := f.String("reason", "", "reason for reserving or conditionally releasing")
@@ -35,7 +37,7 @@ func reserveCommand(ctx context.Context, args []string, out io.Writer) error {
 		arg := args[i]
 		if strings.HasPrefix(arg, "-") {
 			flags = append(flags, arg)
-			if arg != "--whole-host" && arg != "-whole-host" && !strings.Contains(arg, "=") && i+1 < len(args) {
+			if arg != "--whole-host" && arg != "-whole-host" && arg != "--history" && arg != "-history" && !strings.Contains(arg, "=") && i+1 < len(args) {
 				i++
 				flags = append(flags, args[i])
 			}
@@ -52,8 +54,12 @@ func reserveCommand(ctx context.Context, args []string, out io.Writer) error {
 	invalid := false
 	f.Visit(func(v *flag.Flag) {
 		switch v.Name {
-		case "id", "job", "owner", "max-lifetime", "whole-host":
+		case "job", "owner", "max-lifetime", "whole-host":
 			invalid = invalid || args[0] != "add"
+		case "id":
+			invalid = invalid || args[0] == "release" || args[0] == "list" && *id == ""
+		case "history":
+			invalid = invalid || args[0] != "list"
 		case "if-revision":
 			invalid = invalid || args[0] != "release"
 		case "reason":
@@ -77,10 +83,26 @@ func reserveCommand(ctx context.Context, args []string, out io.Writer) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if args[0] == "list" {
+		path := "/api/reservations"
+		query := url.Values{}
+		unreleasedOnly := !*history && *id == ""
+		if unreleasedOnly {
+			query.Set("view", "unreleased")
+		}
+		if *id != "" {
+			query.Set("id", *id)
+		}
+		if len(query) != 0 {
+			path += "?" + query.Encode()
+		}
 		var records []myce.Reservation
-		if err := c.Call(ctx, "GET", "/api/reservations", nil, &records); err != nil {
+		if err := c.Call(ctx, "GET", path, nil, &records); err != nil {
 			return err
 		}
+		// The previous queue ignores the filters and returns the same array.
+		records = slices.DeleteFunc(records, func(r myce.Reservation) bool {
+			return unreleasedOnly && r.ReleasedAt != nil || *id != "" && r.ID != *id
+		})
 		return json.NewEncoder(out).Encode(records)
 	}
 	var record myce.Reservation

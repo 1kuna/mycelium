@@ -1419,8 +1419,12 @@ after a caller restart; do not clear the hold merely because the caller exited.
 myce reserve add 'host=compute-a;devices=0' --id driver-check --job JOB_ID --owner validation-agent --reason 'driver qualification' --max-lifetime 2h
 myce reserve add 'host=compute-b' --whole-host --id host-check --job OTHER_JOB_ID --owner validation-agent --reason 'host validation requires host-wide isolation'
 myce reserve list
+myce reserve list --id driver-check
 myce reserve release driver-check --if-revision 1 --reason 'validation abandoned; inspect retained execution custody separately'
 ```
+
+`reserve list` shows unreleased reservations. Use `--id` to verify a specific
+reservation's release, or `--history` to include all retained released records.
 
 `reserve add` binds one existing single batch job/check before enabling admission
 policy. For a GPU extension check, the CLI narrows a host-only selector to the
