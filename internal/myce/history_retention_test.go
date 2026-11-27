@@ -1,6 +1,8 @@
 package myce
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -124,5 +126,108 @@ func TestHistoryRetentionReleasedFilesKeepSharedCustody(t *testing.T) {
 		if err := q.Tick(); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// #2202: an after: parent and its keyed dependent are released and collected,
+// then the dependent's record expires into a replay. Returns the queue, the
+// parent and the parent's reclaimed file.
+func prunedReleasedDependent(t *testing.T) (*Queue, *fakeClock, *Job, *Job, FileRef) {
+	t.Helper()
+	q, clock, c := retentionFixture(t)
+	if err := q.ConfigureLogRetention(0); err != nil {
+		t.Fatal(err)
+	}
+	parent, _, ref := releaseTerminal(t, q, c, "parent")
+	dependent, _, _ := releaseTerminal(t, q, c, "dependent")
+	if err := q.update(func() error {
+		d := q.touchJob(dependent.ID)
+		d.Spec.After = &PieceDependency{Job: parent.ID, Outputs: map[string]string{"upstream": "result"}}
+		d.Attempt, d.ReleaseConfirmed = 1, true
+		d.Copies = []Copy{{Attempt: 1, ReleaseConfirmed: true}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(filePublicationGrace + time.Second)
+	applyFixtureRelease(t, q, releasePlan(t, q, releaseSelection(parent, dependent)))
+	collectFixtureBlobs(t, q)
+	if _, err := os.Stat(q.files.blob(ref)); !os.IsNotExist(err) {
+		t.Fatal("fixture did not reclaim the parent's file", err)
+	}
+	assertReleaseSettled(t, q, parent, ref, "before expiry")
+	// A host still holding the dependent keeps the chain pending across
+	// expiry: the replay keeps the job ID that HostReleases names.
+	if err := q.update(func() error {
+		q.s.HostReleases = map[string]HostRelease{"held": {Job: dependent.ID}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(jobRecordRetention + time.Second)
+	if err := q.pruneJobHistory(); err != nil {
+		t.Fatal(err)
+	}
+	r := q.s.Submissions[q.records.bindings[dependent.ID]]
+	if q.s.Jobs[dependent.ID] != nil || q.s.Jobs[parent.ID] == nil || r == nil || !r.FileCustodyPruned {
+		t.Fatalf("fixture did not prune only the dependent: dependent=%t parent=%t", q.s.Jobs[dependent.ID] != nil, q.s.Jobs[parent.ID] != nil)
+	}
+	if !q.jobReleasePending(q.s.Jobs[parent.ID]) || !q.cancellationObservation().jobReleasePending(q.s.Jobs[parent.ID]) {
+		t.Fatal("pruning dropped a release a host still holds")
+	}
+	if err := q.update(func() error { q.s.HostReleases = nil; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	return q, clock, parent, dependent, ref
+}
+
+func assertReleaseSettled(t *testing.T, q *Queue, parent *Job, ref FileRef, when string) {
+	t.Helper()
+	p := q.s.Jobs[parent.ID]
+	if q.jobReleasePending(p) || q.cancellationObservation().jobReleasePending(p) || q.observedRelease(p) == "pending" {
+		t.Fatalf("%s: settled release reopened", when)
+	}
+	report, err := q.ProjectFileHoldings(context.Background(), "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range report.Files {
+		if f.SHA256 == ref.SHA256 {
+			t.Fatalf("%s: reclaimed file held again: %+v", when, f)
+		}
+	}
+	// The collector must not keep the reclaimed digest for the parent either.
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	q.visitDurableFileReferences(false, nil, func(r FileRef, flags fileReferenceFlags, owner FileKeepingReference) {
+		if r.SHA256 == ref.SHA256 && flags&fileKept != 0 {
+			t.Fatalf("%s: collector keeps reclaimed file for %s", when, owner.JobID)
+		}
+	})
+}
+
+func TestHistoryExpiryKeepsDependentReleaseSettled(t *testing.T) {
+	q, clock, parent, _, ref := prunedReleasedDependent(t)
+	assertReleaseSettled(t, q, parent, ref, "after expiry")
+	q = reopenCancellationQueue(t, q, clock)
+	assertReleaseSettled(t, q, parent, ref, "after reopen")
+}
+
+// Replays saved before #2202 have no ReleaseConfirmed; older ones also lack
+// the pruned marker, which open restores from the history summary.
+func TestHistoryExpiryLegacyReplayLoadsReleased(t *testing.T) {
+	for _, unmarked := range []bool{false, true} {
+		q, clock, parent, dependent, ref := prunedReleasedDependent(t)
+		if err := q.update(func() error {
+			r := q.touchSubmission(q.records.bindings[dependent.ID])
+			replay := *r.Job
+			replay.ReleaseConfirmed = false
+			r.Job, r.FileCustodyPruned = &replay, !unmarked
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		q = reopenCancellationQueue(t, q, clock)
+		assertReleaseSettled(t, q, parent, ref, fmt.Sprintf("legacy replay (unmarked=%t)", unmarked))
 	}
 }

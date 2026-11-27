@@ -231,9 +231,24 @@ func (q *Queue) pruneJobHistory(requestContexts ...context.Context) error {
 }
 
 // replayJob is the keyed answer for an expired record: identity and outcome.
+// It drops Copies, so the job flag alone must carry the settled release, or
+// the replay reads release-pending forever and reopens its parents' release
+// (#2202). Expiry already requires !attemptReleasePending (mutableJob); a
+// release still held by a host stays visible through HostReleases by ID.
 func replayJob(j *Job) *Job {
+	released := j.ReleaseConfirmed || j.Attempt > 0 && !attemptReleasePending(j)
 	return &Job{ID: j.ID, Spec: j.Spec, State: j.State, Attempt: j.Attempt, Machine: j.Machine, Queued: j.Queued,
-		StartedAt: j.StartedAt, FinishedAt: j.FinishedAt, CancelledAt: j.CancelledAt, Reason: j.Reason}
+		StartedAt: j.StartedAt, FinishedAt: j.FinishedAt, CancelledAt: j.CancelledAt, Reason: j.Reason, ReleaseConfirmed: released}
+}
+
+// Replays saved before #2202 lost ReleaseConfirmed. Every replay came from an
+// expiry that required its attempt's release settled (mutableJob has blocked
+// on attemptReleasePending since expiry began), and with the record gone no
+// confirmation can ever land on it, so it loads as released.
+func settleLegacyReplay(record *submissionRecord) {
+	if j := record.Job; record.FileCustodyPruned && j != nil && j.Attempt > 0 {
+		j.ReleaseConfirmed = true
+	}
 }
 
 // learnExpired installs a durable expired record's learning. Facts are
@@ -259,6 +274,7 @@ func (q *Queue) loadExpiredLearning() error {
 	// keyed answers can have RemovedAt without a summary and still own files.
 	var unmarked map[string]*submissionRecord
 	for _, record := range q.s.Submissions {
+		settleLegacyReplay(record)
 		if record.Job != nil && record.RemovedAt != nil && !record.FileCustodyPruned && q.s.Jobs[record.JobID] == nil {
 			if unmarked == nil {
 				unmarked = map[string]*submissionRecord{}
@@ -286,6 +302,7 @@ func (q *Queue) loadExpiredLearning() error {
 		}
 		if record := unmarked[id]; record != nil {
 			record.FileCustodyPruned = true
+			settleLegacyReplay(record)
 		}
 		if len(data) == 0 {
 			continue
