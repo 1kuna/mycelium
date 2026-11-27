@@ -427,3 +427,36 @@ func TestMemoryExpectedColdCardGroup(t *testing.T) {
 		t.Fatalf("typed demand that cannot fit one cold card: devices=%v memory=%g", a.AllocatedDevices, a.Spec.Needs.MemoryGB)
 	}
 }
+
+func TestMemoryExpectedColdCardModelCoexistence(t *testing.T) {
+	for _, platform := range []string{"fake", "cpu"} {
+		t.Run(platform, func(t *testing.T) {
+			q, _ := fixture(t)
+			m := m3Machine()
+			m.Devices = m.Devices[:1]
+			m.HostMemoryBudgetGB = 32
+			s := spec("production")
+			s.Needs = ResourceNeeds{HostMemoryGB: 1, Platform: Platform{Required: []string{platform}}}
+			if platform == "fake" {
+				s.Needs.MemoryGB = 1
+			}
+			j := submit(t, q, s)
+			batch := r5Start(t, q, r5Check(t, q, m, r5RAM(32, 32)), j.ID)
+			r5Check(t, q, m, r5RAM(32, 32), batch)
+			call := callJob(&ModelCall{Model: "test", Project: s.Project, Priority: s.Priority})
+			q.mu.Lock()
+			card := q.machineTargets(q.s.Machines[m.ID])[1]
+			fits := q.cardRoom(call, card, 1, false, true, false, &placementPlan{})
+			q.mu.Unlock()
+			if platform == "fake" {
+				if fits || batch.Memory.Card == nil || batch.Memory.Card.ChargeGB != 8 {
+					t.Fatalf("cold job must retain the whole card against a same-tier load: fits=%t memory=%+v", fits, batch.Memory)
+				}
+				return
+			}
+			if !fits || batch.Memory.Card != nil {
+				t.Fatalf("CPU job must leave the card available to a same-tier load: fits=%t memory=%+v", fits, batch.Memory)
+			}
+		})
+	}
+}
