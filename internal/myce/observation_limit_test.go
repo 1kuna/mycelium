@@ -216,6 +216,46 @@ func TestObservationLimitProductionHTTPAndPolicy(t *testing.T) {
 	}
 }
 
+func TestMachinesStatusDuringWriterPressure(t *testing.T) {
+	q, clock := fixture(t)
+	check(t, q, machine("worker", "fake"), nil)
+	handler := (API{Queue: q, Token: "fixture"}).handler("", clock)
+	limit := newObservationLimit(clock, q)
+	busy := holdObservationHTTP(t, handler, "/api/inspection")
+	defer busy()
+	recover := observationPressure(limit, clock, time.Millisecond)
+	defer recover()
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	read := func(query string, want int) *httptest.ResponseRecorder {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
+		defer cancel()
+		r := httptest.NewRequestWithContext(ctx, "GET", "/api/status"+query, nil)
+		r.Header.Set("Authorization", "Bearer fixture")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != want {
+			t.Fatalf("status%s: got HTTP %d, want %d", query, w.Code, want)
+		}
+		return w
+	}
+	read("", http.StatusOK)
+	w := read("?sections=machines", http.StatusOK)
+	var s Snapshot
+	if err := json.Unmarshal(w.Body.Bytes(), &s); err != nil || len(s.Machines) != 1 || s.Machines[0].ID != "worker" {
+		t.Fatalf("committed machine missing: %v, %s", err, w.Body)
+	}
+	read("?detail=full", http.StatusOK)
+	read("?sections=machines&jobs=all", http.StatusTooManyRequests)
+
+	previous := q.publishedReads.Swap(nil)
+	defer q.publishedReads.Store(previous)
+	read("?sections=machines", http.StatusTooManyRequests)
+	read("?detail=full", http.StatusTooManyRequests)
+}
+
 // Each operation is a 200-waiter wave. The healthy scalar wait path is measured
 // separately by BenchmarkWaitIndex200; here the expensive reads must all be shed
 // before reaching the handler or queue lock once measured pressure is present.

@@ -22,12 +22,6 @@ func (q *Queue) serveStatusHistory(w http.ResponseWriter, r *http.Request, optio
 		return
 	}
 	defer finish()
-	if q.readIndex(ctx) == nil || q.unpublishedRecords() {
-		if err = admitObservationProjection(ctx); err != nil {
-			respond(w, nil, err)
-			return
-		}
-	}
 	options.stream = true
 	v, files, err := q.captureReadObservation("", &options, ctx)
 	if err != nil {
