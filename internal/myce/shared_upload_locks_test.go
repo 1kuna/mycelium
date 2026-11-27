@@ -65,6 +65,9 @@ func proofUploadRequest(ctx context.Context, member *proofProcess, method, id st
 // work, that concurrent PATCHes have one writer, and that a coordinator
 // suspended mid-PATCH cannot corrupt the upload its successor published.
 func TestSharedQueueMemberUploadLocks(t *testing.T) {
+	// The two subprocesses model different hosts. Do not let their
+	// same-host probe filenames collide while testing upload custody (#2182).
+	t.Setenv("MYCE_SHARED_PROOF_DISTINCT_PROBE_HOSTS", "1")
 	pg := startProofPostgres(t)
 	a := pg.authority(t)
 	dir := t.TempDir()
@@ -179,6 +182,23 @@ func TestSharedQueueMemberUploadLocks(t *testing.T) {
 			_ = old.cmd.Process.Signal(syscall.SIGCONT)
 		}
 	}()
+	proofEventually(t, "former coordinator SIGSTOP to take effect", func() bool {
+		var state syscall.WaitStatus
+		pid, err := syscall.Wait4(old.cmd.Process.Pid, &state, syscall.WNOHANG|syscall.WUNTRACED, nil)
+		if err == syscall.EINTR {
+			return false
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pid == 0 {
+			return false
+		}
+		if !state.Stopped() || state.StopSignal() != syscall.SIGSTOP {
+			t.Fatalf("former coordinator did not stop: %v", state)
+		}
+		return true
+	})
 	chunk(3000, 4000)
 	proofLeader(t, a, next, first.number)
 	linkUnsupported()
