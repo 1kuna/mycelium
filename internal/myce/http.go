@@ -575,7 +575,9 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			if r.URL.Path == "/" {
 				w.Header().Set("WWW-Authenticate", `Basic realm="Mycelium", charset="UTF-8"`)
 			}
-			respond(w, nil, &HTTPError{Status: 401, Code: "authentication_required", Message: rejectionMessages["authentication_required"]})
+			err := &HTTPError{Status: 401, Code: "authentication_required", Message: rejectionMessages["authentication_required"]}
+			logFleetAuthorizationDecision(r, nil, err)
+			respond(w, nil, err)
 			return
 		}
 		if workerProtocolEndpoint(r.URL.Path) && (r.Method == http.MethodPost || r.Method == http.MethodGet) && r.Header.Get("X-Myce-Start-Gate") != startGateProtocol {
@@ -612,6 +614,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		var budgetErr error
 		r, finishBudget, budgetErr = a.Queue.withRequestBudget(w, r)
 		if budgetErr != nil {
+			logFleetAuthorizationDecision(r, nil, budgetErr)
 			respond(w, nil, budgetErr)
 			return
 		}

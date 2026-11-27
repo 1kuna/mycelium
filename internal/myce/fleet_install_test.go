@@ -35,6 +35,7 @@ type fleetInstallFixture struct {
 	authorizations int
 	fetches        int
 	acks           []string
+	ackHandler     func(FleetUpgradeAck, context.Context) error
 	denyAt         int
 	denyCode       string
 	failureCodes   []string
@@ -116,10 +117,7 @@ func newFleetInstallFixture(t *testing.T, goos string) *fleetInstallFixture {
 				_, _ = w.Write(f.next)
 			}
 		case "/api/fleet/ack":
-			var ack struct {
-				Operation, Host, Machine, Session, Phase, Failure string
-				Revision                                          int
-			}
+			var ack FleetUpgradeAck
 			if json.NewDecoder(r.Body).Decode(&ack) != nil || ack.Revision != f.i.Revision || ack.Operation != f.i.Operation || ack.Session != f.i.Session || ack.Host != f.i.Host || ack.Machine != f.i.Machine {
 				t.Error("acknowledgement lost instruction fence")
 			}
@@ -129,6 +127,9 @@ func newFleetInstallFixture(t *testing.T, goos string) *fleetInstallFixture {
 			f.acks = append(f.acks, ack.Phase)
 			if ack.Phase == "failed" {
 				f.failureCodes = append(f.failureCodes, ack.Failure)
+			}
+			if f.ackHandler != nil {
+				respond(w, nil, f.ackHandler(ack, r.Context()))
 			}
 		case "/api/fleet/instruction":
 			_ = json.NewEncoder(w).Encode(f.i)
@@ -311,20 +312,60 @@ func TestFleetInstallRejectsUntrustedReleaseBeforeFetch(t *testing.T) {
 }
 
 func TestFleetInstallRequiresCurrentMaintenanceAuthority(t *testing.T) {
-	for _, denyAt := range []int{2, 3} {
-		t.Run(map[int]string{2: "before-download", 3: "before-publication"}[denyAt], func(t *testing.T) {
-			f := newFleetInstallFixture(t, "linux")
+	for _, tc := range []struct {
+		name, platform string
+		denyAt         int
+	}{
+		{"before-download", "darwin", 2},
+		{"before-publication", "linux", 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFleetInstallFixture(t, tc.platform)
+			q, _, _ := fleetFixture(t, "queue", f.c.HostID)
+			if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+				t.Fatal(err)
+			}
+			fleetTick(t, q)
+			i := fleetInstructionFor(t, q)
+			f.i.Operation = i.Operation
+			f.i.AuthorizationDiagnostics = i.AuthorizationDiagnostics
+			h := q.fleetActiveHost()
+			h.Machine, h.Before.Session = f.i.Machine, f.i.Session
+			f.ackHandler = func(ack FleetUpgradeAck, ctx context.Context) error {
+				return q.AckFleetUpgrade(ack, ctx)
+			}
 			if err := f.launch(); err != nil {
 				t.Fatal(err)
 			}
-			f.denyAt = denyAt
+			f.denyAt = tc.denyAt
 			if err := f.apply(); err == nil || f.restarts != 0 {
 				t.Fatal("changed maintenance owner authorized install", err)
 			}
-			if denyAt == 2 && f.fetches != 0 {
+			if tc.denyAt == 2 && f.fetches != 0 {
 				t.Fatal("artifact requested before authorization")
 			}
 			f.assertBinary(f.old)
+			const failure = "fleet_authorization_refused"
+			const cause = "HTTP 409 code=request_failed"
+			u := q.fleetUpgradeStatus()
+			if u.State != "stopped" || u.Hosts[0].FailureCode != failure || u.Hosts[0].AuthorizationCause != cause {
+				t.Fatal("operation lost typed refusal", u)
+			}
+			replay, err := ReadFleetUpdateFailure(f.c)
+			if err != nil || replay == nil || replay.AuthorizationCause != cause {
+				t.Fatal("receipt replay lost typed refusal", replay, err)
+			}
+			path := filepath.Join(f.c.State, fleetHelperLogFile)
+			info, err := os.Stat(path)
+			if err != nil || info.Mode().Perm() != 0600 || info.Size() > fleetHelperLogLimit {
+				t.Fatal("helper log missing or not bounded and private", info, err)
+			}
+			out, err := os.ReadFile(path)
+			if err != nil || !strings.Contains(string(out), `code="`+failure+`" cause="`+cause+`"`) ||
+				!strings.Contains(string(out), `event=fleet_authorization side=worker cause="`+cause+`"`) ||
+				strings.Contains(string(out), "changed maintenance owner") || strings.Contains(string(out), "fixture-private-token") {
+				t.Fatalf("helper log lost typed cause or disclosed private data: %s (%v)", out, err)
+			}
 		})
 	}
 }

@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
 )
 
 // FleetProofIssue describes why a worker could not report its managed runtime
@@ -89,18 +92,12 @@ func fleetAuthorizationCause(err error, p *FleetRuntimeProof, session string) st
 		}
 		var rejection *HTTPError
 		if errors.As(err, &rejection) {
-			// A syntactically valid server code can still contain private
-			// text. Retain only codes this control endpoint is known to emit.
-			code := "request_failed"
-			switch rejection.Code {
-			case "fleet_instruction_stale", "fleet_ack_stale", "fleet_maintenance_changed",
-				"authentication_required", "request_invalid", "queue_stopping",
-				"status_unavailable", "request_capacity_unavailable":
-				code = rejection.Code
-			}
-			return fmt.Sprintf("HTTP %d code=%s", rejection.Status, code)
+			return fmt.Sprintf("HTTP %d code=%s", rejection.Status, fleetAuthorizationHTTPCode(rejection.Code))
 		}
-		return ClientErrorCause(err)
+		if cause := ClientErrorCause(err); safeFleetAuthorizationCause(cause) != "" {
+			return cause
+		}
+		return "io_error"
 	}
 	if why := fleetProofFailure(p); why != "" {
 		return why
@@ -116,7 +113,7 @@ func fleetAuthorizationCause(err error, p *FleetRuntimeProof, session string) st
 // code is one the helper emits (see docs/reference/fleet-upgrades.md).
 func fleetFailureCode(code string) string {
 	switch code {
-	case "fleet_ack_failed", "fleet_authorization_refused", "fleet_instruction_stale", "fleet_ack_stale",
+	case "fleet_ack_failed", "fleet_authorization_refused", fleetAuthorizationLoad, "fleet_instruction_stale", "fleet_ack_stale",
 		"fleet_maintenance_changed",
 		"fleet_artifact_download_failed", "fleet_artifact_transfer_failed", "fleet_artifact_refused",
 		"fleet_staging_write_failed", "fleet_binary_unavailable", "fleet_candidate_invalid",
@@ -160,12 +157,69 @@ func fleetControlFailure(err error, fallback string) error {
 	return errors.New(fallback)
 }
 
-// Preserve the typed pre-intent stall for the runtime's next-poll recovery,
-// while helpers after intent retain the stable, durable failure code.
-type fleetAuthorizationStalled struct{ cause error }
+func fleetAuthorizationHTTPCode(code string) string {
+	switch code {
+	case "fleet_instruction_stale", "fleet_ack_stale", "fleet_maintenance_changed",
+		"authentication_required", "request_invalid", "queue_stopping", "status_unavailable",
+		"request_capacity_unavailable", "request_budget_invalid", "client_rate_limited":
+		return code
+	}
+	return "request_failed"
+}
 
-func (*fleetAuthorizationStalled) Error() string   { return "fleet_authorization_refused" }
-func (e *fleetAuthorizationStalled) Unwrap() error { return e.cause }
+// Only fixed authorization predicates and canonical HTTP causes may travel
+// from a helper or receipt to the fleet operation record.
+func safeFleetAuthorizationCause(cause string) string {
+	switch cause {
+	case "response_decode_failed", "queue_stalled", "timeout", "cancelled",
+		"io_error", "EOF", "unexpected_EOF", "ECONNREFUSED", "ECONNRESET", "EPIPE",
+		"proof_missing", "proof_pid_missing", "proof_session_missing", "proof_sha256_invalid",
+		"proof_service_unhealthy", "proof_runner_smoke_failed", "proof_start_gate_mismatch",
+		"proof_attempt_protocol_mismatch", "proof_session_mismatch":
+		return cause
+	}
+	if rest, ok := strings.CutPrefix(cause, "HTTP "); ok {
+		status, code, ok := strings.Cut(rest, " code=")
+		n, err := strconv.Atoi(status)
+		if ok && err == nil && n >= 300 && n <= 599 && strconv.Itoa(n) == status && fleetAuthorizationHTTPCode(code) == code {
+			return cause
+		}
+	}
+	return ""
+}
+
+const fleetAuthorizationLoad = "fleet_authorization_transient_load"
+
+type fleetAuthorizationError struct {
+	code, cause string
+	stall       *QueueStalledError
+}
+
+func (e *fleetAuthorizationError) Error() string { return e.code }
+func (e *fleetAuthorizationError) Unwrap() error {
+	if e.stall == nil {
+		return nil
+	}
+	return e.stall
+}
+
+func fleetAuthorizationFailure(err error, cause string) error {
+	result := &fleetAuthorizationError{code: fleetControlFailure(err, "fleet_authorization_refused").Error(), cause: cause}
+	var rejection *HTTPError
+	if errors.As(err, &rejection) && rejection.Status == http.StatusTooManyRequests {
+		result.code = fleetAuthorizationLoad
+	}
+	errors.As(err, &result.stall)
+	return result
+}
+
+func fleetAuthorizationDetail(err error) string {
+	var failure *fleetAuthorizationError
+	if errors.As(err, &failure) {
+		return safeFleetAuthorizationCause(failure.cause)
+	}
+	return ""
+}
 
 // Launch yields to the next runtime poll while a helper still runs or the
 // queue's answer was momentarily stale; the instruction is fetched again.

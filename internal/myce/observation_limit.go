@@ -110,6 +110,7 @@ func (l *observationLimit) better(a, b *observationRead) bool {
 func (l *observationLimit) admit(w http.ResponseWriter, r *http.Request) (func(), bool) {
 	done, err := l.acquire(r)
 	if err != nil {
+		logFleetAuthorizationDecision(r, nil, err)
 		respond(w, nil, err)
 		return nil, false
 	}

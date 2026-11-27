@@ -1070,6 +1070,9 @@ process within 15 minutes (`worker_update_not_verified`,
 `queue_update_not_verified`), or a maintenance change by someone else
 (`maintenance_changed`, keeping their policy). Look the code up in the
 [failure code table](reference/fleet-upgrades.md#failure-codes-and-repairs).
+For authorization failures, check `authorization_cause` in fleet status and
+`fleet-update.log` under the installed worker's state directory. The private
+log retains the latest helper's typed outcome on macOS and Linux.
 For a transient storage warning, retain `storage_warning` from the fleet host
 status or local helper receipt; service health and rollout continue while runtime
 storage admission protects dependent work. For a storage preflight failure, retain

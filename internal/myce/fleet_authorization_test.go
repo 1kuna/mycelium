@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -187,6 +188,18 @@ func TestFleetAuthorizationQueueDiagnostics(t *testing.T) {
 			}
 		})
 	}
+	t.Run("before_handler", func(t *testing.T) {
+		var logs testLogBuffer
+		old := log.Writer()
+		log.SetOutput(&logs)
+		defer log.SetOutput(old)
+		r := httptest.NewRequest(http.MethodGet, fleetAuthorizePath+"?session=private-value", nil)
+		w := httptest.NewRecorder()
+		API{Queue: q, Token: "fixture-token"}.Handler().ServeHTTP(w, r)
+		if w.Code != http.StatusUnauthorized || !strings.Contains(logs.String(), `event=fleet_authorization side=queue cause="HTTP 401 code=authentication_required"`) || strings.Contains(logs.String(), "private-value") {
+			t.Fatal("admission refusal missing its authorization decision", w.Code, logs.String())
+		}
+	})
 }
 
 func TestFleetAuthorizationDeadlineDiagnostic(t *testing.T) {
@@ -270,6 +283,47 @@ func TestFleetAuthorizationStallRechecksFences(t *testing.T) {
 			}
 			if proof, err := fleetAuthorize(context.Background(), client, i, wait); err == nil || fleetProofReady(&proof) {
 				t.Fatal("stalled request retained obsolete authority", proof, err)
+			}
+		})
+	}
+}
+
+func TestFleetAuthorizationOverloadUsesClientPacing(t *testing.T) {
+	for _, finish := range []bool{false, true} {
+		name := "recovered"
+		if finish {
+			name = "owner_stopped"
+		}
+		t.Run(name, func(t *testing.T) {
+			clock := &fakeClock{now: time.Now()}
+			proof := fleetTestProof(clock, "session", 1, false)
+			calls, pauses := 0, 0
+			client := Client{URL: "http://fixture.invalid", Clock: clock, Jitter: func() float64 { return 0 }, HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+				calls++
+				status, header, data := http.StatusTooManyRequests, http.Header{"Retry-After": {"7"}}, []byte(`{"code":"client_rate_limited","error":"private-value"}`)
+				if calls == 2 {
+					status, header = http.StatusOK, nil
+					data, _ = json.Marshal(proof)
+				}
+				return &http.Response{StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader(string(data)))}, nil
+			})}, Pause: func(_ context.Context, delay time.Duration) error {
+				pauses++
+				if delay != 7*time.Second {
+					t.Fatalf("Retry-After lost authority: %s", delay)
+				}
+				if finish {
+					return context.DeadlineExceeded
+				}
+				clock.Advance(delay)
+				return nil
+			}}
+			got, err := fleetAuthorize(context.Background(), client, FleetUpdateInstruction{Session: proof.Session}, nil)
+			if finish {
+				if err == nil || err.Error() != fleetAuthorizationLoad || fleetAuthorizationDetail(err) != "HTTP 429 code=client_rate_limited" || calls != 1 || pauses != 1 {
+					t.Fatal("exhausted overload lost its typed cause", err, fleetAuthorizationDetail(err), calls, pauses)
+				}
+			} else if err != nil || !fleetProofReady(&got) || calls != 2 || pauses != 1 {
+				t.Fatal("authorization did not recover through the existing client retry", got, err, calls, pauses)
 			}
 		})
 	}

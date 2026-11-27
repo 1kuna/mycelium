@@ -262,13 +262,14 @@ func deliverFleetAck(ctx context.Context, client Client, clock Clock, acks map[s
 }
 
 type fleetLaunchFailure struct {
-	Operation string `json:"operation"`
-	Revision  int    `json:"revision"`
-	Host      string `json:"host"`
-	Machine   string `json:"machine"`
-	Session   string `json:"session"`
-	Phase     string `json:"phase"`
-	Failure   string `json:"failure"`
+	Operation          string `json:"operation"`
+	Revision           int    `json:"revision"`
+	Host               string `json:"host"`
+	Machine            string `json:"machine"`
+	Session            string `json:"session"`
+	Phase              string `json:"phase"`
+	Failure            string `json:"failure"`
+	AuthorizationCause string `json:"authorization_cause,omitempty"`
 }
 
 func (w Worker) newFleetRuntime() *workerFleetRuntime {
@@ -489,7 +490,10 @@ func pollFleetRuntimeAt(ctx context.Context, config ServiceConfig, client Client
 		if code == "fleet_failure_code_unrecognized" {
 			code = "fleet_helper_launch_unclassified"
 		}
-		failure := &fleetLaunchFailure{instruction.Operation, instruction.Revision, host, machine, session, "failed", code}
+		failure := &fleetLaunchFailure{Operation: instruction.Operation, Revision: instruction.Revision, Host: host, Machine: machine, Session: session, Phase: "failed", Failure: code}
+		if instruction.AuthorizationDiagnostics {
+			failure.AuthorizationCause = fleetAuthorizationDetail(launchErr)
+		}
 		if !deliverFleetAck(ctx, client, clock, result.acks, "launch/"+fleetInstructionKey(instruction), failure) {
 			result.failed = failure
 		}
