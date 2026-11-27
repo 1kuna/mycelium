@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,11 +35,14 @@ type fileInventory struct {
 // changed marks one identity for re-reading after this process changed its
 // store paths. Call after the filesystem change, never before it.
 func (s *FileStore) changed(name string) {
+	hash := strings.TrimSuffix(filepath.Base(name), ".info")
+	if changed, ok := s.claimReleaseObservations.Load(hash); ok {
+		changed.(*atomic.Bool).Store(true)
+	}
 	inv := s.inventory
 	if inv == nil {
 		return
 	}
-	hash := strings.TrimSuffix(filepath.Base(name), ".info")
 	inv.marks.Lock()
 	inv.dirty[hash] = true
 	if inv.touched != nil {
