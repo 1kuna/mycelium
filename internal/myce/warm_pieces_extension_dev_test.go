@@ -32,12 +32,25 @@ with WarmPieces() as pieces:
         pieces.success()
 `
 
-func warmExtension(t *testing.T) Extension {
+func warmStagePython(t *testing.T) string {
 	t.Helper()
-	python, err := exec.LookPath("python3")
+	name := "python3"
+	if runtime.GOOS == "linux" {
+		// The outer gate's PATH can name Python in its own managed environment.
+		// The dev worker grants system runtimes and environments it prepares;
+		// this fixture declares no environment, so use the system interpreter.
+		name = "/usr/bin/python3"
+	}
+	python, err := exec.LookPath(name)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return python
+}
+
+func warmExtension(t *testing.T) Extension {
+	t.Helper()
+	python := warmStagePython(t)
 	helper, err := os.ReadFile(filepath.Join("..", "..", "clients", "python", "src", "mycelium", "warm_pieces.py"))
 	if err != nil {
 		t.Fatal(err)
@@ -58,6 +71,29 @@ func warmExtension(t *testing.T) Extension {
 	v.Baselines = map[string]ExtensionBaseline{"extension:warmstage": v.Baselines["extension:sample"]}
 	v.References = map[string]WorkReference{"extension:warmstage": {InputShape: "item", Unit: "item", Units: 1}}
 	return freezeComposition(t, e)
+}
+
+func logWarmStageFailures(t *testing.T, d *Dev) {
+	t.Helper()
+	if !t.Failed() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	snapshot, err := d.Queue.Snapshot()
+	if err != nil {
+		t.Logf("job snapshot unavailable: %v", err)
+		return
+	}
+	for _, j := range snapshot.Jobs {
+		t.Logf("job %s %s %s attempt=%d reason=%q machine=%s", j.ID, j.Spec.Name, j.State, j.Attempt, j.Reason, j.Machine)
+		if logs := warmDevLogs(t, ctx, d.Client(), j.ID); logs != "" {
+			t.Logf("job %s log:\n%s", j.ID, logs)
+		}
+		if j.FanOut != nil && j.FanOut.Warm != nil {
+			t.Logf("  warm %+v", *j.FanOut.Warm)
+		}
+	}
 }
 
 // An extension stage with a sidecar runs every declared item in one placed
@@ -86,6 +122,7 @@ func TestWarmPiecesDevExtensionSingleLoad(t *testing.T) {
 			t.Error(err)
 		}
 	})
+	t.Cleanup(func() { logWarmStageFailures(t, d) })
 	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	if err := d.WaitReady(ctx); err != nil {

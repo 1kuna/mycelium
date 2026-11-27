@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -12,6 +13,28 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+func TestLinuxNativeExecReportsDeniedPayload(t *testing.T) {
+	if abi, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, 0, 0, unix.LANDLOCK_CREATE_RULESET_VERSION); errno != 0 || abi < 6 {
+		t.Skipf("Landlock ABI 6 required: abi=%d errno=%v", abi, errno)
+	}
+	payload := filepath.Join(t.TempDir(), "fixture-payload")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	policy := nativeLinuxPolicy{Read: []string{"/usr", "/bin", "/lib", "/lib64"}}
+	argv, err := nativePolicyArgs(policy, []string{payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.CommandContext(t.Context(), argv[0], argv[1:]...)
+	cmd.Env = environmentList(jobBaseEnvironment())
+	out, err := cmd.CombinedOutput()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 125 || !strings.Contains(string(out), `native payload exec "fixture-payload": permission denied`) {
+		t.Fatalf("expected confinement to refuse payload exec with a diagnostic, got %v\n%s", err, out)
+	}
+}
 
 func TestWarmPieceLinuxNativeExecKeepsOnlyMainBootstrap(t *testing.T) {
 	abi, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, 0, 0, unix.LANDLOCK_CREATE_RULESET_VERSION)
