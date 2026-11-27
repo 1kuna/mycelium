@@ -96,7 +96,7 @@ type workerMemoryShadow struct {
 
 func (s *workerMemoryShadow) sample(w Worker, m *Machine, raw float64, jobs []Job, reports []AttemptReport, at time.Time) *MemoryShadowReport {
 	reaction := (checkinPeriod(w.Interval) + s.reactionGrace).Seconds()
-	report := &MemoryShadowReport{ReactionSeconds: reaction}
+	report := &MemoryShadowReport{ReactionSeconds: reaction, sampledAt: at}
 	ram := MemoryShadowPool{Name: "ram", KeepGB: max(w.HostMemoryReserveGB, s.keepGB), CapacityGB: m.HostMemoryBudgetGB}
 	if m.SharedHost != nil {
 		ram.KeepGB = max(ram.KeepGB, m.SharedHost.InteractiveReserveGB)

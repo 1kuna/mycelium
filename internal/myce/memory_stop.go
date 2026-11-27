@@ -8,6 +8,7 @@ import (
 
 const memoryStopHeader = "X-Myce-Memory-Stop"
 const memoryStopProtocol = "memory-stop-v1"
+const memoryStopSampleAgeHeader = "X-Myce-Memory-Stop-Sample-Age"
 
 // Unified CUDA needs a qualified attribution rule before R4 can split
 // available RAM changes into attempts and other owners (probe 0b-1).
@@ -18,11 +19,16 @@ func usesAttemptStopForecast(m *Machine, pool string) bool {
 		(pool != "ram" || !hostHasUnifiedCUDA(m) || unifiedStopAttributionQualified)
 }
 
-func (q *Queue) stopShortMemoryPool(m *Machine, at time.Time) {
+func (q *Queue) stopShortMemoryPool(m *Machine, received time.Time, period time.Duration) {
 	report := m.MemoryShadow
 	host := hostID(m)
+	now := q.clock.Now()
 	if report == nil || !report.stopForecast || m.Gone || m.Leaving || m.Replacement != nil ||
-		q.unreported[m.ID] || !q.workerFresh(m, q.clock.Now()) || !at.After(q.poolLastStop[host]) {
+		q.unreported[m.ID] || !q.workerFresh(m, now) || report.sampleAge < 0 {
+		return
+	}
+	at := received.Add(-report.sampleAge)
+	if now.Sub(at) >= 2*checkinPeriod(period) || !at.After(q.poolLastStop[host]) {
 		return
 	}
 	for _, pool := range report.Pools {
@@ -98,7 +104,7 @@ func (q *Queue) stopShortMemoryPool(m *Machine, at time.Time) {
 		if q.poolLastStop == nil {
 			q.poolLastStop = map[string]time.Time{}
 		}
-		q.poolLastStop[host] = q.clock.Now()
+		q.poolLastStop[host] = now
 		return
 	}
 }

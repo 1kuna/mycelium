@@ -2250,7 +2250,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		q.acceptFaultEvidence(&m)
 		q.quarantineDeviceAttempts(&m)
 		if m.memoryShadowOrder == healthReportOrder {
-			q.stopShortMemoryPool(&m, memoryReceivedAt)
+			q.stopShortMemoryPool(&m, memoryReceivedAt, c.period)
 		}
 		body.next("checkin_maintain")
 		q.observeRestartService(c.contact)
@@ -3369,6 +3369,7 @@ func cloneMachine(m *Machine) Machine {
 	}
 	if out.MemoryShadow != nil {
 		out.MemoryShadow.stopForecast = m.MemoryShadow.stopForecast
+		out.MemoryShadow.sampleAge = m.MemoryShadow.sampleAge
 	}
 	return out
 }

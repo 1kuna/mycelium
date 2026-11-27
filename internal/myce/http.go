@@ -452,7 +452,12 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		c.fleetProofIssue = safeFleetProofIssue(FleetProofIssue(r.Header.Get(fleetProofIssueHeader)))
 		c.ephemeralRefusal = safeEphemeralRefusal(ephemeralRefusal(r.Header.Get(ephemeralRefusalHeader)))
 		if c.Machine.MemoryShadow != nil {
-			c.Machine.MemoryShadow.stopForecast = r.Header.Get(memoryStopHeader) == memoryStopProtocol
+			report := c.Machine.MemoryShadow
+			report.stopForecast = r.Header.Get(memoryStopHeader) == memoryStopProtocol
+			report.sampleAge = -1
+			if age, err := time.ParseDuration(r.Header.Get(memoryStopSampleAgeHeader)); err == nil && age >= 0 {
+				report.sampleAge = age
+			}
 		}
 		accepted := false
 		contact, settle := a.Queue.trackWorkerCheckin(c.Machine.ID, c.Machine.Session, c.period, true, r.Context())
@@ -934,6 +939,9 @@ func (c Client) callOnceShared(ctx context.Context, method, path string, in, out
 	if workerCheckin {
 		if checkin.Machine.MemoryShadow != nil && c.memoryStopWire != nil && c.memoryStopWire.Load() {
 			req.Header.Set(memoryStopHeader, memoryStopProtocol)
+			if at := checkin.Machine.MemoryShadow.sampledAt; !at.IsZero() && c.Clock != nil {
+				req.Header.Set(memoryStopSampleAgeHeader, c.Clock.Now().Sub(at).String())
+			}
 		}
 		if checkin.period > 0 {
 			req.Header.Set(checkinPeriodHeader, checkin.period.String())

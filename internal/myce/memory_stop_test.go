@@ -56,7 +56,7 @@ func TestMemoryStopAttemptForecast(t *testing.T) {
 			prior := p
 			p.forecast(&prior, 1, 11)
 			clock.Advance(time.Second)
-			c.Machine.MemoryShadow = &MemoryShadowReport{Pools: []MemoryShadowPool{p}, ReactionSeconds: 11}
+			c.Machine.MemoryShadow = &MemoryShadowReport{Pools: []MemoryShadowPool{p}, ReactionSeconds: 11, sampledAt: clock.Now()}
 			reply, err := w.checkin(t.Context(), c)
 			if err != nil {
 				t.Fatal(err)
