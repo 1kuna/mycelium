@@ -29,6 +29,9 @@ type workerPublicationTimings struct {
 const publicationTimingsHeader = "X-Myce-Publication-Timings"
 
 func (p *publicationProgress) resultReady(now time.Time) {
+	if p == nil {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.ready.IsZero() {
@@ -37,6 +40,9 @@ func (p *publicationProgress) resultReady(now time.Time) {
 }
 
 func (p *publicationProgress) releaseAcknowledged(now time.Time) {
+	if p == nil {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.ResultReadyToReleaseAckSeconds == nil && !p.ready.IsZero() {
