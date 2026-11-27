@@ -53,6 +53,7 @@ type state struct {
 	EfficiencyHosts    map[string]EfficiencyHost     `json:"efficiency_hosts,omitempty"`
 	EfficiencyHealth   map[string]efficiencyBaseline `json:"efficiency_health,omitempty"`
 	StrandedDemand     []StrandedDemand              `json:"stranded_demand,omitempty"`
+	Utilization        *UtilizationLedger            `json:"utilization,omitempty"`
 	PublicationHorizon time.Duration                 `json:"publication_horizon,omitempty"`
 	PublicationTimings *filePublicationTimings       `json:"publication_timings,omitempty"`
 	ToolInventories    map[string]toolInventoryFence `json:"tool_inventories,omitempty"`
@@ -192,6 +193,7 @@ type Queue struct {
 
 	// Built once on a read-only cancellation projection, never on the live queue.
 	cancellationMembersByParent map[string][]*Job
+	cancellationWarmByParent    map[string][]*Job // Warm dependents, in the same view.
 
 	requestLatencies                requestLatencies
 	requestHealth                   requestHealth
@@ -1330,7 +1332,8 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 			if s.StartBy != nil {
 				j.StartWindow = s.StartBy.Sub(j.Queued)
 			}
-			if s.After == nil {
+			// A dependent's window starts when its first input is ready.
+			if s.After == nil && !warmPieceDependencies(s) {
 				initializeStartDeadline(j, j.Queued)
 			}
 		}
@@ -1454,7 +1457,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	// Read the stop cause while the attempt identity still names it.
 	maintenance := plannedMaintenanceStop(j)
 	if j.Spec.warmPieces() {
-		j.FanOut.Warm.Delivery = nil
+		j.FanOut.Warm.Delivery, j.FanOut.Warm.IdleSince = nil, nil
 		// Once an interrupted delivery has been fenced, a returning copy
 		// can settle cleanup but cannot adopt the logical job again.
 		for i := range j.Copies {
@@ -1587,10 +1590,45 @@ func (q *Queue) maintain() {
 }
 
 func (q *Queue) maintainControl(refreshStartReasons bool) {
+	q.maintainPass(true, refreshStartReasons)
+}
+
+// An exact launch or Started gate needs every time and custody fence fresh.
+// The fleet-wide planning pass (model admission, release planning for the
+// waiting set, display reasons) is what grows with the waiting set (#2179),
+// and it changes a gate's outcome only by preempting the gate's own attempt
+// for strictly higher-tier demand, or by admitting a model call. Without such
+// demand the gate runs fences only; its other planning lands at the next
+// check-in, tick or submission.
+func (q *Queue) maintainGate(plan bool) {
+	if plan {
+		q.maintain()
+		return
+	}
+	q.maintainPass(false, false)
+}
+
+func (q *Queue) gatePlanningMatters(attempt Spec) bool {
+	for _, c := range q.calls {
+		if c.Machine == "" && c.Error == "" {
+			return true
+		}
+	}
+	for _, j := range q.liveJobs() {
+		if j.State == "queued" && q.comparePriority(attempt, j.Spec) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (q *Queue) maintainPass(plan, refreshStartReasons bool) {
 	if q.stopping.Load() {
 		return
 	}
-	if q.maintenance != nil && q.maintenance.ran {
+	// A fence-only pass satisfies a later fence-only request; a planning
+	// request in the same transaction still runs the complete pass.
+	if q.maintenance != nil && q.maintenance.ran && (q.maintenance.planned || !plan) {
 		q.settleMaintenance()
 		return
 	}
@@ -1600,6 +1638,7 @@ func (q *Queue) maintainControl(refreshStartReasons bool) {
 	defer q.memoizeExtensionQualifications(nil)()
 	defer q.bodyPhaseFinish("maintain", q.bodyPhaseStart())
 	q.beginMaintenance()
+	q.maintenance.planned = plan
 	q.expireInventoryObservations()
 	previousCapture := q.memoryAdmissionCapture
 	q.memoryAdmissionCapture = &memoryAdmissionCapture{decisions: map[string]memoryAdmissionDecision{}}
@@ -1735,6 +1774,11 @@ func (q *Queue) maintainControl(refreshStartReasons bool) {
 	q.maintainReservations()
 	q.settleMaintenance()
 	q.refreshHostMemory()
+	if !plan {
+		q.maintainModelSlots()
+		q.settleMaintenance()
+		return
+	}
 	q.maintainModels()
 	q.settleMaintenance()
 	q.admissionWaitPending = true
@@ -3348,7 +3392,9 @@ func (q *Queue) startedWithCustody(ctx context.Context, request workerStartedReq
 	var remaining *float64
 	var rejected error
 	err := q.updateRequest(ctx, func() error {
-		q.maintain()
+		// A missing job refuses whatever planning decides.
+		live := q.s.Jobs[r.ID]
+		q.maintainGate(live != nil && q.gatePlanningMatters(live.Spec))
 		j, e := q.current(r)
 		if e != nil {
 			rejected = e
@@ -3406,7 +3452,13 @@ func (q *Queue) renewRecoveryStartWindow(j *Job) {
 	// Planned leave keeps its original deadline; queue maintenance stops retain
 	// the recovery window for already-started attempts.
 	recovering := j.State == "running" || j.State == "stopping" && plannedStop(j)
-	if j.Spec.Priority == "production" && recovering && j.StartedAt != nil && j.Spec.StartBy != nil {
+	if j.Spec.Priority == "production" && recovering && j.StartedAt != nil && j.Spec.StartBy != nil && warmPieceDependencies(j.Spec) && !absoluteStartBy(j) {
+		// A warm dependent's window starts again at its first ready key.
+		if j.StartWindow == 0 {
+			j.StartWindow = j.Spec.StartBy.Sub(j.Queued)
+		}
+		j.Spec.StartBy, j.StartCapacityBudget = nil, nil
+	} else if j.Spec.Priority == "production" && recovering && j.StartedAt != nil && j.Spec.StartBy != nil {
 		// A started interruption gets the original first-start window, even
 		// when its length came from an explicit first-start cutoff. Waiting
 		// alone never renews an absolute cutoff.
@@ -3649,7 +3701,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	// an uncounted refusal or a recovered older copy never reissues a number.
 	j.Attempt = max(j.Starts+j.AdmissionRequeues, j.Attempt) + 1
 	if j.Spec.warmPieces() {
-		j.FanOut.Warm.Delivery = nil
+		j.FanOut.Warm.Delivery, j.FanOut.Warm.IdleSince = nil, nil
 	}
 	j.Starts = j.Attempt - j.AdmissionRequeues
 	if j.storedFileResults() && !j.Spec.warmPieces() {

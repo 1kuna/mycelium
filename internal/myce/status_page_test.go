@@ -35,11 +35,11 @@ func TestStatusPageRendersSnapshot(t *testing.T) {
 			{Machine: "spark", Model: "qwen", State: "ready", InFlight: 2, Error: "load warning"},
 		},
 		Usage: UsageReport{
-			Projects: []UsageSummary{{Name: "atlas", GPUHours: 9.5}},
+			Projects: []ProjectUsage{{Name: "atlas", GPUHours: 9.5}},
 			Machines: []UsageSummary{{Name: "spark", BusyPercent: 72, IdleHours: 2}},
 			Daily: []DailyUsage{
 				{Date: "2026-10-08", Project: "atlas", GPUHours: 2.25},
-				{Date: "2026-10-08", Machine: "spark", BusyPercent: 72},
+				{Date: "2026-10-08", Machine: "spark", BusyPercent: &[]float64{72}[0]},
 			},
 		},
 	}

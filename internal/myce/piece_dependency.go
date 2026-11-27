@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"time"
 )
@@ -29,7 +30,29 @@ type PieceBinding struct {
 }
 
 func dependencyReady(j *Job) bool {
-	return !j.simGatherWait && (j.Spec.After == nil || j.Dependency != nil && j.Dependency.State == "ready" && j.Dependency.ReadyAt != nil)
+	if j.simGatherWait {
+		return false
+	}
+	if j.Spec.After != nil {
+		return j.Dependency != nil && j.Dependency.State == "ready" && j.Dependency.ReadyAt != nil
+	}
+	return !warmPieceDependencies(j.Spec) || warmPieceAvailable(j)
+}
+
+// dependencyParents names every producer a job's declaration binds, once.
+func dependencyParents(s Spec) []string {
+	var out []string
+	if s.After != nil {
+		out = append(out, s.After.Job)
+	}
+	if s.FanOut != nil {
+		for _, p := range s.FanOut.Pieces {
+			if p.After != nil && !slices.Contains(out, p.After.Job) {
+				out = append(out, p.After.Job)
+			}
+		}
+	}
+	return out
 }
 
 func freshPipelineRoot(j *Job) bool {
@@ -80,12 +103,39 @@ func validatePieceDependency(s Spec) error {
 // q.mu is held. Existing full IDs, same project and declared outputs rule out
 // forward references, cycles and accidental references to internal waves.
 func (q *Queue) validatePieceSource(s Spec) error {
+	if s.FanOut != nil {
+		for _, piece := range s.FanOut.Pieces {
+			if piece.After == nil {
+				continue
+			}
+			p, err := q.validateProducer(s.Project, piece.After)
+			if err != nil {
+				return err
+			}
+			// Warm items stage only verified file-store references.
+			if !p.storedFileResults() {
+				return errors.New("per-piece after requires a producer with stored-file results")
+			}
+		}
+	}
 	if s.After == nil {
 		return nil
 	}
-	p := q.retainedJob(s.After.Job)
-	if p == nil || p.Spec.Project != s.Project || p.Batch != nil || p.Spec.ExtensionCheck != nil || p.Spec.Program != nil {
-		return errors.New("after.job must be a full producer job ID in the same project, not an internal piece, check or program")
+	p, err := q.validateProducer(s.Project, s.After)
+	if err != nil {
+		return err
+	}
+	// Stored inputs and NAS inputs already have mutually exclusive staging rules.
+	if p.storedFileResults() && len(s.Inputs) > 0 || !p.storedFileResults() && len(s.Files) > 0 {
+		return errors.New("after cannot mix stored and NAS inputs")
+	}
+	return nil
+}
+
+func (q *Queue) validateProducer(project string, a *PieceDependency) (*Job, error) {
+	p := q.retainedJob(a.Job)
+	if p == nil || p.Spec.Project != project || p.Batch != nil || p.Spec.ExtensionCheck != nil || p.Spec.Program != nil {
+		return nil, errors.New("after.job must be a full producer job ID in the same project, not an internal piece, check or program")
 	}
 	declared := map[string]bool{}
 	if p.Spec.FanOut != nil {
@@ -93,32 +143,28 @@ func (q *Queue) validatePieceSource(s Spec) error {
 			declared[piece.Key] = true
 		}
 	}
-	if s.After.Piece != "" && !declared[s.After.Piece] {
-		return errors.New("after.piece is not declared by the parent")
+	if a.Piece != "" && !declared[a.Piece] {
+		return nil, errors.New("after.piece is not declared by the parent")
 	}
-	for _, name := range s.After.Outputs {
-		if s.After.Piece == "" && p.Spec.FanOut != nil {
+	for _, name := range a.Outputs {
+		if a.Piece == "" && p.Spec.FanOut != nil {
 			key, output, ok := strings.Cut(name, "/")
 			if !ok || !declared[key] {
-				return errors.New("whole-parent after outputs require declared KEY/OUTPUT_NAME names")
+				return nil, errors.New("whole-parent after outputs require declared KEY/OUTPUT_NAME names")
 			}
 			name = output
 		}
 		if kind, _ := outputKind(name); kind != outputFile {
-			return errors.New("after outputs name individual parent files, not folders or globs")
+			return nil, errors.New("after outputs name individual parent files, not folders or globs")
 		}
 		if _, ok := p.Spec.Outputs[name]; !ok {
-			return errors.New("after output is not declared by the parent")
+			return nil, errors.New("after output is not declared by the parent")
 		}
 	}
 	if p.FilesExpired && (p.State == "succeeded" || !cancelled(p)) {
-		return resultExpired()
+		return nil, resultExpired()
 	}
-	// Stored inputs and NAS inputs already have mutually exclusive staging rules.
-	if p.storedFileResults() && len(s.Inputs) > 0 || !p.storedFileResults() && len(s.Files) > 0 {
-		return errors.New("after cannot mix stored and NAS inputs")
-	}
-	return nil
+	return p, nil
 }
 
 func (q *Queue) maintainPieceDependency(j *Job) {
@@ -288,6 +334,11 @@ func visitJobFileManifests(j *Job, visit func(string, FileManifest)) {
 	}
 	if j.Dependency != nil {
 		visit("dependency_input", j.Dependency.Files)
+	}
+	if j.FanOut != nil && j.FanOut.Warm != nil {
+		for _, b := range j.FanOut.Warm.Dependencies {
+			visit("dependency_input", b.Files)
+		}
 	}
 	if j.FanOut != nil {
 		for _, r := range j.FanOut.Results {

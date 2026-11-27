@@ -97,7 +97,9 @@ GTT storage is never used as VRAM. Missing, censored or invalid entries withhold
 telemetry-dependent sharing and never trigger vendor-tool fallback. Ordinary
 configured-budget admission is unchanged. The [broker installation guide](../../deploy/gpu-telemetry/README.md)
 describes the read-only DRM policy and older-kernel accounting limitations of
-this additive source. Existing GTT-only brokers remain usable for host RAM accounting.
+this additive source. Existing GTT-only brokers remain usable for host RAM accounting;
+for their cards the worker runs the same memory-regions query itself and keeps
+only positive, uncensored usage (#2185).
 
 The helper forwards the broker's timestamp and text unchanged. A timestamp
 before the current helper invocation or after it finishes is rejected, so a

@@ -11,8 +11,14 @@ import (
 const (
 	warmPiecesFixed      = "fixed"
 	warmPiecesCapability = "warm_pieces_fixed_v1"
-	warmBoundaryYield    = "warm pieces: yielded at an item boundary"
-	predicateWarmPieces  = AdmissionPredicate("warm_pieces_capability")
+	// Workers that serve the helper to a lowered extension variant, whose
+	// working directory can differ from the attempt's staged inputs.
+	warmPiecesExtensionCapability = "warm_pieces_extension_v1"
+	// Workers that wait for a ready item and stage per-item dependency inputs.
+	warmPiecesDependenciesCapability = "warm_pieces_dependencies_v1"
+	warmBoundaryYield                = "warm pieces: yielded at an item boundary"
+	warmIdleYield                    = "warm pieces: no item ready within the measured load time"
+	predicateWarmPieces              = AdmissionPredicate("warm_pieces_capability")
 )
 
 func (s Spec) warmPieces() bool  { return s.WarmPieces == warmPiecesFixed }
@@ -25,8 +31,11 @@ func validateWarmPieces(s Spec) error {
 	if !s.warmPieces() {
 		return errors.New("advanced.warm_pieces currently accepts fixed")
 	}
-	if s.FanOut == nil || s.extensionJob() || s.Kind != "" || s.Program != nil || s.Workload != nil || s.ExtensionCheck != nil {
-		return errors.New("warm_pieces requires plain-command pieces")
+	if s.FanOut == nil || s.Program != nil || s.ExtensionCheck != nil || s.Workload != nil && !s.extensionJob() {
+		return errors.New("warm_pieces requires plain-command or extension pieces; programs and checks are unsupported")
+	}
+	if s.extensionJob() && (s.Workload == nil || !s.Workload.valid()) {
+		return errors.New("extension warm_pieces requires a workload describing one item")
 	}
 	if s.After != nil {
 		return errors.New("warm_pieces cannot use after inputs")
@@ -51,9 +60,26 @@ func validateWarmPieces(s Spec) error {
 	return nil
 }
 
-func warmWorkerRefusal(m *Machine) string {
+// evidenceWork names extension work for memory and duration evidence. A warm
+// attempt holds its model across every item, so its whole-attempt peak and
+// duration are not comparable with one-shot runs of the same variant, and a
+// first warm run is sized like any new work. Qualification keeps workType.
+func evidenceWork(s Spec) string {
+	if s.warmPieces() {
+		return "warm:" + s.workType()
+	}
+	return s.workType()
+}
+
+func warmWorkerRefusal(j *Job, m *Machine) string {
 	if !slices.Contains(m.Capabilities, warmPiecesCapability) {
 		return "worker does not support fixed warm pieces"
+	}
+	if j.Spec.extensionJob() && !slices.Contains(m.Capabilities, warmPiecesExtensionCapability) {
+		return "worker does not support extension warm pieces"
+	}
+	if warmPieceDependencies(j.Spec) && !slices.Contains(m.Capabilities, warmPiecesDependenciesCapability) {
+		return "worker does not support warm piece dependencies"
 	}
 	if len(m.groupMembers) > 1 {
 		return "fixed warm pieces require one device or CPU"
@@ -72,13 +98,20 @@ type WarmPieceDelivery struct {
 }
 
 type WarmPieceProgress struct {
-	Delivery            *WarmPieceDelivery   `json:"delivery,omitempty"`
-	Failures            map[string]Execution `json:"failures,omitempty"` // Zero execution means the job ended before the item settled.
-	LastSettledAt       *time.Time           `json:"last_settled_at,omitempty"`
-	StartupSeconds      float64              `json:"startup_seconds,omitempty"`
-	Loads               int                  `json:"loads,omitempty"` // Attempts whose startup is included above.
-	ItemSeconds         float64              `json:"item_seconds,omitempty"`
-	BetweenItemsSeconds float64              `json:"between_items_seconds,omitempty"`
+	Delivery *WarmPieceDelivery   `json:"delivery,omitempty"`
+	Failures map[string]Execution `json:"failures,omitempty"` // Zero execution means the job ended or its producer failed before the item settled.
+	// Dependencies holds one binding per key that declares after. A failed
+	// binding's State is its diagnostic code.
+	Dependencies   map[string]*PieceBinding `json:"dependencies,omitempty"`
+	LastSettledAt  *time.Time               `json:"last_settled_at,omitempty"`
+	IdleSince      *time.Time               `json:"idle_since,omitempty"` // The current attempt has no ready item.
+	StartupSeconds float64                  `json:"startup_seconds,omitempty"`
+	Loads          int                      `json:"loads,omitempty"` // Attempts whose startup is included above.
+	// The latest attempt included in StartupSeconds, and its own load time.
+	LoadAttempt         int     `json:"load_attempt,omitempty"`
+	LoadSeconds         float64 `json:"load_seconds,omitempty"`
+	ItemSeconds         float64 `json:"item_seconds,omitempty"`
+	BetweenItemsSeconds float64 `json:"between_items_seconds,omitempty"`
 }
 
 type warmPieceRequest struct {
@@ -94,7 +127,13 @@ type warmPieceRequest struct {
 
 type warmPieceReply struct {
 	Delivery *WarmPieceDelivery `json:"delivery,omitempty"`
-	End      bool               `json:"end,omitempty"`
+	// Files are the delivered item's bound dependency inputs, by local name.
+	// The worker stages exactly these into the item's folder before start.
+	Files FileManifest `json:"files,omitempty"`
+	End   bool         `json:"end,omitempty"`
+	// Wait asks the worker to ask again: unsettled items remain, none is
+	// ready, and the attempt is still within its idle bound.
+	Wait bool `json:"wait,omitempty"`
 }
 
 func (q *Queue) warmPieceJob(r warmPieceRequest) (*Job, error) {
@@ -171,7 +210,7 @@ func (q *Queue) warmPiece(ctx context.Context, r warmPieceRequest) (reply warmPi
 				return errors.New("next does not select a piece")
 			}
 			if d := j.FanOut.Warm.Delivery; d != nil {
-				reply.Delivery = d
+				reply.Delivery, reply.Files = d, warmPieceFiles(j, d.Key)
 				return nil
 			}
 			if j.FanOut.Next == len(j.Spec.FanOut.Pieces) {
@@ -183,17 +222,30 @@ func (q *Queue) warmPiece(ctx context.Context, r warmPieceRequest) (reply warmPi
 				reply.End = true
 				return nil
 			}
-			j = q.touchJob(j.ID)
 			now := q.clock.Now()
-			progress := j.FanOut.Warm
-			if !warmSettledOnAttempt(j) {
-				progress.StartupSeconds += max(0, now.Sub(*j.StartedAt).Seconds())
+			settled := warmSettledOnAttempt(j)
+			if j.FanOut.Warm.LoadAttempt != j.Attempt && !settled {
+				j = q.touchJob(j.ID)
+				progress := j.FanOut.Warm
+				load := max(0, now.Sub(*j.StartedAt).Seconds())
+				progress.StartupSeconds += load
 				progress.Loads++
-			} else if progress.LastSettledAt != nil {
+				progress.LoadAttempt, progress.LoadSeconds = j.Attempt, load
+			}
+			i := nextReadyWarmPiece(j)
+			if i < 0 {
+				reply.Wait, reply.End = q.warmPieceIdle(j, now)
+				return nil
+			}
+			j = q.touchJob(j.ID)
+			progress := j.FanOut.Warm
+			if settled && progress.LastSettledAt != nil {
 				progress.BetweenItemsSeconds += max(0, now.Sub(*progress.LastSettledAt).Seconds())
 			}
-			d := &WarmPieceDelivery{Key: j.Spec.FanOut.Pieces[j.FanOut.Next].Key, Sequence: j.FanOut.Next + 1, Attempt: j.Attempt, OfferedAt: now}
-			progress.Delivery, reply.Delivery = d, d
+			piece := j.Spec.FanOut.Pieces[i]
+			d := &WarmPieceDelivery{Key: piece.Key, Sequence: i + 1, Attempt: j.Attempt, OfferedAt: now}
+			progress.IdleSince = nil
+			progress.Delivery, reply.Delivery, reply.Files = d, d, warmPieceFiles(j, piece.Key)
 		case "start":
 			if !warmPieceMatches(j, r) {
 				return ErrStale
@@ -289,25 +341,165 @@ func warmFinalState(j *Job) (state, reason string) {
 }
 
 func (q *Queue) maintainWarmPieces(j *Job) {
-	if !j.Spec.warmPieces() || !terminal(j.State) || j.FanOut.Warm.Delivery == nil && (j.State != "failed" || j.FanOut.Next == len(j.Spec.FanOut.Pieces)) {
+	if !j.Spec.warmPieces() {
+		return
+	}
+	if !terminal(j.State) {
+		q.maintainWarmPieceDependencies(j)
+		return
+	}
+	if j.FanOut.Warm.Delivery == nil && (j.State != "failed" || j.FanOut.Next == len(j.Spec.FanOut.Pieces)) {
 		return
 	}
 	j = q.touchJob(j.ID)
 	j.FanOut.Warm.Delivery = nil
 	if j.State == "failed" {
-		for _, p := range j.Spec.FanOut.Pieces[j.FanOut.Next:] {
-			recordWarmPieceFailure(j, p.Key, Execution{})
+		for _, p := range j.Spec.FanOut.Pieces {
+			if !warmSettled(j, p.Key) {
+				recordWarmPieceFailure(j, p.Key, Execution{})
+			}
 		}
 		j.FanOut.Next = len(j.Spec.FanOut.Pieces)
 	}
 }
 
-func warmSettledOnAttempt(j *Job) bool {
-	if j.FanOut.Next == 0 {
+// Bindings use the same metadata-only rule as a job-level after. A key whose
+// producer ends without its outputs settles as failed and is never delivered;
+// the other keys continue. Parent cancellation already fences every key.
+func (q *Queue) maintainWarmPieceDependencies(j *Job) {
+	if !warmPieceDependencies(j.Spec) || cancelled(j) || j.FanOut == nil || j.FanOut.Warm == nil {
+		return
+	}
+	for _, piece := range j.Spec.FanOut.Pieces {
+		a := piece.After
+		if a == nil || warmSettled(j, piece.Key) {
+			continue
+		}
+		if b := j.FanOut.Warm.Dependencies[piece.Key]; b != nil && b.ReadyAt != nil {
+			continue
+		}
+		p := q.retainedJob(a.Job)
+		code := ""
+		b := bindPieceDependency(p, a)
+		switch {
+		// A later cancellation intent does not invalidate a succeeded producer.
+		case p != nil && p.State != "succeeded" && cancelled(p):
+			code = "upstream_cancelled"
+		case b != nil:
+		case p != nil && p.FilesExpired:
+			code = "result_expired"
+		case p == nil || terminal(p.State):
+			code = "upstream_failed"
+		default:
+			if j.FanOut.Warm.Dependencies[piece.Key] == nil {
+				q.touchJob(j.ID)
+				q.setWarmBinding(j, piece.Key, &PieceBinding{Job: a.Job, Piece: a.Piece, State: "blocked"})
+			}
+			continue
+		}
+		q.touchJob(j.ID)
+		if code != "" {
+			q.setWarmBinding(j, piece.Key, &PieceBinding{Job: a.Job, Piece: a.Piece, State: code})
+			recordWarmPieceFailure(j, piece.Key, Execution{})
+			j.FanOut.Next++
+			continue
+		}
+		now := q.clock.Now()
+		b.ReadyAt = &now
+		q.setWarmBinding(j, piece.Key, b)
+	}
+}
+
+// A ready binding is immutable, so every offer of a delivery names the same
+// references. A key without after has none.
+func warmPieceFiles(j *Job, key string) FileManifest {
+	if b := j.FanOut.Warm.Dependencies[key]; b != nil && b.ReadyAt != nil {
+		return maps.Clone(b.Files)
+	}
+	return nil
+}
+
+func (q *Queue) setWarmBinding(j *Job, key string, b *PieceBinding) {
+	if j.FanOut.Warm.Dependencies == nil {
+		j.FanOut.Warm.Dependencies = map[string]*PieceBinding{}
+	}
+	j.FanOut.Warm.Dependencies[key] = b
+}
+
+func warmPieceDependencies(s Spec) bool {
+	if s.FanOut == nil {
 		return false
 	}
-	key := j.Spec.FanOut.Pieces[j.FanOut.Next-1].Key
-	return j.FanOut.Results[key].Execution.Attempt == j.Attempt || j.FanOut.Warm.Failures[key].Attempt == j.Attempt
+	for _, p := range s.FanOut.Pieces {
+		if p.After != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func warmSettled(j *Job, key string) bool {
+	if _, ok := j.FanOut.Results[key]; ok {
+		return true
+	}
+	_, ok := j.FanOut.Warm.Failures[key]
+	return ok
+}
+
+// The first unsettled ready key in declaration order, or -1.
+func nextReadyWarmPiece(j *Job) int {
+	for i, p := range j.Spec.FanOut.Pieces {
+		if warmSettled(j, p.Key) {
+			continue
+		}
+		if b := j.FanOut.Warm.Dependencies[p.Key]; p.After == nil || b != nil && b.State == "ready" && b.ReadyAt != nil {
+			return i
+		}
+	}
+	return -1
+}
+
+// A parent is placeable when an unsettled key is ready. With every key
+// settled it is placed only to finalize, as after an interrupted
+// finalization.
+func warmPieceAvailable(j *Job) bool {
+	if j.FanOut == nil || j.FanOut.Warm == nil {
+		return false
+	}
+	return j.FanOut.Next == len(j.Spec.FanOut.Pieces) || nextReadyWarmPiece(j) >= 0
+}
+
+// With no ready key the attempt keeps its reservation while its idle time is
+// under its own measured load time and no contender needs the resources.
+// Idling at most one reload's worth wastes no more than the reload it avoids
+// (MY-34). Otherwise it ends the segment as a planned requeue.
+func (q *Queue) warmPieceIdle(j *Job, now time.Time) (wait, end bool) {
+	progress := j.FanOut.Warm
+	if progress.IdleSince == nil {
+		j = q.touchJob(j.ID)
+		progress = j.FanOut.Warm
+		since := now
+		progress.IdleSince = &since
+	}
+	if progress.LoadAttempt == j.Attempt && now.Sub(*progress.IdleSince).Seconds() < progress.LoadSeconds {
+		return true, false
+	}
+	q.stop(j, warmIdleYield)
+	return false, true
+}
+
+func warmSettledOnAttempt(j *Job) bool {
+	for _, r := range j.FanOut.Results {
+		if r.Execution.Attempt == j.Attempt {
+			return true
+		}
+	}
+	for _, f := range j.FanOut.Warm.Failures {
+		if f.Attempt == j.Attempt && f.ID != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // Mean measured seconds from Started to the first offer, or zero without a

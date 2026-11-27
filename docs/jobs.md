@@ -290,6 +290,7 @@ advanced:
 | Field | Default | Meaning |
 |---|---|---|
 | `allow_cpu_fallback` | `false`: GPU work waits for a GPU | `true` lets GPU work run on a CPU target when no GPU target fits it at placement time. The attempt then reserves host RAM (its `memory_gb` becomes host memory), gets `MYCE_DEVICE=cpu` and `MYCE_GPU_COUNT=0`, and a requeue tries a GPU again. Plain commands only: extension work runs on CPU through a declared `cpu` variant; refused with `needs.model` or a `needs.gpu.devices` pin |
+| `exclusive_device` | `false`: measured single-card work may share a card | `true` keeps each attempt's whole accelerator card on any platform: no other attempt joins its card, and it never joins a card another attempt holds or is still releasing. Use it while you qualify output on an exclusive card and have not yet measured co-residency parity. It overrides `fan_out.share_xpu`. Model-server, multi-card and unmeasured work already keeps its card |
 | `worker_data` | Omitted: ordinary retention | `ephemeral` removes attempt-private worker payload and delivered logs synchronously after durable result acceptance and before release; supports offline non-resumable commands, extensions, environments, sidecars, `after` and fan-out on v2-capable Linux namespace workers. Shared software caches stay read-only. Unsupported combinations return `job_worker_data_unsupported`. Check `worker_data_cleanup` and its attempt-history receipt; unlink is not SSD secure erasure. Queue/NAS retention stays unchanged ([contract](files.md#ephemeral-worker-data)) |
 | `checkpoint` | Existing configured checkpoint mode | `local_first` opts resumable plain commands into the versioned cooperative [JSON generation protocol](files.md#local-first-checkpoints-1600); no implicit NAS substitution |
 | `memory_limit_gb` | Absent: estimate-based admission with physical containment | Explicit host RAM limit. Set it when the job must respect an authored bound. |
@@ -325,8 +326,12 @@ top level and under `advanced` with different values is refused. Stored and
 replied specs keep the flat fields this release so older workers and clients
 read them unchanged. Status and job GET add a read-only `advanced` object
 holding only the settings that differ from their defaults; it is absent when
-none do. `allow_cpu_fallback` is new and exists only under `advanced` (its
-HTTP wire form is `spec.allow_cpu_fallback`).
+none do. `allow_cpu_fallback` and `exclusive_device` are new and exist only
+under `advanced` (their HTTP wire forms are `spec.allow_cpu_fallback` and
+`spec.exclusive_device`). A queue older than `exclusive_device` refuses a spec
+that sets it with `request_invalid` (unknown field) rather than dropping it, so
+the job is never accepted without the guarantee. Those queues do not share
+cards between attempts, so omit the field only when submitting to one.
 
 Attempts get `MYCE_JOB_ID`, `MYCE_ATTEMPT`, and `MYCE_CHECKPOINT_DIR`. The last
 is writable for every job. Non-resumable jobs without declared checkpoint bytes use an attempt-local folder and
@@ -1508,11 +1513,91 @@ See [the checkpoint contract](files.md#resumable-jobs).
 
 Fixed warm pieces require a worker that advertises support, synchronous
 file-store outputs, and CPU or one accelerator device. Plain pieces' input
-and key bounds apply. Omit per-piece dependencies, result-check wrappers,
+and key bounds apply. Omit job-level `after`, result-check wrappers,
 NAS inputs or output delivery, ephemeral worker data, explicit
-checkpoint policies, multi-device requests, and extension work. Other
+checkpoint policies, multi-device requests, programs and checks. Other
 jobs can use the ordinary `after.piece` binding to consume a warm receipt.
 The [warm pieces design](design-warm-jobs.md) describes the rollout stages.
+
+#### Extension stages
+
+An extension job takes the same opt-in. Declare `extension`, a `workload`
+that describes **one** item, `fan_out.pieces` without `max_concurrency` or
+`share_xpu`, and each item's stored inputs under `.myce-pieces/KEY/DEST`:
+
+```yaml
+name: stage-batch-1
+project: research
+class: production
+submission_key: operation-42.stage.batch-1
+extension: stage@1
+workload: {input_shape: item-v1, units: 1}
+advanced: {warm_pieces: fixed}
+files:                              # common inputs, then one folder per key
+  .myce-pieces/rec-001/audio.wav: {sha256: ..., size_bytes: ...}
+  .myce-pieces/rec-002/audio.wav: {sha256: ..., size_bytes: ...}
+outputs: {words.json: results}
+fan_out:
+  pieces:
+    - {key: rec-001, args: [--language, en]}
+    - {key: rec-002, args: [--language, en]}
+```
+
+The queue selects, qualifies and places the variant as for one ordinary
+extension job, then runs the variant's main and sidecars once for every
+item. Variant parity holds and the automatic qualification check are
+unchanged; the check still runs the variant's one-shot `check` command.
+The variant's main must use the helper loop when `MYCE_WARM_PIECES_FD`
+is set, and may keep its one-shot behaviour otherwise. Item paths are
+absolute, so main can run in `{extension}` or any other working directory.
+Memory and duration evidence for a warm attempt is kept apart from the
+variant's one-shot runs, so the first warm run is sized like new work.
+Older workers hold the job with a `capability` reason.
+
+#### Per-item dependencies
+
+Each piece of a warm parent may declare its own `after`, with the ordinary
+grammar, so a downstream stage can consume each upstream item as soon as it
+is accepted. The local names land in that item's own folder:
+
+```yaml
+extension: naming@1
+workload: {input_shape: item-v1, units: 1}
+advanced: {warm_pieces: fixed}
+outputs: {labels.json: results}
+fan_out:
+  pieces:
+    - {key: rec-001, after: {job: UPSTREAM_JOB_ID, piece: rec-001, outputs: {segments.json: words.json}}}
+    - {key: rec-002, after: {job: UPSTREAM_JOB_ID, piece: rec-002, outputs: {segments.json: words.json}}}
+```
+
+- The piece list is fixed at submission. Each producer must already exist
+  in the same project and store its results in the file store. A piece may
+  name a different producer, or a whole parent with `KEY/OUTPUT_NAME`
+  outputs. Job-level `after` stays refused.
+- `next()` returns the first unsettled item whose inputs are ready, in
+  declaration order. Items therefore arrive in readiness order. The parent
+  is placed once any item is ready, and a production start window starts
+  then.
+- An item receives exactly the files its `after.outputs` names, never the
+  producer's other outputs. The worker stages them before the item starts
+  and removes the item's folder, including its own stored inputs, once its
+  receipt is accepted.
+- If a producer ends without that output, only the bound item fails, with
+  `upstream_failed` (or `result_expired`). A cancelled producer fails only
+  its bound items with `upstream_cancelled`. The other items continue, and
+  `fan_out.warm.dependencies` shows each binding's state. The producer's
+  cancellation scope lists the warm parent under each bound piece.
+- When no item is ready, `next()` blocks while the attempt keeps its
+  reservation. It waits at most the attempt's own measured load time, and
+  less if another job needs the resources. Then the attempt ends as a
+  planned requeue, with no failure or loss charge, and runs again once an
+  item is ready, paying one more load.
+- Workers advertise `warm_pieces_dependencies_v1`. Older workers hold the job.
+
+Submit one warm parent per stage per group of items. A downstream group is
+submitted once its producers exist, so matching group boundaries across
+stages keeps that order free.
 
 ## Observing parents and native children
 

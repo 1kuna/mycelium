@@ -79,6 +79,11 @@ sizing. Use a pin only for a [hard requirement](references/submit.md#explicit-pl
   accelerator by default. For a compatible plain command, set
   `advanced: {allow_cpu_fallback: true}` only when CPU results are acceptable.
   For extension work, declare a CPU variant.
+- Measured single-card attempts may share an accelerator card. If your output
+  is only qualified on an exclusive card, set `advanced: {exclusive_device: true}`
+  so the attempt keeps its whole card until you have measured co-residency
+  parity. An older queue refuses the field as unknown (`request_invalid`);
+  those queues never share a card, so drop it only there.
 - For an explicit exact-digest runtime check, run
   `myce extension check --gpu PLATFORM --device DEVICE --digest SHA256 NAME@VERSION`
   on the target worker as its installation owner. Omit `--device` for CPU.
@@ -229,8 +234,18 @@ uses the declared NAS source even when an ordinary shared-input cache holds a co
 
 ## Fixed warm pieces
 
-Use `advanced: {warm_pieces: fixed}` with plain-command `pieces:` when one
-main process can load a model once and handle the items serially. Submit
+Use `advanced: {warm_pieces: fixed}` with plain-command `pieces:`, or with
+an extension job's `fan_out.pieces` and a one-item `workload`, when one
+main process can load a model once and handle the items serially. Extension
+stages keep their variants, sidecars and qualification; put each item's
+stored inputs under `.myce-pieces/KEY/` and omit `max_concurrency`. A
+downstream stage gives each piece its own `after` (`{key, after: {job,
+piece, outputs: {LOCAL: OUTPUT}}}`, producers already submitted in the
+same project). `next()` then returns items as their inputs are accepted,
+each item receives only its mapped files, and an upstream failure fails
+only that item. With nothing ready, `next()` blocks for at most one
+measured model load, then the attempt requeues without penalty. Submit one
+parent per stage per group. Submit
 normally and keep the parent ID. Main opens the worker helper, loads the
 model, calls `next()` for the key, args and paths, writes the declared
 outputs for that item, and waits for `success()` or reports `failure()`.

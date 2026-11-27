@@ -1351,7 +1351,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
 			m.Capabilities = append(slices.Clone(w.Machine.Capabilities), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1", "nas_inspection_v1", scarceHostYieldCapability, localFirstProtocol)
 			if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
-				m.Capabilities = append(m.Capabilities, warmPiecesCapability)
+				m.Capabilities = append(m.Capabilities, warmPiecesCapability, warmPiecesExtensionCapability, warmPiecesDependenciesCapability)
 			}
 			m.Capabilities = append(m.Capabilities, pooledMemoryCapability)
 			if workerSyntheticMemoryHost || w.devEnvironmentSizing || w.Machine.GPU == "fake" && w.ServiceConfig == nil || runtime.GOOS == "darwin" && w.processMemory != nil && w.processMemory.OwnedFootprint != nil {

@@ -93,7 +93,7 @@ The [approved design](design-proposal.md) is the product spec. Current maintaine
 </details>
 
 ### 4. Automatic and smart: measured limits, no approval gates
-<a id="my-34"></a><a id="my-44"></a><a id="my-58"></a>
+<a id="my-34"></a><a id="my-44"></a><a id="my-58"></a><a id="my-59"></a>
 
 **Mycelium runs whatever the hosts can run, automatically. There are no approval gates and no arbitrary limits; the limits that remain are measured or physical.**
 
@@ -101,6 +101,7 @@ The [approved design](design-proposal.md) is the product spec. Current maintaine
 - No arbitrary fixed limits (rates, caps, timeouts, size defaults). Act on measured pressure and learned telemetry, and refuse, shed or yield work only under real contention, ordered by cost and class. A remaining limit states the failure it prevents, its cost, and a measured or physical basis. An emergency fixed cap is a stopgap with a named adaptive follow-up. Mycelium is released publicly, so it must work for any system combination and workload: thresholds derive from the running system's own measurements, never from values tuned to one deployment. This applies to every rollout wait, drain and health bound too. (MY-34)
 - Mycelium runs whatever can run on the hosts. Consumers need no queue-owner approval to run work their hosts can run. Physical and safety protections stay: disk floors and size limits, memory and device admission, secret and token isolation. (MY-44)
 - Fleet machines keep about 40 GiB of their disk free, so installs and real work always fit. Workers trim their own rebuildable caches to hold that floor; it applies to every fleet machine, not only the agents' workstation. (MY-58)
+- On a pool where the OS cannot fence an attempt's memory, the worker may stop an attempt at once, without checkpoint grace and in any tier including production, when it grows past its expected peak while the host is inside its reserve. If memory still runs out, production attempts are biased to be the kernel's preferred victims ahead of host programs, as lower tiers already are; this is a bias, not a guarantee. Applies to the memory v2 design (#2191). (MY-59)
 
 <details><summary>Sources</summary>
 
@@ -108,6 +109,7 @@ The [approved design](design-proposal.md) is the product spec. Current maintaine
 - MY-34, 2026-11-05: “i don't want us to just have a bunch of arbitrary limits on things. i'd rather it be smart then try to be blindly safe ya know” and “it needs to be smart and dynamic rather than hardcoded because we're releasing this publicly so i needs to work for any system combination and any workload”.
 - MY-44, 2026-11-10, about the `models.sources` allowlist: “i don't like that things need to be approved by you. mycelium needs to be able to run whatever can run on my systems. this is just excess friction”.
 - MY-58, 2026-11-26, after a fleet Mac reached 10 GiB free: “the floor is not only for the agents machine … how the fuck will we install anything with only 10gb left on the disk? … clear out all the bullshit on there”. Implemented in #1836 (worker compiler-cache floor); the 160 GiB small-volume scaling is an agent default.
+- MY-59, 2026-11-26, maintainer, answering the memory v2 design's two safety questions (immediate stop of an over-peak attempt below the reserve without grace, including production; production as preferred OOM victims over host programs) after the orchestrator recommended yes to both: “i guess i’ll go with your recommendation for both”.
 
 </details>
 

@@ -11,6 +11,9 @@ import (
 type FanOutPiece struct {
 	Key  string   `json:"key" yaml:"key"`
 	Args []string `json:"args,omitempty" yaml:"args,omitempty"`
+	// After binds one warm item to accepted producer outputs. Its local names
+	// land in that item's own input folder.
+	After *PieceDependency `json:"after,omitempty" yaml:"after,omitempty"`
 }
 
 // Common Inputs/Files are immutable inputs; Args name each independent piece.
@@ -47,6 +50,12 @@ func validateFanOut(s Spec) error {
 	}
 	if !s.extensionJob() {
 		return validatePlainFanOut(s)
+	}
+	if s.warmPieces() {
+		return validateWarmExtensionFanOut(s)
+	}
+	if warmPieceDependencies(s) {
+		return errors.New("per-piece after requires advanced.warm_pieces")
 	}
 	if !s.extensionJob() || s.ExtensionCheck != nil || s.Program != nil || s.Workload == nil || !s.Workload.valid() || len(f.Pieces) == 0 || len(f.Pieces) > 256 || f.MaxConcurrency < 1 || f.MaxConcurrency > 64 {
 		return errors.New("fan_out requires extension work, a homogeneous workload, 1..256 pieces and max_concurrency in 1..64; programs and checks are unsupported")
@@ -96,9 +105,33 @@ func validatePlainFanOut(s Spec) error {
 	if f.MaxConcurrency != 0 || f.ShareXPU {
 		return errors.New("plain-command pieces are ordinary jobs; omit max_concurrency and share_xpu")
 	}
+	if warmPieceDependencies(s) && !s.warmPieces() {
+		return errors.New("per-piece after requires advanced.warm_pieces")
+	}
 	if s.After != nil || s.Run.Workdir != "" || s.Kind != "" || s.Program != nil || s.Workload != nil || s.ExtensionCheck != nil || len(s.Inputs) > 0 {
 		return errors.New("plain-command pieces cannot combine with after, workdir, kind/program, workload, checks or NAS inputs")
 	}
+	return validatePieceFiles(s)
+}
+
+// An extension warm parent runs every item in one placed attempt, like a
+// plain warm parent, so it takes the same keyed per-item stored inputs and
+// has no wave concurrency. Its workload describes one item (validateWarmPieces).
+func validateWarmExtensionFanOut(s Spec) error {
+	f := s.FanOut
+	if len(f.Pieces) == 0 || len(f.Pieces) > 256 {
+		return errors.New("warm_pieces requires 1..256 pieces")
+	}
+	if f.MaxConcurrency != 0 || f.ShareXPU {
+		return errors.New("warm_pieces runs its items in one attempt; omit max_concurrency and share_xpu")
+	}
+	return validatePieceFiles(s)
+}
+
+// Keys are unique clean names, and each piece's stored inputs under
+// PlainPiecePrefix overlap neither common inputs, outputs nor each other.
+func validatePieceFiles(s Spec) error {
+	f := s.FanOut
 	keys := map[string]bool{}
 	for _, p := range f.Pieces {
 		if !extensionName.MatchString(p.Key) || p.Key == "." || p.Key == ".." || keys[p.Key] {
@@ -119,6 +152,20 @@ func validatePlainFanOut(s Spec) error {
 			return fmt.Errorf("stored piece file %q must be %s<declared key>/<dest>", name, PlainPiecePrefix)
 		}
 		own[key] = append(own[key], dest)
+	}
+	for _, p := range f.Pieces {
+		if p.After == nil {
+			continue
+		}
+		if p.After.Job == "" || len(p.After.Outputs) == 0 {
+			return fmt.Errorf("piece %s after requires one producer job and an output mapping", p.Key)
+		}
+		for local, output := range p.After.Outputs {
+			if !safeRelative(local) || !safeRelative(output) {
+				return errors.New("after outputs require clean relative names")
+			}
+			own[p.Key] = append(own[p.Key], local)
+		}
 	}
 	for name := range s.Outputs {
 		common = append(common, name)

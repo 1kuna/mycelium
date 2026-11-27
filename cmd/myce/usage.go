@@ -37,11 +37,11 @@ func printUsage(w io.Writer, r myce.UsageReport, by string) error {
 	}
 	// Machine occupancy is always shown: it answers whether pooling fills idle time.
 	for _, m := range r.Machines {
-		fmt.Fprintf(w, "machine %s: %.3f GPU-hours; %.1f%% busy; %.3f idle hours; %.3f pinned hours\n", m.Name, m.GPUHours, m.BusyPercent, m.IdleHours, m.PinnedHours)
+		fmt.Fprintf(w, "machine %s: %.3f GPU-hours; %.1f%% allocation occupancy; %.3f idle hours; %.3f pinned hours\n", m.Name, m.GPUHours, m.BusyPercent, m.IdleHours, m.PinnedHours)
 		if by == "machine" {
 			for _, card := range r.Cards {
 				if card.Machine == m.Name {
-					fmt.Fprintf(w, "  card %s: %.3f GPU-hours; %.1f%% busy; %.3f idle hours; %.3f pinned hours\n", card.Device, card.GPUHours, card.BusyPercent, card.IdleHours, card.PinnedHours)
+					fmt.Fprintf(w, "  card %s: %.3f GPU-hours; %.1f%% allocation occupancy; %.3f idle hours; %.3f pinned hours\n", card.Device, card.GPUHours, card.BusyPercent, card.IdleHours, card.PinnedHours)
 				}
 			}
 		}

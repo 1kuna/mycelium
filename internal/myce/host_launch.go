@@ -177,7 +177,7 @@ func (q *Queue) authorizeLaunchWithCustody(ctx context.Context, request workerLa
 		}
 	}
 	err := q.updateRequest(ctx, func() error {
-		q.maintain()
+		q.maintainGate(q.launchPlanningMatters(l))
 		q.refreshHostMemory()
 		if l.Kind == "batch" {
 			attempt, err := strconv.Atoi(l.Attempt)
@@ -325,6 +325,23 @@ func (q *Queue) authorizeLaunchWithCustody(ctx context.Context, request workerLa
 	}
 	return rejected
 }
+
+// Planning never creates the exact job, slot or preparation attempt a stale
+// request names, so a missing one refuses either way. An undemanded
+// preparation has no tier to compare: plan.
+func (q *Queue) launchPlanningMatters(l HostLaunch) bool {
+	switch l.Kind {
+	case "batch":
+		j := q.s.Jobs[l.Key]
+		return j != nil && q.gatePlanningMatters(j.Spec)
+	case "engine":
+		s := q.s.ModelSlots[slotKey(l.Machine, l.Key, l.Device)]
+		return s != nil && q.gatePlanningMatters(q.slotSpec(s))
+	}
+	p, ok := q.s.PreparationPlans[l.Attempt]
+	return ok && (p.Spec == nil || q.gatePlanningMatters(*p.Spec))
+}
+
 func (q *Queue) reconcilePreparationPlans(c Checkin) {
 	for id, l := range q.s.PreparationPlans {
 		if l.Machine != c.Machine.ID {

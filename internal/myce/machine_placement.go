@@ -214,10 +214,11 @@ func batchOnTarget(j *Job, m *Machine) bool {
 // its card when memory fits (MY-30/31, #538). Model-server,
 // extension-check, default fan-out, exploratory and multi-card work keeps the card, as
 // does a hint naming no device memory: its device figure is only a default.
+// advanced.exclusive_device keeps the card on any platform (#2197).
 
 func sharesDevice(j *Job) bool {
 	n := j.Spec.Needs
-	if n.cpuOnly() || n.Model != "" || len(j.AllocatedDevices) > 1 {
+	if n.cpuOnly() || n.Model != "" || len(j.AllocatedDevices) > 1 || j.Spec.ExclusiveDevice {
 		return false
 	}
 	if !pooledMemory(j) {

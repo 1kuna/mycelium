@@ -87,7 +87,8 @@ with its key, configuration, host, end time and extension) and the work
 observations its ledger learned, which stay pinned against evidence expiry.
 Durations and storage envelopes live outside job records. The
 record's logs are deleted with it; a keyed submission keeps only the job's
-identity and outcome for replay. Keyed answers and cancellation reservations
+identity and outcome for replay, including its settled release, so expiry
+never reopens a parent's release or its reclaimed files. Keyed answers and cancellation reservations
 have no age deadline. Historical expired-key digests remain authoritative
 ([submission identity](design-proposal.md#submission-identity-and-cancellation)).
 

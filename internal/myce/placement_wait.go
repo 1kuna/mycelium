@@ -20,8 +20,11 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 	var memoryCapacity []string
 	var ephemeralRefusals []string
 	targets := 0
-	// One kind when every blocked target agrees; mixed causes are capacity.
+	// One kind when every blocked target agrees. Mixed causes are capacity,
+	// unless some target is refused only for memory: more memory would run the
+	// job there, so the wait is a memory wait (#2184).
 	kinds := map[string]bool{}
+	memoryOnly := false
 	specific := false
 	for _, m := range q.planningMachines(scans...) {
 		if !q.jobAllowsMachine(j, m.ID) {
@@ -63,9 +66,11 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 			}
 			targets++
 			var blocked []string
+			targetMemoryOnly := true
 			block := func(kind, why string) {
 				blocked = append(blocked, why)
 				kinds[kind] = true
+				targetMemoryOnly = targetMemoryOnly && kind == memoryWaitReason
 			}
 			if why := inventoryWaitingReason(m); !candidate.Spec.Needs.cpuOnly() && why != "" {
 				block("unknown_observation", why)
@@ -164,6 +169,7 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 			if len(blocked) == 0 {
 				return nil // Another target can serve it; retain ordinary queue ordering.
 			}
+			memoryOnly = memoryOnly || targetMemoryOnly
 			reasons = append(reasons, m.ID+": "+strings.Join(blocked, "; "))
 		}
 	}
@@ -192,6 +198,8 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 		for k := range kinds {
 			kind = k
 		}
+	} else if memoryOnly {
+		kind = memoryWaitReason
 	}
 	return newHold(kind, reason)
 }

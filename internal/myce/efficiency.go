@@ -117,6 +117,18 @@ type EfficiencyHost struct {
 	PhysicalUsedMemoryGB *float64       `json:"physical_used_memory_gb" jsonschema:"nullable"`
 	IOStatus             string         `json:"io_status"`
 	IOPressure           *IOPressure    `json:"io_pressure" jsonschema:"nullable"`
+	// Why the current measured Mycelium memory is unknown, when it is.
+	MeasuredMemoryUnknown string `json:"measured_memory_unknown,omitempty"`
+	// Accepted per-attempt host peaks retained on this host's jobs. They exist
+	// where the host-wide attribution does not (#2184).
+	AttemptPeaks *AttemptPeakSummary `json:"attempt_peaks,omitempty"`
+}
+
+// AttemptPeakSummary is the spread of retained accepted attempt host peaks.
+type AttemptPeakSummary struct {
+	Attempts int     `json:"attempts"`
+	MedianGB float64 `json:"median_gb"`
+	MaxGB    float64 `json:"max_gb"`
 }
 type EfficiencyWait struct {
 	Active  bool               `json:"active"`
@@ -135,13 +147,16 @@ type StrandedDemand struct {
 	CPUCores int      `json:"cpu_cores"`
 }
 type PredictionError struct {
-	JobID                string   `json:"job_id"`
-	Attempt              int      `json:"attempt"`
-	Work                 string   `json:"work"`
-	Basis                string   `json:"basis"`
-	ReservedHostGB       *float64 `json:"reserved_host_gb" jsonschema:"nullable"`
-	AcceptedHostPeakGB   *float64 `json:"accepted_host_peak_gb" jsonschema:"nullable"`
-	HostErrorGB          *float64 `json:"host_error_gb" jsonschema:"nullable"`
+	JobID              string   `json:"job_id"`
+	Attempt            int      `json:"attempt"`
+	Work               string   `json:"work"`
+	Basis              string   `json:"basis"`
+	ReservedHostGB     *float64 `json:"reserved_host_gb" jsonschema:"nullable"`
+	AcceptedHostPeakGB *float64 `json:"accepted_host_peak_gb" jsonschema:"nullable"`
+	HostErrorGB        *float64 `json:"host_error_gb" jsonschema:"nullable"`
+	// The cgroup high-water mark counts reclaimable page cache. Diagnostic
+	// only: the accepted peak is the figure the scheduler learns from.
+	CgroupPeakGB         *float64 `json:"cgroup_peak_gb,omitempty" jsonschema:"nullable"`
 	ReservedDeviceGB     *float64 `json:"reserved_device_gb" jsonschema:"nullable"`
 	AcceptedDevicePeakGB *float64 `json:"accepted_device_peak_gb" jsonschema:"nullable"`
 	DeviceErrorGB        *float64 `json:"device_error_gb" jsonschema:"nullable"`
@@ -209,13 +224,36 @@ type WastedAttempt struct {
 	JobID           string                  `json:"job_id"`
 	Attempt         int                     `json:"attempt"`
 	Host            string                  `json:"host"`
-	Kind            string                  `json:"kind"`
-	EndedAt         time.Time               `json:"ended_at"`
-	Suspect         *bool                   `json:"suspect" jsonschema:"nullable"`
-	Pressure        *MemoryPressureEvidence `json:"pressure" jsonschema:"nullable"`
-	HeadroomGB      *float64                `json:"headroom_gb" jsonschema:"nullable"`
-	IOStatus        string                  `json:"io_status"`
+	// Kind is oom, killed, guard_stopped, cancelled, never_started, lost (ran,
+	// then interrupted) or lost_start_unknown.
+	Kind    string    `json:"kind"`
+	EndedAt time.Time `json:"ended_at"`
+	// Started is yes, no or unknown; BurnedSeconds is the attempt's command
+	// time when known.
+	Started       string                  `json:"started"`
+	BurnedSeconds *float64                `json:"burned_seconds" jsonschema:"nullable"`
+	Suspect       *bool                   `json:"suspect" jsonschema:"nullable"`
+	Pressure      *MemoryPressureEvidence `json:"pressure" jsonschema:"nullable"`
+	HeadroomGB    *float64                `json:"headroom_gb" jsonschema:"nullable"`
+	IOStatus      string                  `json:"io_status"`
 }
+
+// WastedWindow counts stopped attempts that ended inside one stated window.
+type WastedWindow struct {
+	Name     string         `json:"name"`
+	Since    time.Time      `json:"since"`
+	Through  time.Time      `json:"through"`
+	Attempts map[string]int `json:"attempts_by_kind"`
+	// BurnedSeconds sums known command time; UnknownBurn counts attempts
+	// whose command time is unknown.
+	BurnedSeconds float64 `json:"burned_attempt_seconds"`
+	UnknownBurn   int     `json:"attempts_with_unknown_burn"`
+}
+
+// Waste that cost execution time. Cancellations and attempts that never started
+// requeue without burning a run, so signals and headlines exclude them.
+func (a WastedAttempt) burned() bool { return a.Kind != "cancelled" && a.Kind != "never_started" }
+
 type EfficiencySignal struct {
 	Observed        bool     `json:"observed"`
 	Subject         string   `json:"subject"`
@@ -235,6 +273,8 @@ type EfficiencyReport struct {
 	Restrictions            []ProjectRestrictions  `json:"restrictions"`
 	Predictions             []PredictionError      `json:"predictions"`
 	Wasted                  []WastedAttempt        `json:"wasted_attempts"`
+	WastedWindows           []WastedWindow         `json:"wasted_windows"`
+	Utilization             *UtilizationReport     `json:"utilization,omitempty"`
 	Signals                 []EfficiencySignal     `json:"signals"`
 	CPUStatus               string                 `json:"cpu_status"`
 	ResourceAttemptsDropped int                    `json:"resource_attempts_dropped"`
@@ -408,10 +448,18 @@ func (q *Queue) refreshEfficiency() {
 		h.Rate = efficiencyRate{Host: host, ReservedMemoryGB: m.HostMemoryInUseGB, ReservedCPUCores: float64(m.CPUInUseCores)}
 		h.TotalMemoryGB, h.PhysicalUsedMemoryGB = nil, nil
 		h.IOStatus = "unknown"
-		if o := m.MemoryObservation; o != nil && !m.Gone && now.Before(m.LastSeen.Add(q.machineLossTimeout(m.ID))) {
+		h.MeasuredMemoryUnknown = ""
+		switch o := m.MemoryObservation; {
+		case o == nil:
+			h.MeasuredMemoryUnknown = "the worker sends no host memory observation"
+		case m.Gone || !now.Before(m.LastSeen.Add(q.machineLossTimeout(m.ID))):
+			h.MeasuredMemoryUnknown = "the host memory observation is stale"
+		default:
 			total, used := o.TotalGB, o.UsedGB
 			h.TotalMemoryGB, h.PhysicalUsedMemoryGB = &total, &used
-			if !o.AttributionUnknown {
+			if o.AttributionUnknown {
+				h.MeasuredMemoryUnknown = "the worker cannot attribute its process-tree memory"
+			} else {
 				gb := o.MyceliumGB
 				h.Rate.MeasuredMemoryGB = &gb
 				h.Rate.ValidUntil = m.LastSeen.Add(q.machineLossTimeout(m.ID))
@@ -647,6 +695,7 @@ type efficiencyDiagnostics struct {
 	baselines    map[string]efficiencyBaseline
 	baselineJSON json.RawMessage
 	signals      []EfficiencySignal
+	utilization  utilizationObservation
 	applied      bool
 }
 
@@ -665,10 +714,13 @@ func (q *Queue) prepareEfficiencyDiagnostics(ctx context.Context) (*efficiencyDi
 	// their backlog/target projections, as the aggregate status path does.
 	// strandedDemand keeps a separate scan because it relaxes project policy.
 	scan := v.placementScan()
+	categories, kinds := map[string]string{}, map[string]string{}
 	for _, j := range v.liveJobs() {
 		if j.State == "queued" && !cancelled(j) {
 			stranded := v.strandedDemand(j)
-			d.blockers[j.ID] = efficiencyBlockerObservation{Category: v.waitHold(j, scan).efficiencyCategory(), Stranded: len(stranded) > 0, Attempt: j.Attempt, Session: j.Session, Queued: j.Queued}
+			hold := v.waitHold(j, scan)
+			categories[j.ID], kinds[j.ID] = hold.efficiencyCategory(), hold.Kind
+			d.blockers[j.ID] = efficiencyBlockerObservation{Category: categories[j.ID], Stranded: len(stranded) > 0, Attempt: j.Attempt, Session: j.Session, Queued: j.Queued}
 			if j.Efficiency != nil {
 				j.Efficiency.advance(v.clock.Now())
 				j.Efficiency.Blocker, j.Efficiency.Stranded = d.blockers[j.ID].Category, len(stranded) > 0
@@ -677,6 +729,8 @@ func (q *Queue) prepareEfficiencyDiagnostics(ctx context.Context) (*efficiencyDi
 		}
 	}
 	v.s.StrandedDemand = d.stranded
+	d.utilization = v.observeUtilization(categories, kinds)
+	v.s.Utilization = v.s.Utilization.observe(d.utilization)
 	d.report = v.efficiencyReport()
 	d.baselines, d.signals = efficiencySignals(d.report, v.s.EfficiencyHealth)
 	// This generation is immutable after preparation. Encode its retained-sized
@@ -704,6 +758,8 @@ func (q *Queue) applyEfficiencyDiagnostics(d *efficiencyDiagnostics) {
 	}
 	q.s.EfficiencyAt = d.report.At
 	q.s.StrandedDemand = d.stranded
+	// Credit from the live ledger, not the capture's projection of it.
+	q.s.Utilization = q.s.Utilization.observe(d.utilization)
 	q.s.EfficiencyHealth = d.baselines
 	q.efficiencyHealthJSON = d.baselineJSON
 	d.applied = true
@@ -751,6 +807,7 @@ func (q *Queue) efficiencyReport() *EfficiencyReport {
 	resourceAttempts, cpuAttempts, cpuPartial := 0, 0, false
 	ioPressure := q.efficiencyIOPressure(now)
 	projects := map[string]map[string]float64{}
+	peaks := map[string][]float64{}
 	for _, h := range q.s.EfficiencyHosts {
 		h.advance(now)
 		h.IOPressure = ioPressure[h.Host]
@@ -808,10 +865,26 @@ func (q *Queue) efficiencyReport() *EfficiencyReport {
 		}
 		r.Predictions = append(r.Predictions, efficiencyPredictions(j)...)
 		r.Wasted = append(r.Wasted, efficiencyWasted(j)...)
+		for _, f := range j.MemoryAttempts {
+			if f.MemoryPeak == nil || f.LearningReason != "eligible" || f.MemoryPeak.HostGB == nil || !validMemoryValue(*f.MemoryPeak.HostGB) {
+				continue
+			}
+			host := f.Machine
+			if m := q.s.Machines[f.Machine]; m != nil {
+				host = hostID(m)
+			}
+			peaks[host] = append(peaks[host], *f.MemoryPeak.HostGB)
+		}
 	}
 	for i := range r.Hosts {
 		r.Hosts[i].ResourceIntegral.add(resourceHosts[r.Hosts[i].Host])
+		if values := peaks[r.Hosts[i].Host]; len(values) > 0 {
+			slices.Sort(values)
+			r.Hosts[i].AttemptPeaks = &AttemptPeakSummary{Attempts: len(values), MedianGB: values[len(values)/2], MaxGB: values[len(values)-1]}
+		}
 	}
+	r.WastedWindows = wastedWindows(r.Wasted, now)
+	r.Utilization = q.s.Utilization.report(now)
 	if cpuAttempts > 0 {
 		r.CPUStatus = "measured retained attempts"
 		if cpuPartial || cpuAttempts < resourceAttempts || r.ResourceAttemptsDropped > 0 {
@@ -871,11 +944,17 @@ func efficiencyPredictions(j *Job) []PredictionError {
 		if j.Efficiency != nil {
 			row.Work = j.Efficiency.Work
 		}
-		if p.HostGB != nil || p.CgroupGB != nil || p.CombinedHostGB != nil {
-			peak := hostMemoryPeakGB(p)
+		if p.HostGB != nil || p.CombinedHostGB != nil {
+			// The scheduler's RAM evidence (appendProjectedMemoryPeaks), without
+			// the cgroup figure's reclaimable page cache (#2184).
+			peak := max(memoryValue(p.HostGB), memoryValue(p.CombinedHostGB))
 			reserved := e.HostGB
 			delta := reserved - peak
 			row.ReservedHostGB, row.AcceptedHostPeakGB, row.HostErrorGB = &reserved, &peak, &delta
+		}
+		if p.CgroupGB != nil && validMemoryValue(*p.CgroupGB) {
+			cgroup := *p.CgroupGB
+			row.CgroupPeakGB = &cgroup
 		}
 		if p.DeviceGB != nil {
 			reserved, peak := e.DeviceGB, *p.DeviceGB
@@ -918,11 +997,22 @@ func efficiencyWasted(j *Job) []WastedAttempt {
 		if kind == "" || o.OperatorStop || o.PriorityStop != nil {
 			continue
 		}
-		row := WastedAttempt{JobID: j.ID, Attempt: o.Attempt, Host: o.Machine, Kind: kind, EndedAt: o.EndedAt, IOStatus: "unknown", StopObservation: o.StopObservation}
+		row := WastedAttempt{JobID: j.ID, Attempt: o.Attempt, Host: o.Machine, Kind: kind, EndedAt: o.EndedAt, IOStatus: "unknown", StopObservation: o.StopObservation, Started: "unknown"}
 		for _, f := range j.ResourceAttempts {
 			if f.Attempt == o.Attempt && f.Machine == o.Machine && f.Session == o.Session {
 				row.Resources, row.IOStatus = f.Resources, attemptIOStatus(f.Resources)
 				break
+			}
+		}
+		row.Started, row.BurnedSeconds = attemptBurn(j, o, row.Resources)
+		if kind == "lost" || kind == "killed" {
+			switch {
+			case o.State == "cancelled" || o.Reason == "cancel requested":
+				row.Kind = "cancelled"
+			case row.Started == "no":
+				row.Kind = "never_started"
+			case kind == "lost" && row.Started == "unknown":
+				row.Kind = "lost_start_unknown"
 			}
 		}
 		if o.Placement != nil {
@@ -967,6 +1057,71 @@ func efficiencyWasted(j *Job) []WastedAttempt {
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+// attemptBurn says whether the attempt's command started and, when known, how
+// long it ran. Only positive evidence marks an attempt never started.
+func attemptBurn(j *Job, o AttemptOutcome, resources *AttemptResources) (string, *float64) {
+	if t := o.LaunchTimings; t != nil && t.CommandStartAt != nil {
+		seconds := max(0, o.EndedAt.Sub(*t.CommandStartAt).Seconds())
+		return "yes", &seconds
+	}
+	if resources != nil && resources.ElapsedSeconds > 0 {
+		seconds := resources.ElapsedSeconds
+		return "yes", &seconds
+	}
+	for _, f := range j.MemoryAttempts {
+		if f.Attempt == o.Attempt && f.Machine == o.Machine && f.Session == o.Session && f.MemoryPeak != nil {
+			return "yes", nil
+		}
+	}
+	if o.AdmissionRequeue || o.ExecutionEvidence != nil && o.ExecutionEvidence.Main == executionNotStarted || o.LaunchTimings != nil && o.LaunchTimings.CommandStartAt == nil {
+		zero := 0.0
+		return "no", &zero
+	}
+	return "unknown", nil
+}
+
+func wastedWindows(rows []WastedAttempt, now time.Time) []WastedWindow {
+	retained := WastedWindow{Name: "retained", Through: now, Attempts: map[string]int{}}
+	week := WastedWindow{Name: "7d", Since: now.Add(-7 * 24 * time.Hour), Through: now, Attempts: map[string]int{}}
+	for _, a := range rows {
+		if retained.Since.IsZero() || a.EndedAt.Before(retained.Since) {
+			retained.Since = a.EndedAt
+		}
+		windows := []*WastedWindow{&retained}
+		if !a.EndedAt.Before(week.Since) {
+			windows = append(windows, &week)
+		}
+		for _, w := range windows {
+			w.Attempts[a.Kind]++
+			if a.BurnedSeconds != nil {
+				w.BurnedSeconds += *a.BurnedSeconds
+			} else {
+				w.UnknownBurn++
+			}
+		}
+	}
+	return []WastedWindow{week, retained}
+}
+
+func (w WastedWindow) words() string {
+	total := 0
+	for _, n := range w.Attempts {
+		total += n
+	}
+	parts := []string{}
+	for _, kind := range slices.Sorted(maps.Keys(w.Attempts)) {
+		parts = append(parts, fmt.Sprintf("%d %s", w.Attempts[kind], kind))
+	}
+	detail := "none"
+	if len(parts) > 0 {
+		detail = strings.Join(parts, ", ")
+	}
+	if w.Since.IsZero() {
+		return "none retained"
+	}
+	return fmt.Sprintf("%d stopped attempts %s to %s (%s); %.1f attempt-hours burned, %d with unknown burn", total, w.Since.UTC().Format(time.RFC3339), w.Through.UTC().Format(time.RFC3339), detail, w.BurnedSeconds/3600, w.UnknownBurn)
 }
 
 type efficiencyBaseline struct {
@@ -1024,6 +1179,9 @@ func efficiencySignals(r *EfficiencyReport, old map[string]efficiencyBaseline) (
 		values[h.Host+"/suspect_attempts"] = 0
 	}
 	for _, a := range r.Wasted {
+		if !a.burned() {
+			continue
+		}
 		values[a.Host+"/wasted_attempts"]++
 		if a.Suspect != nil && *a.Suspect {
 			values[a.Host+"/suspect_attempts"]++
@@ -1099,17 +1257,34 @@ func (r *EfficiencyReport) Lines() []string {
 	if r == nil {
 		return nil
 	}
-	lines := []string{fmt.Sprintf("efficiency at %s: %d stranded placements; %d wasted attempts; CPU use %s", r.At.UTC().Format(time.RFC3339), len(r.Stranded), len(r.Wasted), r.CPUStatus)}
+	wasted := 0
+	for _, a := range r.Wasted {
+		if a.burned() && !a.EndedAt.Before(r.At.Add(-7*24*time.Hour)) {
+			wasted++
+		}
+	}
+	lines := []string{fmt.Sprintf("efficiency at %s: %d stranded placements; %d stopped attempts that may have burned run time in the last 7 days; CPU use %s", r.At.UTC().Format(time.RFC3339), len(r.Stranded), wasted, r.CPUStatus)}
+	lines = append(lines, r.Utilization.lines()...)
+	for _, w := range r.WastedWindows {
+		lines = append(lines, "  wasted "+w.Name+": "+w.words())
+	}
 	for _, h := range r.Hosts {
 		used := "unknown"
 		if h.Rate.MeasuredMemoryGB != nil {
 			used = fmt.Sprintf("%.1f GiB", *h.Rate.MeasuredMemoryGB)
+		} else if h.MeasuredMemoryUnknown != "" {
+			used = "unknown (" + h.MeasuredMemoryUnknown + ")"
+		}
+		if p := h.AttemptPeaks; p != nil {
+			used += fmt.Sprintf(" (attempt host peaks: %d retained, median %.1f GiB, max %.1f GiB)", p.Attempts, p.MedianGB, p.MaxGB)
 		}
 		physical := "unknown"
 		if h.PhysicalUsedMemoryGB != nil {
 			physical = fmt.Sprintf("%.1f GiB", *h.PhysicalUsedMemoryGB)
 		}
-		lines = append(lines, fmt.Sprintf("  %s: reserved %.1f GiB; measured Mycelium %s; physical used %s; %s; %s; %s; host I/O %s", h.Host, h.Rate.ReservedMemoryGB, used, physical, efficiencyMemoryWords(h.ResourceIntegral), efficiencyCPUWords(h.ResourceIntegral), efficiencyIOWords(h.ResourceIntegral), h.IOStatus))
+		// Host integrals restart when its inventory identity changes; say so.
+		window := fmt.Sprintf("integrals since %s (%.1f h)", h.Since.UTC().Format(time.RFC3339), r.At.Sub(h.Since).Hours())
+		lines = append(lines, fmt.Sprintf("  %s: reserved %.1f GiB; measured Mycelium %s; physical used %s; %s: %s; %s; %s; host I/O %s", h.Host, h.Rate.ReservedMemoryGB, used, physical, window, efficiencyMemoryWords(h.ResourceIntegral), efficiencyCPUWords(h.ResourceIntegral), efficiencyIOWords(h.ResourceIntegral), h.IOStatus))
 	}
 	for _, p := range r.Projects {
 		for _, category := range slices.Sorted(maps.Keys(p.Seconds)) {
@@ -1176,7 +1351,7 @@ func (r *EfficiencyReport) Lines() []string {
 		}
 	}
 	if len(r.Wasted) > 0 {
-		lines = append(lines, fmt.Sprintf("  stops: %d suspect; %d with unknown pressure", suspect, unknown))
+		lines = append(lines, fmt.Sprintf("  stops (retained): %d suspect; %d with unknown pressure", suspect, unknown))
 	}
 	for _, s := range r.Signals {
 		if s.Active {

@@ -218,6 +218,8 @@ type Spec struct {
 	// AllowCPUFallback is the wire form of advanced.allow_cpu_fallback (MY-54).
 	WorkerData       string `json:"worker_data,omitempty" yaml:"-"`
 	AllowCPUFallback bool   `json:"allow_cpu_fallback,omitempty" yaml:"-"`
+	// ExclusiveDevice is the wire form of advanced.exclusive_device (#2197).
+	ExclusiveDevice bool `json:"exclusive_device,omitempty" yaml:"-"`
 	// Advanced is the authoring section for settings with good defaults.
 	// FoldAdvanced moves it onto the flat fields; stored specs never carry it.
 	Advanced *Advanced `json:"advanced,omitempty" yaml:"advanced,omitempty"`
@@ -496,6 +498,10 @@ type Job struct {
 	// Set only on read-only planner copies, never the durable job. Plain work's
 	// recipe and input identity is independent of the target or learned memory.
 	planningMemoryIdentity string
+	// Set only on a worker's launch copy: the attempt directory holding staged
+	// inputs. A lowered extension can run main in another working directory,
+	// and warm items still read their inputs and write outputs here.
+	stagedWork string
 	// Queue-owned comparison in progress. A restart discards unfinished
 	// measurements and keeps completed observations in the evidence store.
 	gpuSharingRun *gpuSharingRun

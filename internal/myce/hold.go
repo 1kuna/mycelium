@@ -180,28 +180,37 @@ var holdDiagnosticCodes = map[string]string{
 	"no_matching_device":          "no_matching_device",
 }
 
-// The efficiency report's wait category for a scheduler wait kind. Kinds not
-// listed are capacity waits.
+// The efficiency report's wait category for every hold kind. Each kind names
+// its category here; a kind missing from the table reports "unknown" rather
+// than passing for capacity (#2184).
 var holdEfficiencyCategories = map[string]string{
-	"paused": "holds", "production_admission": "holds", hostMaintenanceJobHold: "holds",
+	"paused": "holds", "production_admission": "holds", hostMaintenanceJobHold: "holds", "fan_out_cap": "holds",
 	"pinned_model": "holds", checkpointTargetHold: "holds", checkpointFloorMissingHold: "holds", "reservation": "holds", "unified_cuda_headroom": "holds",
-	"waiting_for_builder": "preparation", "building": "preparation", "unprepared": "preparation",
+	"shared_host_backoff": "holds", "host_disabled": "holds", "reservation_active": "holds", "component_exclusion": "holds", "device_maintenance": "holds",
+	"waiting_for_builder": "preparation", "building": "preparation", "unprepared": "preparation", stagingHostRetryHold: "preparation",
 	"shared_input": "preparation", "shared_input_unreported": "preparation", stagingStorageHold: "preparation",
 	"no_buildable_worker": "environment", "deterministically_failed": "environment", "extension": "environment",
 	"missing_extension": "environment", "execution_coverage": "environment", "native_qualification": "environment",
 	"production_parity": "environment", productionParityHostHold: "environment", "capability": "environment", "log_policy": "environment",
-	memoryWaitReason:     "memory_reservation",
-	"host_backfill":      "memory_reservation",
+	workerMemoryReleaseReason: "environment", workerMemoryContainmentReason: "environment", "cpu_isolation": "environment", ephemeralIsolationHold: "environment",
+	"checkpoint_root": "environment", "storage_root": "environment", "storage_parked": "environment", checkpointInputExpiryDue: "environment",
+	// Ledger, pool and headroom refusals are memory waits, not generic capacity.
+	memoryWaitReason: "memory_reservation", "memory": "memory_reservation", "host_memory_headroom": "memory_reservation",
+	"memory_capacity": "memory_reservation", "host_backfill": "memory_reservation",
 	"no_matching_device": "authored_platform_targets", "no_eligible_host": "authored_platform_targets",
 	"project_cap": "priority_fairness",
-	"upstream":    "dependency",
+	"upstream":    "dependency", "fan_out_dispatched": "dependency",
+	"capacity": "capacity", "launch_capacity": "capacity", deviceFaultRetryHold: "capacity", "scarce_host_yield": "capacity",
+	"disk_headroom": "capacity", "file_store_capacity": "capacity", "waiting_for_worker": "capacity", "model_engine": "capacity",
+	"startup_release": "capacity", "host_unavailable": "capacity",
+	"unknown_observation": "unknown", "unclassified": "unknown",
 }
 
 func (h *Hold) efficiencyCategory() string {
 	if c := holdEfficiencyCategories[h.Kind]; c != "" {
 		return c
 	}
-	return "capacity"
+	return "unknown"
 }
 
 // A host or device fence: the kind's defaults, with the operator owning it

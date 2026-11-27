@@ -162,6 +162,10 @@ for source in ('file_socket_unix', 'file_socket_other'):
 # implementation; portable device and admission tests exercise missing evidence.
 SUPPLEMENTAL_CONSUMERS['internal/myce/xe_activity_other.go'] = (
     'xe_activity_linux_test.go', 'device_telemetry_test.go', 'discrete_fanout_sharing_test.go')
+# The Xe VRAM query's platform halves have only unexported symbols; the portable
+# test checks the production probe wires them and maps the reply (#2185).
+for source in ('xe_memory_linux', 'xe_memory_other'):
+    SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = ('xe_memory_test.go', 'device_telemetry_test.go')
 
 
 # The shared writer's row capture and turn fencing have no exported symbols;

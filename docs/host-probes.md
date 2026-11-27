@@ -97,9 +97,10 @@ creates no GPU objects or execution contexts. Older kernels silently censor usag
 positive usage without extra privilege, but treats a zero as unknown unless
 accounting capability is present. The template adds read-only DRM access with
 no capability expansion.
-A GTT-only broker remains valid for host-backed storage but supplies unknown
-VRAM. Upgrade and qualify the broker separately to retain opportunistic sharing;
-missing counters never become free device memory. Xe PMU activity remains per
+A GTT-only or absent broker supplies no VRAM. For those cards the worker makes
+the same `MEM_REGIONS` query on the card's render node itself, with no
+capability, and accepts only positive usage: a zero may be censored and stays
+unknown (#2185). Missing counters never become free device memory. Xe PMU activity remains per
 PCI device. Samples merge only into matching device/driver, selector, topology
 and reserve observations, with their original age.
 

@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -277,6 +278,11 @@ func (q *Queue) projectCancellation(out, stored *Job) {
 		if wave := waves[p.Key]; wave != nil {
 			piece.Materialized, piece.WaveID, piece.Release = true, wave.ID, q.observedRelease(wave)
 		}
+		for _, dependent := range q.warmPieceDependents(stored.ID) {
+			if warmBindsPiece(dependent, stored.ID, p.Key) {
+				piece.Dependents = append(piece.Dependents, dependent.ID)
+			}
+		}
 		for _, child := range members {
 			if a := child.Spec.After; a != nil && a.Job == stored.ID && a.Piece == p.Key {
 				piece.Dependents = append(piece.Dependents, child.ID)
@@ -476,13 +482,18 @@ func (q *Queue) cancellationMembers(j *Job) []*Job {
 // relationships once. This view borrows state only while its caller holds q.mu;
 // it is discarded after projection, so mutations need no new index lifecycle.
 func (q *Queue) cancellationObservation() *Queue {
-	view := &Queue{s: q.s, cancellationMembersByParent: map[string][]*Job{}}
+	view := &Queue{s: q.s, cancellationMembersByParent: map[string][]*Job{}, cancellationWarmByParent: map[string][]*Job{}}
 	retained := make(map[string]*Job, len(q.s.Jobs))
 	dependents := map[string][]*Job{}
 	addDependent := func(j *Job) {
 		if j.Spec.After != nil {
 			parent := j.Spec.After.Job
 			dependents[parent] = append(dependents[parent], j)
+		}
+		if warmPieceDependencies(j.Spec) {
+			for _, parent := range dependencyParents(j.Spec) {
+				view.cancellationWarmByParent[parent] = append(view.cancellationWarmByParent[parent], j)
+			}
 		}
 	}
 	for id, j := range q.s.Jobs {
@@ -509,6 +520,47 @@ func (q *Queue) cancellationObservation() *Queue {
 		view.cancellationMembersByParent[id] = append(members, dependents[id]...)
 	}
 	return view
+}
+
+// Warm parents whose items bind this producer. They are not cancellation
+// members: a producer's cancellation settles only the bound keys.
+func (q *Queue) warmPieceDependents(id string) []*Job {
+	if q.cancellationMembersByParent != nil {
+		return q.cancellationWarmByParent[id]
+	}
+	var out []*Job
+	add := func(j *Job) {
+		if j != nil && warmPieceDependencies(j.Spec) && slices.Contains(dependencyParents(j.Spec), id) {
+			out = append(out, j)
+		}
+	}
+	for _, j := range q.s.Jobs {
+		add(j)
+	}
+	for _, r := range q.s.Submissions {
+		if r.Job != nil && q.s.Jobs[r.Job.ID] == nil {
+			add(r.Job)
+		}
+	}
+	return out
+}
+
+func warmBindsPiece(j *Job, producer, key string) bool {
+	for _, p := range j.Spec.FanOut.Pieces {
+		a := p.After
+		if a == nil || a.Job != producer {
+			continue
+		}
+		if a.Piece == key {
+			return true
+		}
+		for _, output := range a.Outputs {
+			if a.Piece == "" && strings.HasPrefix(output, key+"/") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (q *Queue) jobOwnReleasePending(j *Job) bool {
