@@ -41,6 +41,10 @@ func TestSharedQueueProofProcess(t *testing.T) {
 		return
 	}
 	path := os.Getenv("MYCE_SHARED_PROOF_DATABASE")
+	if os.Getenv("MYCE_SHARED_PROOF_DISTINCT_PROBE_HOSTS") == "1" {
+		name := filepath.Base(filepath.Dir(path))
+		storageProbeHost = func() string { return name }
+	}
 	endpoint := os.Getenv("MYCE_SHARED_PROOF_LISTEN")
 	l, err := net.Listen("tcp", endpoint)
 	if err != nil {
