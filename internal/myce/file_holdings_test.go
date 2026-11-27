@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -550,25 +552,45 @@ func TestFileReleaseInputClaimProtectsUploadAndSubmitGaps(t *testing.T) {
 		releaseCode(t, err, "file_release_protected")
 		checked = append(checked, phase)
 	}
+	const prefix = 64 << 10
 	var patches int
+	c.Clock = clock
+	c.Pause = func(_ context.Context, delay time.Duration) error {
+		clock.Advance(delay)
+		return nil
+	}
 	c.HTTP = &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
-		if r.Method == http.MethodPatch && patches == 0 {
+		firstPatch := r.Method == http.MethodPatch && patches == 0
+		if firstPatch {
 			clock.Advance(testFileRetention - time.Second)
+			// Persist a prefix before dropping the PATCH acknowledgement. The
+			// real client must reconcile the offset and retry the remaining bytes.
+			r = r.Clone(r.Context())
+			r.Body = io.NopCloser(io.LimitReader(r.Body, prefix))
+			r.ContentLength = prefix
+		} else if r.Method == http.MethodPatch && r.Header.Get("Upload-Offset") != strconv.Itoa(prefix) {
+			t.Fatal("client did not resume at the accepted prefix", r.Header.Get("Upload-Offset"))
 		}
 		reply, err := http.DefaultTransport.RoundTrip(r)
 		if err != nil {
 			return nil, err
 		}
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/files/input-claims":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/files/input-claims" && patches == 0:
 			protect("claim reissued before transfer")
 		case r.Method == http.MethodPatch && reply.StatusCode == http.StatusNoContent:
 			patches++
-			if patches == 1 {
+			if firstPatch {
+				if reply.Header.Get("Upload-Offset") != strconv.Itoa(prefix) {
+					t.Fatal("queue did not accept the partial PATCH", reply.Header.Get("Upload-Offset"))
+				}
+				reply.Body.Close()
 				q.fileLifecycle.Lock()
 				q.fileLifecycle.Unlock()
 				clock.Advance(2 * time.Second) // The issuance alone is now idle.
 				protect("between PATCH requests")
+				return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header),
+					Body: io.NopCloser(strings.NewReader(`{"code":"queue_stopping"}`))}, nil
 			}
 		case r.Method == http.MethodHead && strings.HasPrefix(r.URL.Path, "/api/files/blobs/") &&
 			reply.StatusCode == http.StatusOK && patches == 2:
