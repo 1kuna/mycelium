@@ -1,6 +1,6 @@
 # Memory v2: admit on what is free, learn what jobs use
 
-**Draft. Do not merge until the maintainer approves.** If approved, this
+**Approved by the maintainer on 2026-11-27 (MY-60).** This
 replaces the [approved memory admission design](design-memory-admission.md)
 and the parked draft [#2114](https://github.com/1kuna/mycelium/pull/2114). It
 contains no code. Direction: the maintainer, 2026-11-26, "the redesign should
