@@ -493,6 +493,12 @@ func TestEphemeralPlacementRefusalAndWaitReason(t *testing.T) {
 			want: []string{ephemeralCapability, "host policy", "docs/native-isolation.md#optional-administrator-action-per-host-apparmor-user-namespaces"},
 		},
 		{
+			name:    "macOS process custody",
+			caps:    []string{"native_isolation_seatbelt", nativeCICapability},
+			refusal: ephemeralDarwinCustodyUnqualified,
+			want:    []string{ephemeralCapability, "macOS has no qualified kernel boundary for attempt descendants and orphans"},
+		},
+		{
 			name:    "core route",
 			caps:    []string{"native_isolation_namespace", nativeCICapability},
 			refusal: ephemeralCoreRouteUnqualified,

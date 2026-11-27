@@ -320,8 +320,9 @@ Placement refusals and queued-job status name the missing capability. When
 worker evidence identifies the cause, the reason names namespace qualification,
 the core route or the core-limit helper. If host policy refused user namespaces,
 see the [optional administrator action](native-isolation.md#optional-administrator-action-per-host-apparmor-user-namespaces).
-macOS, unsupported workers and the Linux fallback boundary cannot silently run
-these jobs. The worker rechecks core routing at launch and sets both soft and
+macOS withholds the capability because its native boundary cannot prove orphan
+custody. The Linux fallback boundary also withholds it. The Linux worker
+rechecks core routing at launch and sets both soft and
 hard `RLIMIT_CORE` to zero in the payload helper, without changing the worker
 or host limits. **Linux piped core handlers ignore RLIMIT_CORE**. Mycelium's
 qualified router instead matches the dumping PID's cgroup to exact attempt
@@ -358,8 +359,7 @@ The worker inventories private trees, persists the byte census, unlinks them,
 checks absence and syncs the closest existing parents before release. Failures
 remain visible and keep custody. The lifecycle fixture lists every remaining
 worker file after real extension/sidecar execution and dependency staging; shared
-software stays present. Native namespace/core qualification is separate release
-acceptance, not established by a laptop capability seam.
+software stays present.
 
 Removal means unlink, **not secure erasure on SSDs**. Full-disk encryption is the
 real at-rest control. This guarantee covers managed worker-local filesystem
@@ -368,6 +368,43 @@ backups, copies retained by earlier ordinary jobs, or privileged/operator
 processes. Queue- and NAS-side retention is unchanged and out of scope. The
 three-day default still applies there; ephemeral local copies are an explicit
 exception to the ordinary worker retention policy.
+
+### macOS qualification (#2224)
+
+Darwin check-in reports `darwin_process_custody_unqualified`. The queue
+refuses placement and the worker repeats the refusal before staging, even if it
+receives an assignment. Seatbelt restrictions are inherited across fork and
+exec, but XNU's [session creation path](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/kern_prot.c#L484)
+does not consult Seatbelt for process-session membership. The worker's process
+group, session and birth-checked descendant inventory can clean up processes
+it observed. A descendant can create a different session and be orphaned between
+inventories. After worker loss, recovery cannot recover custody that was never
+recorded. An empty scan therefore cannot prove that every writer is gone.
+
+| Worker custody inventory row | macOS mechanism or qualification gap |
+| --- | --- |
+| Stored inputs, source archives, extracted source and `after` output copies | Shared worker implementation downloads into `PRIVATE/.inputs-*` and renames to `PRIVATE/work`, with no shared file-cache lookup or write. Attempt directories use mode `0700`. |
+| NAS inputs and dependency NAS paths | The same private staging and local copy logic applies before launch. The original stays in the NAS retention domain. |
+| Stored/NAS shared inputs, manifests, archives and extracted members | The shared worker implementation stages directly into `PRIVATE/shared`. Archives and extracted data skip shared cache population and pins. |
+| Shared payload caches, including pinned hashes | The same ephemeral transfer branch bypasses the ordinary file and shared-input caches, even for a matching warm hash. |
+| Extension source used by a payload | The worker copies source into `PRIVATE/work/.myce-extension`; language caches under that path are included in the attempt tree census and removal. |
+| Main/sidecar work, scratch, home, tool caches, temp and application progress | The worker sets the same private paths, makes no short-path temp alias and scrubs ambient job credentials, including `MYCE_TOKEN`. Seatbelt protects the managed tree from sibling payloads. The current profile leaves system `/tmp` shared and lacks a filesystem-wide write boundary restricted to the attempt. |
+| Non-resumable checkpoint writes | The worker binds `MYCE_CHECKPOINT_DIR` to `PRIVATE/checkpoint` for both main and sidecars, using the same `0700` directory creation. |
+| Original outputs and result collection/transfer spools | The same attempt-local roots and exact-attempt result fence apply. Verified unlink runs only after accepted output or a durable queue disposition authorizes discard and writer custody has ended. |
+| Main/sidecar stdout and stderr, including staging errors | The shared worker path uses one private log file (mode `0600`) under a `0700` log directory. It unlinks the file only after exact-attempt log delivery and confirms absence and parent sync before release. |
+| Software environment caches, extension library/preparation/assets, model caches | Seatbelt `ci` denies payload writes to the managed software grants. Qualification would also have to prove that each allowed system service cannot persist job bytes elsewhere on behalf of the payload. |
+| Worker attempt/native/result/exit/control records | The same exact-attempt metadata, numeric evidence and receipt format apply. Only managed files are a supported payload channel. |
+| PID/IPC and temp isolation, orphan cleanup, and core files | Seatbelt and process observation do not provide the Linux PID/mount/IPC boundary or guaranteed orphan recovery. A future launch boundary must set both `RLIMIT_CORE` limits to zero before payload exec, check `kern.coredump` and `kern.corefile` in the worker context, and account for OS crash capture outside the private tree. No Darwin core suppression is qualified. |
+| Explicitly excluded job modes | The same submission and frozen-extension validation refuse these modes before any worker assignment. |
+
+The receipt code can verify unlink and directory sync for known paths. It cannot
+make the missing process, filesystem or crash guarantees. A positive
+`myce dev` run and post-release placement proof depend on a Darwin boundary
+that can enforce those guarantees for main and sidecars, even across worker
+restart. The current Darwin dev fixture proves refusal before any worker
+payload or log is created. The existing lifecycle fixture exercises staging,
+transfer, log delivery and verified removal through a test-only qualification
+seam.
 
 ## Transfer behavior
 
