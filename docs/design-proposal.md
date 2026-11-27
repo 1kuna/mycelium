@@ -161,8 +161,9 @@ configuration, accounting definitions and known measurement limits.
 Placement uses the least valuable machine that fits (MY-18), without changing
 adapter contracts or introducing an explicit speed/deadline goal. Eligibility,
 accuracy/qualification and owner policy precede tiers and per-family project
-deficit. Free capacity and existing victim stop-count/lost-work comparisons
-precede host value. Value never selects another project, changes fair-share
+deficit. Existing victim stop-count/lost-work comparisons precede host value.
+Comparable measured completion can steer ready targets for the same fair winner
+as described below. Value never selects another project, changes fair-share
 charges or preempts equal-tier work. [Scarce-host yield](#scarce-host-yield) is
 the narrow exception for moving already-running portable work.
 
@@ -179,13 +180,14 @@ The shared planner applies this ordering to currently admissible targets across
 pulls and status. Owner activity, stale reports, maintenance and
 other temporary occupancy do not redefine measured supply or value; only
 immediate admission excludes those hosts. Compute scarcity once per read-only
-planning pass and discard the projection on state changes. Never reserve or
-wait for a cheaper host: an idle scarce host runs the work when cheap hosts are
-busy, lost, owner-active, recovering or otherwise inadmissible. Attempt and
+planning pass and discard the projection on state changes. An idle scarce host
+can run work when cheaper hosts are occupied or otherwise inadmissible. The
+measured completion rule below may briefly leave an eligible CPU host idle.
+Attempt and
 cleanup custody remain authoritative across restarts. Status exposes the chosen
 host's scarcity vector and usable RAM, or why its value is unknown. Fake-clock
 inventory evidence establishes laptop behavior, not native fleet
-qualification. The explicit speed/deadline tradeoff is later work.
+qualification.
 
 The host's highest-ranked blocked job keeps a memory reservation. Backfill
 uses the surplus beyond its charge through the
@@ -1420,7 +1422,18 @@ place work (MY-07, MY-31).
 
 Under [MY-49](DECISIONS.md#my-49), placement uses the last comparable accepted
 duration and memory peak. Throughput sweeps, the onboarding benchmark,
-calibrated forecasts and batch planning were retired. Read
+calibrated forecasts and batch planning were retired. When multiple ready
+targets offer the same fair winner, a shorter comparable duration can take
+precedence over least-valuable fit within the same ordinary or last-resort
+band. Missing or incomparable measurements keep the existing order.
+
+A backlog of comparable plain CPU commands may leave a slower worker idle
+when a single faster lane is expected to finish the entire waiting tail before
+the slower worker would finish one piece. The lane can be ready now or become
+free when a current measured CPU attempt finishes. The queue reevaluates the
+decision on each placement pass and drops release estimates once they pass.
+Normal eligibility, fair order and exact release continue to govern dispatch.
+Read
 [measurement identity](reference/measurement-mechanisms.md#comparable-observations)
 and [status](status.md#execution-elapsed-time-last-accepted-duration-and-application-progress).
 

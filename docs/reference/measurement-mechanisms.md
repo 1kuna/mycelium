@@ -60,8 +60,8 @@ staleness/invalidation rules apply. Each speed mutation records its exact
 before/after digest in the job's accepted-sample ledger transaction, preserving
 release-verification evidence even when the usable timing window restarts.
 Status and inspection expose this evidence
-through work curves and attempt timing. Completion ranking adds existing setup
-and measured transfer costs and remains after admission, tiers, fairness and
-least-valuable fit. Estimates neither reserve capacity nor wait for a busy faster
-machine. Prediction-error calibration is separate work (#879).
+through work curves and attempt timing. The current queue ranks ready targets
+using the last accepted duration under MY-49. See
+[measured completion placement](../design-proposal.md#measured-work-and-completion-aware-placement)
+for dispatch ordering and the CPU release projection.
 
