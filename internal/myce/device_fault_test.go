@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -228,6 +230,120 @@ func TestDeviceFaultTeardownClassification(t *testing.T) {
 	scan(KernelLogLine{ID: "5", At: clock.Now().Add(-2 * time.Second), Message: "xe 0000:03:00.0: [drm] GPU HANG"})
 	if w.Machine.Devices[0].Reason != "device_fault_xe" {
 		t.Fatal("uncorrelated same-card fault did not quarantine", w.Machine.Devices)
+	}
+}
+
+func TestDeviceFaultDetachedTeardown(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		stopped  bool
+		takeover bool
+		device   int
+	}{
+		{name: "after release", stopped: true},
+		{name: "during takeover", stopped: true, takeover: true},
+		{name: "no stop"},
+		{name: "different card", stopped: true, device: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := &fakeClock{now: time.Date(2026, 11, 27, 7, 32, 34, 698_000_000, time.UTC)}
+			m := m3Machine()
+			m.Devices[0].pciAddress, m.Devices[1].pciAddress = "0000:03:00.0", "0000:07:00.0"
+			var lines []KernelLogLine
+			source := func(_ context.Context, since time.Time) (KernelLogSnapshot, error) {
+				return KernelLogSnapshot{BootID: "boot", Lines: slices.DeleteFunc(slices.Clone(lines), func(l KernelLogLine) bool {
+					return l.At.Before(since)
+				})}, nil
+			}
+			newWorker := func() *Worker {
+				machine := m
+				machine.Devices = slices.Clone(m.Devices)
+				return &Worker{Machine: machine, Clock: clock, control: &processControl{clock: clock},
+					DeviceFaultSource: source, DeviceFaultMatchers: map[string]DeviceFaultMatcher{"fake": intelKernelFault}}
+			}
+			ctx := context.Background()
+			root := &workerStore{dir: t.TempDir()}
+			if err := os.Mkdir(custodianDir(root.dir), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := os.RemoveAll(custodianDir(root.dir)); err != nil {
+					t.Error(err)
+				}
+			})
+			w := newWorker()
+			if err := w.initDeviceFaults(ctx, root); err != nil {
+				t.Fatal(err)
+			}
+			term := clock.Now().Add(140 * time.Millisecond)
+			stop := clock.Now().Add(530 * time.Millisecond)
+			fault := stop.Add(313 * time.Millisecond)
+			job := Job{ID: "victim", Attempt: 3, Session: "session", Machine: m.ID, AllocatedDevices: []string{"0"}}
+			id, identity := ID(), ID()
+			state := workerState{Job: &job, Identity: identity, Session: job.Session}
+			state.Result = &Result{Machine: job.Machine, Session: job.Session, Execution: Execution{ID: job.ID, Attempt: job.Attempt}}
+			if tc.stopped {
+				record := nativeOutcomeRecord{Identity: identity, Members: []*nativeMember{{Name: "main", memberOutcome: memberOutcome{
+					Signals: []deliveredSignal{{At: term, Signal: "TERM"}},
+					Exit:    &memberExit{Status: 143, ObservedAt: fault.Add(1160 * time.Millisecond)},
+				}}}}
+				if err := saveWorkerJSON(root.dir, "native-"+identity+".json", record); err != nil {
+					t.Fatal(err)
+				}
+			}
+			v := custodianSnapshot{Protocol: custodianProtocol, ID: id, Started: true, Finished: true, State: state}
+			if err := saveWorkerJSON(custodianDir(root.dir), custodianName(id, "snapshot"), v); err != nil {
+				t.Fatal(err)
+			}
+			state.Custodian, state.Result = id, nil
+			s := &workerStore{dir: root.dir, state: state}
+			clock.Advance(5 * time.Second)
+			if !tc.takeover && tc.stopped {
+				p, err := w.adoptCustodian(s)
+				if err != nil {
+					t.Fatal(err)
+				}
+				w.control.set(p)
+				<-p.done
+				w.control.remove(job)
+				// The release retires the snapshot. Classification uses the
+				// retained exact attempt and receipts, without a live proxy.
+				if err := os.Remove(filepath.Join(custodianDir(root.dir), custodianName(id, "snapshot"))); err != nil {
+					t.Fatal(err)
+				}
+			}
+			clock.Advance(17 * time.Second)
+			address := m.Devices[tc.device].pciAddress
+			lines = []KernelLogLine{
+				{ID: "1", At: fault, Message: "xe " + address + ": [drm] Tile0: GT0: Engine reset: engine_class=ccs"},
+				{ID: "2", At: fault.Add(time.Millisecond), Message: "xe " + address + ": [drm] Fault response: Unsuccessful -ENOENT"},
+			}
+			if tc.takeover {
+				w = newWorker()
+				if err := w.initDeviceFaults(ctx, root, s); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := w.refreshDeviceFaults(ctx, root); err != nil {
+				t.Fatal(err)
+			}
+			d := w.Machine.Devices[tc.device]
+			key := deviceFaultKey(d)
+			if tc.stopped && tc.device == 0 {
+				if d.Reason != "" || d.FreeMemoryGB != m.Devices[0].FreeMemoryGB || w.faults.Teardowns[key].Reason != "device_fault_xe" {
+					t.Fatalf("stopped card lost capacity or teardown record: %+v", d)
+				}
+				if len(w.faultTeardowns[key]) != 1 || len(d.FaultEvidence) != 2 {
+					t.Fatalf("expected two lines from one incident: %v, %v", w.faultTeardowns[key], d.FaultEvidence)
+				}
+				for _, e := range d.FaultEvidence {
+					if len(e.Attempts) != 1 || e.Attempts[0].Execution != (Execution{ID: job.ID, Attempt: job.Attempt}) || e.Attempts[0].Session != job.Session {
+						t.Fatalf("missing exact released attempt: %+v", e.Attempts)
+					}
+				}
+			} else if d.Reason != "device_fault_xe" || len(d.FaultEvidence) != 2 || len(d.FaultEvidence[0].Attempts) != 0 {
+				t.Fatalf("unrelated reset did not quarantine independently: %+v", d)
+			}
+		})
 	}
 }
 
