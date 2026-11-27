@@ -36,7 +36,9 @@ func (q *Queue) shutdownRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		closeCancelledConnection(w, r)
 		if q.stopping.Load() {
-			respond(w, nil, queueStoppingBecause("queue_shutdown"))
+			err := queueStoppingBecause("queue_shutdown")
+			logFleetAuthorizationDecision(r, nil, err)
+			respond(w, nil, err)
 			return
 		}
 		ctx, cancel := context.WithCancel(r.Context())
@@ -65,7 +67,9 @@ func (q *Queue) shutdownRequests(next http.Handler) http.Handler {
 		}()
 		// Shutdown can race registration; do not begin work after its fence.
 		if q.stopping.Load() {
-			respond(w, nil, queueStoppingBecause("queue_shutdown"))
+			err := queueStoppingBecause("queue_shutdown")
+			logFleetAuthorizationDecision(r, nil, err)
+			respond(w, nil, err)
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))

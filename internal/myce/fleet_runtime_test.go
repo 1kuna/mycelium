@@ -195,7 +195,7 @@ func TestFleetRuntimePollFencesLaunchAndSanitizesFailure(t *testing.T) {
 	current.Store(i)
 	result = pollFleetRuntime(context.Background(), c, client, collect, launch, "host", "worker", "session", true, "", nil)
 	ack := <-acks
-	if launches != 1 || result.attempted != fleetInstructionKey(i) || ack != (fleetLaunchFailure{i.Operation, i.Revision, i.Host, i.Machine, i.Session, "failed", "fleet_helper_launch_unclassified"}) {
+	if launches != 1 || result.attempted != fleetInstructionKey(i) || ack != (fleetLaunchFailure{i.Operation, i.Revision, i.Host, i.Machine, i.Session, "failed", "fleet_helper_launch_unclassified", ""}) {
 		t.Fatal("failed launch acknowledgement", launches, ack)
 	}
 	_ = pollFleetRuntime(context.Background(), c, client, collect, launch, "host", "worker", "session", true, result.attempted, nil)
@@ -279,7 +279,7 @@ func TestFleetRuntimeStaleFailureAckDoesNotConcealRecovery(t *testing.T) {
 	launches := 0
 	launch := func(context.Context, ServiceConfig, FleetUpdateInstruction) error { launches++; return nil }
 	client := Client{URL: server.URL, Token: "test"}
-	failed := &fleetLaunchFailure{i.Operation, 1, i.Host, i.Machine, i.Session, "failed", "helper_launch_failed"}
+	failed := &fleetLaunchFailure{i.Operation, 1, i.Host, i.Machine, i.Session, "failed", "helper_launch_failed", ""}
 	result := pollFleetRuntime(context.Background(), c, client, collect, launch, i.Host, i.Machine, i.Session, true, "upgrade/1", failed)
 	if result.failed != nil || launches != 0 {
 		t.Fatal("obsolete acknowledgement remained pending")

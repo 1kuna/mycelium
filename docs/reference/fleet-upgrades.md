@@ -197,7 +197,8 @@ Local installer and service updater failures. Updater reports expose a fixed
 
 | Code | Next step |
 | --- | --- |
-| `fleet_authorization_refused` | The authorization call failed, or its returned proof failed readiness/session checks. This code alone does not establish a queue refusal. Inspect the sanitized authorization diagnostics below. |
+| `fleet_authorization_refused` | The authorization call failed, or its returned proof failed readiness/session checks. Inspect `authorization_cause` and the diagnostics below. |
+| `fleet_authorization_transient_load` | The authorization request received HTTP 429 and the existing client retry ended before authorization succeeded. Check queue pressure and retry the upgrade when the queue has capacity. |
 | `fleet_instruction_stale`, `fleet_ack_stale`, `fleet_maintenance_changed` | The queue no longer authorizes this operation or session. Check the operation's state and the host's maintenance. |
 | `fleet_ack_failed` | Restore authenticated queue connectivity. |
 | `fleet_artifact_download_failed`, `fleet_artifact_transfer_failed` | Restore connectivity to the queue and its publisher; check local disk space. |
@@ -226,7 +227,16 @@ Local installer and service updater failures. Updater reports expose a fixed
 
 ### Authorization diagnostics
 
-Service logs record `event=fleet_authorization`. A worker's `cause` retains a
+Service logs record `event=fleet_authorization`. On macOS and Linux, the helper
+writes its sanitized diagnostics and typed outcome to `fleet-update.log` under
+the installed service's state directory. The private file holds up to 4 KiB
+and is replaced by each completed helper invocation. The queue includes
+`authorization_cause` in the operation status when the installed updater and
+queue both support it. An older queue still accepts the acknowledgement in
+its existing format. Its status can show an unrecognized code for an exhausted
+429, so check the worker's log for the typed outcome.
+
+A worker's `cause` retains a
 typed `HTTP STATUS code=CODE`, a classified transport/decode failure (for example
 `timeout` or `response_decode_failed`), or the failed readiness/session predicate:
 `proof_pid_missing`, `proof_session_missing`, `proof_sha256_invalid`,
@@ -234,15 +244,18 @@ typed `HTTP STATUS code=CODE`, a classified transport/decode failure (for exampl
 `proof_start_gate_mismatch`, `proof_attempt_protocol_mismatch`, or
 `proof_session_mismatch`. The public failure code stays
 `fleet_authorization_refused` for terminal failures; a pre-intent `queue_stalled`
-is pending as described above. Stale-control codes and their retry policy stay
-unchanged. Received values, server messages, credentials and raw bodies are not
-logged.
+is pending as described above. A 429 uses the existing client's paced retries
+and honors `Retry-After`. If that retry ends while the latest authorization
+response is HTTP 429, the updater reports `fleet_authorization_transient_load`.
+Stale-control responses retain their proof-freshness retry window. The
+diagnostics contain fixed causes, with credentials and raw responses excluded.
 
 HTTP codes use a fixed allowlist for this endpoint; an unknown code becomes
 `request_failed` while retaining the numeric HTTP status.
 
 A supporting queue independently logs `side=queue cause="ready"` or its
-classified refusal, plus `caller=active`, `cancelled` or `timeout`. This is useful
+classified refusal, including a refusal before the handler runs, plus
+`caller=active`, `cancelled` or `timeout`. This is useful
 when an older worker reports only the generic failure. A queue's ready decision
 does not prove that the caller received its answer. Correlate the worker and
 queue records at the failing call; a later request or a healthy status snapshot

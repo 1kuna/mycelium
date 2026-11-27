@@ -114,6 +114,9 @@ func NewCompactStatus(s Snapshot) CompactStatus {
 		c.FleetUpgrade = append(c.FleetUpgrade, line)
 		for _, h := range u.Hosts {
 			line := fmt.Sprintf("host %s: phase=%s wait=%s failure=%s outcome=%s deferred_reason=%s", h.Host, h.Phase, h.Wait, h.Failure, h.Outcome, h.DeferredReason)
+			if h.AuthorizationCause != "" {
+				line += fmt.Sprintf(" authorization_cause=%q", h.AuthorizationCause)
+			}
 			if h.TakeoverWait != "" {
 				line += " takeover_wait=" + h.TakeoverWait
 			}

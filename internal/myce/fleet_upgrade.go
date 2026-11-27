@@ -34,19 +34,20 @@ type FleetHostOutcome string
 const FleetHostDeferred FleetHostOutcome = "deferred"
 
 type FleetHostStatus struct {
-	Outcome        FleetHostOutcome         `json:"outcome,omitempty"`
-	DeferredReason string                   `json:"deferred_reason,omitempty"`
-	StorageWarning *StoragePreflightFailure `json:"storage_warning,omitempty"`
-	PlannedStops   []FleetPlannedStop       `json:"planned_stops,omitempty"`
-	StorageFailure *StoragePreflightFailure `json:"storage_failure,omitempty"`
-	StopRequests   []FleetStopRequest       `json:"stop_requests,omitempty"`
-	Host           string                   `json:"host"`
-	Phase          string                   `json:"phase"`
-	Wait           string                   `json:"wait,omitempty"`
-	TakeoverWait   string                   `json:"takeover_wait,omitempty"` // Most recent natural wait, retained after progress.
-	Failure        string                   `json:"failure,omitempty"`
-	FailureCode    string                   `json:"failure_code,omitempty"`
-	ProgressAt     time.Time                `json:"progress_at"`
+	AuthorizationCause string                   `json:"authorization_cause,omitempty"`
+	Outcome            FleetHostOutcome         `json:"outcome,omitempty"`
+	DeferredReason     string                   `json:"deferred_reason,omitempty"`
+	StorageWarning     *StoragePreflightFailure `json:"storage_warning,omitempty"`
+	PlannedStops       []FleetPlannedStop       `json:"planned_stops,omitempty"`
+	StorageFailure     *StoragePreflightFailure `json:"storage_failure,omitempty"`
+	StopRequests       []FleetStopRequest       `json:"stop_requests,omitempty"`
+	Host               string                   `json:"host"`
+	Phase              string                   `json:"phase"`
+	Wait               string                   `json:"wait,omitempty"`
+	TakeoverWait       string                   `json:"takeover_wait,omitempty"` // Most recent natural wait, retained after progress.
+	Failure            string                   `json:"failure,omitempty"`
+	FailureCode        string                   `json:"failure_code,omitempty"`
+	ProgressAt         time.Time                `json:"progress_at"`
 }
 type fleetUpgrade struct {
 	Urgency string `json:"urgency,omitempty"`
@@ -109,16 +110,17 @@ type FleetUpgradeRequest struct {
 	Host string `json:"host,omitempty"`
 }
 type FleetUpgradeAck struct {
-	StorageWarning *StoragePreflightFailure `json:"storage_warning,omitempty"`
-	StorageFailure *StoragePreflightFailure `json:"storage_failure,omitempty"`
-	Runtime        *FleetRuntimeProof       `json:"runtime,omitempty"`
-	Revision       int                      `json:"revision"`
-	Operation      string                   `json:"operation"`
-	Host           string                   `json:"host"`
-	Machine        string                   `json:"machine"`
-	Session        string                   `json:"session"`
-	Phase          string                   `json:"phase"`
-	Failure        string                   `json:"failure,omitempty"`
+	AuthorizationCause string                   `json:"authorization_cause,omitempty"`
+	StorageWarning     *StoragePreflightFailure `json:"storage_warning,omitempty"`
+	StorageFailure     *StoragePreflightFailure `json:"storage_failure,omitempty"`
+	Runtime            *FleetRuntimeProof       `json:"runtime,omitempty"`
+	Revision           int                      `json:"revision"`
+	Operation          string                   `json:"operation"`
+	Host               string                   `json:"host"`
+	Machine            string                   `json:"machine"`
+	Session            string                   `json:"session"`
+	Phase              string                   `json:"phase"`
+	Failure            string                   `json:"failure,omitempty"`
 }
 
 // The longest one service update can take: the helper's 10-minute artifact
@@ -975,7 +977,7 @@ func (q *Queue) fleetInstruction(host, machine, session string) (FleetUpdateInst
 	if !ok || !q.fleetHostQuiet(h) && !takeoverReady {
 		return FleetUpdateInstruction{}, nil
 	}
-	return FleetUpdateInstruction{StorageDiagnostics: true, StorageWarnings: true, Revision: u.Revision, Operation: u.Operation, Host: host, Machine: machine, Session: session, Release: u.Release, PublisherKey: bytes.Clone(u.PublisherKey)}, nil
+	return FleetUpdateInstruction{AuthorizationDiagnostics: true, StorageDiagnostics: true, StorageWarnings: true, Revision: u.Revision, Operation: u.Operation, Host: host, Machine: machine, Session: session, Release: u.Release, PublisherKey: bytes.Clone(u.PublisherKey)}, nil
 }
 
 func (q *Queue) authorizeFleetUpdate(operation, host, machine, session string) error {
@@ -1016,6 +1018,7 @@ func (q *Queue) AckFleetUpgrade(ack FleetUpgradeAck, requestContexts ...context.
 			h.ProgressAt = q.clock.Now()
 		case "failed":
 			h.FailureCode = fleetFailureCode(ack.Failure)
+			h.AuthorizationCause = safeFleetAuthorizationCause(ack.AuthorizationCause)
 			h.StorageFailure = fleetStorageFailure(h.FailureCode, ack.StorageFailure)
 			reason := h.FailureCode
 			switch h.FailureCode {

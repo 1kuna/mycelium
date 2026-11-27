@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -27,31 +28,37 @@ import (
 // The queue authorizes the exact operation, session and drained host before
 // the launch and again immediately before the restart.
 type FleetUpdateInstruction struct {
-	StorageWarnings    bool              `json:"storage_warnings,omitempty"`
-	StorageDiagnostics bool              `json:"storage_diagnostics,omitempty"`
-	Operation          string            `json:"operation"`
-	Revision           int               `json:"revision"`
-	Host               string            `json:"host"`
-	Machine            string            `json:"machine"`
-	Session            string            `json:"session"`
-	Release            EnrollmentRelease `json:"release"`
-	PublisherKey       []byte            `json:"publisher_key"`
+	AuthorizationDiagnostics bool              `json:"authorization_diagnostics,omitempty"`
+	StorageWarnings          bool              `json:"storage_warnings,omitempty"`
+	StorageDiagnostics       bool              `json:"storage_diagnostics,omitempty"`
+	Operation                string            `json:"operation"`
+	Revision                 int               `json:"revision"`
+	Host                     string            `json:"host"`
+	Machine                  string            `json:"machine"`
+	Session                  string            `json:"session"`
+	Release                  EnrollmentRelease `json:"release"`
+	PublisherKey             []byte            `json:"publisher_key"`
 }
 
-const fleetUpdateReceiptFile = "fleet-update.json"
+const (
+	fleetUpdateReceiptFile = "fleet-update.json"
+	fleetHelperLogFile     = "fleet-update.log"
+	fleetHelperLogLimit    = 4 << 10
+)
 
 type fleetInstallReceipt struct {
-	VersionStderr  string                   `json:"version_stderr,omitempty"` // Local diagnostics only; never included in fleet acknowledgements.
-	StorageWarning *StoragePreflightFailure `json:"storage_warning,omitempty"`
-	Instruction    FleetUpdateInstruction   `json:"instruction"`
-	ConfigSHA256   string                   `json:"config_sha256"`
-	BeforeSHA256   string                   `json:"before_sha256"`
-	BeforeVersion  string                   `json:"before_version"`
-	BeforePID      int                      `json:"before_pid"`
-	BeforeRuntime  FleetRuntimeProof        `json:"before_runtime"`
-	Phase          string                   `json:"phase"`
-	Failure        string                   `json:"failure,omitempty"`
-	StorageFailure *StoragePreflightFailure `json:"storage_failure,omitempty"`
+	AuthorizationCause string                   `json:"authorization_cause,omitempty"`
+	VersionStderr      string                   `json:"version_stderr,omitempty"` // Local diagnostics only; never included in fleet acknowledgements.
+	StorageWarning     *StoragePreflightFailure `json:"storage_warning,omitempty"`
+	Instruction        FleetUpdateInstruction   `json:"instruction"`
+	ConfigSHA256       string                   `json:"config_sha256"`
+	BeforeSHA256       string                   `json:"before_sha256"`
+	BeforeVersion      string                   `json:"before_version"`
+	BeforePID          int                      `json:"before_pid"`
+	BeforeRuntime      FleetRuntimeProof        `json:"before_runtime"`
+	Phase              string                   `json:"phase"`
+	Failure            string                   `json:"failure,omitempty"`
+	StorageFailure     *StoragePreflightFailure `json:"storage_failure,omitempty"`
 }
 
 type fleetInstallDeps struct {
@@ -171,24 +178,29 @@ func fleetArtifact(c ServiceConfig, i FleetUpdateInstruction) (ReleaseArtifact, 
 
 // fleetAuthorize asks the queue whether this exact operation and process may
 // still proceed. A momentarily stale answer (a late proof) is retried for one
-// proof-freshness window; any other refusal is final.
+// proof-freshness window. Client.Call already paces overload retries.
 func fleetAuthorize(ctx context.Context, client Client, i FleetUpdateInstruction, wait func(context.Context, time.Duration) error) (FleetRuntimeProof, error) {
+	return fleetAuthorizeWithLog(ctx, client, i, wait, log.Default())
+}
+
+func fleetAuthorizeWithLog(ctx context.Context, client Client, i FleetUpdateInstruction, wait func(context.Context, time.Duration) error, diagnostics *log.Logger) (FleetRuntimeProof, error) {
+	// No authorization can outlive the queue's service step. Bound the
+	// existing client retry owner so sustained pressure cannot hold the helper.
+	ctx, cancel := context.WithTimeout(ctx, fleetStepTimeout)
+	defer cancel()
 	if wait == nil {
 		wait = enrollmentPause
 	}
 	v := url.Values{"operation": {i.Operation}, "revision": {strconv.Itoa(i.Revision)}, "host": {i.Host}, "machine": {i.Machine}, "session": {i.Session}}
 	for tries := 0; ; tries++ {
 		var proof FleetRuntimeProof
-		err := client.Call(ctx, http.MethodGet, "/api/fleet/authorize?"+v.Encode(), nil, &proof)
+		err := client.Call(ctx, http.MethodGet, fleetAuthorizePath+"?"+v.Encode(), nil, &proof)
 		if err == nil && fleetProofReady(&proof) && proof.Session == i.Session {
 			return proof, nil
 		}
-		log.Printf("event=fleet_authorization side=worker cause=%q", fleetAuthorizationCause(err, &proof, i.Session))
-		var stall *QueueStalledError
-		if errors.As(err, &stall) {
-			return proof, &fleetAuthorizationStalled{err}
-		}
-		err = fleetControlFailure(err, "fleet_authorization_refused")
+		cause := fleetAuthorizationCause(err, &proof, i.Session)
+		diagnostics.Printf("event=fleet_authorization side=worker cause=%q", cause)
+		err = fleetAuthorizationFailure(err, cause)
 		if !fleetStaleControl(err) || tries >= 4 || wait(ctx, fleetRuntimeFreshFor/4) != nil {
 			return proof, err
 		}
@@ -201,7 +213,7 @@ func fleetAck(ctx context.Context, client Client, r fleetInstallReceipt) error {
 	if r.Phase == "failed" {
 		failure = fleetFailureCode(r.Failure)
 	}
-	ack := FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: r.Phase, Failure: failure, StorageFailure: fleetReceiptStorageFailure(r), StorageWarning: fleetReceiptStorageWarning(r)}
+	ack := FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: r.Phase, Failure: failure, AuthorizationCause: fleetAckAuthorizationCause(r), StorageFailure: fleetReceiptStorageFailure(r), StorageWarning: fleetReceiptStorageWarning(r)}
 	if err := client.Call(ctx, http.MethodPost, "/api/fleet/ack", ack, nil); err != nil {
 		return fleetControlFailure(err, "fleet_ack_failed")
 	}
@@ -361,7 +373,7 @@ func ApplyFleetUpdate(ctx context.Context, configPath, receiptPath string) error
 	return applyFleetUpdate(ctx, configPath, receiptPath, fleetInstallDeps{command: fleetCommand, versionCommand: fleetVersionCommand, client: fleetClient})
 }
 
-func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fleetInstallDeps) error {
+func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fleetInstallDeps) (result error) {
 	c, configHash, err := fleetConfig(configPath)
 	if err != nil || receiptPath != filepath.Join(c.State, fleetUpdateReceiptFile) {
 		return errors.New("fleet_config_invalid")
@@ -387,6 +399,21 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 			_, _ = d.command(context.WithoutCancel(ctx), "launchctl", "remove", fleetHelperLabel(c, r.Instruction))
 		}()
 	}
+	// The helper emits sanitized diagnostics through this logger on both
+	// managers. Reserve space for the outcome even if retries fill the log.
+	output := &boundedProbeOutput{limit: fleetHelperLogLimit - 256}
+	diagnostics := log.New(io.MultiWriter(output, log.Writer()), "", log.LstdFlags)
+	defer func() {
+		code := "ready_for_queue_verification"
+		if result != nil {
+			code = fleetFailureCode(result.Error())
+		}
+		outcome := fmt.Appendf(nil, "event=fleet_helper_outcome operation=%q code=%q cause=%q\n",
+			safeLogID(r.Instruction.Operation), code, safeFleetAuthorizationCause(r.AuthorizationCause))
+		if writeInstallFile(filepath.Join(c.State, fleetHelperLogFile), append(outcome, output.Bytes()...), 0600, installFiles{}, nil) != nil {
+			log.Print("event=fleet_helper_log_write_failed")
+		}
+	}()
 	client, err := d.client(c)
 	if err != nil {
 		// The worker replays this receipt once credentials are repaired.
@@ -433,14 +460,16 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 	// This operation, process and drain still hold. When the bytes are already
 	// in place (an earlier helper stopped before its restart), this is the
 	// last check before the restart.
-	if _, err := fleetAuthorize(ctx, client, r.Instruction, d.health.Wait); err != nil {
+	if _, err := fleetAuthorizeWithLog(ctx, client, r.Instruction, d.health.Wait, diagnostics); err != nil {
+		r.AuthorizationCause = fleetAuthorizationDetail(err)
 		return fail(err.Error())
 	}
 	if before != a.SHA256 {
 		if before != r.BeforeSHA256 {
 			return fail("fleet_install_changed")
 		}
-		if err := swapFleetBinary(ctx, c, client, &r, a, d); err != nil {
+		if err := swapFleetBinary(ctx, c, client, &r, a, d, diagnostics); err != nil {
+			r.AuthorizationCause = fleetAuthorizationDetail(err)
 			return fail(err.Error())
 		}
 		r.Phase = "installed"
@@ -476,7 +505,7 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 // hash, signature identity and reported version, asks the queue once more,
 // then publishes it over the installed binary with the installer's atomic
 // same-directory write. The restart follows immediately.
-func swapFleetBinary(ctx context.Context, c ServiceConfig, client Client, r *fleetInstallReceipt, a ReleaseArtifact, d fleetInstallDeps) error {
+func swapFleetBinary(ctx context.Context, c ServiceConfig, client Client, r *fleetInstallReceipt, a ReleaseArtifact, d fleetInstallDeps, diagnostics *log.Logger) error {
 	staged, err := fetchFleetArtifact(ctx, c, client, r.Instruction, a)
 	if err != nil {
 		return err
@@ -502,7 +531,7 @@ func swapFleetBinary(ctx context.Context, c ServiceConfig, client Client, r *fle
 	if err != nil || fleetBytesHash(data) != a.SHA256 || int64(len(data)) != a.Size {
 		return errors.New("fleet_artifact_refused")
 	}
-	if _, err := fleetAuthorize(ctx, client, r.Instruction, d.health.Wait); err != nil {
+	if _, err := fleetAuthorizeWithLog(ctx, client, r.Instruction, d.health.Wait, diagnostics); err != nil {
 		return err
 	}
 	if current, err := FileSHA256(c.Binary); err != nil || current != r.BeforeSHA256 {
@@ -639,5 +668,12 @@ func ReadFleetUpdateFailure(c ServiceConfig) (*FleetUpgradeAck, error) {
 		return nil, errors.New("fleet_receipt_invalid")
 	}
 	code := fleetFailureCode(r.Failure)
-	return &FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed", Failure: code, StorageFailure: fleetReceiptStorageFailure(r), StorageWarning: fleetReceiptStorageWarning(r)}, nil
+	return &FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed", Failure: code, AuthorizationCause: fleetAckAuthorizationCause(r), StorageFailure: fleetReceiptStorageFailure(r), StorageWarning: fleetReceiptStorageWarning(r)}, nil
+}
+
+func fleetAckAuthorizationCause(r fleetInstallReceipt) string {
+	if r.Instruction.AuthorizationDiagnostics && r.Phase == "failed" {
+		return safeFleetAuthorizationCause(r.AuthorizationCause)
+	}
+	return ""
 }

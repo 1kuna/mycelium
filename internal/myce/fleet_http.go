@@ -14,6 +14,19 @@ import (
 	"time"
 )
 
+const fleetAuthorizePath = "/api/fleet/authorize"
+
+func logFleetAuthorizationDecision(r *http.Request, proof *FleetRuntimeProof, err error) {
+	if r.Method != http.MethodGet || r.URL.Path != fleetAuthorizePath {
+		return
+	}
+	caller := "active"
+	if e := r.Context().Err(); e != nil {
+		caller = ClientErrorCause(e)
+	}
+	log.Printf("event=fleet_authorization side=queue cause=%q caller=%s", fleetAuthorizationCause(err, proof, r.URL.Query().Get("session")), caller)
+}
+
 func (a API) registerFleetUpgrade(mux *requestMux) {
 	a.registerProductionLeases(mux)
 	mux.HandleFunc("POST /api/fleet/upgrade", func(w http.ResponseWriter, r *http.Request) {
@@ -66,7 +79,7 @@ func (a API) registerFleetUpgrade(mux *requestMux) {
 		}, &queueUpdateTiming{measureWriter: true})
 		respond(w, out, err)
 	})
-	mux.HandleFunc("GET /api/fleet/authorize", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET "+fleetAuthorizePath, func(w http.ResponseWriter, r *http.Request) {
 		v := r.URL.Query()
 		var proof *FleetRuntimeProof
 		// Authorization changes no state. Do not queue a writer or persist
@@ -96,11 +109,7 @@ func (a API) registerFleetUpgrade(mux *requestMux) {
 		// Older helpers collapse transport/HTTP/proof failures to one code.
 		// Retain the queue's decision independently of the helper version, and
 		// record caller cancellation without claiming the answer was delivered.
-		caller := "active"
-		if e := r.Context().Err(); e != nil {
-			caller = ClientErrorCause(e)
-		}
-		log.Printf("event=fleet_authorization side=queue cause=%q caller=%s", fleetAuthorizationCause(err, proof, v.Get("session")), caller)
+		logFleetAuthorizationDecision(r, proof, err)
 		respond(w, proof, err)
 	})
 	mux.HandleFunc("POST /api/fleet/ack", func(w http.ResponseWriter, r *http.Request) {
