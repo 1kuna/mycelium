@@ -35,7 +35,7 @@ func TestInputStagingOutageSurvivesAcknowledgementAndReopen(t *testing.T) {
 	marker := filepath.Join(w.StateDir, "job-files", j.ID, "1", "launched")
 	var gets atomic.Int32
 	clock := &workerFakeClock{now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
-	w.Clock, w.Client.Clock = clock, clock
+	w.Client.Clock = clock
 	w.Client.Pause = func(ctx context.Context, d time.Duration) error {
 		if ctx.Value(inputTransferRecoveryKey{}) != nil {
 			if gets.Load() == 2 {
@@ -61,7 +61,6 @@ func TestInputStagingOutageSurvivesAcknowledgementAndReopen(t *testing.T) {
 	})}
 	startHarness(t, w, h)
 	await(t, func() bool {
-		clock.Advance(w.Interval)
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		for _, r := range h.results {
@@ -72,7 +71,6 @@ func TestInputStagingOutageSurvivesAcknowledgementAndReopen(t *testing.T) {
 		return false
 	})
 	await(t, func() bool {
-		clock.Advance(w.Interval)
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		return len(h.reports) > 0 && len(h.reports[len(h.reports)-1].Attempts) == 0
