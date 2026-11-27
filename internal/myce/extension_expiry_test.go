@@ -59,7 +59,8 @@ func TestUnusedExtensionRegistrationExpires(t *testing.T) {
 	old := clock.Now().Add(-DefaultExtensionRetention)
 	touchExtensionUse(root, retired, old)
 	m := Machine{Device: "0", Devices: []MachineDevice{{ID: "0", Platform: "fake"}, {ID: "1", Platform: "fake"}}}
-	collectWorkerExtensionReports(root, clock.Now(), DefaultExtensionRetention, &m)
+	var library extensionReportLibrary
+	collectWorkerExtensionReports(root, clock.Now(), DefaultExtensionRetention, &m, &library)
 	for i, reports := range [][]ExtensionReport{m.ExtensionReports, m.Devices[0].ExtensionReports, m.Devices[1].ExtensionReports} {
 		seen := map[string]bool{}
 		for _, r := range reports {
@@ -100,6 +101,43 @@ func TestUnusedExtensionRegistrationExpires(t *testing.T) {
 			!slices.ContainsFunc(reports, func(r ExtensionReport) bool { return r.Version == busy.Version }) {
 			t.Fatalf("quarantined registration reported or healthy registration missing: %+v", reports)
 		}
+	}
+}
+
+func TestWorkerExtensionReportsRefreshEditedAsset(t *testing.T) {
+	root := t.TempDir()
+	e := fakeExtension(t)
+	e.Files["asset.txt"] = []byte("before")
+	if err := InstallExtension(root, e); err != nil {
+		t.Fatal(err)
+	}
+	folder := extensionFolder(root, e)
+	var library extensionReportLibrary
+	now := time.Now()
+	m := Machine{Device: "0", Devices: []MachineDevice{{ID: "0", Platform: "fake", ExtensionFingerprint: "fixture"}}}
+	collectWorkerExtensionReports(root, now, DefaultExtensionRetention, &m, &library)
+	cached, ok := library[folder]
+	if !ok || len(m.ExtensionReports) == 0 || m.ExtensionReports[0].Digest != cached.extension.Digest {
+		t.Fatalf("registration not cached and reported: %+v", m.ExtensionReports)
+	}
+	path := filepath.Join(folder, "asset.txt")
+	old, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("edited"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, old.ModTime(), old.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	collectWorkerExtensionReports(root, now, DefaultExtensionRetention, &m, &library)
+	fresh, err := ReadExtension(folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.ExtensionReports) == 0 || m.ExtensionReports[0].Digest != fresh.Digest || fresh.Digest == cached.extension.Digest {
+		t.Fatalf("heartbeat kept stale digest after an in-place edit: %+v", m.ExtensionReports)
 	}
 }
 

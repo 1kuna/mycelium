@@ -1086,6 +1086,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	w.Machine.CPUIsolation = cpuIsolationUnavailable
 	shadow := workerMemoryShadow{reactionGrace: defaultPreemptionGrace}
 	var retry workerRetry
+	var extensionLibrary extensionReportLibrary
 	var nextRetention time.Time
 	leaving, leaveSent := stop.Err() != nil, false
 	stopCh := stop.Done()
@@ -1337,7 +1338,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.CapabilityProfile = &profile
 			}
 			if w.ExtensionRoot != "" {
-				collectWorkerExtensionReports(w.ExtensionRoot, w.Clock.Now(), w.ExtensionRetention, &m)
+				collectWorkerExtensionReports(w.ExtensionRoot, w.Clock.Now(), w.ExtensionRetention, &m, &extensionLibrary)
 				w.Machine.ExtensionReports = m.ExtensionReports
 				w.Machine.Devices = slices.Clone(m.Devices)
 			}

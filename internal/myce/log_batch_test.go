@@ -227,3 +227,20 @@ func TestLogBatchAtomicFencesAndLegacyReplay(t *testing.T) {
 		t.Fatal(logs, err)
 	}
 }
+
+func BenchmarkWorkerLogReplayCaughtUp(b *testing.B) {
+	dir := b.TempDir()
+	s := &workerStore{dir: dir}
+	s.state.Log = "attempt.log"
+	if err := os.WriteFile(filepath.Join(dir, s.state.Log), []byte("published"), 0600); err != nil {
+		b.Fatal(err)
+	}
+	s.state.Offset = int64(len("published"))
+	w := Worker{}
+	b.ReportAllocs()
+	for b.Loop() {
+		if err := w.replay(context.Background(), s); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
