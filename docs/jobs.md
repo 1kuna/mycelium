@@ -1513,7 +1513,7 @@ See [the checkpoint contract](files.md#resumable-jobs).
 
 Fixed warm pieces require a worker that advertises support, synchronous
 file-store outputs, and CPU or one accelerator device. Plain pieces' input
-and key bounds apply. Omit per-piece dependencies, result-check wrappers,
+and key bounds apply. Omit job-level `after`, result-check wrappers,
 NAS inputs or output delivery, ephemeral worker data, explicit
 checkpoint policies, multi-device requests, programs and checks. Other
 jobs can use the ordinary `after.piece` binding to consume a warm receipt.
@@ -1552,8 +1552,52 @@ is set, and may keep its one-shot behaviour otherwise. Item paths are
 absolute, so main can run in `{extension}` or any other working directory.
 Memory and duration evidence for a warm attempt is kept apart from the
 variant's one-shot runs, so the first warm run is sized like new work.
-Older workers hold the job with a `capability` reason. Per-item `after`
-dependencies are not supported yet; see the [design addendum](design-warm-jobs.md#addendum-extension-stages-per-item-dependencies-and-in-engine-slots).
+Older workers hold the job with a `capability` reason.
+
+#### Per-item dependencies
+
+Each piece of a warm parent may declare its own `after`, with the ordinary
+grammar, so a downstream stage can consume each upstream item as soon as it
+is accepted. The local names land in that item's own folder:
+
+```yaml
+extension: naming@1
+workload: {input_shape: item-v1, units: 1}
+advanced: {warm_pieces: fixed}
+outputs: {labels.json: results}
+fan_out:
+  pieces:
+    - {key: rec-001, after: {job: UPSTREAM_JOB_ID, piece: rec-001, outputs: {segments.json: words.json}}}
+    - {key: rec-002, after: {job: UPSTREAM_JOB_ID, piece: rec-002, outputs: {segments.json: words.json}}}
+```
+
+- The piece list is fixed at submission. Each producer must already exist
+  in the same project and store its results in the file store. A piece may
+  name a different producer, or a whole parent with `KEY/OUTPUT_NAME`
+  outputs. Job-level `after` stays refused.
+- `next()` returns the first unsettled item whose inputs are ready, in
+  declaration order. Items therefore arrive in readiness order. The parent
+  is placed once any item is ready, and a production start window starts
+  then.
+- An item receives exactly the files its `after.outputs` names, never the
+  producer's other outputs. The worker stages them before the item starts
+  and removes the item's folder, including its own stored inputs, once its
+  receipt is accepted.
+- If a producer ends without that output, only the bound item fails, with
+  `upstream_failed` (or `result_expired`). A cancelled producer fails only
+  its bound items with `upstream_cancelled`. The other items continue, and
+  `fan_out.warm.dependencies` shows each binding's state. The producer's
+  cancellation scope lists the warm parent under each bound piece.
+- When no item is ready, `next()` blocks while the attempt keeps its
+  reservation. It waits at most the attempt's own measured load time, and
+  less if another job needs the resources. Then the attempt ends as a
+  planned requeue, with no failure or loss charge, and runs again once an
+  item is ready, paying one more load.
+- Workers advertise `warm_pieces_dependencies_v1`. Older workers hold the job.
+
+Submit one warm parent per stage per group of items. A downstream group is
+submitted once its producers exist, so matching group boundaries across
+stages keeps that order free.
 
 ## Observing parents and native children
 

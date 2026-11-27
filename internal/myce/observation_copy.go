@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"maps"
 	"reflect"
 	"slices"
 	"sync"
@@ -179,6 +180,9 @@ func cancellationInputs(j *Job) cancellationObservationInput {
 		out := make([]FanOutPiece, len(in))
 		for i, piece := range in {
 			out[i].Key = piece.Key
+			if a := piece.After; a != nil {
+				out[i].After = &PieceDependency{Job: a.Job, Piece: a.Piece, Outputs: maps.Clone(a.Outputs)}
+			}
 		}
 		return out
 	}

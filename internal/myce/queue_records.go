@@ -3,6 +3,7 @@ package myce
 import (
 	"container/heap"
 	"reflect"
+	"slices"
 	"time"
 )
 
@@ -43,7 +44,7 @@ type queueRecords struct {
 	editingInputClaims        bool
 	checkpointExpiry          map[string]checkpointExpiryEntry // Settled job ID -> folder and earliest expiry (#894).
 	checkpointUndated         map[string]bool                  // Settled jobs with no timestamp to start a grace period.
-	after                     map[string]string                // Job ID -> its after: parent.
+	after                     map[string][]string              // Job ID -> the parents its after: bindings name.
 	dependents                map[string]int                   // Parent ID -> retained jobs naming it in after:.
 }
 
@@ -181,25 +182,27 @@ func (q *Queue) indexJobLogExpiry(id string, j *Job) {
 // retained job names, without scanning history.
 func (q *Queue) indexDependency(id string, j *Job) {
 	if q.records.after == nil {
-		q.records.after, q.records.dependents = map[string]string{}, map[string]int{}
+		q.records.after, q.records.dependents = map[string][]string{}, map[string]int{}
 	}
-	parent := ""
-	if j != nil && j.Spec.After != nil {
-		parent = j.Spec.After.Job
+	var parents []string
+	if j != nil {
+		parents = dependencyParents(j.Spec)
 	}
 	old, had := q.records.after[id]
-	if had && old == parent {
+	if had && slices.Equal(old, parents) {
 		return
 	}
-	if had {
-		if q.records.dependents[old]--; q.records.dependents[old] <= 0 {
-			delete(q.records.dependents, old)
+	for _, parent := range old {
+		if q.records.dependents[parent]--; q.records.dependents[parent] <= 0 {
+			delete(q.records.dependents, parent)
 		}
-		delete(q.records.after, id)
 	}
-	if parent != "" {
-		q.records.after[id] = parent
-		q.records.dependents[parent]++
+	delete(q.records.after, id)
+	if len(parents) > 0 {
+		q.records.after[id] = parents
+		for _, parent := range parents {
+			q.records.dependents[parent]++
+		}
 	}
 }
 func (q *Queue) indexSubmission(id string, r *submissionRecord) {
