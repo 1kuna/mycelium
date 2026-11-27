@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -713,6 +714,15 @@ func TestFilesTransientInputRetryReconcilesAcceptedOffset(t *testing.T) {
 		if r.Method == "PATCH" {
 			offsets = append(offsets, r.Header.Get("Upload-Offset"))
 			if len(offsets) == 1 {
+				// The connection failed partway through the streamed PATCH.
+				// Let the real queue persist only the bytes that arrived.
+				r.Body = struct {
+					io.Reader
+					io.Closer
+				}{io.LimitReader(r.Body, fileUploadChunkSize), r.Body}
+				r.ContentLength = fileUploadChunkSize
+				r.Header.Del("X-Myce-Upload-Progress")
+				r.Header.Del(uploadQueueServiceHeader)
 				accepted := httptest.NewRecorder()
 				backend.ServeHTTP(accepted, r)
 				if accepted.Code != 204 {
@@ -752,7 +762,7 @@ func TestFilesTransientInputRetryReconcilesAcceptedOffset(t *testing.T) {
 		}
 		return one.UploadJobInput(ctx, path, ref)
 	}, func(error, time.Duration) { reports++ })
-	if err != nil || reports != 1 || len(offsets) != 2 || offsets[0] != "0" || offsets[1] != "4194304" {
+	if err != nil || reports != 1 || len(offsets) != 2 || offsets[0] != "0" || offsets[1] != strconv.Itoa(fileUploadChunkSize) {
 		t.Fatal("upload did not reconcile", err, reports, offsets)
 	}
 	if err := c.HasFile(ctx, ref); err != nil {
