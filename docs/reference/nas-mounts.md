@@ -35,6 +35,52 @@ heartbeats continuing, restore the network, and verify the share mounts and the
 held work is admitted without restarting either service. This native boot check
 is separate from the laptop fixture and requires an authorized test window.
 
+## Brief link stalls and direct writers
+
+Keep job writes on local disks. Use [local-first checkpoints](../files.md#local-first-checkpoints-1600)
+for supported resumable commands and [asynchronous delivery](../files.md#complete-from-queue-storage-deliver-to-nas-later-349)
+for declared outputs and finished ledgers that need a NAS copy. The queue can
+accept these bytes while a configured NAS mirror is delayed. Mount settings
+still matter for direct writers, cold reads and the background publisher.
+
+- **Linux CIFS.** Keep the existing `soft` policy on shared hosts while
+  qualifying changes. A `hard` mount can wait indefinitely during a failed
+  reconnect, including when a stale kernel handle retains a failed tree
+  connection across a clean remount ([#2163](https://github.com/1kuna/mycelium/issues/2163)).
+  Increasing `retrans` is a candidate for bounded replay on supported requests.
+  `echo_interval` controls idle-response detection (three echo intervals in
+  Linux 6.17), so shortening it can initiate reconnect sooner, including during
+  an otherwise recoverable stall. Neither setting extends the socket-send
+  retry loop. SMB durable handles can survive a reconnect when the open and
+  server support it. Test `resilienthandles` against the actual share before
+  opting in. Persistent handles require advertised server support and are
+  normally enabled automatically for continuous-availability shares. Server
+  durable-handle support alone does not establish those capabilities.
+  [Linux 6.17 connection handling](https://github.com/torvalds/linux/blob/v6.17/fs/smb/client/connect.c) ·
+  [send retries](https://github.com/torvalds/linux/blob/v6.17/fs/smb/client/transport.c) ·
+  [SMB replay](https://github.com/torvalds/linux/blob/v6.17/fs/smb/client/smb2ops.c)
+- **macOS SMB.** Check the native `nsmb.conf(5)` and `mount_smbfs(8)` on each
+  supported client. `soft` can return filesystem errors after a timeout.
+  `max_resp_timeout` covers server responses at default or per-server scope,
+  so changing it can affect other mounts to that server. It is not a Linux
+  `retrans` equivalent or an end-to-end write deadline. Test the existing
+  configuration first and qualify any timeout change separately from
+  [remount recovery](macos-smb-recovery.md).
+
+Qualify a candidate with a disposable share and a separate SMB connection
+(`nosharesock` on Linux, `forcenewsession` on macOS). Verify traffic isolation
+before injecting a stall. Stall only that test connection for at least the
+observed 15 seconds while a write or flush is in flight. Test reconnect and
+the unchanged baseline as well as the candidate. Record write, fsync, close
+and reopened checksum results, plus the time a call takes to return during
+a longer outage. Prove a second connection can mount and read while the test
+connection is stalled. After recovery, unmount normally and remount the test
+share. On Linux check for write-back errors and
+kernel-held handles with dead opener PIDs before calling the remount healthy.
+An isolated mount does not isolate a host kernel wedge. Do fault injection
+and production remounts only on a disposable guest or in a drained, idle
+maintenance window as appropriate, and record effective options per host.
+
 ## Worker mount recovery (Linux and macOS)
 
 An in-place update of an installed worker can proceed with its saved NAS

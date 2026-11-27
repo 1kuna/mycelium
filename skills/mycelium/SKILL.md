@@ -46,6 +46,21 @@ failed-attempt diagnostics and storage release.
 Follow the [runnable examples](references/quickstart.md) to try the full path
 from a one-off command to a reusable entry and Python.
 
+Write results and job ledgers to relative files in the worker's local job
+directory. Declare them as outputs and fetch the verified copies with `--out`.
+Outputs are collected at attempt exit. Put progress needed to resume an
+interrupted job in a checkpoint. For a ledger needed after a failed command,
+use the supported [failure diagnostics](https://github.com/1kuna/mycelium/blob/main/docs/files.md#keep-files-from-a-failed-attempt-1341).
+
+When a NAS copy is required, set `output_delivery: async_nas` in the job spec,
+declare `outputs` and estimate their total size with `disk.output_bytes`. This
+requires a queue configured for async NAS delivery. The worker publishes to the
+queue file store and the queue delivers to the NAS in the background. Fetch
+from the queue as soon as the job succeeds. Before consuming the NAS copy,
+check `delivery.state: verified` for the accepted attempt. Keep NAS writes out
+of payload code, including final copies, so a brief NAS stall delays delivery
+instead of failing the command. See the [async delivery contract](https://github.com/1kuna/mycelium/blob/main/docs/files.md#complete-from-queue-storage-deliver-to-nas-later-349).
+
 ## Reusable entries
 
 ```sh
@@ -155,16 +170,22 @@ Make work checkpointable or otherwise resumable. When higher-priority work
 needs its memory, Mycelium can stop and requeue the attempt. Work that cannot
 resume starts from scratch.
 
-Before marking work `advanced: {resumable: true}`, make it save atomically
-under `MYCE_CHECKPOINT_DIR`, reopen the last verified generation at startup
-and handle TERM within its stop grace. Save periodically. Python
-`Checkpoint` and `StopSignal` implement the publication and stop pattern.
-Keep saving children alive until they finish and put checkpoint files outside
-the output tree. Read [the checkpoint guide](https://github.com/1kuna/mycelium/blob/main/docs/files.md#resumable-jobs)
-for storage holds, target compatibility, NAS save notification, retention and
-the `checkpoint: local_first` opt-in. A queue-accepted generation is portable
-to a compatible worker. Check verified NAS mirror state separately when NAS
-durability is required. Status comes from the running worker.
+For a resumable plain command with one self-contained JSON save of at most
+1 MiB, use `advanced: {resumable: true, checkpoint: local_first}`. With the
+current Python `mycelium.Checkpoint`, call `save(value)` with the default name.
+It saves atomically under the worker's local `MYCE_CHECKPOINT_DIR` and returns
+after the queue accepts the generation. A compatible worker can resume that
+generation while the NAS mirror is pending. Check `checkpoint_mirrors` for
+verified delivery if NAS durability is required. Keep the job and key through
+storage holds. A prolonged outage can consume queue storage and backpressure
+later saves. See the [local-first checkpoint contract](https://github.com/1kuna/mycelium/blob/main/docs/files.md#local-first-checkpoints-1600).
+
+Save periodically, reopen the last verified generation at startup and handle
+TERM within the stop grace. Python `StopSignal` implements the signal pattern.
+Keep saving children alive until they finish and checkpoint files outside the
+output tree. Binary, named and multi-file checkpoints still use the configured
+[checkpoint policy](https://github.com/1kuna/mycelium/blob/main/docs/files.md#resumable-jobs),
+whose writes can depend on NAS availability. Status comes from the running worker.
 
 During a worker NAS outage, compatible production, deadline, experiment and
 test jobs can still run. Queue-backed inputs and explicit `local_first`
