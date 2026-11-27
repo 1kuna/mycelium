@@ -445,6 +445,7 @@ func durableMachine(m *Machine) *Machine {
 	d.HostMemoryDerivation, d.HostMemoryPolicyMismatch, d.HostMemoryAllowanceBytes, d.HostMemoryQualification = nil, false, 0, ""
 	d.EffectiveHostMemoryBudgetGB, d.HostMemoryInUseGB, d.FreeHostMemoryGB, d.HostMemory = 0, 0, 0, nil
 	d.EffectiveCPUCores, d.CPUInUseCores, d.FreeCPUCores, d.CPUCapacityReason = 0, 0, 0, ""
+	d.ControlPlaneCPUCores = 0
 	d.SharedHostReason, d.ToolInventory, d.ExternalMemory = "", nil, nil
 	d.CapabilityProfile = withoutAvailability(d.CapabilityProfile)
 	if d.Devices != nil {

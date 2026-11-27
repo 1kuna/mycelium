@@ -910,13 +910,13 @@ func (q *Queue) freezeReadCapture() *committedReadCapture {
 	generation, models, environments, runtime := q.readGeneration, q.readModels, q.readEnvironments, q.readRuntime
 	source := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable, evidenceRetention: q.evidenceRetention, checkpointExpiryStatus: q.checkpointExpiryStatus, efficiencyView: q.efficiencyView,
 		simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts, productionInfrastructureRetries: q.productionInfrastructureRetries,
-		networkQuiet: q.networkQuiet, root: q.root, files: q.files, diskHost: q.diskHost, fileRetention: q.fileRetention, hostMemorySamples: q.readSamples, memoryEvidence: q.memoryEvidence, detachedRead: true}
+		networkQuiet: q.networkQuiet, root: q.root, files: q.files, diskHost: q.diskHost, controlCPU: q.controlCPU, fileRetention: q.fileRetention, hostMemorySamples: q.readSamples, memoryEvidence: q.memoryEvidence, detachedRead: true}
 	source.hostMemoryLedgers = q.hostMemoryLedgers
 	ledgers := make(map[string]observationMachineLedger, len(q.s.Machines))
 	fresh := make(map[string]readFreshness, len(q.s.Machines))
 	for key, m := range q.s.Machines {
 		ledgers[key] = observationMachineLedger{healthDelivery: q.freezeHostHealthDelivery(m),
-			toolInventory: m.toolInventory, cpuLedger: m.cpuLedger,
+			toolInventory: m.toolInventory, cpuLedger: m.cpuLedger, cpuCapacityBeforeControl: m.cpuCapacityBeforeControl,
 			modelReservationDebtGB: m.modelReservationDebtGB, hostReservationDebtGB: m.hostReservationDebtGB}
 		fresh[key] = readFreshness{m.LastSeen, q.unreported[key]}
 	}
@@ -1086,6 +1086,7 @@ func (capture *committedReadCapture) detachedQueue(ctx context.Context, readAt t
 		}
 		copy.toolInventory = l.toolInventory
 		copy.cpuLedger = l.cpuLedger
+		copy.cpuCapacityBeforeControl = l.cpuCapacityBeforeControl
 		copy.modelReservationDebtGB = l.modelReservationDebtGB
 		copy.hostReservationDebtGB = l.hostReservationDebtGB
 		source.s.Machines[key] = &copy

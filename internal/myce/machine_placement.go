@@ -590,7 +590,7 @@ func (q *Queue) machineRecoveryFits(m *Machine, j *Job, copy Copy) bool {
 			own := HostRelease{Job: j.ID, Machine: m.ID, Session: copy.Session, Attempt: copy.Attempt}
 			_, shared := q.deviceCoTenants(target, j, false)
 			shared = shared && !target.Gone && !target.Leaving && !q.unreported[target.ID]
-			return (q.workerBatchIdleExcept(target, &own) || shared) && target.CPUCapacityReason == "" && target.CPUInUseCores <= target.EffectiveCPUCores && target.hostReservationDebtGB == 0 && target.modelReservationDebtGB == 0 && target.MemoryError == "" && deviceAllowed(j, target)
+			return (q.workerBatchIdleExcept(target, &own) || shared) && target.CPUCapacityReason == "" && cpuKeepsReservation(target) && target.hostReservationDebtGB == 0 && target.modelReservationDebtGB == 0 && target.MemoryError == "" && deviceAllowed(j, target)
 		}
 	}
 	return false

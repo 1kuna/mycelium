@@ -536,7 +536,7 @@ func (q *Queue) preparationAvailable(m *Machine, deviceExclusive bool) bool {
 	}
 	for _, p := range q.s.PreparationPlans {
 		if p.Machine == m.ID && p.Session == m.Session && p.Kind == "environment" && p.Started {
-			return m.CPUCapacityReason == "" && m.CPUInUseCores <= m.EffectiveCPUCores
+			return m.CPUCapacityReason == "" && cpuKeepsReservation(m)
 		}
 	}
 	return cpuAllocationFits(m, 1)

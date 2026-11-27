@@ -5,7 +5,7 @@ func observationAllowance(m *Machine) string {
 	if a := machineAvailability(m); a != nil {
 		power, mode = a.Signals.Power, a.Mode
 	}
-	return identityHash([]any{m.CPUReserveCores, m.EffectiveCPUCores, m.EffectiveHostMemoryBudgetGB, m.TotalMemoryGB, m.ReservedMemoryGB, m.UnifiedMemory, power, mode})
+	return identityHash([]any{m.CPUReserveCores, m.configuredCPUAllowance(), m.EffectiveHostMemoryBudgetGB, m.TotalMemoryGB, m.ReservedMemoryGB, m.UnifiedMemory, power, mode})
 }
 
 // Operator allowances and power mode affect throughput comparability, not the
