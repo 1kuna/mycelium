@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -281,6 +282,40 @@ func TestMemoryExpectedOwnersBurst(t *testing.T) {
 	}
 	if h.Window != firstOwnersWindow {
 		t.Fatalf("lapse back-off did not reset: %+v", h)
+	}
+
+	// An ordinary check-in clears the persisted hold and offers the same job.
+	// A six-hour fake cadence crosses a day without thousands of heartbeats.
+	check := func() Reply {
+		p := sample
+		p.sum()
+		m.MemoryShadow = &MemoryShadowReport{Pools: []MemoryShadowPool{p}, stopForecast: true}
+		reply, err := q.Checkin(Checkin{Machine: m, period: 6 * time.Hour, AttemptProtocol: keyedAttemptProtocol})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return reply
+	}
+	if got := assignedJob(check()); got != nil {
+		t.Fatalf("job offered before a fresh window: %s", got.ID)
+	}
+	refused := errors.New("fixture transaction abort")
+	if err := q.update(func() error {
+		q.touchMachine(m.ID).memoryShadowAt = time.Time{}
+		return refused
+	}); !errors.Is(err, refused) {
+		t.Fatal(err)
+	}
+	for range 3 {
+		clock.Advance(6 * time.Hour)
+		if got := assignedJob(check()); got != nil {
+			t.Fatalf("job offered before 24 hours: %s", got.ID)
+		}
+	}
+	clock.Advance(6 * time.Hour)
+	retry := r5Start(t, q, check(), j.ID)
+	if retry.Memory.RAM.ChargeGB != 80 {
+		t.Fatalf("owners hold changed expected peak: %+v", retry.Memory.RAM)
 	}
 }
 

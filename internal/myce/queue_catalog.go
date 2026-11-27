@@ -108,10 +108,11 @@ func (q *Queue) touchMachine(id string) *Machine {
 
 // Each check-in journals its machine. Copy it in memory, as catalogs do; a
 // JSON round trip of the whole worker report held q.mu on every heartbeat.
-// Private fields are dropped as JSON dropped them, except the two cloneMachine keeps.
+// Keep the live observation and its receive order through a failed write.
 func undoMachine(m *Machine) Machine {
 	out := copyObservationValue(reflect.ValueOf(*m)).Interface().(Machine)
 	out.toolInventory = m.toolInventory
+	out.MemoryShadow, out.memoryShadowOrder, out.memoryShadowAt = m.MemoryShadow, m.memoryShadowOrder, m.memoryShadowAt
 	if out.HostHealth != nil {
 		out.HostHealth.delivery = m.HostHealth.delivery
 	}
