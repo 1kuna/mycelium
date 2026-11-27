@@ -18,8 +18,22 @@ import (
 )
 
 func TestPublicationTimingsExactAttempt(t *testing.T) {
+	for _, checkpoints := range []bool{false, true} {
+		t.Run(fmt.Sprintf("file-checkpoints=%t", checkpoints), func(t *testing.T) {
+			testPublicationTimingsExactAttempt(t, checkpoints)
+		})
+	}
+}
+
+func testPublicationTimingsExactAttempt(t *testing.T, checkpoints bool) {
+	t.Helper()
 	q, clock := fixture(t)
-	client := retentionClient(t, q)
+	if err := q.ConfigureFileStore(t.TempDir(), 1<<20, checkpoints); err != nil {
+		t.Fatal(err)
+	}
+	api := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+	t.Cleanup(api.Close)
+	client := Client{URL: api.URL, Token: "test"}
 	_, input := retentionUpload(t, client, "input")
 	_, output := retentionUpload(t, client, "output bytes")
 	spec := spec("experiment")
@@ -33,6 +47,17 @@ func TestPublicationTimingsExactAttempt(t *testing.T) {
 	if j == nil || j.ID != queued.ID {
 		t.Fatal("missing attempt")
 	}
+	if j.FileTransport != checkpoints || !j.storedFileResults() {
+		t.Fatalf("wrong transport for stored result: file checkpoints=%t", j.FileTransport)
+	}
+	var planningCalls atomic.Int32
+	q.mu.Lock()
+	q.observeBodyPhase = func(name string, _ time.Duration) {
+		if name == "maintain_models" {
+			planningCalls.Add(1)
+		}
+	}
+	q.mu.Unlock()
 	p := &publicationProgress{}
 	p.resultReady(clock.Now())
 	clock.Advance(time.Second)
@@ -40,6 +65,9 @@ func TestPublicationTimingsExactAttempt(t *testing.T) {
 	release.ReleaseOnly = true
 	if err := q.Complete(release); err != nil {
 		t.Fatal(err)
+	}
+	if planningCalls.Swap(0) != 0 {
+		t.Error("release acknowledgement ran fleet planning")
 	}
 	p.releaseAcknowledged(clock.Now())
 	manifest := p.begin(clock, "filesystem/output_manifest")
@@ -61,6 +89,9 @@ func TestPublicationTimingsExactAttempt(t *testing.T) {
 	finished.OutputRefs = FileManifest{"output": output}
 	if err := client.Call(context.Background(), "POST", "/api/workers/complete", finished, nil); err != nil {
 		t.Fatal(err)
+	}
+	if planningCalls.Load() != 0 {
+		t.Fatal("successful stored result ran fleet planning")
 	}
 	got := job(t, q, j.ID)
 	timing := got.PublicationTimings
