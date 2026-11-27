@@ -2675,7 +2675,8 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 				}
 			}
 		}
-		if j := q.s.Jobs[r.ID]; j != nil && j.FileTransport && j.State == "running" && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session && r.Success && !r.Interrupted {
+		if j := q.s.Jobs[r.ID]; j != nil && j.storedFileResults() && j.State == "running" && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session && r.Success && !r.Interrupted {
+			// Stored outputs can follow a release in either checkpoint mode.
 			// This successful attempt has no resource to reclaim after release.
 			// Settle time/custody and relations now. Check-in and tick still
 			// plan the waiting set before offering work.
@@ -2964,7 +2965,7 @@ func (q *Queue) complete(r Result, filesVerified bool, checkFailure NativeCheckF
 		outcome.Diagnostics = r.Diagnostics
 	}
 	q.recordAttemptOutcome(j, outcome)
-	if filesVerified && j.FileTransport && j.State == "succeeded" && j.ReleaseConfirmed && !j.Spec.warmPieces() {
+	if filesVerified && j.State == "succeeded" && j.ReleaseConfirmed && !j.Spec.warmPieces() {
 		q.maintainGate(false)
 	} else {
 		q.maintain()
