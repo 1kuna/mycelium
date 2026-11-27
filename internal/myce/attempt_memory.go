@@ -225,9 +225,12 @@ func (w Worker) observeProcessMemoryWith(groups func() []int, sink attemptMemory
 		guard.limit, _ = w.jobCeilingBytes(attempt.job)
 	}
 	footprint := attempt != nil && probe.OwnedFootprint != nil
+	var immediate immediateMemoryStop
 	if attempt != nil {
 		attempt.shadowMemory.platform = shadowPlatform(w, attempt.job, false)
+		immediate = w.immediateRAMStop(attempt.job)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	sample := func(enforce bool) {
 		started := clock.Now()
 		var bytes uint64
@@ -280,6 +283,9 @@ func (w Worker) observeProcessMemoryWith(groups func() []int, sink attemptMemory
 		}
 		if attempt != nil && (footprint || attempt.shadowMemory.platform == shadowSynthetic) {
 			attempt.shadowMemory.observe(at, &gb, nil, processMemorySamplePeriod)
+			if enforce && footprint {
+				immediate.sample(ctx, clock, attempt, attempt.shadowMemory.state.Load().RAM)
+			}
 		}
 		next := &AttemptMemoryPeak{HostGB: &gb, Source: processGroupMemorySource, GrowthGB: &margin, Constrained: guard.exceeded}
 		if footprint {
@@ -290,7 +296,6 @@ func (w Worker) observeProcessMemoryWith(groups func() []int, sink attemptMemory
 		}
 		peak = sampledMemoryPeak(peak, next)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -362,9 +367,11 @@ func (w Worker) observeAttemptMemoryWith(a *memoryAttempt, j Job, groups func() 
 		clock = RealClock{}
 	}
 	var shadow *shadowFootprintSampler
+	var immediateRAM, immediateCard immediateMemoryStop
 	if len(attempts) != 0 && attempts[0] != nil {
 		shadow = &attempts[0].shadowMemory
 		shadow.platform = shadowPlatform(w, j, true)
+		immediateRAM, immediateCard = w.immediateRAMStop(j), w.immediateCardStop()
 	}
 	peak := a.peak()
 	hostDone := make(chan struct{})
@@ -380,11 +387,16 @@ func (w Worker) observeAttemptMemoryWith(a *memoryAttempt, j Job, groups func() 
 				start := clock.Now()
 				sample := a.peak()
 				if shadow != nil {
+					deviceAt := shadow.deviceAt
 					var host *float64
 					if sample != nil {
 						host = sample.HostGB
 					}
 					shadow.observe(clock.Now(), host, a.device.Load(), attemptMemorySamplePeriod)
+					reading := shadow.state.Load()
+					if !immediateRAM.sample(ctx, clock, attempts[0], reading.RAM) && shadow.deviceAt.After(deviceAt) {
+						immediateCard.sample(ctx, clock, attempts[0], reading.Card)
+					}
 				}
 				peak = sampledMemoryPeak(peak, sample)
 				if sink != nil {

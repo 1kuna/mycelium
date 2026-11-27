@@ -199,9 +199,15 @@ uses the declared NAS source even when an ordinary shared-input cache holds a co
   room and the attempts that hold RAM. A `memory_wait` or occupied-card
   `capacity` hold clears as room or custody becomes available.
   For a memory-pool stop, use `myce status --history --json JOB_ID`. In
-  `attempt_history[].priority_stop`, `memory_pool` shows the host forecast and
-  `device_pool` shows the discrete device comparison. `stop_observation` gives
-  the later outcome reading. After a `memory_pressure` stop, the job's next
+  `attempt_history[].priority_stop`, `memory_pool` shows the RAM forecast and
+  `device_pool` shows the card comparison. The `attempt_forecast` trigger
+  projects each attempt's growth and caps it at its hold while within its
+  expected peak. `stop_observation` gives the later outcome reading.
+  On qualified platforms a worker can kill an attempt without checkpoint
+  grace when its footprint exceeds its expected peak below the pool's keep,
+  including a production attempt. The `memory_pressure` execution cause carries
+  the footprint and expected peak in `rss_limit` for this immediate stop.
+  After a `memory_pressure` stop, the job's next
   attempt keeps its charge but waits to run alone on the host's memory pool.
   If it is stopped for pressure again while alone, it is paused with a
   `memory_capacity:` reason giving the measured peak and the stop comparison.

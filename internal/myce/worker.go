@@ -27,6 +27,7 @@ var workerCheckpointPrepare = prepareCheckpoint
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	custodianMemoryStop  bool
 	compactNativeLaunch  bool            // Queue capability from check-in, inherited by the attempt owner.
 	launchTiming         *launchRecorder // Set only on the attempt runner copy.
 	cleanupFS            workerDataFS    // nil uses the real filesystem; tests inject unlink/sync faults.
@@ -315,7 +316,8 @@ func (p *process) stopLocked(now time.Time, grace time.Duration, kill bool) {
 	if p.stopRequested.IsZero() {
 		p.stopRequested = now
 	}
-	if p.stopGroup || p.native != nil && !p.job.Spec.Needs.cpuOnly() {
+	immediateMemoryKill := kill && p.outcome.RSSLimit.pool() != ""
+	if !immediateMemoryKill && (p.stopGroup || p.native != nil && !p.job.Spec.Needs.cpuOnly()) {
 		if kill {
 			grace = p.stopGrace
 		}
@@ -1450,6 +1452,7 @@ func (w Worker) Run(stop context.Context) error {
 	w.Client.launchTimingWire = &atomic.Bool{}
 	w.Client.hostRAMGateWire = &atomic.Bool{}
 	w.Client.memoryShadowWire = &atomic.Bool{}
+	w.Client.memoryStopWire = &atomic.Bool{}
 	w.Client.sharedWire = &atomic.Bool{}
 	if w.ServiceConfig != nil {
 		w.serviceStop = stop

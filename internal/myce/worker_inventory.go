@@ -402,6 +402,12 @@ func (w Worker) forAttempt(j Job) (Worker, error) {
 		}
 		if !backendFor(d.Platform).simulated || len(w.Machine.Devices) != 1 || w.MemorySource == nil {
 			w.MemorySource, w.MemoryMeasured = source, d.MemoryMeasured
+			if term := w.cardStopReserve(d); term > 0 {
+				w.MemorySource = func(ctx context.Context) (float64, error) {
+					free, err := source(ctx)
+					return max(0, free-term), err
+				}
+			}
 		}
 		return w, nil
 	}
@@ -437,12 +443,12 @@ func (w Worker) forCards(ids []string) (Worker, error) {
 	// the count: an equal share must fit on every card.
 	w.MemorySource = func(ctx context.Context) (float64, error) {
 		least := math.Inf(1)
-		for _, source := range sources {
+		for i, source := range sources {
 			free, err := source(ctx)
 			if err != nil {
 				return 0, err
 			}
-			least = min(least, free)
+			least = min(least, max(0, free-w.cardStopReserve(cards[i])))
 		}
 		return least * float64(len(sources)), nil
 	}

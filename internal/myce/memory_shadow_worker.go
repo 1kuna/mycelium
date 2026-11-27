@@ -101,6 +101,9 @@ func (s *workerMemoryShadow) sample(w Worker, m *Machine, raw float64, jobs []Jo
 	if m.SharedHost != nil {
 		ram.KeepGB = max(ram.KeepGB, m.SharedHost.InteractiveReserveGB)
 	}
+	if w.supportsMemoryStops() {
+		ram.KeepGB += ramStopKeep(m, runtime.GOOS)
+	}
 	if ram.CapacityGB == 0 && !m.HostMemoryBudgetMeasured {
 		total := 0.0
 		if m.MemoryObservation != nil {
@@ -133,6 +136,14 @@ func (s *workerMemoryShadow) sample(w Worker, m *Machine, raw float64, jobs []Jo
 		}
 		if card.Platform == "fake" && card.Reason == "" {
 			free := card.FreeMemoryGB
+			pool.FreeGB = &free
+		}
+		pool.KeepGB = card.ReserveMemoryGB
+		if w.supportsMemoryStops() {
+			pool.KeepGB += cardStopKeep(card.Platform)
+		}
+		if pool.FreeGB != nil {
+			free := *pool.FreeGB - pool.KeepGB
 			pool.FreeGB = &free
 		}
 		cards[card.ID] = len(report.Pools)
@@ -177,13 +188,7 @@ func (s *workerMemoryShadow) sample(w Worker, m *Machine, raw float64, jobs []Jo
 		if !readings.RAM.At.IsZero() || readings.RAM.Fastest > 0 {
 			s.fastest[label+"/ram"] = max(s.fastest[label+"/ram"], readings.RAM.Fastest)
 		}
-		expected := hostNeed(&local, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
-		if pooledMemory(&j) {
-			estimate := memoryPools(&j).RAM
-			if estimate.TypicalGB > 0 {
-				expected = estimate.TypicalGB
-			}
-		}
+		expected := stopExpectedRAM(j, &local)
 		a := shadowAttempt(j, expected, readings.RAM, at, period)
 		// Only CPU work on a kernel-contained Linux slice qualifies until
 		// the discrete driver probe. During shadow this changes only a number.
@@ -241,6 +246,14 @@ func (s *workerMemoryShadow) sample(w Worker, m *Machine, raw float64, jobs []Jo
 	}
 	s.previous, s.at = report, at
 	return report
+}
+
+func stopExpectedRAM(j Job, local *Machine) float64 {
+	// Stage 1 uses the same provisional E as stage 0, until stage 2 learns E.
+	if pooledMemory(&j) && memoryPools(&j).RAM.TypicalGB > 0 {
+		return memoryPools(&j).RAM.TypicalGB
+	}
+	return hostNeed(local, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
 }
 
 func shadowAttempt(j Job, expected float64, reading shadowMemoryReading, at time.Time, period time.Duration) MemoryShadowAttempt {

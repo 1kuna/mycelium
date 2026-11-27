@@ -392,20 +392,19 @@ func (a *memoryAttempt) children() (*memoryCeilings, error) {
 }
 
 // Linux adds oom_score_adj / 1000 of the OOM domain's pages to badness.
-// Giving lower tiers the full domain, while the highest tier keeps the worker's
-// inherited score (policy zero means inherit, not an absolute kernel value),
-// makes even a small lower-tier borrower precede a large production process.
-// No process is immune: production can still be killed if it alone exhausts
-// the allowance. Intermediate tiers share the lower-tier score.
+// Bias production against being killed before lower tiers and toward being
+// killed before small host processes. The kernel still counts resident pages.
+const productionOOMScore = 500
+
 func attemptOOMScore(j Job) int {
 	if j.PriorityPolicy.Tier != "" {
 		if j.PriorityPolicy.Index > 0 {
 			return 1000
 		}
-		return 0
+		return productionOOMScore
 	}
 	if j.Spec.Class == "production" || j.Spec.Priority == "production" {
-		return 0
+		return productionOOMScore
 	}
 	return 1000
 }

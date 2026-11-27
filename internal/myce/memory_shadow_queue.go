@@ -265,7 +265,7 @@ func (s *shadowQueueMonitor) observePool(o shadowObservation, p MemoryShadowPool
 		return
 	}
 	h.blocked, h.blockedSession = Execution{}, ""
-	if !p.PressureWarning && *p.FreeGB >= 0 && (p.ForecastFreeGB == nil || *p.ForecastFreeGB >= 0) {
+	if p.shortage() == "" {
 		return
 	}
 	a, rank, ok := o.victim(p)

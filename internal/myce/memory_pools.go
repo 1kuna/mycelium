@@ -259,7 +259,7 @@ func fitPoolCharge(estimate *memoryPoolEstimate, allowance, lower float64) {
 	}
 }
 
-func (q *Queue) pooledKeep(m *Machine) float64 {
+func (q *Queue) pooledBaseKeep(m *Machine) float64 {
 	keep := 0.0
 	if o := m.MemoryObservation; o != nil {
 		keep = o.ReserveGB
@@ -269,6 +269,14 @@ func (q *Queue) pooledKeep(m *Machine) float64 {
 	}
 	if p := q.s.HostMaintenance[hostID(m)].SharedHost; p != nil {
 		keep = max(keep, p.InteractiveReserveGB)
+	}
+	return keep
+}
+
+func (q *Queue) pooledKeep(m *Machine) float64 {
+	keep := q.pooledBaseKeep(m)
+	if m.CapabilityProfile != nil && usesAttemptStopForecast(m, "ram") {
+		keep += ramStopKeep(m, m.CapabilityProfile.OS)
 	}
 	return keep
 }
@@ -819,6 +827,7 @@ func localPooledAdmission(w Worker, jobs []Job, next Job, models []ModelReport, 
 		if card.MemoryMeasured {
 			free = min(free, card.FreeMemoryGB)
 		}
+		free = max(0, free-w.cardStopReserve(card))
 		if err := checkMemoryPool(pools.Card.TypicalGB, free, 0, 0, card.MemoryMeasured || card.MemoryMode == "fixed" && card.BudgetGB > 0); err != nil {
 			return err
 		}

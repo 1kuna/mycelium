@@ -86,8 +86,22 @@ type shadowAttemptReading struct {
 type MemoryShadowReport struct {
 	Pools         []MemoryShadowPool `json:"pools"`
 	FastestGrowth map[string]float64 `json:"fastest_growth_gb_per_second,omitempty"`
+	stopForecast  bool
 	// The worker's reaction horizon uses the queue's existing stop grace.
 	ReactionSeconds float64 `json:"reaction_seconds"`
+}
+
+func (p MemoryShadowPool) shortage() string {
+	switch {
+	case p.PressureWarning && p.Name == "ram":
+		return "host_pressure"
+	case p.FreeGB != nil && *p.FreeGB < 0:
+		return "below_reserve"
+	case p.ForecastFreeGB != nil && *p.ForecastFreeGB < 0:
+		return "attempt_forecast"
+	default:
+		return ""
+	}
 }
 
 type MemoryShadowPool struct {
