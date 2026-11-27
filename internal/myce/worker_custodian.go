@@ -103,19 +103,20 @@ func (r custodianRequest) unstartedFor(id string, a attemptRecord) bool {
 }
 
 type custodianSnapshot struct {
-	Protocol       int                `json:"protocol"`
-	ID             string             `json:"id"`
-	PID            int                `json:"pid"`
-	Birth          string             `json:"birth"`
-	Cgroup         string             `json:"cgroup,omitempty"`
-	At             time.Time          `json:"at"`
-	Started        bool               `json:"started"`
-	Finished       bool               `json:"finished"`
-	State          workerState        `json:"state"`
-	Memory         *CurrentHostMemory `json:"memory,omitempty"`
-	Resources      *AttemptResources  `json:"resources,omitempty"`
-	MemoryAt       time.Time          `json:"memory_at,omitempty"`
-	DeviceMemoryAt time.Time          `json:"device_memory_at,omitempty"`
+	MemoryShadow   *shadowAttemptReading `json:"memory_shadow,omitempty"`
+	Protocol       int                   `json:"protocol"`
+	ID             string                `json:"id"`
+	PID            int                   `json:"pid"`
+	Birth          string                `json:"birth"`
+	Cgroup         string                `json:"cgroup,omitempty"`
+	At             time.Time             `json:"at"`
+	Started        bool                  `json:"started"`
+	Finished       bool                  `json:"finished"`
+	State          workerState           `json:"state"`
+	Memory         *CurrentHostMemory    `json:"memory,omitempty"`
+	Resources      *AttemptResources     `json:"resources,omitempty"`
+	MemoryAt       time.Time             `json:"memory_at,omitempty"`
+	DeviceMemoryAt time.Time             `json:"device_memory_at,omitempty"`
 }
 
 func (v custodianSnapshot) belongsTo(id string, a attemptRecord) bool {
@@ -643,6 +644,7 @@ func (w Worker) runCustodian(stop context.Context) error {
 		}
 		if p != nil {
 			v.Started, v.Resources = p.started(), p.resourceSnapshot()
+			v.MemoryShadow = p.shadowMemoryReading()
 			v.Memory = p.currentProcessHostMemory()
 			if p.memory != nil {
 				v.Memory = p.memory.currentHostMemory(w.Clock)

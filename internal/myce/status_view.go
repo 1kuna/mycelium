@@ -490,6 +490,9 @@ func (q *Queue) projectStatusMachine(m *Machine, compact bool) Machine {
 	now := q.clock.Now()
 	copy := cloneMachine(m)
 	copy.Suspect = q.workerSuspect(m, now)
+	if m.Gone || copy.Suspect || q.unreported[m.ID] {
+		copy.MemoryShadow = nil
+	}
 	copy.ExternalMemory = q.externalMemoryStatus(hostID(m))
 	if copy.IOPressure != nil {
 		copy.IOPressure.AgeSeconds += max(0, now.Sub(copy.IOPressure.ReceivedAt).Seconds())

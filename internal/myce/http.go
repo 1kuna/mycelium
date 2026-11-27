@@ -588,6 +588,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			w.Header().Set(stagingPhasesHeader, stagingPhasesProtocol)
 			w.Header().Set(launchTimingsHeader, launchTimingsWire)
 			w.Header().Set(hostRAMGateHeader, hostRAMGateProtocol)
+			w.Header().Set(memoryShadowHeader, memoryShadowProtocol)
 		}
 		// Liveness is a fixed-size authenticated response, not a projection.
 		// A progress probe must not wait on the OS memory observation used to
@@ -793,6 +794,7 @@ type Client struct {
 	launchTimingWire *atomic.Bool
 	faultWire        *atomic.Bool
 	hostRAMGateWire  *atomic.Bool
+	memoryShadowWire *atomic.Bool
 	URL              string
 	Token            string
 	endpoints        *queueEndpoints
@@ -983,6 +985,9 @@ func (c Client) callOnceShared(ctx context.Context, method, path string, in, out
 	}
 	if c.faultWire != nil && advertisesWorkerProtocol {
 		c.faultWire.Store(res.Header.Get(faultEvidenceHeader) == faultEvidenceProtocol)
+	}
+	if c.memoryShadowWire != nil && advertisesWorkerProtocol {
+		c.memoryShadowWire.Store(res.Header.Get(memoryShadowHeader) == memoryShadowProtocol)
 	}
 	if c.hostRAMGateWire != nil && workerProtocolEndpoint(path) {
 		c.hostRAMGateWire.Store(res.Header.Get(hostRAMGateHeader) == hostRAMGateProtocol)

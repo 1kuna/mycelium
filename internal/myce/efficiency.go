@@ -264,6 +264,8 @@ type EfficiencySignal struct {
 	Active          bool     `json:"active"`
 }
 type EfficiencyReport struct {
+	MemoryShadow            []memoryShadowHost     `json:"memory_shadow,omitempty"`
+	ShadowWeek              *MemoryShadowWeek      `json:"memory_shadow_week,omitempty"`
 	At                      time.Time              `json:"at"`
 	Hosts                   []EfficiencyHost       `json:"hosts"`
 	Programs                []EfficiencyAllocation `json:"programs"`
@@ -732,6 +734,10 @@ func (q *Queue) prepareEfficiencyDiagnostics(ctx context.Context) (*efficiencyDi
 	d.utilization = v.observeUtilization(categories, kinds)
 	v.s.Utilization = v.s.Utilization.observe(d.utilization)
 	d.report = v.efficiencyReport()
+	if week := q.memoryShadow.week(d.report.At); week != nil {
+		v.observeCurrentMemoryStops(week)
+		d.report.ShadowWeek = week
+	}
 	d.baselines, d.signals = efficiencySignals(d.report, v.s.EfficiencyHealth)
 	// This generation is immutable after preparation. Encode its retained-sized
 	// history here, before the commit lock, alongside the diagnostic calculation.
@@ -806,6 +812,12 @@ func (q *Queue) efficiencyReport() *EfficiencyReport {
 	resourceHosts := map[string]ResourceIntegral{}
 	resourceAttempts, cpuAttempts, cpuPartial := 0, 0, false
 	ioPressure := q.efficiencyIOPressure(now)
+	for _, id := range slices.Sorted(maps.Keys(q.s.Machines)) {
+		m := q.s.Machines[id]
+		if m.MemoryShadow != nil && !m.Gone && !q.unreported[id] && !q.workerSuspect(m, now) {
+			r.MemoryShadow = append(r.MemoryShadow, memoryShadowHost{Worker: id, Report: m.MemoryShadow})
+		}
+	}
 	projects := map[string]map[string]float64{}
 	peaks := map[string][]float64{}
 	for _, h := range q.s.EfficiencyHosts {
@@ -1265,6 +1277,14 @@ func (r *EfficiencyReport) Lines() []string {
 	}
 	lines := []string{fmt.Sprintf("efficiency at %s: %d stranded placements; %d stopped attempts that may have burned run time in the last 7 days; CPU use %s", r.At.UTC().Format(time.RFC3339), len(r.Stranded), wasted, r.CPUStatus)}
 	lines = append(lines, r.Utilization.lines()...)
+	if r.ShadowWeek != nil {
+		lines = append(lines, r.ShadowWeek.line())
+	}
+	for _, h := range r.MemoryShadow {
+		for _, line := range h.Report.lines() {
+			lines = append(lines, "  "+h.Worker+": "+line)
+		}
+	}
 	for _, w := range r.WastedWindows {
 		lines = append(lines, "  wasted "+w.Name+": "+w.words())
 	}

@@ -36,17 +36,18 @@ type CompactStatus struct {
 	QueueCapabilities []string `json:"queue_capabilities,omitempty"`
 }
 type CompactHypha struct {
-	ModelConfigHash   string             `json:"model_config_hash,omitempty"`
-	MemoryContainment *MemoryContainment `json:"memory_containment,omitempty"`
-	FleetProofIssue   FleetProofIssue    `json:"fleet_proof_issue,omitempty"`
-	ID                string             `json:"id"`
-	GPU               string             `json:"gpu"`
-	FreeMemoryGB      float64            `json:"free_memory_gb"`
-	Availability      string             `json:"availability"`
-	HostRAMGB         *float64           `json:"host_ram_for_admission_gb,omitempty"`
-	FreeCPU           *int               `json:"free_cpu_cores,omitempty"`
-	CPU               *int               `json:"cpu_cores,omitempty"`
-	Running           int                `json:"running,omitempty"`
+	MemoryShadow      *MemoryShadowReport `json:"memory_shadow,omitempty"`
+	ModelConfigHash   string              `json:"model_config_hash,omitempty"`
+	MemoryContainment *MemoryContainment  `json:"memory_containment,omitempty"`
+	FleetProofIssue   FleetProofIssue     `json:"fleet_proof_issue,omitempty"`
+	ID                string              `json:"id"`
+	GPU               string              `json:"gpu"`
+	FreeMemoryGB      float64             `json:"free_memory_gb"`
+	Availability      string              `json:"availability"`
+	HostRAMGB         *float64            `json:"host_ram_for_admission_gb,omitempty"`
+	FreeCPU           *int                `json:"free_cpu_cores,omitempty"`
+	CPU               *int                `json:"cpu_cores,omitempty"`
+	Running           int                 `json:"running,omitempty"`
 	// Release is set only when it differs from the queue's, or is "unknown".
 	Release            string              `json:"release,omitempty"`
 	Preparing          []string            `json:"preparing,omitempty"`
@@ -140,6 +141,7 @@ func NewCompactStatus(s Snapshot) CompactStatus {
 	for _, m := range s.Machines {
 		h := CompactHypha{ID: m.ID, GPU: m.GPU, FreeMemoryGB: m.FreeMemoryGB, Availability: HyphaAvailability(m), Running: running[m.ID], ModelConfigHash: m.ModelConfigHash, FleetProofIssue: m.FleetProofIssue}
 		h.MemoryContainment = m.MemoryContainment
+		h.MemoryShadow = m.MemoryShadow
 		h.ResultPublications = m.ResultPublications
 		if m.HostMemoryMeasured {
 			ram := m.FreeHostMemoryGB
@@ -304,6 +306,9 @@ func (c CompactStatus) Lines(full bool) []string {
 			line += "; fleet runtime proof unavailable: " + string(h.FleetProofIssue)
 		}
 		out = append(out, line)
+		for _, shadow := range h.MemoryShadow.lines() {
+			out = append(out, "  "+shadow)
+		}
 		if h.MemoryContainment != nil {
 			out = append(out, "  "+h.MemoryContainment.String())
 		}

@@ -101,6 +101,7 @@ func (w Worker) sampleHeartbeatMemory(ctx context.Context, m *Machine, reports [
 			latest := a.report
 			if latest.ID == key.job && latest.Attempt == key.attempt && latest.Session == key.session {
 				memory = latest.CurrentHostMemory
+				reports[i].memoryShadow = latest.memoryShadow
 			}
 			a.mu.Unlock()
 		}
@@ -457,6 +458,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		}
 		if p != nil && (report.Started || p.native != nil) {
 			report.CurrentHostMemory = w.currentAttemptHostMemory(p, a.job, s.state.Cgroup)
+			report.memoryShadow = p.shadowMemoryReading()
 		}
 		if s.state.Job != nil {
 			report.InputsStagedAt = s.state.Job.InputsStagedAt
@@ -1082,6 +1084,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	var cpuQualification checkpointIO[string]
 	toolInventory := map[string][]string{"": executableTools(jobBaseEnvironment()["PATH"])}
 	w.Machine.CPUIsolation = cpuIsolationUnavailable
+	shadow := workerMemoryShadow{reactionGrace: defaultPreemptionGrace}
 	var retry workerRetry
 	var nextRetention time.Time
 	leaving, leaveSent := stop.Err() != nil, false
@@ -1399,6 +1402,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 
 			// Refresh memory together after inventory, then age through the reads.
 			ramGate := w.sampleHeartbeatMemory(ctx, &m, reports, actors)
+			shadowAt := w.Clock.Now()
 			if m.MemoryObservation != nil {
 				m.MemoryObservation.Quiescent = !recovering && !leaving && len(actors) == 0 && modelReportsQuiescent(modelReports) && environments.cores() == 0 && !hostPreparing(&m)
 			}
@@ -1430,6 +1434,11 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			// Snapshot at send time: preparation must not disappear from the
 			// sensor age, and report-gap learning includes the entire control path.
 			m.HostHealth = health.report(m.DiskVolumes)
+			raw := ramGate.RawGB
+			if ramGate.Unavailable {
+				raw = -1
+			}
+			m.MemoryShadow = shadow.sample(w, &m, raw, jobs, reports, shadowAt)
 			applyHostMountHealth(w, &m)
 			w.Machine.UnavailableRoots = slices.Clone(m.UnavailableRoots)
 			m.SharedHostPressure = pressureProbe.snapshot(w.Machine.SharedHost != nil)
@@ -1439,6 +1448,10 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			received := w.Clock.Now()
 			health.noteHeartbeat(received.Sub(heartbeatStarted))
 			if err == nil {
+				if settings := reply.MemoryShadowSettings; settings != nil {
+					shadow.keepGB = settings.KeepGB
+					shadow.reactionGrace = time.Duration(settings.GraceSeconds * float64(time.Second))
+				}
 				if receiptErr := saveEnrollmentReceipt(root.dir, m); receiptErr != nil {
 					// Enrollment is an observer, never authority to terminate live work.
 					// Retry next successful check-in; no filesystem paths or errors in logs.

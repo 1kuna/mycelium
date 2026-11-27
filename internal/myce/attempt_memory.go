@@ -225,6 +225,9 @@ func (w Worker) observeProcessMemoryWith(groups func() []int, sink attemptMemory
 		guard.limit, _ = w.jobCeilingBytes(attempt.job)
 	}
 	footprint := attempt != nil && probe.OwnedFootprint != nil
+	if attempt != nil {
+		attempt.shadowMemory.platform = shadowPlatform(w, attempt.job, false)
+	}
 	sample := func(enforce bool) {
 		started := clock.Now()
 		var bytes uint64
@@ -261,6 +264,7 @@ func (w Worker) observeProcessMemoryWith(groups func() []int, sink attemptMemory
 		if err != nil || members == 0 {
 			growth = processMemoryGrowth{}
 			if attempt != nil {
+				attempt.shadowMemory.observe(clock.Now(), nil, nil, processMemorySamplePeriod)
 				attempt.rssMemory.Store(nil)
 			}
 			if sink != nil && enforce {
@@ -273,6 +277,9 @@ func (w Worker) observeProcessMemoryWith(groups func() []int, sink attemptMemory
 		margin := growth.observe(at, gb)
 		if attempt != nil {
 			attempt.rssMemory.Store(&processResidentSample{gb: gb, growth: margin, rate: growth.rate, at: at, observed: growth.horizon > 0})
+		}
+		if attempt != nil && (footprint || attempt.shadowMemory.platform == shadowSynthetic) {
+			attempt.shadowMemory.observe(at, &gb, nil, processMemorySamplePeriod)
 		}
 		next := &AttemptMemoryPeak{HostGB: &gb, Source: processGroupMemorySource, GrowthGB: &margin, Constrained: guard.exceeded}
 		if footprint {
@@ -354,6 +361,11 @@ func (w Worker) observeAttemptMemoryWith(a *memoryAttempt, j Job, groups func() 
 	if clock == nil {
 		clock = RealClock{}
 	}
+	var shadow *shadowFootprintSampler
+	if len(attempts) != 0 && attempts[0] != nil {
+		shadow = &attempts[0].shadowMemory
+		shadow.platform = shadowPlatform(w, j, true)
+	}
 	peak := a.peak()
 	hostDone := make(chan struct{})
 	go func() {
@@ -367,6 +379,13 @@ func (w Worker) observeAttemptMemoryWith(a *memoryAttempt, j Job, groups func() 
 			case <-tick.C:
 				start := clock.Now()
 				sample := a.peak()
+				if shadow != nil {
+					var host *float64
+					if sample != nil {
+						host = sample.HostGB
+					}
+					shadow.observe(clock.Now(), host, a.device.Load(), attemptMemorySamplePeriod)
+				}
 				peak = sampledMemoryPeak(peak, sample)
 				if sink != nil {
 					if sample == nil {
@@ -498,7 +517,8 @@ func cudaAttemptMemoryReading(b []byte, selector string, ids map[int]bool, resid
 
 func drmAttemptMemory(b []byte, pci string) (string, float64, float64, error) {
 	client, pdev := "", ""
-	var total, host float64
+	var total float64
+	host := -1.0
 	found := false
 	for _, line := range strings.Split(string(b), "\n") {
 		key, val, ok := strings.Cut(line, ":")
@@ -627,12 +647,13 @@ func (w Worker) observeDeviceMemoryWith(ctx context.Context, inventory func() (m
 					continue
 				}
 
-				var pinned float64
-				var host *float64
-				if w.Machine.GPU == "xpu" && !w.Machine.UnifiedMemory {
-					host = &pinned
+				var gb, pinned float64
+				pinnedKnown := true
+				if w.Machine.GPU == "xpu" && !w.Machine.UnifiedMemory && len(w.selectedDevices) <= 1 {
+					gb, pinned, pinnedKnown, err = xpuAttemptDeviceSample(w, ids, fs)
+				} else {
+					gb, _, err = w.attemptDeviceMemoryReading(ctx, ids, fs, nil, known)
 				}
-				gb, _, err := w.attemptDeviceMemoryReading(ctx, ids, fs, host, known)
 				if errors.Is(err, errDeviceMemoryNotReported) {
 					unreported = true
 					report(&AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNotReported})
@@ -655,7 +676,7 @@ func (w Worker) observeDeviceMemoryWith(ctx context.Context, inventory func() (m
 				margin := growth.observe(now, gb)
 				peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceGB: &gb, DeviceGrowthGB: &margin})
 				if a != nil {
-					a.device.Store(&hostMemorySample{gb: gb, pinnedGB: pinned, at: now})
+					a.device.Store(&hostMemorySample{gb: gb, pinnedGB: pinned, pinnedKnown: pinnedKnown, at: now})
 				}
 
 			}
@@ -698,8 +719,16 @@ func queryCUDAAttemptMemory(ctx context.Context) ([]byte, error) {
 	return cmd.Output()
 }
 func xpuAttemptDeviceMemory(w Worker, _ context.Context, ids map[int]bool, fs memoryFS, host *float64, _ ...map[int]bool) (float64, bool, error) {
+	device, system, _, err := xpuAttemptDeviceSample(w, ids, fs)
+	if host != nil {
+		*host += system
+	}
+	return device, false, err
+}
+
+func xpuAttemptDeviceSample(w Worker, ids map[int]bool, fs memoryFS) (device, host float64, hostKnown bool, err error) {
 	if w.selectedDevice == nil || w.selectedDevice.pciAddress == "" {
-		return 0, false, errAttemptMemoryUnsupported
+		return 0, 0, false, errAttemptMemoryUnsupported
 	}
 
 	clients := map[string]float64{}
@@ -716,27 +745,26 @@ func xpuAttemptDeviceMemory(w Worker, _ context.Context, ids map[int]bool, fs me
 			}
 			key, gb, pinned, err := drmAttemptMemory(b, w.selectedDevice.pciAddress)
 			if errors.Is(err, errAttemptMemoryUnsupported) {
-				return 0, false, err
+				return 0, 0, false, err
 			}
 			if err == nil {
 				clients[key] = max(clients[key], gb)
-				if host != nil {
+				if pinned >= 0 {
 					system[key] = max(system[key], pinned)
 				}
 			}
 		}
 	}
-	total := 0.0
 	for _, gb := range clients {
-		total += gb
+		device += gb
 	}
 	for _, gb := range system {
-		*host += gb
+		host += gb
 	}
 	if len(clients) == 0 {
-		return 0, false, errAttemptMemoryPending
+		return 0, 0, false, errAttemptMemoryPending
 	}
-	return total, false, nil
+	return device, host, len(system) == len(clients), nil
 }
 
 const deviceUnifiedResidentSource = "unified RSS/cgroup upper estimate with host reconciliation"

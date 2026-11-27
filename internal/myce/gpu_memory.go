@@ -36,7 +36,7 @@ func NewMemorySourceWithMode(platform string, budget, reserve float64, mode stri
 		})
 }
 
-func newMemorySource(platform string, budget, reserve float64, mode, goos string, readFile func(string) ([]byte, error), command func(context.Context, string, ...string) ([]byte, error)) (MemorySource, error) {
+func newMemorySource(platform string, budget, reserve float64, mode, goos string, readFile func(string) ([]byte, error), command func(context.Context, string, ...string) ([]byte, error), observedFree ...*float64) (MemorySource, error) {
 	if !validMemoryValue(budget) || !validMemoryValue(reserve) {
 		return nil, fmt.Errorf("memory budget and reserve must be finite and nonnegative")
 	}
@@ -90,6 +90,9 @@ func newMemorySource(platform string, budget, reserve float64, mode, goos string
 				if err != nil {
 					return 0, fmt.Errorf("unified memory unavailable: %w; refusing work (explicit --memory-mode fixed --memory-gb can configure an operator budget)", err)
 				}
+			}
+			if !unified && len(observedFree) != 0 {
+				*observedFree[0] = available
 			}
 			if budget > 0 {
 				available = min(available, budget)
@@ -217,13 +220,13 @@ func NewDeviceMemorySource(platform, device string, budget, reserve float64, mod
 	})
 }
 
-func newDeviceMemorySource(platform, device string, budget, reserve float64, mode, goos string, readFile func(string) ([]byte, error), command func(context.Context, string, ...string) ([]byte, error)) (MemorySource, error) {
+func newDeviceMemorySource(platform, device string, budget, reserve float64, mode, goos string, readFile func(string) ([]byte, error), command func(context.Context, string, ...string) ([]byte, error), observedFree ...*float64) (MemorySource, error) {
 	return newMemorySource(platform, budget, reserve, mode, goos, readFile, func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		if backend := backendFor(platform); backend.memoryCommand != "" && name == backend.memoryCommand && device != "" {
 			args = append(args, backend.memorySelectorFlag+device)
 		}
 		return command(ctx, name, args...)
-	})
+	}, observedFree...)
 }
 
 // ResolveCUDADevice maps the operator's physical selector to the stable UUID

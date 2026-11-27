@@ -184,6 +184,7 @@ type workerFinish struct {
 	err    error
 }
 type process struct {
+	shadowMemory     shadowFootprintSampler
 	custodian        *attemptCustodian
 	cancelStart      context.CancelFunc // Immutable; cancel before taking a launch-held mutex.
 	stopAdmission    func()
@@ -1445,6 +1446,7 @@ func (w Worker) Run(stop context.Context) error {
 	w.Client.stagingWire = &atomic.Bool{}
 	w.Client.launchTimingWire = &atomic.Bool{}
 	w.Client.hostRAMGateWire = &atomic.Bool{}
+	w.Client.memoryShadowWire = &atomic.Bool{}
 	w.Client.sharedWire = &atomic.Bool{}
 	if w.ServiceConfig != nil {
 		w.serviceStop = stop
