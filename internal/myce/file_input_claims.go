@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	tus "github.com/tus/tusd/v2/pkg/handler"
@@ -319,12 +320,6 @@ func (q *Queue) ReleaseFileInputClaim(ctx context.Context, req FileInputClaimRel
 	if !validFileProject(req.Project) || req.ClaimID == "" || !req.AcceptExpiry {
 		return result, fileReleaseInvalid("claim release requires a project, one claim ID and explicit acceptance")
 	}
-	// Revoke only outside active transfer/verification intervals. TryLock keeps
-	// an owner release from queuing a writer ahead of unrelated publications.
-	if !q.fileLifecycle.TryLock() {
-		return result, fileReleaseError("file_release_busy", "file publication is active; retry claim release")
-	}
-	defer q.fileLifecycle.Unlock()
 	unlock := requestReadLock(ctx, &q.mu)
 	claim, found := q.s.FileInputClaims[req.ClaimID]
 	store := q.files
@@ -342,6 +337,20 @@ func (q *Queue) ReleaseFileInputClaim(ctx context.Context, req FileInputClaimRel
 	if store == nil {
 		return result, &HTTPError{Status: http.StatusServiceUnavailable, Code: "file_store_unavailable", Message: "queue file store inventory unavailable"}
 	}
+	// Bracket the observation with nonblocking exclusive checks. An active
+	// transfer prevents either check; a transfer that finishes during the
+	// observation marks its digest before dropping its shared fence.
+	if !q.fileLifecycle.TryLock() {
+		return result, fileReleaseError("file_release_busy", "file publication is active; retry claim release")
+	}
+	changed := new(atomic.Bool)
+	hash := claim.File.SHA256
+	_, probing := store.claimReleaseObservations.LoadOrStore(hash, changed)
+	q.fileLifecycle.Unlock()
+	if probing {
+		return result, fileReleaseError("file_release_busy", "input transfer activity is being inspected; retry claim release")
+	}
+	defer store.claimReleaseObservations.Delete(hash)
 	payload, err := store.observeClaimPayload(claim.File)
 	if err != nil {
 		return result, fileReleaseError("file_release_busy", "cannot read input transfer activity; retry claim release")
@@ -357,9 +366,13 @@ func (q *Queue) ReleaseFileInputClaim(ctx context.Context, req FileInputClaimRel
 			return result, fileReleaseError("file_release_busy", "cannot read input transfer custody; retry claim release")
 		}
 	}
+	if !q.fileLifecycle.TryLock() {
+		return result, fileReleaseError("file_release_busy", "file publication is active; retry claim release")
+	}
+	defer q.fileLifecycle.Unlock()
 	err = q.updateRequest(ctx, func() error {
 		current, found := q.s.FileInputClaims[req.ClaimID]
-		if q.files != store || !found || !current.equal(claim) {
+		if q.files != store || !found || !current.equal(claim) || q.inputClaimNeedsLegacyCustody(current) != needsLegacy || changed.Load() {
 			return fileReleaseError("file_release_stale", "claim custody changed; inspect holdings again")
 		}
 		// The configured interrupted-upload idle window and measured
@@ -399,7 +412,7 @@ func (p claimPayloadObservation) lastActivity(claim FileInputClaim) time.Time {
 
 // Neither the blob nor tus HEAD path is observational. Read metadata directly
 // and look for the blob last, since publication links it before removing the
-// upload paths. The caller holds at least the shared lifecycle fence.
+// upload paths. A release validates the observation before acting on it.
 func (s *FileStore) observeClaimPayload(ref FileRef) (claimPayloadObservation, error) {
 	var out claimPayloadObservation
 	if err := ref.validate(); err != nil {
@@ -407,7 +420,7 @@ func (s *FileStore) observeClaimPayload(ref FileRef) (claimPayloadObservation, e
 	}
 	upload := filepath.Join(s.root, "uploads", ref.SHA256)
 	for i, path := range []string{upload + ".info", upload, s.blob(ref)} {
-		st, err := os.Lstat(path)
+		st, err := s.statClaimPayload(path)
 		if os.IsNotExist(err) {
 			continue
 		}
@@ -428,11 +441,18 @@ func (s *FileStore) observeClaimPayload(ref FileRef) (claimPayloadObservation, e
 	return out, nil
 }
 
+func (s *FileStore) statClaimPayload(path string) (os.FileInfo, error) {
+	if s.claimLstat != nil {
+		return s.claimLstat(path)
+	}
+	return os.Lstat(path)
+}
+
 func (s *FileStore) legacyPartialInput(ctx context.Context, ref FileRef) (bool, error) {
 	if err := ref.validate(); err != nil {
 		return false, err
 	}
-	if _, err := os.Lstat(s.blob(ref)); !os.IsNotExist(err) {
+	if _, err := s.statClaimPayload(s.blob(ref)); !os.IsNotExist(err) {
 		return false, err
 	}
 	upload, err := s.getUpload(ctx, ref.SHA256)

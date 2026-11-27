@@ -154,9 +154,11 @@ type FileStore struct {
 	explainRefusal              func(context.Context, error) error
 	handler                     http.Handler
 	uploadLocker                tus.Locker
-	syncDir                     func(string) error         // Durability failure injection.
-	beforeTrash                 func(string)               // Fixtures may block a collector's move.
-	link                        func(string, string) error // Fixtures may refuse hard links; nil is os.Link.
+	syncDir                     func(string) error                // Durability failure injection.
+	beforeTrash                 func(string)                      // Fixtures may block a collector's move.
+	claimLstat                  func(string) (os.FileInfo, error) // Fixtures may block claim metadata reads.
+	claimReleaseObservations    sync.Map                          // Digest to *atomic.Bool, only during a release probe.
+	link                        func(string, string) error        // Fixtures may refuse hard links; nil is os.Link.
 	expired                     func(string, ...context.Context) bool
 	lifecycle                   *sync.RWMutex
 	clock                       Clock
