@@ -102,22 +102,17 @@ func (n *checkpointProgressReader) event(clock Clock, event, path string, scan f
 }
 
 // Terminal jobs cannot be recovered. Drop their event observations without
-// expiring a live event into a new heartbeat scan. Caller must not hold q.mu.
-func (q *Queue) forgetSettledCheckpointProgress(id string) {
-	q.mu.Lock()
-	root := ""
-	if j := q.s.Jobs[id]; j != nil && terminal(j.State) {
-		root = j.Checkpoint
-	}
-	q.mu.Unlock()
+// expiring a live event into a new heartbeat scan. The caller supplies a
+// committed terminal job's root and must not hold q.mu.
+func (n *checkpointProgressReader) forgetSettled(root string) {
 	if root == "" {
 		return
 	}
-	q.nasProgress.readMu.Lock()
-	defer q.nasProgress.readMu.Unlock()
-	for path, observation := range q.nasProgress.recent {
+	n.readMu.Lock()
+	defer n.readMu.Unlock()
+	for path, observation := range n.recent {
 		if filepath.Dir(path) == root && !observation.pending {
-			delete(q.nasProgress.recent, path)
+			delete(n.recent, path)
 		}
 	}
 }

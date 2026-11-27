@@ -50,6 +50,28 @@ func testPublicationTimingsExactAttempt(t *testing.T, checkpoints bool) {
 	if j.FileTransport != checkpoints || !j.storedFileResults() {
 		t.Fatalf("wrong transport for stored result: file checkpoints=%t", j.FileTransport)
 	}
+	checkpoint := attemptCheckpoint(*j)
+	pending := filepath.Join(j.Checkpoint, "attempt-pending")
+	unrelated := filepath.Join(t.TempDir(), "attempt-other")
+	q.nasProgress.readMu.Lock()
+	q.nasProgress.recent = map[string]checkpointProgressObservation{
+		checkpoint: {value: 1},
+		pending:    {pending: true},
+		unrelated:  {value: 2},
+	}
+	q.nasProgress.readMu.Unlock()
+	checkObservations := func(wantSettled bool) {
+		t.Helper()
+		q.nasProgress.readMu.Lock()
+		defer q.nasProgress.readMu.Unlock()
+		_, settledPresent := q.nasProgress.recent[checkpoint]
+		_, pendingPresent := q.nasProgress.recent[pending]
+		_, unrelatedPresent := q.nasProgress.recent[unrelated]
+		if settledPresent != wantSettled || !pendingPresent || !unrelatedPresent {
+			t.Fatalf("unexpected checkpoint observations after completion request: settled=%t pending=%t unrelated=%t",
+				settledPresent, pendingPresent, unrelatedPresent)
+		}
+	}
 	var planningCalls atomic.Int32
 	q.mu.Lock()
 	q.observeBodyPhase = func(name string, _ time.Duration) {
@@ -69,6 +91,7 @@ func testPublicationTimingsExactAttempt(t *testing.T, checkpoints bool) {
 	if planningCalls.Swap(0) != 0 {
 		t.Error("release acknowledgement ran fleet planning")
 	}
+	checkObservations(true)
 	p.releaseAcknowledged(clock.Now())
 	manifest := p.begin(clock, "filesystem/output_manifest")
 	clock.Advance(200 * time.Millisecond)
@@ -93,6 +116,7 @@ func testPublicationTimingsExactAttempt(t *testing.T, checkpoints bool) {
 	if planningCalls.Load() != 0 {
 		t.Fatal("successful stored result ran fleet planning")
 	}
+	checkObservations(false)
 	got := job(t, q, j.ID)
 	timing := got.PublicationTimings
 	if timing == nil || len(got.AttemptHistory) != 1 || got.AttemptHistory[0].PublicationTimings == nil {
