@@ -4,6 +4,7 @@ entries:
         advanced:
             keep_on_failure:
                 - gate-failures.txt
+                - upgrade-compat-failure.log
         checks:
             result:
                 - grep
@@ -40,6 +41,7 @@ entries:
         advanced:
             keep_on_failure:
                 - gate-failures.txt
+                - upgrade-compat-failure.log
         checks:
             result:
                 - grep
