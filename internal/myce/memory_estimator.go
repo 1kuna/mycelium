@@ -54,6 +54,8 @@ type memoryEvidenceSeries struct {
 	// Trailing entries of Peaks, with an empty identity for an unbound sample.
 	// Older queues can still use Peaks without input coverage.
 	CardInputs []string `json:",omitempty"`
+	// Trailing entries of Peaks. Zero means no declared decoded duration.
+	CardSeconds []float64 `json:",omitempty"`
 }
 
 type memoryRatioKey struct {

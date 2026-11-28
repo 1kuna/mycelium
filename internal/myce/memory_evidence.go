@@ -235,7 +235,7 @@ func (w queueSQLiteWriter) seedXPUHighWater(s state, evidence *memoryEvidence) (
 			}
 			extension = &j.Extensions[i]
 		}
-		key := pooledEvidenceKeyForExtension(j, m, extension)
+		key, _ := pooledEvidenceKeyForExtension(j, m, extension)
 		if !xpuAutoRAM(j, key, len(j.AllocatedDevices)) {
 			continue
 		}

@@ -1184,7 +1184,17 @@ advanced:
   size_hint: {host_memory_gb: 14, memory_gb: 30}
 ```
 
-A matching variant reference enables accepted slice-1 observations. Prefer
+A matching variant reference enables accepted slice-1 observations.
+For one-shot XPU extension work whose card peak tracks decoded duration, set
+`unit: audio-seconds` on the matching variant reference. Set the reference's
+`units` to the check fixture's decoded duration and each job's `workload.units`
+to its own decoded duration in seconds, using the matching `input_shape`.
+The job needs immutable staged inputs. Once clean measurements bound that
+duration, a new input can share a card at the measured upper-band charge
+plus observed same-duration variation. An explicit card `size_hint` can
+raise that charge. Inputs outside the measured interval run alone.
+
+For host memory, prefer
 complete local CPU or discrete xe host evidence plus the margin above
 (other GPU and legacy local peaks × 1.25), then another machine's peaks for
 the same recipe/work/shape
