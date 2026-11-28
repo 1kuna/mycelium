@@ -637,11 +637,17 @@ func (w Worker) observeDeviceMemory(ctx context.Context, inventory func() (map[i
 func (w Worker) observeDeviceMemoryWith(ctx context.Context, inventory func() (map[int]bool, map[int]bool, error), fs memoryFS, period time.Duration, clock Clock, a *memoryAttempt, sink attemptMemorySampleSink, ticks ...<-chan time.Time) <-chan deviceMemoryResult {
 	result := make(chan deviceMemoryResult, 1)
 	started := clock.Now()
+	discreteXPU := w.Machine.GPU == "xpu" && !w.Machine.UnifiedMemory && len(w.selectedDevices) <= 1
 	go func() {
 		peak := &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNoSample}
 		unreported := false
 		var growth processMemoryGrowth
 		sampling := deviceSampling{start: started}
+		if discreteXPU {
+			// Completion timestamps ran up to 2.93 ms past two cycles in
+			// #2185. Cover that jitter while still rejecting a third cycle.
+			sampling.jitter = 5 * time.Millisecond
+		}
 		defer func() {
 			peak.DeviceSampling = sampling.finish(clock.Now(), period)
 			result <- deviceMemoryResult{peak: peak, unreported: unreported}
@@ -679,7 +685,7 @@ func (w Worker) observeDeviceMemoryWith(ctx context.Context, inventory func() (m
 
 				var gb, pinned float64
 				pinnedKnown := true
-				if w.Machine.GPU == "xpu" && !w.Machine.UnifiedMemory && len(w.selectedDevices) <= 1 {
+				if discreteXPU {
 					gb, pinned, pinnedKnown, err = xpuAttemptDeviceSample(w, ids, fs)
 				} else {
 					gb, _, err = w.attemptDeviceMemoryReading(ctx, ids, fs, nil, known)
@@ -691,12 +697,15 @@ func (w Worker) observeDeviceMemoryWith(ctx context.Context, inventory func() (m
 					continue
 				}
 				if err != nil {
-					sampling.incomplete = true
 					if !errors.Is(err, errAttemptMemoryPending) {
+						sampling.incomplete = true
 						report(&AttemptMemoryPeak{DeviceUnavailable: deviceMemoryUnsupported})
 						peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryUnsupported})
 						return
 					}
+					// XPU can poll before a matching DRM client exists.
+					// Count pending reads as missed cycles in its coverage.
+					sampling.incomplete = sampling.incomplete || !discreteXPU
 					report(&AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNoSample})
 					continue
 				}
