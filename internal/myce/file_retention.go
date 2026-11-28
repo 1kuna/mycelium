@@ -120,16 +120,17 @@ func (q *Queue) publishFileUpload(hash string, requestContexts ...context.Contex
 	}, nil)
 }
 
-// Called before the transaction commits a job/reference. Terminal retention
-// takes over once attached; other durable custody also releases orphan eligibility.
+// Called before the transaction commits a job/reference. Durable references
+// take over published blob retention. An interrupted upload keeps its zero
+// marker until publication or cleanup, including across a failed unlink.
 func (q *Queue) releaseFileUploadMarkers() {
 	if len(q.s.JobInputUploads) == 0 {
 		return
 	}
 	_, _, referenced := q.collectDurableFileReferences(false, nil, nil, q.touchedJobs())
 	q.records.referenceAdds = referenced
-	for hash := range q.s.JobInputUploads {
-		if referenced[hash] || q.records.references[hash] {
+	for hash, at := range q.s.JobInputUploads {
+		if !at.IsZero() && (referenced[hash] || q.records.references[hash]) {
 			delete(q.s.JobInputUploads, hash)
 		}
 	}
