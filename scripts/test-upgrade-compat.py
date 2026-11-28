@@ -123,6 +123,50 @@ class SupervisorTests(unittest.TestCase):
                     except ProcessLookupError:
                         pass
 
+    def test_shutdown_timeout_preserves_the_active_case_exception(self):
+        child = mock.Mock(returncode=-signal.SIGQUIT)
+        child.poll.return_value = None
+        child.wait.side_effect = [subprocess.TimeoutExpired("fixture", 8), -signal.SIGQUIT]
+
+        def spawn(*args, stdout, **kwargs):
+            stdout.write("teardown stack\n")
+            stdout.flush()
+            return child
+
+        primary = AssertionError("inventory refresh failed")
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(compat.subprocess, "Popen", side_effect=spawn):
+            with self.assertRaises(AssertionError) as result:
+                with compat.process("fixture", "worker", Path(tmp)):
+                    raise primary
+        self.assertIs(result.exception, primary)
+        self.assertIn("worker fixture shutdown stalled", primary.__notes__[0])
+        self.assertIn("teardown stack", primary.__notes__[0])
+        self.assertEqual(child.send_signal.call_args_list, [mock.call(signal.SIGTERM), mock.call(signal.SIGQUIT)])
+
+    def test_case_report_retains_previous_queue_generations_and_worker_log(self):
+        child = mock.Mock(returncode=0)
+        child.poll.return_value = 0
+        outputs = iter(("initial queue", "restarted queue", "worker check-in"))
+
+        def spawn(*args, stdout, **kwargs):
+            stdout.write(next(outputs))
+            stdout.flush()
+            return child
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(compat.subprocess, "Popen", side_effect=spawn):
+            root = Path(tmp)
+            queue = root / "queue"
+            worker = root / "worker"
+            for mode, path in (("queue", queue), ("queue", queue), ("worker", worker)):
+                with compat.process("fixture", mode, path):
+                    pass
+            with mock.patch.dict(os.environ, GATE_FAILURE_REPORT=str(root / "gate-failures.txt")), mock.patch("builtins.print"):
+                compat.report_case_failure("restart", AssertionError("original failure"), root,
+                                           set(root.rglob("process*.log")))
+            report = (root / "upgrade-compat-failure.log").read_text()
+            for text in ("original failure", "initial queue", "restarted queue", "worker check-in"):
+                self.assertIn(text, report)
+
     def test_successful_worker_does_not_hide_queue_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -24,7 +24,7 @@ targets:
 # Locked CPU tools for every declared target (see env/mycelium-gate/README.md).
 environment: {backend: pixi, lock_file: env/mycelium-gate/pixi.lock}
 advanced:
-  keep_on_failure: [gate-failures.txt]
+  keep_on_failure: [gate-failures.txt, upgrade-compat-failure.log]
 outputs:
   gate-result.txt: results
 check: [grep, -qx, 'gate full: exit=0', gate-result.txt]

@@ -14,6 +14,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import traceback
 import urllib.request
 import urllib.parse
 
@@ -169,31 +170,44 @@ def process(binary, mode, root, *, queue="", config="", tools=None, listen=""):
         (root / "url").unlink(missing_ok=True)
     if tools:
         env["PATH"] = str(tools)  # Worker discovers exactly the authored tools.
-    with (root / "process.log").open("w+") as log:
+    log_path = root / "process.log"
+    if log_path.exists():
+        generation = len(list(root.glob("process-*.log"))) + 1
+        log_path.rename(root / f"process-{generation}.log")
+    with log_path.open("w+") as log:
+        log.write(f"fixture mode={mode}\n")
+        log.flush()
         child = subprocess.Popen([str(binary), "-test.run=^TestUpgradeCompatProcess$", "-test.v", "-test.timeout=45s"],
                                  env=env, stdout=log, stderr=subprocess.STDOUT)
+        active_error = None
         try:
             yield child
+        except BaseException as error:
+            active_error = error
+            raise
         finally:
-            active_error = sys.exc_info()[1]
-            if child.poll() is None:
-                child.send_signal(signal.SIGTERM)
-                try:
-                    child.wait(timeout=8)
-                except subprocess.TimeoutExpired:
-                    # Preserve Go's stacks before failing a stuck shutdown.
-                    child.send_signal(signal.SIGQUIT)
+            try:
+                if child.poll() is None:
+                    child.send_signal(signal.SIGTERM)
                     try:
-                        child.wait(timeout=5)
+                        child.wait(timeout=8)
                     except subprocess.TimeoutExpired:
-                        child.kill()
-                        child.wait(timeout=5)
+                        # Save the fixture's stacks before failing a stuck shutdown.
+                        child.send_signal(signal.SIGQUIT)
+                        try:
+                            child.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            child.kill()
+                            child.wait(timeout=5)
+                        log.seek(0)
+                        raise RuntimeError(f"{mode} fixture shutdown stalled:\n{log.read()[-6000:]}")
+                if child.returncode:
                     log.seek(0)
-                    raise RuntimeError(f"{mode} fixture shutdown stalled:\n{log.read()}")
-            if child.returncode and (active_error is None or isinstance(active_error, Exception)):
-                log.seek(0)
-                detail = f"{active_error}; " if active_error else ""
-                raise RuntimeError(f"{detail}{mode} fixture exited {child.returncode}:\n{log.read()[-6000:]}")
+                    raise RuntimeError(f"{mode} fixture exited {child.returncode}:\n{log.read()[-6000:]}")
+            except Exception as cleanup_error:
+                if active_error is None:
+                    raise
+                active_error.add_note(str(cleanup_error))
 
 
 def await_file(path, child, predicate=bool, timeout=30):
@@ -255,6 +269,19 @@ def pairing(name, queue_binary, worker_binary, root, tools, *, large=False, conf
             print(f"upgrade-compat: PASS {name} (max check-in {max(row['bytes'] for row in rows)} bytes)", flush=True)
 
 
+def report_case_failure(name, error, scratch, logs):
+    details = f"upgrade-compat: FAIL {name}\n" + "".join(traceback.format_exception(error))
+    print(details, end="", flush=True)
+    fixture_logs = "".join(f"\n== {path.relative_to(scratch)} ==\n{path.read_text(errors='replace')}\n"
+                           for path in sorted(logs))
+    if failure_report := os.environ.get("GATE_FAILURE_REPORT"):
+        destination = Path(failure_report).with_name("upgrade-compat-failure.log")
+        with destination.open("a") as output:
+            output.write(details + fixture_logs)
+    else:
+        print(fixture_logs, end="", flush=True)
+
+
 def run(args):
     scratch_parent = REPO / ".gate"
     scratch_parent.mkdir(exist_ok=True)
@@ -291,11 +318,12 @@ def run(args):
             if not cases:
                 raise ValueError("no compatibility case matches --case")
         for name, case in cases:
+            prior_logs = set(scratch.rglob("process*.log"))
             try:
                 case()
             except Exception as error:
                 failures.append(name)
-                print(f"upgrade-compat: FAIL {name}: {error}", flush=True)
+                report_case_failure(name, error, scratch, set(scratch.rglob("process*.log")) - prior_logs)
         if failures:
             raise RuntimeError("failed cases: " + ", ".join(failures))
 
