@@ -179,6 +179,8 @@ func replayXPUCoreBackfill(t *testing.T, withResume bool) {
 			// attempt finishes, the core still accumulates for the XPU head.
 			urgent := small
 			urgent.Priority = "deadline"
+			deadline := clock.Now().Add(time.Hour)
+			urgent.Deadline = &deadline
 			wanted := submit(t, q, urgent)
 			got := assignedJob(machineCheck(t, q, m, running...))
 			if got == nil || got.ID != wanted.ID {
