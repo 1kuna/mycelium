@@ -39,10 +39,23 @@ func testQueueCheckpointWriterWait(t *testing.T, automatic bool) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, "queue.db")
+	store := path
+	if !automatic {
+		if err := PrepareStateRoots(root); err != nil {
+			t.Fatal(err)
+		}
+		store = filepath.Join(root, "queue-real.db")
+		if err := os.WriteFile(store, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(store, path); err != nil {
+			t.Fatal(err)
+		}
+	}
 	entered, resume := make(chan struct{}), make(chan struct{})
 	unblock := sync.OnceFunc(func() { close(resume) })
 	var armed atomic.Bool
-	installQueueFileSyncHook(t, sqlite3.SQLITE_OPEN_MAIN_DB, path, func(sync func() int32) int32 {
+	installQueueFileSyncHook(t, sqlite3.SQLITE_OPEN_MAIN_DB, store, func(sync func() int32) int32 {
 		if armed.CompareAndSwap(true, false) {
 			close(entered)
 			<-resume

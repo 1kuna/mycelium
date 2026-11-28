@@ -422,9 +422,9 @@ func openQueue(path, root string, clock Clock, shared *sharedQueueWriter, lock *
 			_ = lock.Close()
 		}
 	}()
-	writerDSN, checkpointDSN := path, ""
+	writerDSN, checkpointPath := path, ""
 	if shared == nil {
-		writerDSN, checkpointDSN, err = queueCheckpointDSNs(path)
+		writerDSN, err = queueCheckpointWriterDSN(path)
 		if err != nil {
 			return nil, err
 		}
@@ -442,6 +442,11 @@ func openQueue(path, root string, clock Clock, shared *sharedQueueWriter, lock *
 				return nil, err
 			}
 			return nil, errSharedCopy
+		}
+		checkpointPath, err = queueCheckpointDatabasePath(db)
+		if err != nil {
+			db.Close()
+			return nil, err
 		}
 	}
 	q := &Queue{sharedWriter: shared, startupReadWorkers: startupQueueReadWorkers, slimJobRecords: slimJobRecordsDefault, inputClaimRows: inputClaimRowsDefault, fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lock: lock, borrowedLock: borrowed, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, FairUsageVersion: 1, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
@@ -570,9 +575,9 @@ func openQueue(path, root string, clock Clock, shared *sharedQueueWriter, lock *
 	if !q.simulation {
 		q.openIdleHistory(path + ".idle")
 	}
-	if checkpointDSN != "" {
+	if checkpointPath != "" {
 		q.initShutdown()
-		q.walCheckpoint.start(q.shutdownContext, checkpointDSN, path+"-wal", q.persistencePageBytes)
+		q.walCheckpoint.start(q.shutdownContext, checkpointPath, q.persistencePageBytes)
 	}
 	success = true
 	if q.checkpointExpiryStatus == nil {

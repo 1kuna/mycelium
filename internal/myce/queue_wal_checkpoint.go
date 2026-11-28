@@ -21,26 +21,33 @@ type queueWALCheckpoint struct {
 
 const queueWALCheckpointFrames = 1000 // SQLite's default foreground threshold.
 
-func queueCheckpointDSNs(path string) (writer, checkpoint string, err error) {
+func queueCheckpointWriterDSN(path string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	u := url.URL{Scheme: "file", Path: abs}
-	u.RawQuery = "mode=rw&_pragma=busy_timeout(0)&_pragma=synchronous(FULL)"
-	checkpoint = u.String()
 	// The setting belongs to each SQLite connection. Apply it on every open,
 	// including a pool reconnection or a connection retained after startup.
 	u.RawQuery = "mode=rwc&_pragma=wal_autocheckpoint(0)&_pragma=busy_timeout(5000)&_pragma=synchronous(FULL)"
-	return u.String(), checkpoint, nil
+	return u.String(), nil
 }
 
-func (c *queueWALCheckpoint) start(ctx context.Context, dsn, walPath string, pageBytes int) {
+func queueCheckpointDatabasePath(db *sql.DB) (string, error) {
+	// SQLite opens the WAL beside the resolved file, including when the
+	// configured database is a symlink. Its filename is the authority.
+	var path string
+	err := db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path)
+	return path, err
+}
+
+func (c *queueWALCheckpoint) start(ctx context.Context, path string, pageBytes int) {
 	c.done = make(chan struct{})
 	c.pages.Add(queueWALCheckpointFrames) // Include frames recovered on open.
 	go func() {
 		defer close(c.done)
-		db, err := sql.Open("sqlite", dsn)
+		u := url.URL{Scheme: "file", Path: path, RawQuery: "mode=rw&_pragma=busy_timeout(0)&_pragma=synchronous(FULL)"}
+		db, err := sql.Open("sqlite", u.String())
 		if err != nil {
 			log.Print("event=queue_wal_checkpoint outcome=open_failed")
 			return
@@ -65,7 +72,7 @@ func (c *queueWALCheckpoint) start(ctx context.Context, dsn, walPath string, pag
 				if work == 0 && !pending {
 					continue
 				}
-				info, err := os.Stat(walPath)
+				info, err := os.Stat(path + "-wal")
 				if err != nil {
 					c.pages.Add(work)
 					continue
