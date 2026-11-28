@@ -80,13 +80,14 @@ func (q *Queue) stopShortMemoryPool(m *Machine, received time.Time, period time.
 		}
 		stop := PriorityPreemption{Demand: "host/" + host, MemorySample: &memoryStopSample{
 			ExpectedGB: a.ExpectedGB, PeakGB: max(a.HighWaterGB, *a.FootprintGB),
-			OwnersGB: pool.OwnersGB, OwnersPeakGB: max(pool.OwnersGB, pool.OwnersForecastGB),
 		}}
 		free := 0.0
 		if pool.FreeGB != nil {
 			free = *pool.FreeGB
 		}
 		if pool.Name == "ram" {
+			stop.MemorySample.OwnersGB = pool.OwnersGB
+			stop.MemorySample.OwnersPeakGB = max(pool.OwnersGB, pool.OwnersForecastGB)
 			grace := q.preemptionGrace().Seconds()
 			r := &MemoryPoolStop{ObservedAt: at, AvailableGB: free + pool.KeepGB, ReserveGB: pool.KeepGB,
 				SampleSeconds: max(0, report.ReactionSeconds-grace), GraceSeconds: grace, Trigger: trigger}

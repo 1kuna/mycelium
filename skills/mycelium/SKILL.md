@@ -105,8 +105,9 @@ sizing. Use a pin only for a [hard requirement](references/submit.md#explicit-pl
   XPU, the queue learns a card charge from complete device peaks on clean runs.
   Without comparable device evidence, the job reserves the whole card.
   Same-tier attempts can share when their charges fit the card and the host
-  has room. If your workload requires a card to itself, set
-  `advanced: {exclusive_device: true}` to reserve it exclusively. Queues that
+  has room. Card admission checks live device free memory and reservations
+  for current and unreleased attempts. If your workload requires a card to
+  itself, set `advanced: {exclusive_device: true}`. Queues that
   predate this field reject it with `request_invalid`.
 - For an explicit exact-digest runtime check, run
   `myce extension check --gpu PLATFORM --device DEVICE --digest SHA256 NAME@VERSION`

@@ -94,6 +94,11 @@ A run is **clean** only when every counter in its row was read for the whole run
     - X is the use the stop's forecast took them to.
 
     S subtracts it like any other hold, so R1 waits until a job fits beside the owners' peak, not just their current use. A later stop within E only raises X. The hold lapses once their use has stayed below X for its window, 24 h at first. A stop within E that sets an owners' hold on a pool whose last one lapsed less than one window ago reinstates it with twice that window: 48 h, then 96 h. The window returns to 24 h once a full window passes after a lapse with no reinstatement.
+    On a discrete card, the driver free counter and the attempt counters have separate cadences.
+    The difference between them cannot attribute growth to another owner.
+    Card stops use driver free and the current attempts' growth.
+    Card admission uses driver free and the current reservations, including each attempt's
+    measured high-water and capacity still held pending exact release (#2264).
   - Each pool's raised E is capped at that pool's reach, the largest on any host that can run the job. If the cap leaves it no higher than the measured peak or the old E, a retry can't do better, so the job waits under the existing `memory_capacity` hold. So does any job whose E on some pool exceeds that pool's reach. The hold names the pool, its peak, any owners' peak and the reach, and clears when that reach grows past them.
   - A kill at the job's own `memory_limit_gb` still fails it (#1972).
 
