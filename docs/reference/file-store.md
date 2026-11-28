@@ -103,6 +103,9 @@ when an unpublished upload has reached its declared length. Successful upload
 POST, HEAD, and PATCH requests refresh the durable idle timestamp.
 Active requests and committed references are fenced against collection. Rerun
 the upload to obtain a fresh claim and start at offset zero after collection.
+Once a job's file custody clears, its retained digest serves replay and
+published-blob history. A separate interrupted upload for that digest can
+then expire through the ordinary upload sweep.
 Published inputs still keep their unsettled-claim protection. A retention of `0`
 disables idle collection. Interrupted uploads without claims still use the
 retention window and publication grace. Unknown files and uploads created as

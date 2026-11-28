@@ -166,21 +166,48 @@ func TestFileCapacityAbandonedClaimedUploadSweep(t *testing.T) {
 func TestFileCapacityAbandonedUnclaimedLegacyUploadSweep(t *testing.T) {
 	q, clock := fixture(t)
 	c := retentionClient(t, q)
-	abandoned := capacityPartial(t, c, "abandoned legacy input", jobInputUploadPurpose)
+	const content = "abandoned legacy input"
+	abandoned := capacityPartial(t, c, content, jobInputUploadPurpose)
+	q.fileLifecycle.Lock()
+	q.fileLifecycle.Unlock()
+	// Replay a transfer whose full body reached disk without publishing the
+	// blob. The tus receipt was created with offset zero.
+	path := filepath.Join(q.files.root, "uploads", abandoned.SHA256)
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.files.refreshUpload(abandoned.SHA256); err != nil {
+		t.Fatal(err)
+	}
 	imported := capacityPartial(t, c, "abandoned legacy import", fileImportUploadPurpose)
+	protected := capacityPartial(t, c, "referenced legacy input", jobInputUploadPurpose)
+	expiredOwner := submit(t, q, spec("experiment"))
+	activeOwner := submit(t, q, spec("experiment"))
+	finished := clock.Now()
 	clock.Advance(max(testFileRetention, filePublicationGrace) + time.Nanosecond)
 	recent := capacityPartial(t, c, "recent legacy input", jobInputUploadPurpose)
 	q.fileLifecycle.Lock()
 	q.fileLifecycle.Unlock()
 	if err := q.update(func() error {
+		past := q.touchJob(expiredOwner.ID)
+		past.Spec.SharedInputs = map[string]SharedInput{"video": {SHA256: abandoned.SHA256, SizeBytes: abandoned.SizeBytes}}
+		past.State, past.FinishedAt, past.ReleaseConfirmed = "succeeded", &finished, true
+		past.FilesExpired, past.FileReclamation = true, &FileReclamation{}
+		active := q.touchJob(activeOwner.ID)
+		active.Spec.SharedInputs = map[string]SharedInput{"video": {SHA256: protected.SHA256, SizeBytes: protected.SizeBytes}}
 		delete(q.s.JobInputUploads, abandoned.SHA256)
 		delete(q.s.JobInputUploads, recent.SHA256)
+		delete(q.s.JobInputUploads, protected.SHA256)
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// An installed queue already indexed this terminal history on open.
+	q.mu.Lock()
+	q.rebuildRecords()
+	q.mu.Unlock()
 	ctx := context.Background()
-	if status := q.fileStoreStatus(ctx); status.ReclaimableBytes != 2 {
+	if status := q.fileStoreStatus(ctx); status.ReclaimableBytes != uint64(abandoned.SizeBytes) {
 		t.Fatalf("idle unclaimed job-input bytes missing from reclaimable accounting: %+v", status)
 	}
 	if err := q.Tick(); err != nil {
@@ -196,6 +223,7 @@ func TestFileCapacityAbandonedUnclaimedLegacyUploadSweep(t *testing.T) {
 		}
 	}
 	checkUpload(abandoned, false)
+	checkUpload(protected, true)
 	checkUpload(imported, true)
 	checkUpload(recent, true)
 	clock.Advance(max(testFileRetention, filePublicationGrace) + time.Nanosecond)
@@ -203,6 +231,7 @@ func TestFileCapacityAbandonedUnclaimedLegacyUploadSweep(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkUpload(recent, false)
+	checkUpload(protected, true)
 	checkUpload(imported, true)
 }
 

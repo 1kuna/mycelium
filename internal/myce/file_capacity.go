@@ -330,7 +330,7 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 			status.OpenUploadBytes = addDiskBytes(status.OpenUploadBytes, p.size)
 			_, output := v.outputMarkers[hash]
 			owned := marked && at.IsZero() || !marked && p.jobInput && legacyInputAllocation(claims, int64(p.length))
-			if owned && !referenced[hash] && (!output || len(claims) == 0) && v.age.interruptedUploadIdle(p.modified, claims) {
+			if owned && !keep[hash] && (!output || len(claims) == 0) && v.age.interruptedUploadIdle(p.modified, claims) {
 				status.ReclaimableBytes = addDiskBytes(status.ReclaimableBytes, p.size)
 			}
 			continue
@@ -505,14 +505,16 @@ func (q *Queue) reclaimInterruptedUploads(requestCtx context.Context, discoverLe
 		requestUnlock1()
 		return nil
 	}
-	_, _, referenced := q.collectDurableFileReferences(false, nil, nil)
+	// Expired jobs retain digest identities for replay and blob history. Only
+	// a keeping reference has custody of a separate interrupted upload.
+	_, keep, _ := q.collectDurableFileReferences(false, nil, nil)
 	claims := q.unsettledInputClaims()
 	revision := q.fileReferenceRevision
 	age := q.filePublicationAge(q.clock.Now())
 	candidates := map[string]bool{}
 	markers := q.jobUploadMarkers()
 	for hash, at := range markers {
-		if at.IsZero() && !referenced[hash] {
+		if at.IsZero() && !keep[hash] {
 			candidates[hash] = true
 		}
 	}
@@ -520,7 +522,7 @@ func (q *Queue) reclaimInterruptedUploads(requestCtx context.Context, discoverLe
 	// Verify the original purpose and exact allocation from tus metadata below.
 	legacy := map[string]bool{}
 	for hash, receipts := range claims {
-		if _, marked := markers[hash]; !marked && !referenced[hash] && age.interruptedUploadIdle(time.Time{}, receipts) {
+		if _, marked := markers[hash]; !marked && !keep[hash] && age.interruptedUploadIdle(time.Time{}, receipts) {
 			for _, claim := range receipts {
 				if claim.Allocated {
 					legacy[hash] = true
@@ -553,7 +555,7 @@ func (q *Queue) reclaimInterruptedUploads(requestCtx context.Context, discoverLe
 		}
 	}
 	for hash := range store.legacyUnclaimedUploads {
-		if _, marked := markers[hash]; !marked && !referenced[hash] && age.interruptedUploadIdle(time.Time{}, claims[hash]) {
+		if _, marked := markers[hash]; !marked && !keep[hash] && age.interruptedUploadIdle(time.Time{}, claims[hash]) {
 			candidates[hash] = true
 		}
 	}
@@ -573,7 +575,7 @@ func (q *Queue) reclaimInterruptedUploads(requestCtx context.Context, discoverLe
 		}
 		requestUnlock2 := requestReadLock(requestCtx, &q.mu)
 		if revision != q.fileReferenceRevision {
-			_, _, referenced = q.collectDurableFileReferences(false, nil, nil)
+			_, keep, _ = q.collectDurableFileReferences(false, nil, nil)
 			claims = q.unsettledInputClaims()
 			revision = q.fileReferenceRevision
 		}
@@ -581,7 +583,7 @@ func (q *Queue) reclaimInterruptedUploads(requestCtx context.Context, discoverLe
 		at, marked := q.jobUploadMarker(hash)
 		_, output := q.s.AttemptOutputUploads[hash]
 		receipts := claims[hash]
-		remove := q.files == store && !referenced[hash] && (!marked || at.IsZero()) &&
+		remove := q.files == store && !keep[hash] && (!marked || at.IsZero()) &&
 			(!output || len(receipts) == 0) && age.interruptedUploadIdle(time.Time{}, receipts)
 		requestUnlock2()
 		q.fileLifecycle.Unlock()
