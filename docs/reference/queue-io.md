@@ -52,9 +52,18 @@ for a complete queue recovery generation.
 
 Queue mutations commit with WAL and `synchronous=FULL`. The writer keeps its
 turn through the SQLite transaction, even when the physical mutex is released.
-Synchronization and automatic checkpoints can delay subsequent turns. Committed
-read views can coexist with the flush. Publishing before commit would break
-durable publication and rollback semantics.
+Required WAL synchronization can delay subsequent turns. Committed read views
+can coexist with the flush. Publishing before commit would break durable
+publication and rollback semantics.
+
+The standalone queue runs `PASSIVE` WAL checkpoints on a separate connection.
+It checks for work at most once per second. Once the WAL reaches SQLite's
+default 1,000-frame threshold, growth, accumulated logical write work or a
+partial pass can trigger another checkpoint. The work estimate avoids syncing
+the main database on every small write after a WAL file reaches its high-water
+size. A busy writer or pinned reader can leave work for the next pass. The
+`queue_wal_checkpoint` event records sampled pass durations and frame counts.
+The shutdown path joins the checkpoint before releasing the database lock.
 
 For [#2257](https://github.com/1kuna/mycelium/issues/2257), the r6.63 journal's
 52.778 s input-claim transaction held the physical mutex for 66.9 ms. It spent
@@ -89,6 +98,16 @@ busy hour. Durable SQLite work can still delay other writers during an I/O stall
 Mutable state and WAL checkpointing can cause sustained write amplification
 without database growth. Process counters do not distinguish database, WAL,
 logs and payload writes; whole-disk averages do not establish a safe I/O ceiling.
+
+In the r6.66 acceptance hour, the two consecutive writer turns overlapping
+the 11.772 s check-in wait were admission evidence (7.614 s) and another
+check-in (4.178 s). They spent 7.586 s and 4.021 s in SQLite commit. The longest
+same-request check-in turn was 6.509 s, with 6.342 s in commit and 108 ms in its
+body. Those live logs cannot separate WAL sync from SQLite's former automatic
+checkpoint. On a disposable queue with an injected main-database sync stall,
+the previous inline checkpoint blocked five check-ins, and all five persisted
+contact while the off-turn checkpoint was still blocked. Live after release,
+compare the new checkpoint timings with SQLite commit times and check-in waits.
 
 In the [#2245](https://github.com/1kuna/mycelium/issues/2245) incident, I/O PSI
 `full avg60` was 54%. One sampled check-in spent 3.64 s inside SQLite commit

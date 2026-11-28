@@ -235,6 +235,10 @@ func runQueueRootFragmentCrash(t *testing.T, dir, phase string) {
 // This VFS shim lives only in the killed subprocess. It intercepts the same
 // WAL xSync that SQLite calls for a FULL commit, independent of Go file I/O.
 func installQueueRootSyncHook(t *testing.T, hook func(func() int32) int32) {
+	installQueueFileSyncHook(t, sqlite3.SQLITE_OPEN_WAL, "", hook)
+}
+
+func installQueueFileSyncHook(t *testing.T, kind int32, path string, hook func(func() int32) int32) {
 	t.Helper()
 	tls := libc.NewTLS()
 	original := readRootFaultMemory[sqlite3.Tsqlite3_vfs](sqlite3.Xsqlite3_vfs_find(tls, 0))
@@ -247,7 +251,7 @@ func installQueueRootSyncHook(t *testing.T, hook func(func() int32) int32) {
 	vfs.FxOpen = keep(func(tls *libc.TLS, vfs, name, file uintptr, flags int32, out uintptr) int32 {
 		open := *(*func(*libc.TLS, uintptr, uintptr, uintptr, int32, uintptr) int32)(unsafe.Pointer(&original.FxOpen))
 		rc := open(tls, vfs, name, file, flags, out)
-		if rc != sqlite3.SQLITE_OK || flags&sqlite3.SQLITE_OPEN_WAL == 0 {
+		if rc != sqlite3.SQLITE_OK || flags&kind == 0 || path != "" && (name == 0 || libc.GoString(name) != path) {
 			return rc
 		}
 		f := readRootFaultMemory[sqlite3.Tsqlite3_file](file)

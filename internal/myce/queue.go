@@ -140,6 +140,7 @@ type Queue struct {
 	configureUploads        func(*tus.Config)  // Tests shorten tusd's socket timeouts; nil keeps its defaults.
 	diskHost                string             // Physical hostname for co-located disk relief.
 	controlCPUSampler       *controlCPUSampler
+	walCheckpoint           queueWALCheckpoint
 	controlCPU              controlCPUObservation // q.mu; local queue host only.
 	startupTrace            func(string)          // Startup only; controlled phase names, no state values.
 	startupReadWorkers      int
@@ -421,7 +422,14 @@ func openQueue(path, root string, clock Clock, shared *sharedQueueWriter, lock *
 			_ = lock.Close()
 		}
 	}()
-	db, err := openQueueSQLite(path)
+	writerDSN, checkpointDSN := path, ""
+	if shared == nil {
+		writerDSN, checkpointDSN, err = queueCheckpointDSNs(path)
+		if err != nil {
+			return nil, err
+		}
+	}
+	db, err := openQueueSQLite(writerDSN)
 	if err != nil {
 		return nil, err
 	}
@@ -561,6 +569,10 @@ func openQueue(path, root string, clock Clock, shared *sharedQueueWriter, lock *
 	q.traceStartup("load_usage_reader")
 	if !q.simulation {
 		q.openIdleHistory(path + ".idle")
+	}
+	if checkpointDSN != "" {
+		q.initShutdown()
+		q.walCheckpoint.start(q.shutdownContext, checkpointDSN, path+"-wal", q.persistencePageBytes)
 	}
 	success = true
 	if q.checkpointExpiryStatus == nil {
@@ -731,6 +743,7 @@ func (q *Queue) Close() error {
 	// Fence even no-op control requests, which can skip the SQLite writer.
 	q.BeginShutdown()
 	err := errors.Join(q.closeCheckpointShards(), q.closeIdleHistory())
+	q.walCheckpoint.wait()
 	if q.stopping.Load() {
 		log.Printf("event=queue_shutdown phase=storage_wait")
 	}
