@@ -127,8 +127,78 @@ func TestHostBackfillExtensionCheckRespectsRetainedCardCustody(t *testing.T) {
 // accumulation fence as CPU backfill, then place it beside CPU holders once
 // the preceding demand clears (#1701).
 
-// A completely occupied host needs no backfill projection yet. After a partial
-// natural release, the new pass must still protect a demand that cannot fit.
+func TestHostBackfillAccumulatesCoresForXPU(t *testing.T) {
+	t.Run("ordinary stream", func(t *testing.T) { replayXPUCoreBackfill(t, false) })
+	t.Run("CPU maintenance resume", func(t *testing.T) { replayXPUCoreBackfill(t, true) })
+}
+
+func replayXPUCoreBackfill(t *testing.T, withResume bool) {
+	t.Helper()
+	q, clock, m, _ := gpuHostFixture(t)
+	m.CapabilityProfile.LogicalCPUs = 6
+	machineCheck(t, q, m)
+
+	small := cpuSpec(1, 0.5)
+	small.WallTime = "1h"
+	var running []*Job
+	for i := 0; i < 6; i++ {
+		queued := submit(t, q, small)
+		got := assignedJob(machineCheck(t, q, m, running...))
+		if got == nil || got.ID != queued.ID {
+			t.Fatalf("filling core %d: %v", i, job(t, q, queued.ID).Reason)
+		}
+		running = append(running, got)
+	}
+
+	clock.Advance(time.Second)
+	// A queued CPU maintenance resume uses the same host cores as the
+	// incoming stream and must also leave room for the accelerator head.
+	if withResume {
+		resume := submit(t, q, small)
+		if err := q.update(func() error {
+			now := clock.Now()
+			q.touchJob(resume.ID).MaintenanceResume = &now
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(time.Second)
+	}
+	xpu := spec("experiment")
+	xpu.Project = "accelerator-project"
+	xpu.Needs = ResourceNeeds{CPUCores: 4, HostMemoryGB: 1, MemoryGB: 2,
+		Platform: Platform{Required: []string{"xpu"}}, GPU: &GPUSelection{Devices: []string{"1"}}}
+	head := submit(t, q, xpu)
+	for release := 1; release <= 4; release++ {
+		clock.Advance(time.Second)
+		submit(t, q, small)
+		finish(t, q, running[0], true)
+		running = running[1:]
+		if release == 1 {
+			// A higher tier may use the same partial release. Once that
+			// attempt finishes, the core still accumulates for the XPU head.
+			urgent := small
+			urgent.Priority = "deadline"
+			wanted := submit(t, q, urgent)
+			got := assignedJob(machineCheck(t, q, m, running...))
+			if got == nil || got.ID != wanted.ID {
+				t.Fatal("XPU fence blocked the deadline tier")
+			}
+			finish(t, q, got, true)
+		}
+		got := assignedJob(machineCheck(t, q, m, running...))
+		if release < 4 && got != nil {
+			t.Fatalf("release %d was backfilled by %s", release, got.ID)
+		}
+		if release == 4 && (got == nil || got.ID != head.ID) {
+			t.Fatalf("XPU demand missed its fourth release: %v", job(t, q, head.ID).Reason)
+		}
+		ledger := q.s.Machines[m.ID]
+		if ledger.CPUInUseCores > ledger.EffectiveCPUCores {
+			t.Fatalf("charged %d above %d admitted", ledger.CPUInUseCores, ledger.EffectiveCPUCores)
+		}
+	}
+}
 
 // CPU backfill can use surplus beside a finite device holder. The next GPU
 // execution still needs its full host vector when the card releases.

@@ -17,9 +17,11 @@ Queued accelerator extension checks also protect their resolved host RAM and
 cores, including guarded first measurements. A partial CPU release accumulates
 toward that demand instead of admitting another CPU attempt into its deficit.
 The same host fence applies to CPU maintenance resumes: within a tier, CPU
-backfill uses only capacity beyond queued accelerator demand. Higher tiers and
-already committed preemption releases retain precedence. Other eligible hosts
-and excess capacity remain usable; there is no fixed or whole-host reserve.
+backfill uses only capacity beyond queued accelerator demand. If a qualified
+accelerator has its card and RAM ready, a same-tier CPU maintenance resume
+leaves the accelerator's cores free through the pull that can start it.
+Higher tiers and already committed preemption releases retain precedence.
+Other eligible hosts and excess capacity remain usable.
 While an accelerator job waits for a card held by a single finite execution,
 equal-tier CPU backfill can use the RAM and cores that fit now and will still
 leave enough for the successor when that holder releases. Other running work
@@ -527,6 +529,12 @@ demand once, as do calls sharing a model allocation. Idle models/pins do not
 consume fair usage. Running work is accounted before each scheduling decision.
 This is admission fairness: same-tier work is not interrupted to rebalance
 projects, and an indefinite allocation has no bounded-wait guarantee.
+
+On a host that also runs the queue, measured control-plane CPU use can lower
+the current admission allowance. Existing charges can temporarily exceed the
+new allowance. The queue keeps those attempt reservations and withholds new
+CPU charges until the candidate fits the current allowance. On a shared host,
+measured job CPU overuse can also raise a running attempt's charge.
 
 Set weights and caps in the revision-CAS [owner policy](scheduling.md).
 The legacy `--project-config projects.yaml` option (also supported by `myce dev`)

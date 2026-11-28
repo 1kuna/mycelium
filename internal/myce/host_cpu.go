@@ -277,7 +277,13 @@ func cpuWait(j *Job, machines map[string]*Machine) *Hold {
 			_, reason = cpuCapacity(m)
 		}
 		if reason == "" {
-			reason = fmt.Sprintf("%d cores unreserved of %d admitted (%d charged; shared hosts include measured CPU overuse)", m.FreeCPUCores, m.EffectiveCPUCores, m.CPUInUseCores)
+			reason = fmt.Sprintf("%d cores unreserved of %d admitted (%d charged)", m.FreeCPUCores, m.EffectiveCPUCores, m.CPUInUseCores)
+			if configured := m.configuredCPUAllowance(); m.ControlPlaneCPUCores > 0 && configured > m.EffectiveCPUCores {
+				reason += fmt.Sprintf(", %.2f measured control-plane cores reduce the configured allowance of %d", m.ControlPlaneCPUCores, configured)
+			}
+			if m.SharedHost != nil {
+				reason += ", charge includes any measured job CPU overuse"
+			}
 		}
 		reasons = append(reasons, m.ID+": "+reason)
 	}
