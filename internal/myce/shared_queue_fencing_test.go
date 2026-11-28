@@ -549,9 +549,10 @@ func TestSharedQueueMemberRetriesLaunchAcrossHandover(t *testing.T) {
 	job := proofSubmit(t, old.client, proofSpec("launch-on-successor"))
 	j := proofAssignment(t, old.client, m, job.ID)
 
-	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	captured, deliver, awaitingCheckin := make(chan struct{}), make(chan struct{}), make(chan struct{}, 1)
+	captured, deliver := make(chan struct{}), make(chan struct{})
+	awaitingCheckin, checkedIn := make(chan struct{}), make(chan struct{})
 	const launchPath = "/api/workers/launch"
 	c := old.client
 	var nextURL *url.URL // Published to the observer by closing deliver.
@@ -564,8 +565,17 @@ func TestSharedQueueMemberRetriesLaunchAcrossHandover(t *testing.T) {
 			res, err := http.DefaultTransport.RoundTrip(req)
 			if err == nil && req.Header.Get(sharedTurnHeader) == successorTurn && res.StatusCode == http.StatusServiceUnavailable {
 				select {
-				case awaitingCheckin <- struct{}{}:
+				case <-awaitingCheckin:
 				default:
+					close(awaitingCheckin)
+				}
+				// Deliver the refusal after the test has reconciled this worker
+				// with the successor. The first retry can then be authorized.
+				select {
+				case <-checkedIn:
+				case <-req.Context().Done():
+					res.Body.Close()
+					return nil, req.Context().Err()
 				}
 			}
 			return res, err
@@ -601,8 +611,6 @@ func TestSharedQueueMemberRetriesLaunchAcrossHandover(t *testing.T) {
 	case <-captured:
 	case err := <-done:
 		t.Fatalf("launch probe did not reach first turn: %v", err)
-	case <-ctx.Done():
-		t.Fatal("launch probe was not produced")
 	}
 	old.stop(t, syscall.SIGTERM)
 	next := startProofMember(t, dir, "next", "127.0.0.1:0", pg.dsn)
@@ -614,17 +622,16 @@ func TestSharedQueueMemberRetriesLaunchAcrossHandover(t *testing.T) {
 	case <-awaitingCheckin:
 	case err := <-done:
 		t.Fatalf("worker lost its launch attempt before reporting to the successor: %v", err)
-	case <-ctx.Done():
-		t.Fatal("launch never reached the successor")
 	}
 	proofCheckin(t, next.client, m)
+	close(checkedIn)
 	if err := <-done; err != nil {
 		t.Fatalf("worker lost its launch attempt on handover: %v", err)
 	}
-	if err := next.client.Call(ctx, http.MethodPost, "/api/workers/started", execution, nil); err != nil {
+	if err := next.client.Call(t.Context(), http.MethodPost, "/api/workers/started", execution, nil); err != nil {
 		t.Fatal(err)
 	}
-	got, err := next.client.GetJob(ctx, j.ID)
+	got, err := next.client.GetJob(t.Context(), j.ID)
 	if err != nil || got.Attempt != j.Attempt || got.StartedAt == nil || got.State != "running" {
 		t.Fatalf("successor did not start the original attempt: %v", err)
 	}

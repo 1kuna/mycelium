@@ -67,7 +67,10 @@ runs the race-tested selection printed in its log:
 Full runs all Go packages under the race detector, the Python client suite and
 the adjacent-release check below. Run it once per release batch on a host with
 room for the Go cache and test scratch. Native Go tools use their normal cache.
-The gate uses a private fixture HOME and a one-hour Go test timeout per package.
+The gate uses a private fixture HOME and a one-hour Go test timeout. The full
+gate builds the core race test binary once and runs its compiled test inventory
+across four independent processes. Each root runs in exactly one process and
+each process has its own fixture HOME and one-hour Go timeout.
 Release builds cover the cross-architecture build matrix. The full suite retains
 security, incident and consumer-facing tests under [MY-53](DECISIONS.md#my-53).
 

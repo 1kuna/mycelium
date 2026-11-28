@@ -100,10 +100,7 @@ func processExposes(t *testing.T, pid int, secret string) bool {
 // password to argv, the environment, logs or a job.
 func TestSharedQueueMemberServiceRemoteAuthority(t *testing.T) {
 	pg := startRemoteProofPostgres(t)
-	binary := filepath.Join(t.TempDir(), "myce")
-	if out, err := exec.CommandContext(t.Context(), "go", "build", "-o", binary, "../../cmd/myce").CombinedOutput(); err != nil {
-		t.Fatalf("build CLI: %v\n%s", err, out)
-	}
+	binary := proofCLI(t)
 	authority := pg.authority(t)
 	dir := t.TempDir()
 	single := filepath.Join(dir, "single", "queue.db")
