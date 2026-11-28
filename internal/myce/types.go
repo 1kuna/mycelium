@@ -495,9 +495,10 @@ type Job struct {
 	// The target that wrote the newest accepted checkpoint generation (#1437).
 	CheckpointTarget *CheckpointOrigin `json:"checkpoint_target,omitempty"`
 	FaultEvidence    []*FaultEvidence  `json:"fault_evidence,omitempty"`
-	// Set only on read-only planner copies, never the durable job. Plain work's
-	// recipe and input identity is independent of the target or learned memory.
-	planningMemoryIdentity string
+	// Derived from a plain, non-fan-out job's immutable execution inputs.
+	// Assignment can change resource needs, so reuse requires the same configuration.
+	planningMemoryIdentity      string
+	planningMemoryConfiguration string
 	// Set only on a worker's launch copy: the attempt directory holding staged
 	// inputs. A lowered extension can run main in another working directory,
 	// and warm items still read their inputs and write outputs here.

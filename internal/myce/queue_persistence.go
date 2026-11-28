@@ -439,6 +439,11 @@ func (q *Queue) loadPersistedState() error {
 	if err := q.loadExpiredLearning(); err != nil {
 		return err
 	}
+	for _, j := range q.s.Jobs {
+		if mutableJob(j) {
+			j.preparePlanningMemoryIdentity()
+		}
+	}
 	q.rebuildRecords()
 	q.histories = cloneHistories(q.s.EfficiencyHosts)
 	return nil

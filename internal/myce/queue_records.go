@@ -263,6 +263,8 @@ func (q *Queue) touchJob(id string) *Job {
 				input.AdmissionWait = nil
 				v := cloneJob(&input)
 				v.AdmissionWait = j.AdmissionWait
+				v.planningMemoryIdentity = j.planningMemoryIdentity
+				v.planningMemoryConfiguration = j.planningMemoryConfiguration
 				if reason, ok := q.records.reasons[id]; ok {
 					v.Reason = reason
 				}

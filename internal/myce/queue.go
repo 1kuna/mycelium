@@ -1399,6 +1399,7 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		var copy Job
 		_ = q.withoutQueueMutex(queueWriteJournaled, &timing, true, func() error {
 			copy = cloneJob(j)
+			copy.preparePlanningMemoryIdentity()
 			return nil
 		})
 		j = &copy
