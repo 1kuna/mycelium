@@ -64,6 +64,9 @@ func logQueueHold(duration time.Duration, operation string, fn func() error, pha
 	if len(phases) != 0 {
 		p := phases[0]
 		detail = fmt.Sprintf(" mutex_hold_ms=%.3f off_lock_write_ms=%.3f", holdMS(p.mutexHold()), holdMS(p.offLock))
+		if p.offLockPrep != 0 {
+			detail += fmt.Sprintf(" off_lock_prepare_ms=%.3f", holdMS(p.offLockPrep))
+		}
 		detail += fmt.Sprintf(" records_snapshot_ms=%.3f fn_body_ms=%.3f persist_commit_ms=%.3f usage_accounting_ms=%.3f notify_ms=%.3f", holdMS(p.phases[holdRecords]), holdMS(p.phases[holdBody]), holdMS(p.phases[holdPersist]), holdMS(p.phases[holdUsage]), holdMS(p.phases[holdNotify]))
 		detail += fmt.Sprintf(" persist_marshal_ms=%.3f persist_sql_ms=%.3f persist_sync_commit_ms=%.3f persist_payload_bytes=%d persist_records=%d", holdMS(p.persistence.Marshal), holdMS(p.persistence.SQL), holdMS(p.persistence.Commit), p.persistence.Bytes, p.persistence.Records)
 		if p.checkinBody {
@@ -79,9 +82,11 @@ func logQueueHold(duration time.Duration, operation string, fn func() error, pha
 // Launch requests and instruction polls opt into detailed request/commit
 // timing; mutex holds are sampled independently above.
 type queueUpdateTiming struct {
+	clock     Clock // Optional observational clock for mutex timing.
 	started   time.Time
 	lockedAt  time.Time
 	mutexWait time.Duration
+	offLock   time.Duration
 	sqlCommit time.Duration
 	// Instruction polls opt in to distinguish pool acquisition from work.
 	measureWriter bool
@@ -116,10 +121,10 @@ func (t *queueUpdateTiming) lock(mu sync.Locker) {
 		mu.Lock()
 		return
 	}
-	started := time.Now()
+	started := holdNow(t.clock)
 	mu.Lock()
-	t.mutexWait = time.Since(started)
-	t.lockedAt = time.Now()
+	t.lockedAt = holdNow(t.clock)
+	t.mutexWait = t.lockedAt.Sub(started)
 }
 
 // The detached cancellation waiter may touch only the mutex, never caller
@@ -127,14 +132,14 @@ func (t *queueUpdateTiming) lock(mu sync.Locker) {
 func (t *queueUpdateTiming) lockContext(ctx context.Context, mu sync.Locker) error {
 	var started time.Time
 	if t != nil {
-		started = time.Now()
+		started = holdNow(t.clock)
 	}
 	if err := lockUploadContext(ctx, mu.Lock, mu.Unlock); err != nil {
 		return err
 	}
 	if t != nil {
-		t.mutexWait = time.Since(started)
-		t.lockedAt = time.Now()
+		t.lockedAt = holdNow(t.clock)
+		t.mutexWait = t.lockedAt.Sub(started)
 	}
 	return nil
 }
@@ -164,7 +169,7 @@ func (t *queueUpdateTiming) logLaunch(ok bool) {
 // Optional internal observer used by the queue-history burst regression.
 func (t *queueUpdateTiming) observe(fn func(time.Duration, time.Duration)) {
 	if fn != nil {
-		fn(t.mutexWait, time.Since(t.lockedAt))
+		fn(t.mutexWait, holdNow(t.clock).Sub(t.lockedAt))
 	}
 }
 
@@ -175,6 +180,7 @@ type queueHoldPhases struct {
 	clock         Clock
 	started, last time.Time
 	offLock       time.Duration
+	offLockPrep   time.Duration
 	active        int
 	phases        [5]time.Duration
 	checkinBody   bool
@@ -274,10 +280,14 @@ func (p *queueHoldPhases) finish() time.Duration {
 
 func (p *queueHoldPhases) pause() { p.next(p.active) }
 
-func (p *queueHoldPhases) resume() {
+func (p *queueHoldPhases) resume(preparing bool) {
 	if !p.started.IsZero() {
 		now := holdNow(p.clock)
-		p.offLock += now.Sub(p.last)
+		if preparing {
+			p.offLockPrep += now.Sub(p.last)
+		} else {
+			p.offLock += now.Sub(p.last)
+		}
 		p.last = now
 	}
 }
@@ -287,7 +297,7 @@ func (p *queueHoldPhases) resume() {
 func (p *queueHoldPhases) duration() time.Duration { return p.last.Sub(p.started) }
 
 // Physical mutex hold only; readers of committed views can overlap the rest.
-func (p *queueHoldPhases) mutexHold() time.Duration { return p.duration() - p.offLock }
+func (p *queueHoldPhases) mutexHold() time.Duration { return p.duration() - p.offLock - p.offLockPrep }
 
 // Body timers run inside a transaction or an explicitly observed diagnostic
 // fixture. Only the existing slow-hold logger emits them, after unlocking.

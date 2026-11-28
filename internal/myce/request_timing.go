@@ -22,6 +22,7 @@ type requestSpan struct {
 	finished   bool
 	started    time.Time
 	wait, hold time.Duration
+	offLock    time.Duration
 	writerWait time.Duration
 	lastUnlock time.Time
 	measured   bool
@@ -219,7 +220,7 @@ func (q *Queue) measureRequests(next http.Handler, registered ...map[string]stru
 			s.mu.Lock()
 			s.finished = true
 			wait, hold, lastUnlock, measured := s.wait, s.hold, s.lastUnlock, s.measured
-			writerWait := s.writerWait
+			writerWait, offLock := s.writerWait, s.offLock
 			logRequest := s.logRequest
 			s.mu.Unlock()
 			duration := ended.Sub(s.started)
@@ -239,7 +240,7 @@ func (q *Queue) measureRequests(next http.Handler, registered ...map[string]stru
 			if route == "POST /api/workers/checkin" && response.status < 400 && measured {
 				// Occupied queue work excludes body reads, reply writes and
 				// mutex acquisition. Slow peers cannot redefine queue latency.
-				q.requestBudgets.recordControl(max(0, hold-writerWait))
+				q.requestBudgets.recordControl(max(0, hold+offLock-writerWait))
 			}
 			slow := q.requestLatencies.record(route, duration)
 			q.requestHealth.recordRequest(q.clock.Now(), route, duration, wait)
@@ -258,13 +259,13 @@ func (q *Queue) measureRequests(next http.Handler, registered ...map[string]stru
 			if route == "GET /api/fleet/instruction" {
 				// Role only: hosts stay out of slow lines (#474); the idle-request
 				// event names host and machine.
-				phases = fmt.Sprintf(" writer_wait_ms=%.3f work_ms=%.3f caller=%s", float64(writerWait)/float64(time.Millisecond), float64(max(0, hold-writerWait))/float64(time.Millisecond), fleetInstructionCaller(r.URL.Query()))
+				phases = fmt.Sprintf(" writer_wait_ms=%.3f work_ms=%.3f caller=%s", holdMS(writerWait), holdMS(max(0, hold+offLock-writerWait)), fleetInstructionCaller(r.URL.Query()))
 			}
 			if route == "POST /api/workers/log" || route == "POST /api/workers/log-batch" {
 				phases = fmt.Sprintf(" request_id=%q job=%q attempt=%d offset=%d length=%d", logRequest.RequestID, logRequest.Job, logRequest.Attempt, logRequest.Offset, logRequest.Length)
 			}
 			logStarted := time.Now()
-			log.Printf("event=slow_request route=%q status=%d duration_ms=%.3f mutex_measured=%t mutex_wait_ms=%.3f mutex_hold_ms=%.3f after_unlock_ms=%.3f%s", route, status, float64(duration)/float64(time.Millisecond), measured, float64(wait)/float64(time.Millisecond), float64(hold)/float64(time.Millisecond), float64(after)/float64(time.Millisecond), phases)
+			log.Printf("event=slow_request route=%q status=%d duration_ms=%.3f mutex_measured=%t mutex_wait_ms=%.3f mutex_hold_ms=%.3f after_unlock_ms=%.3f off_lock_turn_ms=%.3f%s", route, status, holdMS(duration), measured, holdMS(wait), holdMS(hold), holdMS(after), holdMS(offLock), phases)
 			q.requestLatencies.mu.Lock()
 			budget := q.requestLatencies.routes[route].telemetry
 			q.requestLatencies.mu.Unlock()
@@ -281,12 +282,17 @@ func unlockTimedRequest(ctx context.Context, mu sync.Locker, timing *queueUpdate
 		return
 	}
 	end := time.Now()
+	held := end.Sub(timing.lockedAt)
+	if timing.clock != nil {
+		held = timing.clock.Now().Sub(timing.lockedAt)
+	}
 	mu.Unlock()
-	s.observe(timing.mutexWait, end.Sub(timing.lockedAt), end)
-	if timing.measureWriter {
+	s.observe(timing.mutexWait, max(0, held-timing.offLock), end)
+	if timing.measureWriter || timing.offLock != 0 {
 		s.mu.Lock()
 		if !s.finished {
 			s.writerWait += timing.writerWait
+			s.offLock += timing.offLock
 		}
 		s.mu.Unlock()
 	}

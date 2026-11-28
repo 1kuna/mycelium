@@ -67,51 +67,104 @@ func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileIn
 	if err := ref.validate(); err != nil {
 		return out, err
 	}
-	if s.Class == "" {
-		if err := lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock); err != nil {
-			return out, err
-		}
-		s.Class = q.s.Policies[s.Project].DefaultCallPriority
-		q.mu.RUnlock()
-	}
-	if err := normalizeJobClass(&s); err != nil {
-		return out, err
-	}
 	// Serialize receipt issuance with removal of the matching interrupted upload.
 	if err := lockUploadContext(ctx, q.fileLifecycle.RLock, q.fileLifecycle.RUnlock); err != nil {
 		return out, err
 	}
 	defer q.fileLifecycle.RUnlock()
-	// Settlement transfers quota attribution to the job, but concurrent uploads
-	// may still hold this receipt. An unrelated claim grants no revocation
-	// authority. Interrupted upload collection retires a claim with its transfer.
-	err := q.updateUploadRequest(ctx, func() error {
-		now := q.clock.Now()
-		cutoff := now.Add(-fileStoreQuotaWindow)
-		for id, claim := range q.s.FileInputClaims {
+	ctx = context.WithValue(ctx, submissionTurnKey{}, true)
+	for {
+		unlock, err := q.lockUploadRead(ctx)
+		if err != nil {
+			return out, err
+		}
+		claims, revision := q.s.FileInputClaims, q.fileInputClaimsRevision
+		defaultClass := q.s.Policies[s.Project].DefaultCallPriority
+		unlock()
+		candidate := s
+		if candidate.Class == "" {
+			candidate.Class = defaultClass
+		}
+		if err := normalizeJobClass(&candidate); err != nil {
+			return out, err
+		}
+		cutoff := q.clock.Now().Add(-fileStoreQuotaWindow)
+		var expired []string
+		var matching FileInputClaim
+		for id, claim := range claims {
 			if claim.Released {
 				if !claim.SettledAt.After(cutoff) {
-					delete(q.editInputClaims(), id)
+					expired = append(expired, id)
 				}
 				continue
 			}
-			if claim.Project == s.Project && claim.Class == s.Class && claim.File == ref {
-				if claim.SettledAt.IsZero() && now.After(claim.lastIssuance()) {
-					claim.LastIssuedAt = now
-					q.editInputClaims()[id] = claim
-				}
-				out = claim
-				return nil
+			if claim.Project == candidate.Project && claim.Class == candidate.Class && claim.File == ref {
+				matching = claim
 			}
 		}
-		if err := q.fileStoreQuotaRefusal(s, FileManifest{"input": ref}, 0); err != nil {
-			return err
+		var next map[string]FileInputClaim
+		if matching.ID == "" || matching.SettledAt.IsZero() || len(expired) > 0 {
+			next = copyInputClaims(claims)
+			for _, id := range expired {
+				delete(next, id)
+			}
 		}
-		out = FileInputClaim{ID: ID(), Project: s.Project, Class: s.Class, File: ref, At: now}
-		q.editInputClaims()[out.ID] = out
-		return nil
-	}, nil)
-	return out, err
+		id := matching.ID
+		if id == "" {
+			id = ID()
+		}
+		timing := &queueUpdateTiming{}
+		err = q.updateUploadRequest(ctx, func() error {
+			if q.fileInputClaimsRevision != revision || s.Class == "" && q.s.Policies[s.Project].DefaultCallPriority != defaultClass {
+				return errInputClaimsChanged
+			}
+			now := q.clock.Now()
+			if len(expired) > 0 {
+				q.replaceInputClaims(next)
+			}
+			// Settlement transferred quota attribution to the job. Reuse the
+			// receipt because concurrent uploads may still hold it.
+			if matching.ID != "" {
+				if matching.SettledAt.IsZero() && now.After(matching.lastIssuance()) {
+					matching.LastIssuedAt = now
+					next[id] = matching
+					q.replaceInputClaims(next)
+				}
+				out = matching
+				return nil
+			}
+			if err := q.submissionFileQuotaRefusal(candidate, FileManifest{"input": ref}, 0, timing); err != nil {
+				return err
+			}
+			out = FileInputClaim{ID: id, Project: candidate.Project, Class: candidate.Class, File: ref, At: now}
+			next[id] = out
+			q.replaceInputClaims(next)
+			return nil
+		}, timing)
+		if err != errInputClaimsChanged {
+			return out, err
+		}
+	}
+}
+
+var errInputClaimsChanged = errors.New("input claims changed during preparation")
+
+func copyInputClaims(claims map[string]FileInputClaim) map[string]FileInputClaim {
+	if claims == nil {
+		return map[string]FileInputClaim{}
+	}
+	return maps.Clone(claims)
+}
+
+// Install the owned map after rechecking its revision under q.mu. The undo
+// journal and committed read view retain their own immutable generation.
+func (q *Queue) replaceInputClaims(claims map[string]FileInputClaim) {
+	q.s.FileInputClaims = claims
+	if q.records != nil && q.records.updating {
+		q.records.editingInputClaims = true
+	}
+	q.fileInputClaimsJSON = nil
+	q.fileInputClaimsRevision++
 }
 
 func inputClaimError() error {
@@ -121,14 +174,12 @@ func inputClaimError() error {
 // Clone once on the first edit so unrelated transactions can borrow the
 // original map for rollback. Every write invalidates the prepared encoding.
 func (q *Queue) editInputClaims() map[string]FileInputClaim {
-	if q.records != nil && q.records.updating && !q.records.editingInputClaims {
-		q.s.FileInputClaims = maps.Clone(q.s.FileInputClaims)
-		q.records.editingInputClaims = true
+	if q.records == nil || !q.records.updating || !q.records.editingInputClaims {
+		q.replaceInputClaims(copyInputClaims(q.s.FileInputClaims))
+	} else {
+		q.fileInputClaimsJSON = nil
+		q.fileInputClaimsRevision++
 	}
-	if q.s.FileInputClaims == nil {
-		q.s.FileInputClaims = map[string]FileInputClaim{}
-	}
-	q.fileInputClaimsJSON = nil
 	return q.s.FileInputClaims
 }
 
@@ -253,25 +304,39 @@ func (q *Queue) noteInputClaimFacts(f *projectFileFacts, project string) {
 	}
 }
 
-// The job's ordinary reference now carries attribution/retention. This runs in
-// the same transaction as submission and never removes payload bytes.
-func (q *Queue) settleFileInputClaims(s Spec) {
-	now := q.clock.Now()
-	var delay time.Duration
-	for _, ref := range submissionFiles(s) {
-		for id, claim := range q.s.FileInputClaims {
-			if !claim.Released && claim.Project == s.Project && claim.File == ref {
-				// A settled claim is reused by later submissions of the same bytes.
-				// Its age then measures reuse, not a publication delay: live, one
-				// reused claim lifted the horizon past file retention (#1375).
-				if claim.SettledAt.IsZero() {
-					delay = max(delay, now.Sub(claim.At))
-				}
-				claim.SettledAt = now
-				q.editInputClaims()[id] = claim
-			}
+// Scan the immutable claim generation once, regardless of the manifest size.
+// A reused receipt already transferred attribution to ordinary job references.
+func prepareInputClaimSettlement(claims map[string]FileInputClaim, project string, files map[FileRef]bool) (map[string]FileInputClaim, []string) {
+	var ids []string
+	if len(files) == 0 {
+		return nil, nil
+	}
+	for id, claim := range claims {
+		if !claim.Released && claim.SettledAt.IsZero() && claim.Project == project && files[claim.File] {
+			ids = append(ids, id)
 		}
 	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	return copyInputClaims(claims), ids
+}
+
+// The job's ordinary reference now carries attribution and retention. Record
+// the first settlement in the same transaction as submission.
+func (q *Queue) settleFileInputClaims(next map[string]FileInputClaim, ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	now := q.clock.Now()
+	var delay time.Duration
+	for _, id := range ids {
+		claim := next[id]
+		delay = max(delay, now.Sub(claim.At))
+		claim.SettledAt = now
+		next[id] = claim
+	}
+	q.replaceInputClaims(next)
 	if delay > 0 {
 		q.recordPublicationTiming(now, delay)
 	}

@@ -226,6 +226,18 @@ func (q *Queue) fileStoreQuotaRefusal(s Spec, incoming FileManifest, declared ui
 	return q.projectFileQuotaRefusal(s.Project, incoming, declared)
 }
 
+// Submission owns the writer turn. Quota walks read the speculative expiry
+// and claim state without excluding readers of the committed publication.
+func (q *Queue) submissionFileQuotaRefusal(s Spec, incoming FileManifest, declared uint64, timing *queueUpdateTiming) error {
+	p := q.s.Policies[s.Project]
+	if p.MaxRetainedFileBytes == 0 && p.MaxAddedFileBytes24h == 0 || q.priorityMatch(s).Tier == "production" {
+		return nil
+	}
+	return q.withoutQueueMutex(queueWriteJournaled, timing, true, func() error {
+		return q.projectFileQuotaRefusal(s.Project, incoming, declared)
+	})
+}
+
 // q.mu held; the caller has already excluded production.
 func (q *Queue) projectFileQuotaRefusal(project string, incoming FileManifest, declared uint64) error {
 	p := q.s.Policies[project]

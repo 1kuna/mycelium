@@ -298,6 +298,7 @@ type Queue struct {
 	historiesPending        *historySnapshot
 	efficiencyHealthJSON    json.RawMessage            // Same immutable generation as s.EfficiencyHealth; q.mu.
 	fileInputClaimsJSON     json.RawMessage            // Same immutable generation as s.FileInputClaims; q.mu.
+	fileInputClaimsRevision uint64                     // Advances on edit, including a rolled-back edit; q.mu.
 	persistedStateFields    map[string]json.RawMessage // Committed fragments only; q.mu.
 	persistedStateSize      int                        // Logical JSON size for evidence accounting; q.mu.
 	flushHistoriesNow       bool
@@ -813,8 +814,10 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	if timing == nil {
 		timing = &queueUpdateTiming{}
 	}
+	timing.clock = q.holdClock
 	var writer sync.Locker = &q.mu
-	if ctx.Value(submissionTurnKey{}) != nil {
+	submission := ctx.Value(submissionTurnKey{}) != nil
+	if submission {
 		writer = submissionMutex{&q.mu}
 	}
 	if cancelWait {
@@ -933,7 +936,7 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 			err = audit()
 		}
 		if err == nil {
-			err = q.persistUsage(timing, observationOnly)
+			err = q.persistUsage(timing, observationOnly, submission)
 		}
 	}
 	if err != nil {
@@ -1044,12 +1047,17 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 	}
 	// Own all client maps/slices before the lock and across verification.
 	s = cloneJob(&Job{Spec: s}).Spec
+	files := submissionFiles(s)
+	fileRefs := make(map[FileRef]bool, len(files))
+	for _, ref := range files {
+		fileRefs[ref] = true
+	}
+	warmPiecesErr := validateWarmPieces(s)
 	unlockRequest := requestLock(ctx, submissionMutex{&q.mu})
 	store, ready := q.files, q.sharedFilesReady()
 	catalog := q.environments
 	environmentRevision := q.environmentRevision
 	replay := s.SubmissionKey != "" && q.s.Submissions[submissionDigest(s.Project, s.SubmissionKey)] != nil
-	files := submissionFiles(s)
 	if len(files) > 0 && !replay && ready && q.submitVerificationSlot == nil {
 		q.submitVerificationSlot = make(chan struct{}, 1)
 	}
@@ -1124,8 +1132,6 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 			}
 		}
 	}
-	var resultCapacity FileStoreStatus
-	var resultPayloads map[string]storedPayload
 	var resultView *fileCapacitySnapshot
 	if s.OutputDelivery == asyncNAS && !replay && ready && store != nil {
 		resultView = store.snapshotCapacity(ctx)
@@ -1134,11 +1140,15 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 
 	var out Job
 	var refusedHealthDemand *Job
-	err = q.updateTransaction(ctx, func() error {
-		if resultView != nil {
-			store.mu.Lock()
-			resultCapacity, resultPayloads = resultView.current()
-			store.mu.Unlock()
+	var claimsRevision uint64
+	var nextClaims map[string]FileInputClaim
+	var settledClaims []string
+	var timing queueUpdateTiming
+	commit := func() error {
+		// A changed claim generation must be prepared again without the writer
+		// turn. The verified blobs remain protected by fileLifecycle.
+		if len(fileRefs) > 0 && claimsRevision != q.fileInputClaimsRevision {
+			return errInputClaimsChanged
 		}
 		q.maintainSubmissions()
 		existing, err := q.existingSubmission(s, fingerprint)
@@ -1173,8 +1183,8 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		if q.files != store || q.environmentRevision != environmentRevision {
 			return ErrStale
 		}
-		if err := validateWarmPieces(s); err != nil {
-			return rejectFieldRule("job_files_invalid", err)
+		if warmPiecesErr != nil {
+			return rejectFieldRule("job_files_invalid", warmPiecesErr)
 		}
 		if err := q.defaultMemory(&s); err != nil {
 			return specRejection(err)
@@ -1252,7 +1262,18 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 			if store == nil {
 				return &HTTPError{Status: 503, Code: "file_store_unavailable", Message: "queue-file-store is not configured"}
 			}
-			if err := q.fileStoreAdmissionRefusal(WithFileStoreSubmission(ctx, s), resultCapacity, resultPayloads, addDiskBytes(q.outputReservations(resultPayloads, ""), s.Disk.OutputBytes), s.Disk.OutputBytes, q.outputReservationsFor(resultPayloads, "", true), q.priorityMatch(s).Tier == "production"); err != nil {
+			if err := q.withoutQueueMutex(queueWriteJournaled, &timing, true, func() error {
+				var capacity FileStoreStatus
+				var payloads map[string]storedPayload
+				if resultView != nil {
+					store.mu.Lock()
+					capacity, payloads = resultView.current()
+					store.mu.Unlock()
+				}
+				need := addDiskBytes(q.outputReservations(payloads, ""), s.Disk.OutputBytes)
+				protected := q.outputReservationsFor(payloads, "", true)
+				return q.fileStoreAdmissionRefusal(WithFileStoreSubmission(ctx, s), capacity, payloads, need, s.Disk.OutputBytes, protected, q.priorityMatch(s).Tier == "production")
+			}); err != nil {
 				return err
 			}
 		}
@@ -1269,7 +1290,7 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		if s.Disk != nil {
 			declared = s.Disk.OutputBytes
 		}
-		if err := q.fileStoreQuotaRefusal(s, submissionFiles(s), declared); err != nil {
+		if err := q.submissionFileQuotaRefusal(s, files, declared, &timing); err != nil {
 			return err
 		}
 		modelLimits, err := q.modelLimits(s)
@@ -1373,7 +1394,11 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 				return rejectFieldRule("job_capacity_invalid", e)
 			}
 		}
-		copy := cloneJob(j)
+		var copy Job
+		_ = q.withoutQueueMutex(queueWriteJournaled, &timing, true, func() error {
+			copy = cloneJob(j)
+			return nil
+		})
 		j = &copy
 		if s.FanOut != nil {
 			j.FanOut = &FanOutProgress{Results: map[string]PieceResult{}}
@@ -1390,7 +1415,7 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 			return err
 		}
 		q.materializePlainPieces(j)
-		q.settleFileInputClaims(s)
+		q.settleFileInputClaims(nextClaims, settledClaims)
 		if s.SubmissionKey != "" {
 			if q.s.Submissions == nil {
 				q.s.Submissions = map[string]*submissionRecord{}
@@ -1404,9 +1429,28 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 			}
 		}
 		q.maintain()
-		out = cloneJob(j)
-		return nil
-	}, nil, false, committed)
+		return q.withoutQueueMutex(queueWriteJournaled, &timing, true, func() error {
+			out = cloneJob(j)
+			return nil
+		})
+	}
+	for {
+		if len(fileRefs) > 0 {
+			unlock := requestReadLock(ctx, &q.mu)
+			claims := q.s.FileInputClaims
+			claimsRevision = q.fileInputClaimsRevision
+			unlock()
+			nextClaims, settledClaims = prepareInputClaimSettlement(claims, s.Project, fileRefs)
+		}
+		timing = queueUpdateTiming{}
+		err = q.updateTransaction(ctx, commit, &timing, false, committed)
+		if err != errInputClaimsChanged {
+			break
+		}
+		if err = ctx.Err(); err != nil {
+			break
+		}
+	}
 	if err != nil && refusedHealthDemand != nil {
 		// The refused submission rolls back. Record only a rechecked health
 		// observation in its own transaction, never create or admit the job.
