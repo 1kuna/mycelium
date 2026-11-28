@@ -69,6 +69,19 @@ step() {
 go_tests() {
   go test -race -count=1 -timeout=1h -p=1 -json "$@" | python3 "$repo/scripts/gate-test-output.py"
 }
+go_core_tests() {
+  go test -c -race -vet=off -o "$scratch/myce.test" ./internal/myce || return
+  python3 "$repo/scripts/gate-core-tests.py" "$scratch/myce.test" | python3 "$repo/scripts/gate-test-output.py"
+}
+go_other_tests() {
+  local packages package
+  local -a selected=()
+  packages=$(go list ./...) || return
+  while IFS= read -r package; do
+    [[ $package == mycelium/internal/myce ]] || selected+=("$package")
+  done <<< "$packages"
+  go_tests -vet=off "${selected[@]}"
+}
 # A directory with its own go.mod (scripts/queue-qualify) is a separate
 # module that ./... at the root skips; vet and test it from inside.
 module_tests() {
@@ -83,10 +96,14 @@ python_tests() {
 step docs-links python3 scripts/check-doc-links.py
 step docs-links-regressions python3 scripts/test-check-doc-links.py
 step selector-regressions python3 scripts/test-gate-related.py
-step build go build -o /dev/null ./cmd/myce
+step build go build -o "$scratch/myce" ./cmd/myce
+if [[ -x $scratch/myce ]]; then
+  export MYCE_TEST_CLI="$scratch/myce"
+fi
 step vet go vet ./...
 if [[ $mode == full ]]; then
-  step go-tests go_tests -vet=off ./...
+  step go-tests-core go_core_tests
+  step go-tests go_other_tests
   while IFS= read -r module; do
     step "go-tests ${module%/go.mod}" module_tests "${module%/go.mod}"
   done < <(find scripts -name go.mod -mindepth 2 | sort)
