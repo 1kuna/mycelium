@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -86,14 +87,28 @@ func TestControlCPUReserveConstrainsCheckinAdmission(t *testing.T) {
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	if r := check(t, q, local, nil); r.Job == nil || r.Job.ID != job.ID {
-		t.Fatalf("check-in did not admit %s when measured CPU fell: %+v", job.ID, r.Job)
+	assigned := check(t, q, local, nil).Job
+	if assigned == nil || assigned.ID != job.ID {
+		t.Fatalf("check-in did not admit %s when measured CPU fell: %+v", job.ID, assigned)
 	}
 
 	clock.Advance(controlCPUWindow)
 	writeControlCPUCounter(t, queue, 20_000_000)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
+	}
+	ledger := q.s.Machines[local.ID]
+	if ledger.CPUInUseCores != 3 || ledger.EffectiveCPUCores != 2 {
+		t.Fatalf("subsequent measured control use did not explain the excess: %d charged, %d admitted", ledger.CPUInUseCores, ledger.EffectiveCPUCores)
+	}
+	next := submit(t, q, cpuSpec(1, 1))
+	if got := check(t, q, local, assigned); got.Job != nil {
+		t.Fatalf("over-budget ledger admitted another job: %s", got.Job.ID)
+	}
+	h := cpuWait(next, map[string]*Machine{local.ID: ledger})
+	want := fmt.Sprintf("2 admitted (3 charged), %.2f measured control-plane cores reduce the configured allowance of 4", ledger.ControlPlaneCPUCores)
+	if h == nil || !strings.Contains(h.Detail, want) {
+		t.Fatalf("CPU hold did not explain the changed allowance: %+v", h)
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()

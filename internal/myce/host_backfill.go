@@ -16,6 +16,9 @@ type hostBackfillDemand struct {
 	pooled  bool
 	// A promoted stage keeps the project's original position against other projects.
 	fairHead *hostBackfillDemand
+	// A card-ready head can use the CPU maintenance resume's turn. Work
+	// behind the head still respects the original drain.
+	cpuDrain *hostBackfillDemand
 	// drain marks a maintenance resume's fence; start is when it is expected
 	// to fit anyway, or nil when unknown.
 	drain bool
@@ -203,9 +206,12 @@ func (q *Queue) hostBackfillBlocker(j *Job, m *Machine, fence *hostBackfillDeman
 		if fence.fairHead != nil && j.Spec.Project != fence.job.Spec.Project {
 			order = fence.fairHead
 		}
-		before := q.pipelineStagePrecedes(j, fence.job) || !q.pipelineStagePrecedes(fence.job, j) && q.beforeWithFair(j, order.job, order.machine, fence.order.score, fence.order.active)
-		if before || q.poolBackfillFits(j, m, fence) {
+		before := q.pipelineStagePrecedes(j, fence.job) || !q.pipelineStagePrecedes(fence.job, j) && q.hostBackfillBefore(j, order.job, order.machine, fence.order)
+		if before {
 			return nil
+		}
+		if q.poolBackfillFits(j, m, fence) {
+			return q.hostBackfillBlocker(j, m, fence.cpuDrain)
 		}
 		return fence.job
 	}
@@ -290,7 +296,7 @@ func (q *Queue) hostBackfillWaitingReason(j *Job, scan *placementScan) string {
 			}
 			if demand == nil || blocker.ID < demand.ID {
 				demand = blocker
-				poolFence = fence.pooled
+				poolFence = fence.pooled && blocker.ID == fence.job.ID
 			}
 		}
 	}

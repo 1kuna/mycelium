@@ -333,7 +333,9 @@ func (q *Queue) addPoolBackfillHeads(scan *placementScan, demands []*Job, live m
 	ready := map[string]bool{}
 	for _, m := range scan.machines {
 		host := hostID(m)
-		if workerMemoryHold(m) != nil || !live[m.ID] || scan.hostBackfill[host] != nil || q.preparationActive(m) || q.preparationStopping(m) {
+		existing := scan.hostBackfill[host]
+		cpuDrain := existing != nil && existing.drain && existing.startProbe == nil && existing.job.Spec.Needs.cpuOnly()
+		if workerMemoryHold(m) != nil || !live[m.ID] || existing != nil && (!cpuDrain || m.GPU == "cpu") || q.preparationActive(m) || q.preparationStopping(m) {
 			continue
 		}
 		capacity := q.qualificationCapacity(m)
@@ -353,11 +355,22 @@ func (q *Queue) addPoolBackfillHeads(scan *placementScan, demands []*Job, live m
 				if !pooledMemory(candidate) || !environmentReady(candidate, m) || q.capReasonFor(candidate, m) != "" || !fits(candidate, &capacity, capacity.FreeMemoryGB) {
 					continue
 				}
-				if fits(candidate, m, m.FreeMemoryGB) && q.batchSlotFree(m, candidate) && q.poolCustodyAllows(candidate, m) && q.workerRAMGate(candidate, m) == nil {
+				if cpuDrain {
+					// A CPU resume must preserve a card-ready accelerator's turn,
+					// including the pull on which its last required core frees.
+					// Keep all the live gates except current CPU occupancy.
+					room := *m
+					room.FreeCPUCores = m.EffectiveCPUCores
+					if candidate.Spec.Needs.cpuOnly() || !q.hostBackfillBefore(candidate, existing.job, m, existing.order) ||
+						q.variantParityHold(candidate, m) != nil || !q.immediateProjectionFits(candidate, &room, scan) || !q.poolCustodyAllows(candidate, m) {
+						continue
+					}
+				}
+				if !cpuDrain && fits(candidate, m, m.FreeMemoryGB) && q.batchSlotFree(m, candidate) && q.poolCustodyAllows(candidate, m) && q.workerRAMGate(candidate, m) == nil {
 					ready[j.ID] = true
 					continue
 				}
-				byHost[host] = append(byHost[host], &hostBackfillDemand{job: candidate, machine: m, pooled: true})
+				byHost[host] = append(byHost[host], &hostBackfillDemand{job: candidate, machine: m, pooled: true, cpuDrain: existing})
 			}
 		}
 	}
@@ -377,7 +390,7 @@ func (q *Queue) addPoolBackfillHeads(scan *placementScan, demands []*Job, live m
 			if ready[c.job.ID] {
 				continue
 			}
-			if head == nil || q.beforeWithFair(c.job, head.job, c.machine, set.score, set.active) {
+			if head == nil || q.hostBackfillBefore(c.job, head.job, c.machine, set) {
 				head = c
 			}
 		}

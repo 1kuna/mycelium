@@ -155,6 +155,11 @@ Choose a class before submission. Owner policy maps project/class pairs to
 ordered tiers. Default order is production, deadline, then experiment. The
 planner prefers fitting free capacity, applies fair sharing within a tier and
 waits for exact release when it displaces work.
+A card-ready accelerator job can accumulate released host cores ahead of
+same-tier CPU backfill, including CPU maintenance resumes. Higher tiers keep
+their turn. A CPU hold may show charges above the current allowance when
+measured control-plane CPU use lowers it or measured shared-host job use raises
+the charge. Keep the job and key while the queue waits for room.
 
 | Class | Use |
 | --- | --- |
