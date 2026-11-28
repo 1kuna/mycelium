@@ -120,7 +120,7 @@ func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileIn
 			}
 			now := q.clock.Now()
 			if len(expired) > 0 {
-				q.replaceInputClaims(next)
+				q.replaceInputClaims(next, expired...)
 			}
 			// Settlement transferred quota attribution to the job. Reuse the
 			// receipt because concurrent uploads may still hold it.
@@ -128,7 +128,7 @@ func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileIn
 				if matching.SettledAt.IsZero() && now.After(matching.lastIssuance()) {
 					matching.LastIssuedAt = now
 					next[id] = matching
-					q.replaceInputClaims(next)
+					q.replaceInputClaims(next, id)
 				}
 				out = matching
 				return nil
@@ -138,7 +138,7 @@ func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileIn
 			}
 			out = FileInputClaim{ID: id, Project: candidate.Project, Class: candidate.Class, File: ref, At: now}
 			next[id] = out
-			q.replaceInputClaims(next)
+			q.replaceInputClaims(next, id)
 			return nil
 		}, timing)
 		if err != errInputClaimsChanged {
@@ -158,13 +158,39 @@ func copyInputClaims(claims map[string]FileInputClaim) map[string]FileInputClaim
 
 // Install the owned map after rechecking its revision under q.mu. The undo
 // journal and committed read view retain their own immutable generation.
-func (q *Queue) replaceInputClaims(claims map[string]FileInputClaim) {
+func (q *Queue) replaceInputClaims(claims map[string]FileInputClaim, changed ...string) {
 	q.s.FileInputClaims = claims
 	if q.records != nil && q.records.updating {
 		q.records.editingInputClaims = true
 	}
 	q.fileInputClaimsJSON = nil
 	q.fileInputClaimsRevision++
+	q.journalInputClaims(changed...)
+}
+
+func (q *Queue) journalInputClaims(ids ...string) {
+	if !q.inputClaimRows || q.records == nil || !q.records.updating || len(ids) == 0 {
+		return
+	}
+	if q.records.inputClaims == nil {
+		q.records.inputClaims = make(map[string]struct{}, len(ids))
+	}
+	for _, id := range ids {
+		q.records.inputClaims[id] = struct{}{}
+	}
+}
+
+// Open removes the legacy field and writes the individual claims in its first
+// transaction, before serving requests. A failed write leaves the old format.
+func (q *Queue) migrateInputClaimRows() {
+	if !q.inputClaimRows {
+		return
+	}
+	for id := range q.s.FileInputClaims {
+		if q.persisted[inputClaimRowPrefix+id] == nil {
+			q.journalInputClaims(id)
+		}
+	}
 }
 
 func inputClaimError() error {
@@ -173,12 +199,13 @@ func inputClaimError() error {
 
 // Clone once on the first edit so unrelated transactions can borrow the
 // original map for rollback. Every write invalidates the prepared encoding.
-func (q *Queue) editInputClaims() map[string]FileInputClaim {
+func (q *Queue) editInputClaims(id string) map[string]FileInputClaim {
 	if q.records == nil || !q.records.updating || !q.records.editingInputClaims {
-		q.replaceInputClaims(copyInputClaims(q.s.FileInputClaims))
+		q.replaceInputClaims(copyInputClaims(q.s.FileInputClaims), id)
 	} else {
 		q.fileInputClaimsJSON = nil
 		q.fileInputClaimsRevision++
+		q.journalInputClaims(id)
 	}
 	return q.s.FileInputClaims
 }
@@ -186,7 +213,7 @@ func (q *Queue) editInputClaims() map[string]FileInputClaim {
 func (q *Queue) forgetFileInputClaims(hash string, before time.Time) {
 	for id, claim := range q.s.FileInputClaims {
 		if !claim.Released && claim.File.SHA256 == hash && !claim.lastIssuance().After(before) {
-			delete(q.editInputClaims(), id)
+			delete(q.editInputClaims(id), id)
 		}
 	}
 }
@@ -271,7 +298,7 @@ func (q *Queue) inputClaimContext(ctx context.Context, ref FileRef, allocate boo
 				return inputClaimError()
 			}
 			current.Allocated = true
-			q.editInputClaims()[id] = current
+			q.editInputClaims(id)[id] = current
 			return nil
 		}, nil); err != nil {
 			return ctx, err
@@ -336,7 +363,7 @@ func (q *Queue) settleFileInputClaims(next map[string]FileInputClaim, ids []stri
 		claim.SettledAt = now
 		next[id] = claim
 	}
-	q.replaceInputClaims(next)
+	q.replaceInputClaims(next, ids...)
 	if delay > 0 {
 		q.recordPublicationTiming(now, delay)
 	}
@@ -455,7 +482,7 @@ func (q *Queue) ReleaseFileInputClaim(ctx context.Context, req FileInputClaimRel
 			}
 		}
 		claim.SettledAt, claim.Released = q.clock.Now(), true
-		q.editInputClaims()[claim.ID] = claim
+		q.editInputClaims(claim.ID)[claim.ID] = claim
 		result = FileInputClaimReleaseResult{claim.ID, claim.SettledAt}
 		return nil
 	}, nil)

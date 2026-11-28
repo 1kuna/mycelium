@@ -42,6 +42,7 @@ type queueRecords struct {
 	jobCount, submissionCount int
 	updating                  bool
 	editingInputClaims        bool
+	inputClaims               map[string]struct{}
 	checkpointExpiry          map[string]checkpointExpiryEntry // Settled job ID -> folder and earliest expiry (#894).
 	checkpointUndated         map[string]bool                  // Settled jobs with no timestamp to start a grace period.
 	after                     map[string][]string              // Job ID -> the parents its after: bindings name.
@@ -505,6 +506,7 @@ func (q *Queue) commitRecords() {
 	q.records.machines, q.records.reasons, q.records.staleness = nil, nil, nil
 	q.records.updating = false
 	q.records.editingInputClaims = false
+	q.records.inputClaims = nil
 	q.records.jobs = nil
 	q.records.submissions = nil
 }
