@@ -140,6 +140,7 @@ type Queue struct {
 	configureUploads        func(*tus.Config)  // Tests shorten tusd's socket timeouts; nil keeps its defaults.
 	diskHost                string             // Physical hostname for co-located disk relief.
 	controlCPUSampler       *controlCPUSampler
+	walCheckpoint           queueWALCheckpoint
 	controlCPU              controlCPUObservation // q.mu; local queue host only.
 	startupTrace            func(string)          // Startup only; controlled phase names, no state values.
 	startupReadWorkers      int
@@ -421,7 +422,14 @@ func openQueue(path, root string, clock Clock, shared *sharedQueueWriter, lock *
 			_ = lock.Close()
 		}
 	}()
-	db, err := openQueueSQLite(path)
+	writerDSN, checkpointPath := path, ""
+	if shared == nil {
+		writerDSN, err = queueCheckpointWriterDSN(path)
+		if err != nil {
+			return nil, err
+		}
+	}
+	db, err := openQueueSQLite(writerDSN)
 	if err != nil {
 		return nil, err
 	}
@@ -434,6 +442,11 @@ func openQueue(path, root string, clock Clock, shared *sharedQueueWriter, lock *
 				return nil, err
 			}
 			return nil, errSharedCopy
+		}
+		checkpointPath, err = queueCheckpointDatabasePath(db)
+		if err != nil {
+			db.Close()
+			return nil, err
 		}
 	}
 	q := &Queue{sharedWriter: shared, startupReadWorkers: startupQueueReadWorkers, slimJobRecords: slimJobRecordsDefault, inputClaimRows: inputClaimRowsDefault, fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lock: lock, borrowedLock: borrowed, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, FairUsageVersion: 1, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
@@ -561,6 +574,10 @@ func openQueue(path, root string, clock Clock, shared *sharedQueueWriter, lock *
 	q.traceStartup("load_usage_reader")
 	if !q.simulation {
 		q.openIdleHistory(path + ".idle")
+	}
+	if checkpointPath != "" {
+		q.initShutdown()
+		q.walCheckpoint.start(q.shutdownContext, checkpointPath, q.persistencePageBytes)
 	}
 	success = true
 	if q.checkpointExpiryStatus == nil {
@@ -731,6 +748,7 @@ func (q *Queue) Close() error {
 	// Fence even no-op control requests, which can skip the SQLite writer.
 	q.BeginShutdown()
 	err := errors.Join(q.closeCheckpointShards(), q.closeIdleHistory())
+	q.walCheckpoint.wait()
 	if q.stopping.Load() {
 		log.Printf("event=queue_shutdown phase=storage_wait")
 	}

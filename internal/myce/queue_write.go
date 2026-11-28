@@ -78,7 +78,17 @@ func (q *Queue) applyQueueWrite(ctx context.Context, batch *queueWriteBatch, tim
 	}
 	write := func() error {
 		writer := queueSQLiteWriter{db: q.db, clock: q.clock, holdClock: q.holdClock, observe: q.observeQueueRow, shared: q.sharedWriter}
-		return writer.apply(ctx, batch, timing, measured)
+		err := writer.apply(ctx, batch, timing, measured)
+		if err == nil && q.sharedWriter == nil && q.persistencePageBytes > 0 {
+			// Pace checkpoints on a reused WAL by logical work. SQLite can
+			// dirty more pages than this estimate, so growth also triggers.
+			pages := uint64(len(batch.rows))
+			if measured != nil {
+				pages += uint64(measured.Bytes / int64(q.persistencePageBytes))
+			}
+			q.walCheckpoint.pages.Add(pages)
+		}
+		return err
 	}
 	if mode != queueWriteDetached && q.inLockCommit && q.sharedWriter == nil {
 		return write()
