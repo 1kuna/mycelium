@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"syscall"
 	"testing"
@@ -194,7 +195,10 @@ func TestSharedQueueMemberUploadLocks(t *testing.T) {
 		if pid == 0 {
 			return false
 		}
-		if !state.Stopped() || state.StopSignal() != syscall.SIGSTOP {
+		stopped := state.Stopped() && state.StopSignal() == syscall.SIGSTOP
+		// Darwin's Go WaitStatus uses the same encoding for SIGSTOP and
+		// Continued. This wait requests stopped events only (no WCONTINUED).
+		if !stopped && (runtime.GOOS != "darwin" || !state.Continued()) {
 			t.Fatalf("former coordinator did not stop: %v", state)
 		}
 		return true
