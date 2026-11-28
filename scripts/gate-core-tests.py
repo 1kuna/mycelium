@@ -13,6 +13,12 @@ from zlib import crc32
 
 PACKAGE = "mycelium/internal/myce"
 SHARDS = 4
+# These assert a physical mutex hold bound and uninterrupted lease renewal.
+# The two-core AMD64 gate showed that concurrent race shards can obscure both.
+SERIAL_TESTS = {
+    "TestFileSubmissionBatchMutexHold",
+    "TestSharedQueueMemberHungStorePromotion",
+}
 
 
 def main(binary):
@@ -22,9 +28,13 @@ def main(binary):
     roots = [name for name in inventory.splitlines() if re.fullmatch(r"(?:Test|Example|Fuzz)\w*", name)]
     if not roots or len(roots) != len(set(roots)):
         raise ValueError("invalid compiled core test inventory")
+    serial = []
     groups = [[] for _ in range(SHARDS)]
     for name in roots:
-        groups[crc32(name.encode()) % SHARDS].append(name)
+        if name in SERIAL_TESTS:
+            serial.append(name)
+        else:
+            groups[crc32(name.encode()) % SHARDS].append(name)
 
     output_lock = Lock()
 
@@ -41,8 +51,9 @@ def main(binary):
                     sys.stdout.buffer.flush()
             return child.wait()
 
+    statuses = [run(serial)] if serial else []
     with ThreadPoolExecutor(max_workers=SHARDS) as pool:
-        statuses = list(pool.map(run, (group for group in groups if group)))
+        statuses.extend(pool.map(run, (group for group in groups if group)))
     status = int(any(statuses))
     print(f"{PACKAGE} full: {len(roots)} roots, exit={status}, wall={time.monotonic() - started:.3f}s")
     return status
