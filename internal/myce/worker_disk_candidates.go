@@ -8,12 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
-func (c *FileCache) budgetCandidates(ctx context.Context) ([]diskBudgetCandidate, error) {
+func (c *FileCache) budgetCandidates(ctx context.Context) (diskBudgetCandidateSet, error) {
 	entries, err := os.ReadDir(c.Root)
 	if err != nil {
-		return nil, err
+		return diskBudgetCandidateSet{}, err
 	}
 	var out []diskBudgetCandidate
 	for _, entry := range entries {
@@ -26,7 +27,12 @@ func (c *FileCache) budgetCandidates(ctx context.Context) ([]diskBudgetCandidate
 			continue
 		}
 		path := filepath.Join(c.Root, entry.Name())
-		out = append(out, diskBudgetCandidate{path: path, used: info.ModTime(), evict: func(context.Context) (bool, error) {
+		stat := info.Sys().(*syscall.Stat_t)
+		var bytes uint64
+		if stat.Nlink == 1 && stat.Blocks > 0 {
+			bytes = uint64(stat.Blocks) * 512
+		}
+		out = append(out, diskBudgetCandidate{path: path, used: info.ModTime(), bytes: bytes, evict: func(context.Context) (bool, error) {
 			if !c.mu.TryLock() {
 				return false, nil
 			}
@@ -55,7 +61,7 @@ func (c *FileCache) budgetCandidates(ctx context.Context) ([]diskBudgetCandidate
 			return true, os.Remove(path)
 		}})
 	}
-	return out, nil
+	return diskBudgetCandidateSet{entries: out}, nil
 }
 
 // Local-only provenance accompanies the existing integrity record. This is
@@ -131,10 +137,10 @@ func (c *SharedInputCache) recoverable(ctx context.Context, source *sharedRecove
 	return c.Client.HasFile(ctx, s.ref())
 }
 
-func (c *SharedInputCache) budgetCandidates(ctx context.Context) ([]diskBudgetCandidate, error) {
+func (c *SharedInputCache) budgetCandidates(ctx context.Context) (diskBudgetCandidateSet, error) {
 	entries, err := os.ReadDir(c.cache.Root)
 	if err != nil {
-		return nil, err
+		return diskBudgetCandidateSet{}, err
 	}
 	var out []diskBudgetCandidate
 	for _, entry := range entries {
@@ -149,12 +155,16 @@ func (c *SharedInputCache) budgetCandidates(ctx context.Context) ([]diskBudgetCa
 			if err != nil {
 				continue
 			}
-			out = append(out, diskBudgetCandidate{path: path, used: info.ModTime(), evict: func(ctx context.Context) (bool, error) {
+			out = append(out, diskBudgetCandidate{path: path, used: info.ModTime(), tree: true, evict: func(ctx context.Context) (bool, error) {
 				build, err := c.cache.tryLock(stageKey + ".build")
 				if err != nil || build == nil {
 					return false, err
 				}
 				defer unlockEnvironment(build)
+				current, err := os.Lstat(filepath.Join(path, "resume"))
+				if err != nil || !os.SameFile(info, current) || !info.ModTime().Equal(current.ModTime()) {
+					return false, err
+				}
 				data, err := os.ReadFile(filepath.Join(path, "resume"))
 				if err != nil {
 					return false, err
@@ -206,7 +216,7 @@ func (c *SharedInputCache) budgetCandidates(ctx context.Context) ([]diskBudgetCa
 		if err != nil {
 			continue
 		}
-		out = append(out, diskBudgetCandidate{path: path, used: info.ModTime(), class: transferDiskCache, evict: func(ctx context.Context) (bool, error) {
+		out = append(out, diskBudgetCandidate{path: path, used: info.ModTime(), class: transferDiskCache, tree: true, evict: func(ctx context.Context) (bool, error) {
 			use, err := c.cache.tryLock(key + ".use")
 			if err != nil || use == nil {
 				return false, err
@@ -260,7 +270,7 @@ func (c *SharedInputCache) budgetCandidates(ctx context.Context) ([]diskBudgetCa
 			}
 			defer unlockEnvironment(gate)
 			if err = removeSharedEntry(path); err != nil {
-				return false, err
+				return true, err // Removal may have freed part of the tree.
 			}
 			c.mu.Lock()
 			delete(c.verified, key)
@@ -268,18 +278,23 @@ func (c *SharedInputCache) budgetCandidates(ctx context.Context) ([]diskBudgetCa
 			return true, nil
 		}})
 	}
-	return out, nil
+	return diskBudgetCandidateSet{entries: out}, nil
 }
 
-func (c *EnvironmentCache) budgetCandidates(ctx context.Context) ([]diskBudgetCandidate, error) {
+func (c *EnvironmentCache) budgetCandidates(ctx context.Context) (diskBudgetCandidateSet, error) {
 	entries, err := c.evictionCandidates("")
 	if err != nil {
-		return nil, err
+		return diskBudgetCandidateSet{}, err
 	}
 	var out []diskBudgetCandidate
 	for _, entry := range entries {
 		key := entry.Key
-		out = append(out, diskBudgetCandidate{path: filepath.Join(c.Root, key), used: c.Clock.Now().Add(-entry.Age), class: preparedDiskCache, evict: func(ctx context.Context) (bool, error) {
+		ready := filepath.Join(c.Root, key, "ready.json")
+		info, err := os.Lstat(ready)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		out = append(out, diskBudgetCandidate{path: filepath.Join(c.Root, key), used: info.ModTime(), class: preparedDiskCache, tree: true, evict: func(ctx context.Context) (bool, error) {
 			if c.references == nil {
 				return false, errors.New("environment references unavailable")
 			}
@@ -291,7 +306,11 @@ func (c *EnvironmentCache) budgetCandidates(ctx context.Context) ([]diskBudgetCa
 					return false, err
 				}
 				gate, err = c.tryLock("admission")
-				return gate != nil, err
+				if err != nil || gate == nil {
+					return false, err
+				}
+				current, err := os.Lstat(ready)
+				return err == nil && os.SameFile(info, current) && info.ModTime().Equal(current.ModTime()), err
 			})
 			if removed && err == nil {
 				_, err = c.purgeRetiredKey(key)
@@ -301,7 +320,7 @@ func (c *EnvironmentCache) budgetCandidates(ctx context.Context) ([]diskBudgetCa
 	}
 	// Use package managers' supported pruning, under their existing exclusive
 	// download lock. Never unlink shared wheels behind active builders.
-	out = append(out, diskBudgetCandidate{path: filepath.Join(c.Root, ".downloads"), evict: func(ctx context.Context) (bool, error) {
+	out = append(out, diskBudgetCandidate{path: filepath.Join(c.Root, ".downloads"), bulk: true, evict: func(ctx context.Context) (bool, error) {
 		lock, err := c.tryLock("downloads")
 		if err != nil || lock == nil {
 			return false, err
@@ -326,13 +345,13 @@ func (c *EnvironmentCache) budgetCandidates(ctx context.Context) ([]diskBudgetCa
 		}
 		return true, nil
 	}})
-	return out, nil
+	return diskBudgetCandidateSet{entries: out}, nil
 }
 
-func (c *ModelCache) budgetCandidates(ctx context.Context) ([]diskBudgetCandidate, error) {
+func (c *ModelCache) budgetCandidates(ctx context.Context) (diskBudgetCandidateSet, error) {
 	entries, err := os.ReadDir(c.Root)
 	if err != nil {
-		return nil, err
+		return diskBudgetCandidateSet{}, err
 	}
 	var out []diskBudgetCandidate
 	for _, entry := range entries {
@@ -346,7 +365,7 @@ func (c *ModelCache) budgetCandidates(ctx context.Context) ([]diskBudgetCandidat
 			continue
 		}
 		path := filepath.Join(c.Root, entry.Name())
-		out = append(out, diskBudgetCandidate{path: path, used: info.ModTime(), class: transferDiskCache, evict: func(ctx context.Context) (bool, error) {
+		out = append(out, diskBudgetCandidate{path: path, used: info.ModTime(), class: transferDiskCache, tree: true, evict: func(ctx context.Context) (bool, error) {
 			if !c.mu.TryLock() {
 				return false, nil
 			}
@@ -389,14 +408,14 @@ func (c *ModelCache) budgetCandidates(ctx context.Context) ([]diskBudgetCandidat
 				return false, nil
 			}
 			if err = os.RemoveAll(path); err != nil {
-				return false, err
+				return true, err // Removal may have freed part of the tree.
 			}
 			c.verified.Delete(key)
 			c.progress.Delete(key)
 			return true, nil
 		}})
 	}
-	return out, nil
+	return diskBudgetCandidateSet{entries: out}, nil
 }
 
 func independentCacheSource(source string, victims ...string) bool {

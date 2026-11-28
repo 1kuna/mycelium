@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -159,4 +160,131 @@ func TestCompilerCacheFloorKeepsLockedAndPinnedObjects(t *testing.T) {
 	f.clock.Advance(workerHygieneMinInterval)
 	f.budget.reclaimPressure(context.Background())
 	f.present(map[string]bool{})
+}
+
+// #2276: one floor on the worker's volume, with a single eviction order across
+// real cache entries. A predicted write reserves headroom at the floor.
+func TestWorkerCacheFloorReclaimsAcrossCaches(t *testing.T) {
+	q, clock := fixture(t)
+	client := retentionClient(t, q)
+	ctx := context.Background()
+	const total = 228 << 30
+	const floor = 40 << 30
+	const block = 4096
+	dir := t.TempDir()
+	owner := &workerStore{dir: dir}
+	type cacheEntry struct {
+		path  string
+		bytes uint64
+		gone  bool
+	}
+	var entries []*cacheEntry
+	var order []string
+	probe := func(string) (DiskReading, error) {
+		free := uint64(floor)
+		for _, entry := range entries {
+			if _, err := os.Lstat(entry.path); os.IsNotExist(err) {
+				if !entry.gone {
+					entry.gone = true
+					order = append(order, entry.path)
+				}
+				free += entry.bytes
+			}
+		}
+		return DiskReading{Volume: "local", TotalBytes: total, FreeBytes: free, BlockBytes: block}, nil
+	}
+	fileRoot := filepath.Join(dir, "file-cache")
+	if err := PrepareStateRoots(fileRoot); err != nil {
+		t.Fatal(err)
+	}
+	w := Worker{Clock: clock, Client: client, EnvironmentLimit: 1 << 20, FileCacheRoot: fileRoot, DiskProbe: probe}
+	if err := w.initAttemptRuntime(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+	env := w.environmentCache
+	old := 72 * time.Hour
+	pinnedEnv := pruneFixture(t, env, 1, old+time.Hour)
+	inUseEnv := pruneFixture(t, env, 2, old+time.Hour)
+	oldEnv := pruneFixture(t, env, 3, old)
+	freshEnv := pruneFixture(t, env, 4, time.Hour)
+	useLock, err := env.lock(ctx, inUseEnv+".use", syscall.LOCK_SH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlockEnvironment(useLock)
+	recipe := binaryRecipe(t, "fake")
+	recipe.Key = pinnedEnv
+	if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"needed": {"fake": recipe}}}); err != nil {
+		t.Fatal(err)
+	}
+	s := spec("experiment")
+	s.Environment.Name = "needed"
+	submit(t, q, s)
+
+	compilerDir := filepath.Join(w.compilerCache.cache.Root, identityHash("go-build"), "aa")
+	if err := os.MkdirAll(compilerDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	unpin, err := owner.pinSharedInput(w.compilerCache.cache.Root, identityHash("go-build"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unpin()
+	write := func(path string, age time.Duration) string {
+		t.Helper()
+		if err := os.WriteFile(path, make([]byte, 4096), 0600); err != nil {
+			t.Fatal(err)
+		}
+		at := clock.Now().Add(-age)
+		if err := os.Chtimes(path, at, at); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	oldGo := write(filepath.Join(compilerDir, fmt.Sprintf("aa%062x-d", 1)), 48*time.Hour)
+	pinnedGo := write(filepath.Join(compilerDir, fmt.Sprintf("aa%062x-d", 2)), 50*time.Minute)
+	unknownGo := write(filepath.Join(compilerDir, "unknown"), 100*time.Hour)
+	oldFile := write(filepath.Join(w.fileCache.Root, fmt.Sprintf("%064x", 1)), 36*time.Hour)
+	newerFile := write(filepath.Join(w.fileCache.Root, fmt.Sprintf("%064x", 2)), 24*time.Hour)
+
+	// Account the fixture's real allocated size to exercise the measured cap.
+	victims := []string{filepath.Join(env.Root, oldEnv), oldGo, oldFile}
+	var need uint64
+	for _, path := range append(slices.Clone(victims), newerFile) {
+		bytes, err := collectionAllocatedBytes(ctx, path)
+		if err != nil || bytes <= 0 {
+			t.Fatalf("measure fixture allocation: %d, %v", bytes, err)
+		}
+		entries = append(entries, &cacheEntry{path: path, bytes: uint64(bytes)})
+		if path != newerFile {
+			need += uint64(bytes)
+		}
+	}
+
+	// The ordinary pressure pass restores idle headroom at exactly the floor.
+	w.diskBudget.reclaimPressure(ctx)
+	if !slices.Equal(order, victims[:1]) {
+		t.Fatalf("idle eviction order = %v, want %v", order, victims[:1])
+	}
+	clock.Advance(workerHygieneMinInterval)
+
+	// Before the pending write, trim across the remaining cache types in LRU
+	// order, leaving at least one available allocation block above the floor.
+	release, err := w.diskBudget.reserve(ctx, dir, need-block, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if got, _ := probe(dir); got.FreeBytes != floor+need {
+		t.Fatalf("free = %d, want %d before writing. Evicted: %v", got.FreeBytes, floor+need, order)
+	}
+	if !slices.Equal(order, victims) {
+		t.Fatalf("eviction order = %v, want %v", order, victims)
+	}
+	for _, path := range []string{filepath.Join(env.Root, pinnedEnv), filepath.Join(env.Root, inUseEnv),
+		filepath.Join(env.Root, freshEnv), pinnedGo, unknownGo, newerFile} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("protected or unneeded entry removed: %s: %v", path, err)
+		}
+	}
 }

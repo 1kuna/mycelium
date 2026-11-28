@@ -54,17 +54,18 @@ func (b *workerDiskBudget) trimForFileStore(ctx context.Context, cache *workerCo
 		disk, err := b.probe(path)
 		return disk.Volume != volume || disk.FreeBytes >= target, err
 	}
-	// statfs can increase only by a complete allocation block.
-	if disk.BlockBytes > 0 && limit%disk.BlockBytes != 0 {
-		limit = addDiskBytes(limit, disk.BlockBytes-limit%disk.BlockBytes)
-	}
-	candidates, err := cache.budgetCandidates(ctx)
+	set, err := cache.budgetCandidates(ctx)
 	if err != nil {
+		if set.close != nil {
+			set.close()
+		}
 		return
 	}
-	for _, candidate := range candidates {
-		_ = candidate.trim(ctx, enough, limit)
+	if set.close != nil {
+		defer set.close()
 	}
+	sortDiskCandidates(set.entries, false)
+	_ = evictDiskCandidates(ctx, set.entries, enough, roundDiskShortfall(limit, disk.BlockBytes), false)
 	// Start the next rate sample after our own removals, so this trim
 	// cannot hide allocations made between hygiene passes.
 	if after, err := b.probe(path); err == nil && after.Volume == volume && after.TotalBytes == disk.TotalBytes {

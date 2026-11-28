@@ -580,7 +580,7 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 		rt.cache.knownModels.Store(cacheKey(model), model)
 	}
 	if w.diskBudget != nil {
-		w.diskBudget.add(diskBudgetRoot{name: "models", path: root, candidates: rt.cache.budgetCandidates})
+		w.diskBudget.add(diskBudgetRoot{name: "models", path: root, candidates: rt.cache.budgetCandidates, cacheFloor: true})
 	}
 	if data, e := os.ReadFile(filepath.Join(dir, "copy-speed.json")); e == nil {
 		if e := decodeWorkerJSON(data, &rt.cache.speed); e != nil {

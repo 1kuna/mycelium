@@ -69,15 +69,24 @@ first until a fresh free-space read meets the current goal. It retains auxiliary
 gate state and any object modified in the last 10 minutes.
 
 <a id="cache-free-floor-1836"></a>
-The Go build cache also keeps its volume at or above a **cache floor** of
-40 GiB free, or a quarter of the volume when that is smaller, and never below
-the disk floor (#1836). The retention lane's periodic pressure pass and full
-collection, and every admission reservation on that volume, trim it toward the
-floor before any job demand exists. Each pass removes at most the measured
-shortfall, because deleted blocks held by a local snapshot do not raise free
-space; a pass that cannot reach the floor waits one minute before admission
-scans again. The floor limits what caches may consume; admission never refuses
-work because of it, and other caches keep their own limits.
+Each worker volume has one **cache floor** of 40 GiB free, or a quarter of
+the volume when that is smaller, and never below the physical disk floor
+(#1836, #2276). The worker accounts for pending local writes and measured
+competing use before deciding whether it needs to free cache space. The
+periodic pressure pass, full collection and admission all use that same
+target. Entries are considered in last-use order across disposable file
+copies, recoverable shared inputs and model copies, ready environment
+prefixes, and eligible Go cache objects on the volume. The checks for use,
+pins, references and recoverability still apply to each entry.
+
+The floor pass rechecks actual free space after deletion and bounds its
+total attempted allocation to the measured shortfall, with one final whole
+entry when it cannot be split. This matters on filesystems where snapshots
+can hold deleted blocks. If the pass falls short, it waits one minute
+before rescanning. The physical admission floor and cache-specific limits
+still apply. Package-manager download pruning retains its existing policy
+and locking, and attempt scratch remains governed by exact custody and file
+retention.
 
 While an attempt holds the cache (its use lock or a durable pin), trimming
 removes only objects last modified more than an hour and 10 minutes before the
