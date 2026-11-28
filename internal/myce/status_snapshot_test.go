@@ -91,6 +91,7 @@ func TestMachineStatusBoundedDuringWriterTurn(t *testing.T) {
 			j := &Job{ID: id, State: group.state, Queued: clock.Now(), Spec: spec("experiment")}
 			if group.state == "running" {
 				j.Machine, j.Attempt, j.StartedAt = fmt.Sprintf("worker-%d", i%5), 1, statusTestTime(clock.Now())
+				j.Spec.Needs.Platform.Any = false
 				j.Spec.Needs.Platform.Required = []string{"cpu"}
 				if i == 0 {
 					j.Spec.Needs.Platform.Required = []string{"cuda"}
@@ -123,7 +124,7 @@ func TestMachineStatusBoundedDuringWriterTurn(t *testing.T) {
 	elapsed := time.Since(started)
 	t.Logf("machine status: %s", elapsed)
 	if res.Code != 200 || elapsed >= 2*time.Second {
-		t.Fatalf("machine status returned HTTP %d in %s", res.Code, elapsed)
+		t.Fatalf("machine status returned HTTP %d in %s: %s", res.Code, elapsed, res.Body.String())
 	}
 	if history.decoded.Load() {
 		t.Error("machine status decoded an unrelated retained job")
