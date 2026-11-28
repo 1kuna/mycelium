@@ -103,7 +103,10 @@ sizing. Use a pin only for a [hard requirement](references/submit.md#explicit-pl
   For extension work, declare a CPU variant.
 - Measured single-card attempts may share an accelerator card. On discrete
   XPU, the queue learns a card charge from complete device peaks on clean runs.
-  Without comparable device evidence, the job reserves the whole card.
+  One-shot extension jobs that declare `workload` need a clean sample in the
+  current window for the same immutable staged inputs. New inputs and mutable
+  input paths reserve the whole card. A card wait can name the attempt that
+  holds exclusive custody while measuring its card memory.
   Same-tier attempts can share when their charges fit the card and the host
   has room. Card admission checks live device free memory and reservations
   for current and unreleased attempts. If your workload requires a card to

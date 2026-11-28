@@ -51,6 +51,9 @@ type memoryEvidenceSeries struct {
 	Lower     float64
 	Raise     *memoryRaise `json:",omitempty"`
 	HighWater float64      `json:",omitempty"`
+	// Trailing entries of Peaks, with an empty identity for an unbound sample.
+	// Older queues can still use Peaks without input coverage.
+	CardInputs []string `json:",omitempty"`
 }
 
 type memoryRatioKey struct {
@@ -178,7 +181,7 @@ func memoryMedian(values []float64) float64 {
 	return sorted[(len(sorted)-1)/2]/2 + sorted[len(sorted)/2]/2
 }
 
-func appendMemoryValue(values []float64, value float64, limit int) []float64 {
+func appendMemoryValue[T any](values []T, value T, limit int) []T {
 	if len(values) == limit {
 		values = values[1:]
 	}

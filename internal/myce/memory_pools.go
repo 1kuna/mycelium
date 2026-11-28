@@ -229,7 +229,11 @@ func (q *Queue) resolvePooledSize(j *Job, m *Machine) pooledCandidateSize {
 			fitPoolCharge(&card, m.TotalMemoryGB/float64(count), evidence.exact[key].Lower)
 		default:
 			raiseReach, raiseKnown := q.raiseReach(j, m, key, reach, known)
-			card = evidence.expected(key, 0, raiseReach, raiseKnown, false)
+			if needsXPUCardInputEvidence(j, key) {
+				card = evidence.expectedXPUCard(j, key, reach, raiseReach, raiseKnown)
+			} else {
+				card = evidence.expected(key, 0, raiseReach, raiseKnown, false)
+			}
 		}
 		if card.Alone && card.Evidence.Level == "unknown" && deviceHint > m.TotalMemoryGB {
 			// A cold estimate occupies a whole card, but a typed multi-card
