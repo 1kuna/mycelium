@@ -19,7 +19,7 @@ var normalizedQueueMarker = []byte(`"myce-normalized-state-v3"`)
 
 // Ship the reader before enabling this writer. The preceding queue binary
 // must open the same committed database on rollback (MY-42).
-const inputClaimRowsDefault = false
+const inputClaimRowsDefault = true
 const inputClaimRowPrefix = "file_input_claims/"
 
 type queueRecordReader interface {
