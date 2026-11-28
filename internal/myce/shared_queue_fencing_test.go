@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -548,91 +549,128 @@ func TestSharedQueueMemberRetriesLaunchAcrossHandover(t *testing.T) {
 	m := machine("fixture-worker", "cpu", "fixture-host")
 	job := proofSubmit(t, old.client, proofSpec("launch-on-successor"))
 	j := proofAssignment(t, old.client, m, job.ID)
-
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	captured, deliver := make(chan struct{}), make(chan struct{})
-	awaitingCheckin, checkedIn := make(chan struct{}), make(chan struct{})
-	const launchPath = "/api/workers/launch"
-	c := old.client
-	var nextURL *url.URL // Published to the observer by closing deliver.
-	var successorTurn string
-	c.HTTP = &http.Client{Transport: proofRoundTrip(func(req *http.Request) (*http.Response, error) {
-		select {
-		case <-deliver:
-			req = req.Clone(req.Context())
-			req.URL.Host, req.Host = nextURL.Host, nextURL.Host
-			res, err := http.DefaultTransport.RoundTrip(req)
-			if err == nil && req.Header.Get(sharedTurnHeader) == successorTurn && res.StatusCode == http.StatusServiceUnavailable {
-				select {
-				case <-awaitingCheckin:
-				default:
-					close(awaitingCheckin)
-				}
-				// Deliver the refusal after the test has reconciled this worker
-				// with the successor. The first retry can then be authorized.
-				select {
-				case <-checkedIn:
-				case <-req.Context().Done():
-					res.Body.Close()
-					return nil, req.Context().Err()
-				}
-			}
-			return res, err
-		default:
-		}
-		res, err := http.DefaultTransport.RoundTrip(req)
-		if err != nil || req.URL.Path != launchPath || res.StatusCode != http.StatusNoContent {
-			return res, err
-		}
-		defer res.Body.Close()
-		close(captured)
-		select {
-		case <-deliver:
-			res.Body = http.NoBody
-			return res, nil
-		case <-req.Context().Done():
-			return nil, req.Context().Err()
-		}
-	})}
-	w := Worker{Client: c, Interval: 25 * time.Millisecond, launchCtx: ctx}
-	execution := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
-	launch := workerLaunchRequest{HostLaunch: HostLaunch{Kind: "batch", Key: j.ID, Attempt: strconv.Itoa(j.Attempt), Machine: m.ID, Session: m.Session}}
-	done := make(chan error, 1)
-	go func() {
-		var result struct{ OK bool }
-		_, err := w.controlHandshake(launchPath, launch, &result)
-		if err == nil && !result.OK {
-			err = fmt.Errorf("launch lacked positive authorization")
-		}
-		done <- err
-	}()
-	select {
-	case <-captured:
-	case err := <-done:
-		t.Fatalf("launch probe did not reach first turn: %v", err)
-	}
-	old.stop(t, syscall.SIGTERM)
 	next := startProofMember(t, dir, "next", "127.0.0.1:0", pg.dsn)
-	second := proofLeader(t, a, next, first.number)
-	nextURL, _ = url.Parse(next.client.URL)
-	successorTurn = strconv.FormatInt(second.number, 10)
-	close(deliver)
-	select {
-	case <-awaitingCheckin:
-	case err := <-done:
-		t.Fatalf("worker lost its launch attempt before reporting to the successor: %v", err)
-	}
-	proofCheckin(t, next.client, m)
-	close(checkedIn)
-	if err := <-done; err != nil {
-		t.Fatalf("worker lost its launch attempt on handover: %v", err)
-	}
-	if err := next.client.Call(t.Context(), http.MethodPost, "/api/workers/started", execution, nil); err != nil {
+	nextURL, err := url.Parse(next.client.URL)
+	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := next.client.GetJob(t.Context(), j.ID)
-	if err != nil || got.Attempt != j.Attempt || got.StartedAt == nil || got.State != "running" {
+
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	const retryCode = "shared_queue_control_retry"
+	firstTurn := strconv.FormatInt(first.number, 10)
+	var handedOver, staleRefused bool
+	var firstCheckin, checkedIn string
+	type launchReply struct {
+		path, want, turn string
+		status           int
+		Code             string `json:"code"`
+		Reason           string `json:"error"`
+	}
+	var last launchReply
+
+	c := old.client
+	c.HTTP = &http.Client{Transport: proofRoundTrip(func(req *http.Request) (*http.Response, error) {
+		last = launchReply{path: req.URL.Path, want: req.Header.Get(sharedTurnHeader)}
+		if handedOver {
+			req = req.Clone(req.Context())
+			req.URL.Host, req.Host = nextURL.Host, nextURL.Host
+		}
+		res, err := http.DefaultTransport.RoundTrip(req)
+		if err != nil {
+			last.Reason = err.Error()
+			return nil, err
+		}
+		last.turn, last.status = res.Header.Get(sharedTurnHeader), res.StatusCode
+		if res.StatusCode >= 300 {
+			body, err := io.ReadAll(res.Body)
+			res.Body.Close()
+			if err != nil {
+				last.Reason = err.Error()
+				return nil, err
+			}
+			_ = json.Unmarshal(body, &last)
+			res.Body = io.NopCloser(bytes.NewReader(body))
+		}
+		if !handedOver {
+			res.Body.Close()
+			if last.want != "" || last.turn != firstTurn || last.status != http.StatusNoContent {
+				return nil, fmt.Errorf("first turn did not return a launch probe: %+v", last)
+			}
+			// Retire the first turn before the worker receives its probe reply.
+			old.stop(t, syscall.SIGTERM)
+			proofLeaderContext(t, ctx, a, next, first.number)
+			handedOver = true
+			res.Body = http.NoBody
+		}
+		return res, nil
+	})}
+	c.Pause = func(ctx context.Context, delay time.Duration) error {
+		if last.status != http.StatusServiceUnavailable || last.Code != retryCode {
+			return waitStatusPause(ctx, delay)
+		}
+		if last.want == firstTurn && last.turn == "" {
+			staleRefused = true
+			return ctx.Err()
+		}
+		if last.want == "" || last.want != last.turn || checkedIn == last.turn {
+			return waitStatusPause(ctx, delay)
+		}
+
+		// A replacement turn needs its own worker contact. Pin the check-in
+		// to the turn that refused authorization, then let Client verify it.
+		in := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, period: time.Second}
+		var reply Reply
+		err := next.client.callOnceShared(ctx, http.MethodPost, "/api/workers/checkin", in, &reply, last.turn)
+		if retryTransient(err) || errors.Is(err, context.DeadlineExceeded) {
+			return waitStatusPause(ctx, delay)
+		}
+		if err != nil {
+			return err
+		}
+		checkedIn = last.turn
+		t.Logf("control_refusal route=%s turn=%s status=%d code=%s reason=%q checked_in_turn=%s", last.path, last.want, last.status, last.Code, last.Reason, checkedIn)
+		if firstCheckin == "" {
+			firstCheckin = checkedIn
+			// Reproduce the second turnover after a confirmed check-in.
+			// The same endpoint now needs contact under a newer turn.
+			turn, err := a.current(ctx)
+			if err != nil {
+				return err
+			}
+			if strconv.FormatInt(turn.number, 10) == checkedIn {
+				if err := a.renew(ctx, turn, 0, false); err != nil && !errors.Is(err, errSharedTurn) {
+					return err
+				}
+				proofLeaderContext(t, ctx, a, next, turn.number)
+			}
+		}
+		return ctx.Err()
+	}
+
+	w := Worker{Client: c, Interval: 25 * time.Millisecond, launchCtx: ctx}
+	launch := workerLaunchRequest{HostLaunch: HostLaunch{Kind: "batch", Key: j.ID, Attempt: strconv.Itoa(j.Attempt), Machine: m.ID, Session: m.Session}}
+	var result struct{ OK bool }
+	if _, err := w.controlHandshake("/api/workers/launch", launch, &result); err != nil || !result.OK {
+		t.Fatalf("launch did not authorize the original attempt: %v (last reply %+v, last check-in turn %q)", err, last, checkedIn)
+	}
+	if !staleRefused || firstCheckin == "" || checkedIn == firstCheckin || last.turn != checkedIn {
+		t.Fatalf("launch did not reconcile under a newer turn: stale refusal=%t, first check-in=%q, last check-in=%q, launch turn=%q",
+			staleRefused, firstCheckin, checkedIn, last.turn)
+	}
+
+	execution := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
+	result.OK = false
+	if _, err := w.controlHandshake("/api/workers/started", execution, &result); err != nil || !result.OK {
+		t.Fatalf("Started did not authorize the original attempt: %v (last reply %+v, last check-in turn %q)", err, last, checkedIn)
+	}
+	var got *Job
+	err = next.client.RetryTransient(ctx, func(ctx context.Context, c Client) error {
+		var err error
+		got, err = c.GetJob(ctx, j.ID)
+		return err
+	}, nil)
+	if err != nil || got.Attempt != j.Attempt || got.Session != j.Session || got.StartedAt == nil || got.State != "running" {
 		t.Fatalf("successor did not start the original attempt: %v", err)
 	}
 }

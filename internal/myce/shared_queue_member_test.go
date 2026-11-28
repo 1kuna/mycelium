@@ -210,11 +210,16 @@ func (p *proofProcess) stop(t *testing.T, sig syscall.Signal) {
 
 func proofEventually(t *testing.T, why string, f func() bool) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	proofEventuallyContext(t, t.Context(), why, func(context.Context) bool { return f() })
+}
+
+func proofEventuallyContext(t *testing.T, ctx context.Context, why string, f func(context.Context) bool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	tick := time.NewTicker(25 * time.Millisecond)
 	defer tick.Stop()
-	for !f() {
+	for !f(ctx) {
 		select {
 		case <-ctx.Done():
 			t.Fatalf("timed out waiting for %s", why)
@@ -225,6 +230,11 @@ func proofEventually(t *testing.T, why string, f func() bool) {
 
 func proofLeader(t *testing.T, a *sharedQueueAuthority, p *proofProcess, after int64) sharedQueueTurn {
 	t.Helper()
+	return proofLeaderContext(t, t.Context(), a, p, after)
+}
+
+func proofLeaderContext(t *testing.T, ctx context.Context, a *sharedQueueAuthority, p *proofProcess, after int64) sharedQueueTurn {
+	t.Helper()
 	var turn sharedQueueTurn
 	defer func() {
 		if t.Failed() {
@@ -232,13 +242,13 @@ func proofLeader(t *testing.T, a *sharedQueueAuthority, p *proofProcess, after i
 			t.Logf("last turn: %+v\nmember log: %s", turn, data)
 		}
 	}()
-	proofEventually(t, "routable coordinator "+filepath.Base(filepath.Dir(p.db)), func() bool {
+	proofEventuallyContext(t, ctx, "routable coordinator "+filepath.Base(filepath.Dir(p.db)), func(ctx context.Context) bool {
 		var err error
-		turn, err = a.current(t.Context())
+		turn, err = a.current(ctx)
 		return err == nil && turn.ready && turn.number > after && turn.endpoint == p.client.URL
 	})
-	proofEventually(t, "coordinator accepts API traffic", func() bool {
-		return p.client.Call(t.Context(), http.MethodGet, "/api/ping", nil, nil) == nil
+	proofEventuallyContext(t, ctx, "coordinator accepts API traffic", func(ctx context.Context) bool {
+		return p.client.Call(ctx, http.MethodGet, "/api/ping", nil, nil) == nil
 	})
 	return turn
 }
