@@ -64,6 +64,84 @@ func statusSnapshotReads(queued string) []statusSnapshotRead {
 	}
 }
 
+func TestMachineStatusBoundedDuringWriterTurn(t *testing.T) {
+	q, clock := fixture(t)
+	q.mu.Lock()
+	for i := range 5 {
+		id := fmt.Sprintf("worker-%d", i)
+		m := machine(id, "fake")
+		m.LastSeen = clock.Now()
+		m.EnvironmentReports = []EnvironmentReport{{Key: "env", State: "ready"}}
+		if i == 0 {
+			m.Devices = []MachineDevice{{ID: "0", Platform: "cuda", TotalMemoryGB: 24, BudgetGB: 24, FreeMemoryGB: 24}}
+			m.HostHealth = &HostHealth{History: []HostHealthSample{{}, {}}}
+		}
+		q.s.Machines[id] = &m
+	}
+	for i := range 12400 {
+		id := fmt.Sprintf("history-%05d", i)
+		q.s.Jobs[id] = &Job{ID: id, State: "succeeded", ReleaseConfirmed: true, Queued: clock.Now().Add(-time.Hour), Attempt: 1, Spec: spec("experiment")}
+	}
+	for _, group := range []struct {
+		state string
+		count int
+	}{{"queued", 126}, {"paused", 56}, {"running", 30}} {
+		for i := range group.count {
+			id := fmt.Sprintf("%s-%03d", group.state, i)
+			j := &Job{ID: id, State: group.state, Queued: clock.Now(), Spec: spec("experiment")}
+			if group.state == "running" {
+				j.Machine, j.Attempt, j.StartedAt = fmt.Sprintf("worker-%d", i%5), 1, statusTestTime(clock.Now())
+				j.Spec.Needs.Platform.Any = false
+				j.Spec.Needs.Platform.Required = []string{"cpu"}
+				if i == 0 {
+					j.Spec.Needs.Platform.Required = []string{"cuda"}
+					j.AllocatedDevices = []string{"0"}
+					q.hostMemorySamples = map[string]map[attemptKey]hostMemorySample{j.Machine: {jobKey(*j): {devicePeakGB: 10}}}
+				}
+			}
+			q.s.Jobs[id] = j
+		}
+	}
+	q.mu.Unlock()
+	if err := q.update(func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	publication := q.publishedReads.Load()
+	history := readGet(publication.root, "jobs/history-00000")
+	if history.decoded.Load() {
+		t.Fatal("fixture must start with cold settled jobs")
+	}
+	handler := (API{Queue: q, Token: "test"}).Handler()
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req := httptest.NewRequest("GET", "/api/status?sections=machines", nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer test")
+	res := httptest.NewRecorder()
+	started := time.Now()
+	handler.ServeHTTP(res, req)
+	elapsed := time.Since(started)
+	t.Logf("machine status: %s", elapsed)
+	if res.Code != 200 || elapsed >= 2*time.Second {
+		t.Fatalf("machine status returned HTTP %d in %s: %s", res.Code, elapsed, res.Body.String())
+	}
+	if history.decoded.Load() {
+		t.Error("machine status decoded an unrelated retained job")
+	}
+	var s Snapshot
+	if err := json.Unmarshal(res.Body.Bytes(), &s); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Jobs) != 212 || len(s.Machines) != 5 || len(s.Machines[0].EnvironmentReports) != 1 || s.Summary != nil {
+		t.Fatalf("machine status lost jobs or machine detail: %d jobs, %d machines, summary=%t", len(s.Jobs), len(s.Machines), s.Summary != nil)
+	}
+	m := s.Machines[0]
+	if m.HostHealth == nil || len(m.HostHealth.History) != 2 || len(m.Devices) != 1 || m.Devices[0].FreeMemoryGB != 14 || len(m.Devices[0].Attempts) != 1 {
+		t.Fatalf("machine status lost host history or exact device custody: health=%+v devices=%+v", m.HostHealth, m.Devices)
+	}
+}
+
 // #1052: status and job GETs project the last committed publication. A writer
 // that owns q.mu (a long control transaction) must not delay them: before this
 // change every default-status miss, filtered status and unknown-ID job read

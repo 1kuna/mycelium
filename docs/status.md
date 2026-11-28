@@ -4,6 +4,9 @@
 `--json` returns the compact view (`CompactStatus`). Use `--sections jobs,machines`
 for full job and machine diagnostics, `--jobs all` for a history page
 (`StatusJobsPage`), or `--history` for retained state (`Snapshot`).
+Use `--sections machines` for full machine telemetry and current job summaries.
+The job summaries use committed reasons. Add `jobs` to the sections to
+calculate current placement diagnostics.
 For one job use `myce status JOB_ID`, `myce wait JOB_ID` and `myce logs JOB_ID`.
 
 ## Queue restart grace

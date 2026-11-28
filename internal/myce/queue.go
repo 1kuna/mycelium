@@ -3077,6 +3077,7 @@ func (q *Queue) snapshot(forStatus bool, contexts ...context.Context) (Snapshot,
 func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snapshot {
 	defer q.memoizeExtensionQualifications(nil)()
 	compact := q.observationSelection != nil && q.observationSelection.compact
+	detailMachines := !compact || q.observationSelection.detailMachines
 	out := Snapshot{CheckpointExpiry: q.checkpointExpiryCounts(), EvidenceRetention: q.evidenceRetention, Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), QueueRelease: CurrentRelease(), Holds: []Hold{}, Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	out.HealthAlertDelivery = q.healthAlertDelivery()
 	if compact {
@@ -3085,7 +3086,7 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 	for _, s := range q.s.ModelSlots {
 		copy := *s
 		model, _ := q.model(s.Model)
-		if !compact {
+		if detailMachines {
 			copy.Placement = q.modelPlacement(model)
 		} else {
 			copy.Placement = nil
@@ -3187,6 +3188,13 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 			continue
 		}
 		if compact {
+			if detailMachines {
+				job := compactStatusJob(stored)
+				if job.State == "paused" {
+					job.Hold = pauseHold(stored)
+				}
+				stored = &job
+			}
 			out.Jobs = append(out.Jobs, q.projectCompactJob(stored))
 		} else {
 			j := q.projectJob(stored, order[stored.ID], reasons[stored.ID], forStatus)
@@ -3210,7 +3218,7 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 	}
 	finishJobWork()
 	for _, m := range q.s.Machines {
-		copy := q.projectStatusMachine(m, compact)
+		copy := q.projectStatusMachine(m, !detailMachines)
 		out.Machines = append(out.Machines, &copy)
 	}
 	finishJobWork = projectionSample.measure()

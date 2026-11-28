@@ -1022,29 +1022,43 @@ func (capture *committedReadCapture) statusContactInputs(q *Queue, at time.Time)
 	return v
 }
 
-// statusQueue materializes only what the compact status view reads.
-func (capture *committedReadCapture) statusQueue(ctx context.Context, readAt time.Time, live *Queue) (*Queue, error) {
+// statusQueue materializes current work and the exact records referenced by
+// current reservations or startup-release fences.
+func (capture *committedReadCapture) statusQueue(ctx context.Context, readAt time.Time, live *Queue, detailMachines bool) (*Queue, error) {
 	return capture.detachedQueue(ctx, readAt, live, func(g *readGeneration) (state, *queueRecords, error) {
-		s, err := g.compactInputs(ctx)
+		s, err := g.compactInputs(ctx, detailMachines)
 		if err != nil {
 			return state{}, nil, err
 		}
 		// Reservation cleanup consults its job even after it became history.
 		// Decode just those records instead of all retained work.
 		var extra map[string]*Job
-		for _, r := range s.Reservations {
-			if r.Job == "" || s.Jobs[r.Job] != nil || extra[r.Job] != nil {
-				continue
+		loadJob := func(id string) error {
+			if id == "" || s.Jobs[id] != nil || extra[id] != nil {
+				return nil
 			}
-			j, err := g.job(ctx, r.Job)
+			j, err := g.job(ctx, id)
 			if err != nil {
-				return state{}, nil, err
+				return err
 			}
 			if j != nil {
 				if extra == nil {
 					extra = map[string]*Job{}
 				}
-				extra[r.Job] = j
+				extra[id] = j
+			}
+			return nil
+		}
+		for _, r := range s.Reservations {
+			if err := loadJob(r.Job); err != nil {
+				return state{}, nil, err
+			}
+		}
+		if detailMachines {
+			for _, r := range s.HostReleases {
+				if err := loadJob(r.Job); err != nil {
+					return state{}, nil, err
+				}
 			}
 		}
 		if extra != nil {

@@ -100,6 +100,15 @@ blocked on storage. Ordinary status, including `--sections machines` with the
 current jobs, can use the committed publication without that admission step.
 The failed release capture itself had no completed phase measurement.
 
+The subsequent release's `status --sections machines --json` reads spent
+6.02–7.41 s in three matching server requests with no measured mutex wait.
+They returned about 213 active jobs. The route loaded the retained publication
+and ran the job placement projection before reducing those rows to summaries.
+A 12,400-retained-job fixture with a busy writer reproduced that unrelated
+history decode. The machine-only section now reads detailed machine telemetry,
+current job summaries and their named custody references from committed state.
+`--sections jobs,machines` still calculates placement diagnostics.
+
 ## Slow check-in body attribution (#1568)
 
 The existing `slow_queue_mutex_hold` event logs body phase totals for check-in

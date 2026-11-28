@@ -42,7 +42,8 @@ project and reason with their `ids`. Full job objects need
 `myce status JOB_ID --json`, `--sections jobs --json` or
 `client.status(snapshot=True)`.
 
-- `myce status --sections jobs,machines` adds detailed diagnostics;
+- `myce status --sections machines` returns full machine telemetry and current
+  job summaries with committed reasons. Add `jobs` for placement diagnostics.
   `--sections work,storage,alerts,efficiency,usage,diagnostics` selects retained
   collections. Python: `client.status(sections="work,storage")`. A machine's
   host RAM is `host_memory`: `capacity_gb`, `charged_gb`, `room_gb` (room =
