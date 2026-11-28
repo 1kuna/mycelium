@@ -64,7 +64,17 @@ func TestUpgradeCompatProcess(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer q.Close()
+		claimSpec := Spec{Project: "rollback", Class: "experiment"}
+		claimFile := FileRef{SHA256: strings.Repeat("a", 64), SizeBytes: 1}
+		claimReceipt := filepath.Join(root, "input-claim.id")
 		if mode == "queue-rollback-seed" {
+			claim, err := q.claimFileInput(ctx, claimSpec, claimFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(claimReceipt, []byte(claim.ID), 0600); err != nil {
+				t.Fatal(err)
+			}
 			now := q.clock.Now()
 			m := Machine{ID: "rollback-device", HostID: "rollback-host", Session: "rollback-session", GPU: "cpu", FreeMemoryGB: 64, HostMemoryMeasured: true, CapabilityProfile: &CapabilityProfile{Version: 0, OS: runtime.GOOS, Arch: runtime.GOARCH, LogicalCPUs: 16, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30}}
 			// Both releases expose the keyed HTTP contract; their in-process
@@ -102,6 +112,15 @@ func TestUpgradeCompatProcess(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+		claimID, err := os.ReadFile(claimReceipt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		claim := q.s.FileInputClaims[string(claimID)]
+		if claim.ID == "" || claim.Project != claimSpec.Project || claim.File != claimFile || claim.At.IsZero() || claim.Released {
+			t.Fatal("reopen lost input claim custody")
+		}
+		previousFile := FileRef{SHA256: strings.Repeat("b", 64), SizeBytes: 2}
 		for _, state := range []string{"queued", "paused", "running", "succeeded", "failed"} {
 			j := q.s.Jobs["rollback-"+state]
 			if j == nil || j.State != state {
@@ -122,6 +141,9 @@ func TestUpgradeCompatProcess(t *testing.T) {
 			t.Fatal(err)
 		}
 		if mode == "queue-rollback-previous" {
+			if _, err := q.claimFileInput(ctx, claimSpec, previousFile); err != nil {
+				t.Fatal(err)
+			}
 			want := ""
 			if _, known := reflect.TypeFor[Spec]().FieldByName("MemoryLimitGB"); known {
 				want = "2.5"
@@ -140,6 +162,15 @@ func TestUpgradeCompatProcess(t *testing.T) {
 		}
 		if mode == "queue-rollback-open" && q.s.Jobs["rollback-paused"].Reason != "updated by rollback release" {
 			t.Fatal("candidate lost a previous-release write")
+		}
+		if mode == "queue-rollback-open" {
+			found := false
+			for _, claim := range q.s.FileInputClaims {
+				found = found || claim.File == previousFile && claim.Project == claimSpec.Project && !claim.Released
+			}
+			if !found {
+				t.Fatal("candidate lost the previous release's new claim")
+			}
 		}
 	default:
 		t.Fatal("unknown fixture mode")

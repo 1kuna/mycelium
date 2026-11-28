@@ -18,16 +18,18 @@ import (
 // production claim catalog without using any real records.
 func seedRetainedInputClaims(q *Queue, count int) {
 	claims := make(map[string]FileInputClaim, count)
+	ids := make([]string, 0, count)
 	now := q.clock.Now()
 	for i := range count {
 		id := fmt.Sprintf("synthetic-claim-%05d", i)
+		ids = append(ids, id)
 		claims[id] = FileInputClaim{
 			ID: id, Project: "synthetic-volume", Class: "experiment",
 			File: FileRef{SHA256: fmt.Sprintf("%064x", i), SizeBytes: 1},
 			At:   now, SettledAt: now,
 		}
 	}
-	q.s.FileInputClaims = claims
+	q.replaceInputClaims(claims, ids...)
 }
 
 func TestQueuePersistenceInputClaimsRollbackRestart(t *testing.T) {

@@ -17,6 +17,11 @@ import (
 // r6.10 and later write this per-machine layout; MY-42 retired every older one.
 var normalizedQueueMarker = []byte(`"myce-normalized-state-v3"`)
 
+// Ship the reader before enabling this writer. The preceding queue binary
+// must open the same committed database on rollback (MY-42).
+const inputClaimRowsDefault = false
+const inputClaimRowPrefix = "file_input_claims/"
+
 type queueRecordReader interface {
 	Query(string, ...any) (*sql.Rows, error)
 }
@@ -83,6 +88,7 @@ func (q *Queue) readStartupState(marker []byte) error {
 	if err := json.Unmarshal(base, &q.s); err != nil {
 		return err
 	}
+	legacyClaims := len(q.s.FileInputClaims) > 0
 	q.s.Jobs, q.s.Machines = decoded.jobs, map[string]*Machine{}
 	events := map[int]HealthAlert{}
 	for key, data := range records {
@@ -123,6 +129,18 @@ func (q *Queue) readStartupState(marker []byte) error {
 				q.s.ExternalMemory = map[string]*externalMemoryRing{}
 			}
 			err = decodeQueueRecord(q.s.ExternalMemory, id, data)
+		case "file_input_claims":
+			if legacyClaims {
+				return fmt.Errorf("mixed queue input claim formats")
+			}
+			if q.s.FileInputClaims == nil {
+				q.s.FileInputClaims = map[string]FileInputClaim{}
+			}
+			err = decodeQueueRecord(q.s.FileInputClaims, id, data)
+			if err == nil && (id == "" || q.s.FileInputClaims[id].ID != id) {
+				err = fmt.Errorf("invalid input claim identity")
+			}
+			q.inputClaimRows = true
 		case "health_events":
 			index, e := strconv.Atoi(id)
 			if e != nil || index < 0 {
@@ -228,7 +246,11 @@ func (q *Queue) prepareStateWrite(batch *queueWriteBatch, measured *queuePersist
 		update.stateSize, update.stateFields = q.persistedStateSize, q.persistedStateFields
 	} else {
 		started := holdNow(q.holdClock)
-		base, err := q.encodeStateRoot(q.persistentBase())
+		stateRoot := q.persistentBase()
+		if q.inputClaimRows {
+			stateRoot.FileInputClaims = nil
+		}
+		base, err := q.encodeStateRoot(stateRoot)
 		if err != nil {
 			return nil, err
 		}
@@ -256,6 +278,21 @@ func (q *Queue) prepareStateWrite(batch *queueWriteBatch, measured *queuePersist
 		}
 		if err != nil {
 			return nil, err
+		}
+	}
+	for id := range q.records.inputClaims {
+		key := inputClaimRowPrefix + id
+		if claim, ok := q.s.FileInputClaims[id]; ok {
+			if id == "" || claim.ID != id {
+				return nil, fmt.Errorf("invalid input claim identity")
+			}
+			if err := put(key, claim); err != nil {
+				return nil, err
+			}
+		} else if q.persisted[key] != nil {
+			measured.Records++
+			next[key] = nil
+			batch.add("DELETE FROM queue_state WHERE key=?", key)
 		}
 	}
 	machines := q.s.Machines
@@ -386,8 +423,10 @@ func (q *Queue) loadPersistedState() error {
 		return err
 	}
 	// The large claim field was already detached during startup decoding.
-	claimField := base64.RawURLEncoding.EncodeToString([]byte("file_input_claims"))
-	q.fileInputClaimsJSON = q.persistedStateFields[claimField]
+	if !q.inputClaimRows {
+		claimField := base64.RawURLEncoding.EncodeToString([]byte("file_input_claims"))
+		q.fileInputClaimsJSON = q.persistedStateFields[claimField]
+	}
 	q.persistedStateSize = len(q.persisted["state"])
 	q.evidenceBytes = 0
 	for key, data := range q.persisted {

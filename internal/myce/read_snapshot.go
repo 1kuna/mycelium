@@ -37,6 +37,7 @@ type readRecord struct {
 
 type publishedStateRoot struct {
 	queueStateEncoding
+	claimsRevision uint64
 	// These generations are replaced by diagnostics and copied on the first
 	// input-claim edit, so readers may borrow them across commits.
 	baselines map[string]efficiencyBaseline
@@ -314,18 +315,22 @@ func (q *Queue) publishReadRecordChanges(next map[string][]byte, observationOnly
 	}
 	for key, data := range next {
 		// The immutable read schema remains assembled; durable inventories are rows.
-		if strings.HasPrefix(key, "machines/") {
+		if strings.HasPrefix(key, "machines/") || strings.HasPrefix(key, inputClaimRowPrefix) {
 			continue
 		}
 		if key == "state" {
-			encoded, err := q.encodeStateRoot(queueBase(q.s, true))
+			base := queueBase(q.s, true)
+			if q.inputClaimRows {
+				base.FileInputClaims = nil
+			}
+			encoded, err := q.encodeStateRoot(base)
 			if err != nil {
 				q.readRoot = readPut(q.readRoot, key, nil)
 				continue
 			}
 			old := readGet(q.readRoot, key)
-			if old == nil || old.stateRoot == nil || !encoded.equal(old.stateRoot.queueStateEncoding) {
-				root := &publishedStateRoot{queueStateEncoding: encoded}
+			if old == nil || old.stateRoot == nil || old.stateRoot.claimsRevision != q.fileInputClaimsRevision || !encoded.equal(old.stateRoot.queueStateEncoding) {
+				root := &publishedStateRoot{queueStateEncoding: encoded, claimsRevision: q.fileInputClaimsRevision}
 				if len(q.s.EfficiencyHealth) > 0 {
 					root.baselines = q.s.EfficiencyHealth
 				}

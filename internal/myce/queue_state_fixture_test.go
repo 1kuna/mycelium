@@ -18,7 +18,7 @@ func readQueueState(db queueRecordReader, data []byte) ([]byte, error) {
 		return nil, err
 	}
 	var base map[string]json.RawMessage
-	groups := map[string]map[string]json.RawMessage{"jobs": {}, "submissions": {}, "extensions": {}, "work_observations": {}, "storage_observations": {}, "external_memory": {}, "health_events": {}, "machines": {}}
+	groups := map[string]map[string]json.RawMessage{"jobs": {}, "submissions": {}, "extensions": {}, "work_observations": {}, "storage_observations": {}, "external_memory": {}, "health_events": {}, "machines": {}, "file_input_claims": {}}
 	for key, value := range records {
 		if key == "state" {
 			if err = json.Unmarshal(value, &base); err != nil {
@@ -34,6 +34,9 @@ func readQueueState(db queueRecordReader, data []byte) ([]byte, error) {
 	}
 	if base == nil {
 		return nil, fmt.Errorf("queue state fragment missing")
+	}
+	if len(groups["file_input_claims"]) > 0 && base["file_input_claims"] != nil {
+		return nil, fmt.Errorf("mixed queue input claim formats")
 	}
 	if events := groups["health_events"]; len(events) > 0 {
 		var health map[string]json.RawMessage

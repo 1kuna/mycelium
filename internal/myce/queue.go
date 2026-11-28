@@ -299,6 +299,7 @@ type Queue struct {
 	efficiencyHealthJSON    json.RawMessage            // Same immutable generation as s.EfficiencyHealth; q.mu.
 	fileInputClaimsJSON     json.RawMessage            // Same immutable generation as s.FileInputClaims; q.mu.
 	fileInputClaimsRevision uint64                     // Advances on edit, including a rolled-back edit; q.mu.
+	inputClaimRows          bool                       // Selected at startup, for the life of the queue.
 	persistedStateFields    map[string]json.RawMessage // Committed fragments only; q.mu.
 	persistedStateSize      int                        // Logical JSON size for evidence accounting; q.mu.
 	flushHistoriesNow       bool
@@ -435,7 +436,7 @@ func openQueue(path, root string, clock Clock, shared *sharedQueueWriter, lock *
 			return nil, errSharedCopy
 		}
 	}
-	q := &Queue{sharedWriter: shared, startupReadWorkers: startupQueueReadWorkers, slimJobRecords: slimJobRecordsDefault, fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lock: lock, borrowedLock: borrowed, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, FairUsageVersion: 1, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
+	q := &Queue{sharedWriter: shared, startupReadWorkers: startupQueueReadWorkers, slimJobRecords: slimJobRecordsDefault, inputClaimRows: inputClaimRowsDefault, fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lock: lock, borrowedLock: borrowed, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, FairUsageVersion: 1, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
 	q.diskHost, _ = os.Hostname()
 	q.mu.control = &controlClock{clock: func() time.Time { return q.clock.Now() }, at: clock.Now()}
 	q.admissionWaitBuild.synchronous = synchronousAdmissionWaitDefault
@@ -534,6 +535,7 @@ func openQueue(path, root string, clock Clock, shared *sharedQueueWriter, lock *
 		q.migrateParityKinds()
 		q.mirrorProjectParity()
 		q.convertJobRecords()
+		q.migrateInputClaimRows()
 		return nil
 	}); err != nil {
 		db.Close()

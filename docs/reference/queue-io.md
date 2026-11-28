@@ -69,10 +69,23 @@ time spent with the writer turn held and the mutex released. Check-in
 bulk preparation from SQLite work outside the mutex.
 
 Issuing and settling claims scan the immutable claim generation before the
-writer turn and recheck it before applying edits. A repeated submission does
-not rewrite the timestamp of a claim that already settled. A new or changed
-claim still rewrites the durable claim field in normalized-state-v3. A slow
-SQLite transaction can delay other writers even when its physical hold is short.
+writer turn and recheck it before applying edits. A repeated submission keeps
+the original settlement timestamp. A later read-only lookup measured the live
+legacy claim field at 3,553,299 bytes, with 4,096-byte SQLite pages. The three
+logged claim turns during the incident submitted 3,578,979–3,580,069 bytes each
+to SQLite. The legacy writer replaces the entire field on each changed claim,
+so logical write bytes scale with retained claims. These totals include other
+queue-state rows for the turn. They measure SQLite payload, with physical I/O and
+fsync duration still dependent on the device and WAL checkpointing.
+
+The incremental layout writes each changed claim as an individual queue-state
+row, in the same transaction as admission, allocation, or job settlement. Ship
+the reader in the release before enabling the writer (`inputClaimRowsDefault`)
+so queue-only rollback can read and write the new rows (MY-42). The first open
+with the writer enabled atomically replaces the old field before serving work.
+The adjacent-release rollback fixture verifies claim custody in both directions.
+After activation, compare claim write bytes and writer-turn duration during a
+busy hour. Durable SQLite work can still delay other writers during an I/O stall.
 Mutable state and WAL checkpointing can cause sustained write amplification
 without database growth. Process counters do not distinguish database, WAL,
 logs and payload writes; whole-disk averages do not establish a safe I/O ceiling.

@@ -27,7 +27,7 @@ const rootFixtureFront = -17
 func openQueueRootFixture(t *testing.T, dir string) *Queue {
 	t.Helper()
 	clock := &fakeClock{now: time.Date(2026, 11, 22, 0, 0, 0, 0, time.UTC)}
-	q, err := Open(filepath.Join(dir, "queue.db"), dir, clock)
+	q, err := Open(filepath.Join(dir, "queue.db"), dir, clock, func(q *Queue) { q.inputClaimRows = false })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func seedQueueRootFixture(t *testing.T, q *Queue) {
 func replaceQueueRootFixture(q *Queue) error {
 	return q.update(func() error {
 		q.s.Front = rootFixtureFront
-		delete(q.editInputClaims(), rootFixtureClaim)
+		delete(q.editInputClaims(rootFixtureClaim), rootFixtureClaim)
 		q.s.EfficiencyHealth = nil
 		return nil
 	})
@@ -112,7 +112,9 @@ func TestQueueRootKeepsPinnedAttachments(t *testing.T) {
 		t.Fatal("committing new fragments changed an older read generation")
 	}
 	if err := q.update(func() error {
-		clear(q.editInputClaims())
+		for id := range q.s.FileInputClaims {
+			delete(q.editInputClaims(id), id)
+		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
