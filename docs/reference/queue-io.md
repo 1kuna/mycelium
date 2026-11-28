@@ -55,6 +55,24 @@ turn through the SQLite transaction, even when the physical mutex is released.
 Synchronization and automatic checkpoints can delay subsequent turns. Committed
 read views can coexist with the flush. Publishing before commit would break
 durable publication and rollback semantics.
+
+For [#2257](https://github.com/1kuna/mycelium/issues/2257), the r6.63 journal's
+52.778 s input-claim transaction held the physical mutex for 66.9 ms. It spent
+24.527 s in SQLite statements and 28.185 s in commit while keeping the writer
+turn. The 16.534 s submission held the physical mutex for 1.020 s, including
+0.524 s of persistence preparation, and spent 15.514 s on the off-lock write.
+Older `slow_request` events counted the entire acquired turn as a mutex hold.
+`mutex_hold_ms` now reports physical hold time and `off_lock_turn_ms` reports
+time spent with the writer turn held and the mutex released. Check-in
+`mutex_wait_ms` still includes waiting for the writer turn. On
+`slow_queue_mutex_hold`, `off_lock_prepare_ms` and `off_lock_write_ms` separate
+bulk preparation from SQLite work outside the mutex.
+
+Issuing and settling claims scan the immutable claim generation before the
+writer turn and recheck it before applying edits. A repeated submission does
+not rewrite the timestamp of a claim that already settled. A new or changed
+claim still rewrites the durable claim field in normalized-state-v3. A slow
+SQLite transaction can delay other writers even when its physical hold is short.
 Mutable state and WAL checkpointing can cause sustained write amplification
 without database growth. Process counters do not distinguish database, WAL,
 logs and payload writes; whole-disk averages do not establish a safe I/O ceiling.

@@ -2,6 +2,7 @@ package myce
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log"
 	"reflect"
@@ -234,7 +235,9 @@ func TestSlowOffLockWriteLogsWriterTurn(t *testing.T) {
 			old := log.Writer()
 			log.SetOutput(logs)
 			defer log.SetOutput(old)
-			if err := q.update(fn); err != nil {
+			span := &requestSpan{}
+			ctx := context.WithValue(t.Context(), requestSpanKey{}, span)
+			if err := q.updateRequest(ctx, fn, nil); err != nil {
 				t.Fatal(err)
 			}
 			log.SetOutput(old)
@@ -243,11 +246,16 @@ func TestSlowOffLockWriteLogsWriterTurn(t *testing.T) {
 			}
 			line := testLogEvent(t, logs.String(), "slow_queue_mutex_hold")
 			turn, hold := "duration_ms=900.000", "mutex_hold_ms=0.000 off_lock_write_ms=900.000"
+			wantHold, wantOffLock := time.Duration(0), 900*time.Millisecond
 			if rollback {
 				hold = "mutex_hold_ms=900.000 off_lock_write_ms=0.000"
+				wantHold, wantOffLock = wantOffLock, wantHold
 			}
 			if !strings.Contains(line, turn) || !strings.Contains(line, hold) || !strings.Contains(line, "operation="+operation) {
 				t.Fatalf("slow write logged without its writer turn: %s", line)
+			}
+			if span.hold != wantHold || span.offLock != wantOffLock {
+				t.Fatalf("request attributed SQLite write to hold=%s off-lock=%s, want %s/%s", span.hold, span.offLock, wantHold, wantOffLock)
 			}
 		})
 	}

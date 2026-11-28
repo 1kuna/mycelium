@@ -83,11 +83,21 @@ func (q *Queue) applyQueueWrite(ctx context.Context, batch *queueWriteBatch, tim
 	if mode != queueWriteDetached && q.inLockCommit && q.sharedWriter == nil {
 		return write()
 	}
+	return q.withoutQueueMutex(mode, timing, false, write)
+}
+
+// The writer turn fences the speculative state, including before any SQL is
+// sent. Readers of the mutable state stay behind the journal barrier.
+func (q *Queue) withoutQueueMutex(mode queueWriteMode, timing *queueUpdateTiming, preparing bool, work func() error) error {
 	if q.activeHold != nil {
 		q.activeHold.pause()
-		defer q.activeHold.resume()
+		defer q.activeHold.resume(preparing)
 	}
-	return q.mu.commitOutsideLock(mode == queueWriteJournaled, write)
+	if timing != nil {
+		started := holdNow(timing.clock)
+		defer func() { timing.offLock += holdNow(timing.clock).Sub(started) }()
+	}
+	return q.mu.commitOutsideLock(mode == queueWriteJournaled, work)
 }
 
 // Startup evidence migrations also use this writer, without a live queue turn.

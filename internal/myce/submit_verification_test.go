@@ -5,12 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -152,6 +153,113 @@ func TestSubmitVerificationDoesNotBlockQueue(t *testing.T) {
 	}
 	if got := job(t, q, active.ID); got.State != "cancelled" || !got.ReleaseConfirmed {
 		t.Fatal("other-host cancellation acknowledgement did not settle", got)
+	}
+}
+
+func TestFileSubmissionBatchMutexHold(t *testing.T) {
+	q, clock := fixture(t)
+	s := submitVerificationInput(t, q)
+	s.Priority = "production" // The receipt skips optional post-commit planning.
+	ref := s.Files["input"]
+	for i := range 3072 {
+		s.Files[fmt.Sprintf("inputs/%04d", i)] = ref
+	}
+	if err := q.update(func() error { seedRetainedInputClaims(q, 14000); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	m := machine("checkin", "fake")
+	check(t, q, m, nil)
+	drainAdmissionWait(t, q)
+	// The probe runs immediately before the writer turn, after the claim
+	// snapshot is prepared. Allow a new receipt to invalidate that snapshot.
+	var gateCommit atomic.Bool
+	commitReady, resumeCommit := make(chan struct{}), make(chan struct{})
+	continueCommit := sync.OnceFunc(func() { close(resumeCommit) })
+	defer continueCommit()
+	q.checkpointProbe = func() bool {
+		if gateCommit.CompareAndSwap(true, false) {
+			close(commitReady)
+			<-resumeCommit
+		}
+		return true
+	}
+	const claimRoute = "POST /api/files/input-claims"
+	const jobRoute = "POST /api/jobs"
+	var mu sync.Mutex
+	holds := map[string]time.Duration{}
+	counts := map[string]int{}
+	q.observeRequest = func(route string, _, _, hold, _ time.Duration) {
+		mu.Lock()
+		holds[route] = max(holds[route], hold)
+		counts[route]++
+		mu.Unlock()
+	}
+	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+	t.Cleanup(server.Close)
+	client := (Client{URL: server.URL, Token: "test"}).WithoutRetries()
+	entered, unblock := gateSubmitVerification(t, q, nil)
+	defer unblock()
+	submitted := make(chan error, 1)
+	var j Job
+	go func() { submitted <- client.Call(t.Context(), "POST", "/api/jobs", s, &j) }()
+	submitVerificationWait(t, "large input durability barrier", entered)
+	// Issue claims through the real one-receipt endpoint.
+	var claim FileInputClaim
+	for i := range 15 {
+		file := FileRef{SHA256: fmt.Sprintf("%064x", 14000+i), SizeBytes: 1}
+		clock.Advance(time.Second)
+		if err := client.Call(t.Context(), "POST", "/api/files/input-claims", map[string]any{"project": s.Project, "file": file}, &claim); err != nil {
+			t.Fatal(err)
+		}
+		if i%4 == 0 {
+			var reply Reply
+			if err := client.Call(t.Context(), "POST", "/api/workers/checkin", Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol}, &reply); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	select {
+	case err := <-submitted:
+		t.Fatalf("job returned before verification finished: %v", err)
+	default:
+	}
+	drainAdmissionWait(t, q)
+	gateCommit.Store(true)
+	unblock()
+	submitVerificationWait(t, "prepared submission before writer turn", commitReady)
+	clock.Advance(time.Second)
+	if err := client.Call(t.Context(), "POST", "/api/files/input-claims", map[string]any{"project": s.Project, "file": ref}, &claim); err != nil {
+		t.Fatal(err)
+	}
+	continueCommit()
+	if err := submitVerificationWait(t, "large submit", submitted); err != nil || j.ID == "" || len(j.Spec.Files) != len(s.Files) {
+		t.Fatalf("large submit returned id=%q files=%d: %v", j.ID, len(j.Spec.Files), err)
+	}
+	q.mu.RLock()
+	settled := q.s.FileInputClaims[claim.ID]
+	q.mu.RUnlock()
+	if settled.SettledAt.IsZero() || settled.Released || settled.File != ref {
+		t.Fatalf("submission did not atomically settle concurrent claim: %+v", settled)
+	}
+	clock.Advance(time.Second)
+	s.SubmissionKey += "-new-job"
+	if err := client.Call(t.Context(), "POST", "/api/jobs", s, &j); err != nil {
+		t.Fatal(err)
+	}
+	q.mu.RLock()
+	reused := q.s.FileInputClaims[claim.ID]
+	q.mu.RUnlock()
+	if !reused.equal(settled) {
+		t.Fatalf("reusing settled input rewrote claim: before=%+v after=%+v", settled, reused)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	const bound = 250 * time.Millisecond
+	for route, want := range map[string]int{claimRoute: 16, jobRoute: 2, "POST /api/workers/checkin": 4} {
+		if counts[route] != want || holds[route] <= 0 || holds[route] >= bound {
+			t.Errorf("%s count=%d want=%d physical hold max=%s bound=%s", route, counts[route], want, holds[route], bound)
+		}
+		t.Logf("%s max physical hold %s across %d requests", route, holds[route], counts[route])
 	}
 }
 

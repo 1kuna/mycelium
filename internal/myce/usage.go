@@ -217,7 +217,7 @@ func maxTime(a, b time.Time) time.Time {
 	}
 	return b
 }
-func (q *Queue) persistUsage(timing *queueUpdateTiming, observationOnly bool) error {
+func (q *Queue) persistUsage(timing *queueUpdateTiming, observationOnly, prepareOutsideLock bool) error {
 	measured := queuePersistenceTiming{}
 	defer func() {
 		if timing != nil {
@@ -228,13 +228,24 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming, observationOnly bool) er
 		}
 	}()
 	var batch queueWriteBatch
-	for _, r := range q.usageWrites {
-		batch.add(`INSERT INTO usage_samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(at,span,machine,device,project,job,model) DO UPDATE SET busy=busy+excluded.busy,idle=idle+excluded.idle,pinned=pinned+excluded.pinned,memory_seconds=memory_seconds+excluded.memory_seconds,observed=observed+excluded.observed`, r.At, r.Span, r.Machine, r.Device, r.Project, r.Job, r.Model, r.Busy, r.Idle, r.Pinned, r.Memory, r.Observed)
-	}
-	if err := q.memoryEvidencePending.prepareWrite(&batch); err != nil {
+	var next *queuePersistenceUpdate
+	prepare := func() error {
+		for _, r := range q.usageWrites {
+			batch.add(`INSERT INTO usage_samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(at,span,machine,device,project,job,model) DO UPDATE SET busy=busy+excluded.busy,idle=idle+excluded.idle,pinned=pinned+excluded.pinned,memory_seconds=memory_seconds+excluded.memory_seconds,observed=observed+excluded.observed`, r.At, r.Span, r.Machine, r.Device, r.Project, r.Job, r.Model, r.Busy, r.Idle, r.Pinned, r.Memory, r.Observed)
+		}
+		if err := q.memoryEvidencePending.prepareWrite(&batch); err != nil {
+			return err
+		}
+		var err error
+		next, err = q.prepareStateWrite(&batch, &measured, observationOnly)
 		return err
 	}
-	next, err := q.prepareStateWrite(&batch, &measured, observationOnly)
+	var err error
+	if prepareOutsideLock {
+		err = q.withoutQueueMutex(queueWriteJournaled, timing, true, prepare)
+	} else {
+		err = prepare()
+	}
 	if err != nil {
 		return err
 	}
