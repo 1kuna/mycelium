@@ -214,6 +214,8 @@ RSS guards where applicable, and tier OOM scores retain their existing behavior.
 For a pooled-memory assignment, job GET includes `memory.ram` and, on a
 discrete accelerator, `memory.card`. Each pool shows the typical estimate,
 admission charge, evidence level and run count, held memory and measured peak.
+On XPU, card evidence `size_band` means the job's decoded duration falls
+within comparable clean measurements.
 `memory.limit_gb` appears when the submitter set an explicit RAM limit.
 The queue can use the typical estimate when the cautious charge exceeds the
 target pool's allowance. A temporary shortage uses `memory_wait` with the RAM

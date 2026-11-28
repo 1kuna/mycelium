@@ -118,6 +118,11 @@ func (w Worker) acceptMemoryOffer(j *Job) {
 }
 
 func pooledEvidenceKey(j *Job, m *Machine) memoryEvidenceKey {
+	key, _ := pooledEvidenceReference(j, m)
+	return key
+}
+
+func pooledEvidenceReference(j *Job, m *Machine) (memoryEvidenceKey, WorkReference) {
 	var extension *Extension
 	if j.Spec.extensionJob() {
 		extension = qualifiedExtension(j, m)
@@ -125,7 +130,7 @@ func pooledEvidenceKey(j *Job, m *Machine) memoryEvidenceKey {
 	return pooledEvidenceKeyForExtension(j, m, extension)
 }
 
-func pooledEvidenceKeyForExtension(j *Job, m *Machine, extension *Extension) memoryEvidenceKey {
+func pooledEvidenceKeyForExtension(j *Job, m *Machine, extension *Extension) (memoryEvidenceKey, WorkReference) {
 	target := machineTarget(m)
 	if j.Spec.Needs.cpuOnly() {
 		target.Platform = "cpu"
@@ -149,7 +154,7 @@ func pooledEvidenceKeyForExtension(j *Job, m *Machine, extension *Extension) mem
 	if len(m.groupMembers) > 1 || len(j.AllocatedDevices) > 1 {
 		key.Concurrency = max(len(m.groupMembers), len(j.AllocatedDevices))
 	}
-	return memoryEvidenceKey{Platform: memoryPlatform(target, m.UnifiedMemory), Pool: "ram", Family: memoryFamily(&identity), Exact: memoryEvidenceExact(key, configuration)}
+	return memoryEvidenceKey{Platform: memoryPlatform(target, m.UnifiedMemory), Pool: "ram", Family: memoryFamily(&identity), Exact: memoryEvidenceExact(key, configuration)}, key.Reference
 }
 
 type pooledSizeKey struct {
@@ -187,7 +192,7 @@ func (q *Queue) pooledSize(source, candidate *Job, m *Machine, variant int) pool
 
 func (q *Queue) resolvePooledSize(j *Job, m *Machine) pooledCandidateSize {
 	n := j.Spec.Needs
-	key := pooledEvidenceKey(j, m)
+	key, ref := pooledEvidenceReference(j, m)
 	hostHint, deviceHint := n.HostMemoryGB, n.MemoryGB
 	hostHint = max(hostHint, j.Spec.SizeHint.HostMemoryGB)
 	deviceHint = max(deviceHint, j.Spec.SizeHint.MemoryGB)
@@ -229,7 +234,11 @@ func (q *Queue) resolvePooledSize(j *Job, m *Machine) pooledCandidateSize {
 			fitPoolCharge(&card, m.TotalMemoryGB/float64(count), evidence.exact[key].Lower)
 		default:
 			raiseReach, raiseKnown := q.raiseReach(j, m, key, reach, known)
-			card = evidence.expected(key, 0, raiseReach, raiseKnown, false)
+			if needsXPUCardInputEvidence(j, key) {
+				card = evidence.expectedXPUCard(j, key, ref, reach, raiseReach, raiseKnown)
+			} else {
+				card = evidence.expected(key, 0, raiseReach, raiseKnown, false)
+			}
 		}
 		if card.Alone && card.Evidence.Level == "unknown" && deviceHint > m.TotalMemoryGB {
 			// A cold estimate occupies a whole card, but a typed multi-card

@@ -52,6 +52,10 @@ func (q *Queue) currentMemoryEvidence() *memoryEvidence {
 }
 
 func (e *memoryEvidence) observeExpected(key memoryEvidenceKey, peak float64) {
+	e.observeExpectedInput(key, peak, "", 0)
+}
+
+func (e *memoryEvidence) observeExpectedInput(key memoryEvidenceKey, peak float64, input string, seconds float64) {
 	key = key.v2()
 	exact := e.exact[key]
 	familyKey := key.familyKey()
@@ -62,6 +66,12 @@ func (e *memoryEvidence) observeExpected(key memoryEvidenceKey, peak float64) {
 		e.write(memoryEvidenceRowKey{kind: "first", key: platform}, e.first[platform])
 	}
 	exact.Peaks = appendMemoryValue(exact.Peaks, peak, memoryPeakWindow)
+	if input != "" || len(exact.CardInputs) > 0 {
+		exact.CardInputs = appendMemoryValue(exact.CardInputs, input, memoryPeakWindow)
+	}
+	if seconds > 0 || len(exact.CardSeconds) > 0 {
+		exact.CardSeconds = appendMemoryValue(exact.CardSeconds, seconds, memoryPeakWindow)
+	}
 	exact.Raise = nil
 	exact.HighWater = 0
 	family.Peaks = appendMemoryValue(family.Peaks, peak, memoryPeakWindow)
@@ -69,6 +79,115 @@ func (e *memoryEvidence) observeExpected(key memoryEvidenceKey, peak float64) {
 	e.exact[key], e.family[familyKey] = exact, family
 	e.write(memoryEvidenceRowKey{kind: "exact", key: key}, exact)
 	e.write(memoryEvidenceRowKey{kind: "family", key: familyKey}, family)
+}
+
+func needsXPUCardInputEvidence(j *Job, key memoryEvidenceKey) bool {
+	return key.Platform == "linux/xpu/discrete" && j.Spec.extensionJob() &&
+		j.Spec.Workload != nil && !j.Spec.warmPieces()
+}
+
+// Units describe work throughput and can be one per recording at every
+// duration. Bind card coverage to the immutable staged inputs and the
+// declared workload. A mutable path or an absent input cannot teach sharing.
+func xpuCardInput(j *Job) string {
+	if len(j.Spec.Inputs) > 0 || j.Dependency != nil && len(j.Dependency.Inputs) > 0 {
+		return ""
+	}
+	files := jobInputFiles(j)
+	if len(files) == 0 && len(j.Spec.SharedInputs) == 0 {
+		return ""
+	}
+	shared := make(map[string]string, len(j.Spec.SharedInputs))
+	for name, input := range j.Spec.SharedInputs {
+		shared[name] = input.key()
+	}
+	return identityHash(struct {
+		Workload *Workload
+		Files    FileManifest
+		Shared   map[string]string
+		Models   map[string]ModelSnapshot
+	}{j.Spec.Workload, files, shared, j.Spec.ModelSnapshots})
+}
+
+func cardAudioSeconds(j *Job, ref WorkReference) float64 {
+	if w := j.Spec.Workload; ref.Unit == "audio-seconds" && w != nil && w.InputShape == ref.InputShape && w.valid() {
+		return w.Units
+	}
+	return 0
+}
+
+// An input in range reserves the largest peak through its next measured
+// duration, plus the largest observed spread among runs of the same duration.
+// An uncovered edge uses the ordinary exclusive first run.
+func (s memoryEvidenceSeries) cardSizeBand(seconds float64) (float64, int) {
+	if seconds <= 0 || len(s.CardSeconds) > len(s.Peaks) {
+		return 0, 0
+	}
+	var low, high, upper float64
+	for _, size := range s.CardSeconds {
+		if size > 0 && (low == 0 || size < low) {
+			low = size
+		}
+		high = max(high, size)
+		if size >= seconds && (upper == 0 || size < upper) {
+			upper = size
+		}
+	}
+	if high == low || low > seconds || upper == 0 {
+		return 0, 0
+	}
+	peaks := s.Peaks[len(s.Peaks)-len(s.CardSeconds):]
+	type peakRange struct{ low, high float64 }
+	byDuration := make(map[float64]peakRange, len(s.CardSeconds))
+	var peak, spread float64
+	var runs int
+	for i, size := range s.CardSeconds {
+		if size <= 0 {
+			continue
+		}
+		bounds, exists := byDuration[size]
+		if !exists {
+			bounds = peakRange{peaks[i], peaks[i]}
+		}
+		bounds.low, bounds.high = min(bounds.low, peaks[i]), max(bounds.high, peaks[i])
+		byDuration[size] = bounds
+		spread = max(spread, bounds.high-bounds.low)
+		if size <= upper {
+			peak = max(peak, peaks[i])
+			runs++
+		}
+	}
+	return peak + spread, runs
+}
+
+func (e *memoryEvidence) expectedXPUCard(j *Job, key memoryEvidenceKey, ref WorkReference, reach, raiseReach float64, raiseKnown bool) memoryPoolEstimate {
+	card := e.expected(key, 0, raiseReach, raiseKnown, false)
+	exact := e.exact[key.v2()]
+	input := xpuCardInput(j)
+	if input != "" {
+		if slices.Contains(exact.CardInputs, input) {
+			return card
+		}
+		if peak, runs := exact.cardSizeBand(cardAudioSeconds(j, ref)); runs > 0 {
+			charge := max(peak, j.Spec.SizeHint.MemoryGB)
+			if exact.Raise != nil {
+				charge = max(charge, card.ChargeGB)
+			} else {
+				card.Evidence = memoryEstimateEvidence{Level: "size_band", Runs: runs}
+			}
+			card.TypicalGB, card.ChargeGB = charge, charge
+			return card
+		}
+	}
+	card.Alone = true
+	if card.RetryFloorGB > 0 {
+		card.ChargeGB = max(card.ChargeGB, reach)
+	} else {
+		card.ChargeGB = reach
+		card.Evidence = memoryEstimateEvidence{Level: "unknown"}
+	}
+	card.TypicalGB = card.ChargeGB
+	return card
 }
 
 // Only single-card XPU auto RAM uses measured attempts before the first
@@ -385,7 +504,7 @@ func (q *Queue) recordPoolEvidence(j *Job, r Result) bool {
 		return false
 	}
 	pools := memoryPools(j)
-	key := pooledEvidenceKey(j, m)
+	key, ref := pooledEvidenceReference(j, m)
 	stop := priorityStop(j)
 	pressure := j.Reason == memoryPressureCause || r.ExecutionCause != nil && r.ExecutionCause.Class == memoryPressureCause
 	if !r.Success || j.Spec.warmPieces() && j.FanOut.Next < len(j.Spec.FanOut.Pieces) {
@@ -403,7 +522,15 @@ func (q *Queue) recordPoolEvidence(j *Job, r Result) bool {
 		if peak := p.Learned.Card.acceptedGB(); pools.Card != nil && pools.Card.Learned && peak != nil {
 			cardKey := key
 			cardKey.Pool = "card"
-			q.stagedMemoryEvidence().observeExpected(cardKey, *peak)
+			input := ""
+			seconds := 0.0
+			if len(j.AllocatedDevices) == 1 && needsXPUCardInputEvidence(j, cardKey) {
+				input = xpuCardInput(j)
+				if input != "" {
+					seconds = cardAudioSeconds(j, ref)
+				}
+			}
+			q.stagedMemoryEvidence().observeExpectedInput(cardKey, *peak, input, seconds)
 			retainPoolPeaks(j, 0, *peak)
 		}
 	}

@@ -39,8 +39,12 @@ func TestQueuePersistenceInputClaimsRollbackRestart(t *testing.T) {
 	}
 	assertClaims := func(want map[string]FileInputClaim) {
 		t.Helper()
+		data, err := readQueueState(q.db, normalizedQueueMarker)
+		if err != nil {
+			t.Fatal(err)
+		}
 		var disk state
-		if err := json.Unmarshal(durableQueueRecord(t, q.db, "state"), &disk); err != nil {
+		if err := json.Unmarshal(data, &disk); err != nil {
 			t.Fatal(err)
 		}
 		published, err := readGet(q.readRoot, "state").decode("state")

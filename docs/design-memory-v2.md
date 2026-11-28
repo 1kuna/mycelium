@@ -111,6 +111,17 @@ A run is **clean** only when every counter in its row was read for the whole run
 
   On a discrete card with no measured device peak, the card's E is the whole card. The reason is physical: a failed allocation can land on a co-tenant. This keeps the 2026-11-23 agent default.
 
+  For one-shot XPU extension workloads that declare `workload`, repeated
+  immutable inputs use the exact window's maximum under R5. A variant can
+  declare `unit: audio-seconds` in its matching work reference to size unique
+  inputs by their decoded duration. Within the measured interval, E is the
+  largest clean peak through the next measured duration, plus the largest
+  spread observed among runs of the same duration. The interval and spread
+  come from the exact work's 20-run window. An input outside that interval,
+  an unmeasured input without this size declaration, or a mutable input path
+  takes the whole card. Record count and encoded bytes can hide longer
+  recordings and their larger peaks (#2279).
+
 "Alone" is no longer a state. It is just E equal to the pool's reach. Whether two jobs that fit one GPU *should* share it is a throughput question, not a memory one. The existing comparison of alone and shared runs answers it (#2037).
 
 ### Constants (MY-34)

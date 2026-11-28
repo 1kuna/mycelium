@@ -229,6 +229,9 @@ func (q *Queue) cardWaitingReason(j *Job, m *Machine) string {
 	for _, holder := range q.liveJobs() {
 		if holder.ID != j.ID && batchOnTarget(holder, m) && batchReservesCapacity(holder) {
 			holders[holder.ID] = holder.ID + " (" + q.priorityMatch(holder.Spec).Tier + ")"
+			if m.GPU == "xpu" && !holder.Spec.ExclusiveDevice && holder.Memory != nil && unmeasuredCard(holder.Memory.Card) {
+				holders[holder.ID] += " (exclusive while measuring card memory)"
+			}
 			if restriction.conflicts(holder, m) {
 				sharingBlockers = append(sharingBlockers, holders[holder.ID])
 			}
@@ -261,7 +264,15 @@ func (q *Queue) cardWaitingReason(j *Job, m *Machine) string {
 	if n, shared := q.deviceCoTenants(m, j, true); shared && n > 0 && q.cardSettled(m) {
 		return reservationWaitReason(m, false, n) + "; held by " + strings.Join(owners, ", ")
 	}
-	return reservationWaitReason(m, true, 0) + fmt.Sprintf("; card busy: waiting for GPU batch slot on device %s held by %s", device, strings.Join(owners, ", "))
+	reason := reservationWaitReason(m, true, 0) + fmt.Sprintf("; card busy: waiting for GPU batch slot on device %s held by %s", device, strings.Join(owners, ", "))
+	if m.GPU == "xpu" && !j.Spec.ExclusiveDevice && j.Memory != nil && unmeasuredCard(j.Memory.Card) {
+		reason += "; this job requires an exclusive first run to measure card memory"
+	}
+	return reason
+}
+
+func unmeasuredCard(card *memoryPoolEstimate) bool {
+	return card != nil && card.Alone && card.Evidence.Level == "unknown"
 }
 
 // A dead end is a wait the queue itself judges waiting cannot clear. It fails
