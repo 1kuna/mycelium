@@ -214,6 +214,9 @@ func (q *Queue) observeMemoryOwners(m, old *Machine, received time.Time, period 
 	now := received.Add(-report.sampleAge)
 	m.memoryShadowAt = now
 	for _, p := range report.Pools {
+		if p.Name != "ram" {
+			continue
+		}
 		key := ownersKey(m, p.Name)
 		h := q.currentMemoryEvidence().owners[key]
 		if h.PeakGB == 0 || p.ReachGB == nil || !validMemoryValue(p.OwnersGB) {
@@ -245,6 +248,11 @@ func memoryPoolReading(m *Machine, pool string) *MemoryShadowPool {
 }
 
 func (q *Queue) ownersMemory(m *Machine, pool string) (hold, peak float64) {
+	// Older queues persisted card residual forecasts in the RAM hold format.
+	// Card capacity uses the driver free reading and exact attempt commitments.
+	if pool != "ram" {
+		return 0, 0
+	}
 	holds := q.currentMemoryEvidence().owners
 	if len(holds) == 0 {
 		return 0, 0
@@ -428,10 +436,8 @@ func (q *Queue) learnMemoryStop(j *Job, r Result, m *Machine, key memoryEvidence
 		pool = limit.pool()
 		sample = &memoryStopSample{ExpectedGB: float64(limit.LimitBytes) / (1 << 30), PeakGB: float64(limit.ObservedBytes) / (1 << 30)}
 	}
-	poolName := pool
 	if pool == "card" {
 		estimate = pools.Card
-		poolName += "/" + m.Device
 	}
 	if estimate == nil || !estimate.Learned || sample == nil && !kernelKill {
 		q.recordLegacyPoolEvidence(j, r)
@@ -468,9 +474,9 @@ func (q *Queue) learnMemoryStop(j *Job, r Result, m *Machine, key memoryEvidence
 			e.observeHighWater(key, peak)
 		}
 		e.raiseExpected(key, peak, sample.ExpectedGB)
-	} else if validRate(sample.OwnersPeakGB) && validMemoryValue(sample.OwnersGB) {
+	} else if pool == "ram" && validRate(sample.OwnersPeakGB) && validMemoryValue(sample.OwnersGB) {
 		e := q.stagedMemoryEvidence()
-		key := ownersKey(m, poolName)
+		key := ownersKey(m, pool)
 		e.writeOwners(key, e.owners[key].stopped(q.clock.Now(), sample))
 	}
 	if pool == "card" {

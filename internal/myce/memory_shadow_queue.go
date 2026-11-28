@@ -291,7 +291,7 @@ func (s *shadowQueueMonitor) observePool(o shadowObservation, p MemoryShadowPool
 		}) {
 			cause = "co_tenant_over_e"
 		}
-		if p.OwnersForecastGB > max(p.OwnersGB, h.owners.peak) {
+		if p.Name == "ram" && p.OwnersForecastGB > max(p.OwnersGB, h.owners.peak) {
 			if !h.owners.lapsed.IsZero() && h.owners.peak == 0 {
 				cause = "lapsed_owners_hold"
 			} else if cause == "unclassified" {

@@ -454,6 +454,110 @@ func TestMemoryExpectedXPUCardSharing(t *testing.T) {
 	r5Start(t, q, check(), peer.ID)
 }
 
+func TestMemoryExpectedXPUCardStaleOwnersForecast(t *testing.T) {
+	q, clock := fixture(t)
+	const (
+		capacity = 30.296092987060547
+		keep     = 0.25
+		budget   = capacity - keep
+		peak     = 28.457469940185547
+		resident = 1.5775222778320312
+		rawFree  = 3.7036705017089844
+		owners   = capacity - rawFree - resident
+		forecast = 170.35562166409454
+		want     = 8.215
+	)
+	m := sharedDiscreteMachine("xpu")
+	d := &m.Devices[0]
+	d.ID, d.TotalMemoryGB, d.BudgetGB, d.FreeMemoryGB = "1", capacity, budget, budget
+	d.ReserveMemoryGB, d.rawFreeGB = keep, shadowGB(rawFree)
+	card := MemoryShadowPool{Name: "card/1", CapacityGB: capacity, KeepGB: keep, FreeGB: shadowGB(budget)}
+	check := func(pool MemoryShadowPool, runs ...*Job) Reply {
+		clock.Advance(time.Second)
+		return r5Check(t, q, m, pool, runs...)
+	}
+	s := sharedSpec("experiment", budget)
+	s.Needs.Platform = Platform{Required: []string{"xpu"}}
+	train := submit(t, q, s)
+	r5Clean(t, q, r5Start(t, q, check(card), train.ID),
+		memoryRunPool{PeakGB: 1, Complete: true}, memoryRunPool{PeakGB: want, Complete: true})
+
+	// A different workload had no complete samples and occupied the whole card.
+	cold := s
+	cold.Name = "whole-card-workload"
+	coldJob := submit(t, q, cold)
+	run := r5Start(t, q, check(card), coldJob.ID)
+	if run.Memory.Card.ChargeGB != budget || !run.Memory.Card.Alone {
+		t.Fatalf("cold XPU allocation: %+v", run.Memory.Card)
+	}
+	skewed := card
+	skewed.FreeGB = shadowGB(rawFree - keep)
+	skewed.Attempts = []MemoryShadowAttempt{{ID: run.ID, Attempt: run.Attempt, ExpectedGB: budget,
+		FootprintGB: shadowGB(resident), HighWaterGB: peak}}
+	// Replay the retained report from an adjacent worker. The old residual
+	// forecast used a falling process reading against a still-low driver free.
+	skewed.OwnersGB, skewed.OwnersForecastGB = owners, forecast
+	skewed.ForecastFreeGB = shadowGB(rawFree - keep - (forecast - owners))
+	// Replay a falling per-process reading against the same driver reading
+	// through the current worker. Adjacent queues receive no residual.
+	worker := Worker{Machine: m, Interval: time.Second}
+	var shadow workerMemoryShadow
+	for _, used := range []float64{peak, resident} {
+		reading := &shadowAttemptReading{Card: shadowMemoryReading{At: clock.Now(), GB: used, PeakGB: peak}}
+		report := AttemptReport{Execution: Execution{ID: run.ID, Attempt: run.Attempt}, Session: run.Session, memoryShadow: reading}
+		shadow.sample(worker, &m, 32, []Job{*run}, []AttemptReport{report}, clock.Now())
+		clock.Advance(time.Second)
+	}
+	current := shadow.previous.Pools[1]
+	if current.ForecastFreeGB == nil || *current.ForecastFreeGB != rawFree-keep ||
+		current.FootprintGB != resident || current.OwnersGB != 0 || current.OwnersForecastGB != 0 {
+		t.Fatalf("worker forecast with no attempt growth: %+v", current)
+	}
+
+	check(skewed, run)
+	if got := job(t, q, run.ID); got.State != "running" {
+		t.Errorf("unattributed forecast stopped an in-budget card owner: %s", got.State)
+	}
+
+	waitingSpec := s
+	waitingSpec.Priority, waitingSpec.Class = "production", "production"
+	waiting := submit(t, q, waitingSpec)
+	// A genuine below-keep reading still stops and requeues the exact attempt.
+	// Its released card is available even with the old persisted projection.
+	r5Stop(t, q, clock, m, run, MemoryShadowPool{Name: card.Name, CapacityGB: capacity,
+		KeepGB: keep, FreeGB: shadowGB(-0.125), OwnersGB: owners, OwnersForecastGB: forecast},
+		budget, peak, true)
+	if h := q.currentMemoryEvidence().owners[ownersKey(&m, card.Name)]; h.PeakGB != 0 {
+		t.Errorf("new card pressure stop persisted an unattributed peak: %+v", h)
+	}
+	if err := q.update(func() error {
+		q.stagedMemoryEvidence().writeOwners(ownersKey(&m, card.Name),
+			memoryOwnersHold{PeakGB: forecast, Window: firstOwnersWindow})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The waiting job is ahead of the requeued owner. The old attempt and
+	// the requeue owe zero.
+	a := r5Start(t, q, check(card), waiting.ID)
+	if a.Memory.Card.ChargeGB != want {
+		t.Fatalf("card charge after owner release: %+v", a.Memory.Card)
+	}
+	running := []*Job{a}
+	for range 2 {
+		peer := submit(t, q, waitingSpec)
+		running = append(running, r5Start(t, q, check(card, running...), peer.ID))
+	}
+	over := submit(t, q, waitingSpec)
+	if got := assignedJob(check(card, running...)); got != nil {
+		t.Fatalf("offered %s (%s) over the card budget", got.ID, over.ID)
+	}
+	target := q.machineTargets(q.s.Machines[m.ID])[1]
+	if room := budget - 3*want; math.Abs(target.FreeMemoryGB-room) > 1e-9 {
+		t.Fatalf("card room %.3f, want %.3f after three live card peaks", target.FreeMemoryGB, room)
+	}
+}
+
 func TestMemoryExpected2240XPUHighWater(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

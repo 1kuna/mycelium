@@ -99,11 +99,22 @@ func (p MemoryShadowPool) shortage() string {
 		return "host_pressure"
 	case p.FreeGB != nil && *p.FreeGB < 0:
 		return "below_reserve"
-	case p.ForecastFreeGB != nil && *p.ForecastFreeGB < 0:
+	case p.ForecastFreeGB != nil && *p.ForecastFreeGB+p.unattributedCardForecastLoss() < 0:
 		return "attempt_forecast"
 	default:
 		return ""
 	}
+}
+
+// Adjacent workers can still subtract a card's unattributed residual growth
+// from the forecast. The driver free reading and attempt samples are taken on
+// separate cadences, so their difference cannot establish another owner's
+// growth. Actual free memory and the attempt forecasts still govern stops.
+func (p MemoryShadowPool) unattributedCardForecastLoss() float64 {
+	if p.Name == "ram" {
+		return 0
+	}
+	return max(0, p.OwnersForecastGB-p.OwnersGB)
 }
 
 type MemoryShadowPool struct {
@@ -185,8 +196,11 @@ func (p *MemoryShadowPool) forecast(previous *MemoryShadowPool, elapsed, reactio
 		}
 		loss += growth
 	}
-	ownersLoss := max(0, p.OwnersGB-previous.OwnersGB) / elapsed * reaction
-	p.OwnersForecastGB = p.OwnersGB + ownersLoss
+	var ownersLoss float64
+	if p.Name == "ram" {
+		ownersLoss = max(0, p.OwnersGB-previous.OwnersGB) / elapsed * reaction
+		p.OwnersForecastGB = p.OwnersGB + ownersLoss
+	}
 	free := *p.FreeGB - loss - ownersLoss
 	p.ForecastFreeGB = &free
 }

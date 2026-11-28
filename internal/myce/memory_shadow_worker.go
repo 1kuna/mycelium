@@ -231,13 +231,14 @@ func (s *workerMemoryShadow) sample(w Worker, m *Machine, raw float64, jobs []Jo
 		if p.SlackGB == nil {
 			continue
 		}
-		// Keep cancels out of the inferred owners' slope. Use raw physical
-		// totals where available; none of these readings fill a footprint gap.
-		total := p.CapacityGB
-		if p.Name == "ram" && m.MemoryObservation != nil {
-			total = m.MemoryObservation.TotalGB
+		if p.Name == "ram" {
+			// Keep cancels out of the inferred RAM owners' slope.
+			total := p.CapacityGB
+			if m.MemoryObservation != nil {
+				total = m.MemoryObservation.TotalGB
+			}
+			p.OwnersGB = max(0, total-(*p.FreeGB+p.KeepGB)-p.FootprintGB)
 		}
-		p.OwnersGB = max(0, total-(*p.FreeGB+p.KeepGB)-p.FootprintGB)
 		if s.previous != nil && at.Sub(s.at) < 2*checkinPeriod(w.Interval) {
 			for _, prior := range s.previous.Pools {
 				if p.Name == prior.Name && p.KeepGB == prior.KeepGB {
