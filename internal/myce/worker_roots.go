@@ -158,9 +158,21 @@ func (w *Worker) sampleStorageRoots(ctx context.Context, checkpoint string) []Un
 // is not a host-wide disable: a local prepared environment or staged immutable
 // input remains usable unless its own cache root is affected.
 func storageRootReason(j *Job, m *Machine) string {
-	if m == nil {
+	return storageRootBlock(j, m).description()
+}
+
+func (r UnavailableRoot) description() string {
+	if r.Root == "" {
 		return ""
 	}
+	return fmt.Sprintf("%s: %s unavailable", r.Reason, r.Root)
+}
+
+func storageRootBlock(j *Job, m *Machine) UnavailableRoot {
+	if m == nil {
+		return UnavailableRoot{}
+	}
+	var pending UnavailableRoot
 	for _, root := range m.UnavailableRoots {
 		needs := false
 		switch root.Root {
@@ -193,11 +205,17 @@ func storageRootReason(j *Job, m *Machine) string {
 		case "environment":
 			needs = j.Spec.Environment.Key() != "" || len(j.EnvironmentRecipes) > 0 || len(j.SidecarEnvironmentRecipes) > 0 || j.Spec.Extension != "" || len(j.Extensions) > 0
 		}
-		if needs {
-			return fmt.Sprintf("%s: %s unavailable", root.Reason, root.Root)
+		if !needs {
+			continue
+		}
+		if root.Reason != mountProbePending {
+			return root
+		}
+		if pending.Root == "" {
+			pending = root
 		}
 	}
-	return ""
+	return pending
 }
 
 func environmentRecipeNeedsSource(recipe EnvironmentRecipe, m *Machine) bool {

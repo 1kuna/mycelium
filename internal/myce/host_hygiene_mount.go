@@ -251,7 +251,7 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 			return result
 		}
 		if result.LatencySeconds == 0 {
-			result.Reason = "mount_probe_pending"
+			result.Reason = mountProbePending
 			return p.confirm(result, false)
 		}
 		if len(base) < hostHealthWarmup || result.PendingSeconds <= limit.Seconds() {
@@ -265,7 +265,7 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 		result.Reason = "mount_probe_slow"
 	}
 	if !completed && result.LatencySeconds == 0 && result.Reason == "" {
-		result.Reason = "mount_probe_pending"
+		result.Reason = mountProbePending
 	}
 	if !completed && result.Reason == "" {
 		// A cached success is not fresh recovery evidence.
@@ -368,6 +368,8 @@ func (p *hostMountProbe) withheld() bool {
 	return state != nil && state.fault.Active && state.owner == p.root
 }
 
+const mountProbePending = "mount_probe_pending"
+
 func mountHealthWithholds(reason string) bool {
 	return reason != "" && reason != "mount_probe_slow"
 }
@@ -377,7 +379,7 @@ func (p *hostMountProbe) confirm(result HostMountHealth, fresh bool) HostMountHe
 	// Initial pending is absence of evidence, not a failed access. One
 	// completed success establishes health; real failed/stalled episodes still
 	// require the existing consecutive fresh recovery observations.
-	if p.reason == "mount_probe_pending" && fresh && !mountHealthWithholds(result.Reason) {
+	if p.reason == mountProbePending && fresh && !mountHealthWithholds(result.Reason) {
 		p.reason, p.candidate, p.consecutive = "", "", 0
 	}
 	if result.Reason != "" && result.Reason != "mount_probe_slow" && result.Reason != "mount_probe_stalled" {
@@ -414,7 +416,10 @@ func applyHostMountHealth(w Worker, m *Machine) {
 	mark := func(role, reason string) {
 		for i := range m.UnavailableRoots {
 			if m.UnavailableRoots[i].Root == role {
-				m.UnavailableRoots[i].Reason = reason
+				// An unfinished probe cannot replace a known missing mount.
+				if reason != mountProbePending {
+					m.UnavailableRoots[i].Reason = reason
+				}
 				return
 			}
 		}

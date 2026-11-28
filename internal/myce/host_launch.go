@@ -237,6 +237,11 @@ func (q *Queue) authorizeLaunchWithCustody(ctx context.Context, request workerLa
 				reject("execution_released")
 			default:
 				predicate := q.startPlacementRejection(j)
+				if predicate == startStorageProbePending {
+					// A cold worker's first probe has not established access.
+					// Keep exact custody and retry before permitting any launch.
+					return sharedQueueControlRetry()
+				}
 				if predicate == "" {
 					q.clearStartRefusal(j)
 					if request.Custody != nil {

@@ -428,8 +428,20 @@ func (q *Queue) startPlacementPolicyRejection(j *Job) string {
 		return "execution_target"
 	case !cpuFits(j, m):
 		return "cpu_fit"
-	case !q.placementPolicyAllowed(j, m, false):
+	}
+	if j.StartedAt == nil && j.Spec.Needs.Model == "" {
+		root := storageRootBlock(j, m)
+		if root.Reason == mountProbePending {
+			return startStorageProbePending
+		}
+		if root.Root != "" {
+			return string(predicateStorageRoot)
+		}
+	}
+	if !q.placementPolicyAllowed(j, m, false) {
 		return "placement_policy"
 	}
 	return ""
 }
+
+const startStorageProbePending = "storage_root_probe_pending"

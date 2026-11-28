@@ -3553,6 +3553,9 @@ func (q *Queue) startedWithCustody(ctx context.Context, request workerStartedReq
 		if q.assignedLaunchAllowed(m, r.Session, j) {
 			predicate = q.startPlacementRejection(j)
 		}
+		if predicate == startStorageProbePending {
+			return sharedQueueControlRetry()
+		}
 		if predicate != "" {
 			q.recordStartRefusal(j, predicate)
 			rejected = ErrStale
