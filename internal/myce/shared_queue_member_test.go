@@ -597,7 +597,10 @@ func TestSharedQueueMemberWrongStartedDuringRetirement(t *testing.T) {
 	c.HTTP = &http.Client{Transport: proofRoundTrip(func(r *http.Request) (*http.Response, error) {
 		res, err := transport.RoundTrip(r)
 		if r.URL.Path == "/api/workers/started" && err != nil {
-			dropped <- err
+			select {
+			case dropped <- err:
+			default:
+			}
 			release()
 		}
 		return res, err
