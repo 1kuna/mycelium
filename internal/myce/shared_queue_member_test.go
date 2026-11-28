@@ -371,11 +371,7 @@ func assertProofAttempt(t *testing.T, before, after *Job) {
 }
 
 func TestSharedQueueMemberRunningHandover(t *testing.T) {
-	binary := filepath.Join(t.TempDir(), "myce")
-	build := exec.CommandContext(t.Context(), "go", "build", "-o", binary, "../../cmd/myce")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build CLI: %v\n%s", err, out)
-	}
+	binary := proofCLI(t)
 	pythonPath, err := filepath.Abs("../../clients/python/src")
 	if err != nil {
 		t.Fatal(err)
@@ -407,26 +403,28 @@ func TestSharedQueueMemberRunningHandover(t *testing.T) {
 				t.Fatal(err)
 			}
 			before, unblock, finished := proofBlockingJob(t, client, dir)
-			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-			defer cancel()
-			ready := filepath.Join(dir, "client-ready")
+			ctx := t.Context()
 			download := filepath.Join(dir, "python-download")
 			python := exec.CommandContext(ctx, "python3", "-c", `
 from pathlib import Path
 from sys import argv
 from mycelium import Client
-job, ready, destination = argv[1:]
-client = Client(timeout=12)
+job, destination = argv[1:]
+client = Client()
 assert client.get(job)["state"] == "running"
-Path(ready).touch()
+print("ready", flush=True)
 assert client.wait(job)["state"] == "succeeded"
 client.download_result(job, "result.txt", destination)
 assert Path(destination).read_bytes() == b"proof"
-`, before.ID, ready, download)
+`, before.ID, download)
 			clientEnv := append(os.Environ(), "MYCE_QUEUE="+addresses, "MYCE_TOKEN="+proofToken)
 			python.Env = append(clientEnv, "PYTHONPATH="+pythonPath, "PYTHONDONTWRITEBYTECODE=1")
 			var pythonLog bytes.Buffer
-			python.Stdout, python.Stderr = &pythonLog, &pythonLog
+			python.Stderr = &pythonLog
+			pythonEvents, err := python.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
 			if err := python.Start(); err != nil {
 				t.Fatal(err)
 			}
@@ -437,10 +435,13 @@ assert Path(destination).read_bytes() == b"proof"
 					_ = python.Wait()
 				}
 			}()
-			proofEventually(t, "Python client reads from the original member", func() bool {
-				_, err := os.Stat(ready)
-				return err == nil
-			})
+			if event, err := bufio.NewReader(pythonEvents).ReadString('\n'); err != nil || event != "ready\n" {
+				_ = python.Process.Kill()
+				waitErr := python.Wait()
+				waited = true
+				t.Fatalf("Python did not observe the running job before handover: event %q, read %v, wait %v\n%s",
+					event, err, waitErr, pythonLog.String())
+			}
 			proofEventually(t, "follower replays running job", func() bool {
 				_, j := proofReplica(t, next, before.ID)
 				return j != nil && j.State == "running" && j.StartedAt != nil
@@ -504,7 +505,7 @@ assert Path(destination).read_bytes() == b"proof"
 			if waitErr != nil {
 				t.Fatalf("Python client failed after handover: %v\n%s", waitErr, pythonLog.String())
 			}
-			if out := cli("wait", "--timeout", "5s", before.ID); !strings.Contains(string(out), "succeeded") {
+			if out := cli("wait", before.ID); !strings.Contains(string(out), "succeeded") {
 				t.Fatalf("CLI wait did not report success: %s", out)
 			}
 			dest := filepath.Join(dir, "download")
@@ -516,6 +517,19 @@ assert Path(destination).read_bytes() == b"proof"
 			}
 		})
 	}
+}
+
+func proofCLI(t *testing.T) string {
+	t.Helper()
+	if binary := os.Getenv("MYCE_TEST_CLI"); binary != "" {
+		return binary
+	}
+	binary := filepath.Join(t.TempDir(), "myce")
+	build := exec.CommandContext(t.Context(), "go", "build", "-o", binary, "../../cmd/myce")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build CLI: %v\n%s", err, out)
+	}
+	return binary
 }
 
 func TestSharedQueueMemberDatabaseOutage(t *testing.T) {
