@@ -39,6 +39,14 @@ defaults such as `--file-retention 72h`, and the saved discovery bind supplied b
 syntax refuses conservatively; the override is never removed automatically.
 Consumer files are preserved. Check health and exact cleanup before resuming.
 
+`myce install queue --config QUEUE_CONFIG --output-delivery-root PATH` saves
+the async NAS destination and renders it into the service command. Verify the
+destination is mounted and writable before enabling it. Queue startup does
+not depend on reaching this root. Later installs preserve the setting when
+the flag is omitted, and `--output-delivery-root=` clears it. The installer
+saves the setting beside the queue config so the adjacent release can still
+decode the config and run the generated service during a rollback.
+
 To prepare retirement while a differing override remains in place, use
 `myce install queue --config QUEUE_CONFIG --save-settings-only` with all intended
 settings. This mode requires an existing Linux queue. It saves only the config

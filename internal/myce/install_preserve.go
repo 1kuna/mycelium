@@ -172,7 +172,7 @@ func compareQueueExecStart(c ServiceConfig, start string) error {
 		"restart-grace": RestartGrace.String(), "production-infrastructure-retries": strconv.Itoa(DefaultProductionInfrastructureRetries),
 		"production-loss-timeout": "0s", "deadline-loss-timeout": "0s", "experiment-loss-timeout": "0s",
 		"model-config": "", "environment-config": "", "project-config": "", "host-config": "",
-		"discovery-listen": "", "discovery": "true",
+		"discovery-listen": "", "discovery": "true", "output-delivery-root": "",
 	}
 	parse := func(argv []string) (map[string]string, error) {
 		values := make(map[string]string, len(defaults))
@@ -268,7 +268,7 @@ func saveQueueInstallSettings(ctx context.Context, c ServiceConfig, tx *installT
 	if err = tx.put(c.Config, data, 0600); err != nil {
 		return err
 	}
-	if err = tx.put(c.Service, []byte(c.ServiceText()), 0600); err != nil {
+	if err = tx.putServiceDefinition(c); err != nil {
 		return err
 	}
 	if err := tx.pruneBackups(); err != nil {
@@ -421,6 +421,27 @@ type installTransaction struct {
 	manager   installManager
 	retired   []string
 	units     []installUnit
+}
+
+func queueOutputDeliverySettings(configPath string) string {
+	return configPath + ".output-delivery-root"
+}
+
+func (tx *installTransaction) putServiceDefinition(c ServiceConfig) error {
+	if c.Role == "queue" {
+		path := queueOutputDeliverySettings(c.Config)
+		old := tx.originals[path]
+		if c.OutputDeliveryRoot != "" || old.existed {
+			data, err := json.Marshal(c.OutputDeliveryRoot)
+			if err != nil {
+				return err
+			}
+			if err := tx.put(path, data, 0600); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.put(c.Service, []byte(c.ServiceText()), 0600)
 }
 
 func (tx *installTransaction) put(path string, data []byte, mode os.FileMode) error {

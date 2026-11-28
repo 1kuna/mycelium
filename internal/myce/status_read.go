@@ -918,8 +918,12 @@ func (q *Queue) statusSnapshotOptions(options *statusOptions, contexts ...contex
 }
 
 // The serving queue owns this list. Client projections only forward it.
-func queueCapabilities() []string {
-	return []string{"paused_start_window_frozen", "fenced_job_control", "fenced_job_control_if_revision"}
+func (q *Queue) queueCapabilities() []string {
+	capabilities := []string{"paused_start_window_frozen", "fenced_job_control", "fenced_job_control_if_revision"}
+	if q.deliveryRoot != "" {
+		capabilities = append(capabilities, "async_nas_output_delivery_configured")
+	}
+	return capabilities
 }
 
 func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...context.Context) (Snapshot, error) {
@@ -932,7 +936,7 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 	if options != nil && !options.full && len(options.sections) == 1 && options.sections[0] == "idle" {
 		now := q.clock.Now()
 		idle, err := q.readIdleStatus(ctx, options, now)
-		return Snapshot{Now: now, Idle: idle, QueueCapabilities: queueCapabilities()}, err
+		return Snapshot{Now: now, Idle: idle, QueueCapabilities: q.queueCapabilities()}, err
 	}
 	if options.compact() {
 		v, summary, delivery, err := q.compactStatusObservation(options, ctx)
@@ -940,6 +944,7 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 			return Snapshot{}, err
 		}
 		out := v.projectSnapshot(true)
+		out.QueueCapabilities = q.queueCapabilities()
 		out.Machines = dropReplacedStatusMachines(out.Machines)
 		out.Summary, out.HealthAlertDelivery = summary, delivery
 		out.Freshness = q.snapshotFreshness(readCommitted(v.clock), false)
@@ -969,6 +974,7 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 	// each queued job/target diagnostic rebuilds the retained-evidence catalog.
 	v.initStatusPlanning()
 	out := v.projectSnapshot(true, &q.requestBudgets)
+	out.QueueCapabilities = q.queueCapabilities()
 	out.RequestLatencies = q.requestLatencies.snapshot()
 	if options.includes("usage") {
 		out.Usage, err = v.readUsage(q.usageReader, out.Now.Add(-7*24*time.Hour), ctx)

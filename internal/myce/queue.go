@@ -3067,6 +3067,7 @@ func (q *Queue) snapshot(forStatus bool, contexts ...context.Context) (Snapshot,
 	var out Snapshot
 	err := q.updateRequest(requestContext(contexts), func() error { q.maintain(); out = q.projectSnapshot(false); return nil }, nil)
 	if err == nil {
+		out.QueueCapabilities = q.queueCapabilities()
 		out.Usage, err = q.usageSnapshot(out.Now.Add(-7*24*time.Hour), requestContext(contexts))
 	}
 	return out, err
@@ -3077,7 +3078,6 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 	defer q.memoizeExtensionQualifications(nil)()
 	compact := q.observationSelection != nil && q.observationSelection.compact
 	out := Snapshot{CheckpointExpiry: q.checkpointExpiryCounts(), EvidenceRetention: q.evidenceRetention, Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), QueueRelease: CurrentRelease(), Holds: []Hold{}, Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
-	out.QueueCapabilities = queueCapabilities()
 	out.HealthAlertDelivery = q.healthAlertDelivery()
 	if compact {
 		out.FleetUpgrade = q.observationSelection.upgrade

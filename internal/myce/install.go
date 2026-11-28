@@ -132,6 +132,8 @@ type ServiceConfig struct {
 
 	FileStoreBytes             int64 `json:"file_store_bytes"`
 	FileStoreProductionReserve int64 `json:"file_store_production_reserve"`
+	// Saved beside the config so the previous release's strict decoder can still start.
+	OutputDeliveryRoot string `json:"-"`
 
 	Version int `json:"version"`
 
@@ -366,6 +368,9 @@ func (c ServiceConfig) ServiceText() string {
 		return "[Unit]\nDescription=Mycelium " + c.Role + "\nAfter=network-online.target\n\n[Service]\n" + "ExecStart=:" + unitQuote(c.Binary) + " service --config " + unitQuote(c.Config) + " --" + argv + "\n" + settings + stopSettings + "Restart=on-failure\nRestartSec=3\nUMask=0077\n\n[Install]\nWantedBy=default.target\n"
 	}
 	vals := []string{c.Binary, "service", "--config", c.Config}
+	if c.Role == "queue" && c.OutputDeliveryRoot != "" {
+		vals = append(append(vals, "--"), c.Args()...)
+	}
 	args := ""
 	for _, v := range vals {
 		args += "<string>" + html.EscapeString(v) + "</string>"
@@ -713,7 +718,7 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		}
 
 	}
-	if err = tx.put(c.Service, []byte(c.ServiceText()), 0600); err != nil {
+	if err = tx.putServiceDefinition(c); err != nil {
 		return err
 	}
 	if c.Detection.OS == "linux" {
@@ -783,6 +788,17 @@ func ReadServiceConfig(path string) (ServiceConfig, error) {
 	}
 	if e == nil && (c.Version < 0 || c.Version > 1) {
 		return c, errors.New("unsupported installed config version")
+	}
+	if e == nil && c.Role == "queue" {
+		b, err := os.ReadFile(queueOutputDeliverySettings(path))
+		switch {
+		case err == nil:
+			if json.Unmarshal(b, &c.OutputDeliveryRoot) != nil {
+				return c, errors.New("invalid saved output-delivery root")
+			}
+		case !errors.Is(err, os.ErrNotExist):
+			return c, err
+		}
 	}
 	return c, e
 }
@@ -1046,7 +1062,7 @@ func (c ServiceConfig) Args() []string {
 		// Always rendered: a saved zero means retain until release, not the default.
 		args = append(args, "--file-retention", c.FileRetention.String())
 		args = append(args, "--file-store-bytes", strconv.FormatInt(c.FileStoreBytes, 10), "--file-store-production-reserve", strconv.FormatInt(c.FileStoreProductionReserve, 10))
-		for _, v := range [][2]string{{"--project-config", c.ProjectConfig}, {"--host-config", c.HostConfig}, {"--upload-spool-dir", c.UploadSpoolDir}, {"--file-store", c.FileStore}} {
+		for _, v := range [][2]string{{"--project-config", c.ProjectConfig}, {"--host-config", c.HostConfig}, {"--upload-spool-dir", c.UploadSpoolDir}, {"--file-store", c.FileStore}, {"--output-delivery-root", c.OutputDeliveryRoot}} {
 			if v[1] != "" {
 				args = append(args, v[0], v[1])
 			}

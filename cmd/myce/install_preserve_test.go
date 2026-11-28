@@ -330,6 +330,71 @@ func TestInstallQueueFileStoreWithExecStartOverride(t *testing.T) {
 	}
 }
 
+func TestInstallQueueOutputDeliveryRoot(t *testing.T) {
+	c, p := savedInstallFixture(t)
+	root := filepath.Join(t.TempDir(), "offline NAS 100%")
+	base := []string{"install", "queue", "--config", c.Config}
+	if err := setupCommandWithProbe(append(base, "--output-delivery-root", root), p, c.NAS); err != nil {
+		t.Fatal(err)
+	}
+	checkSaved := func(want string) string {
+		t.Helper()
+		got, err := myce.ReadServiceConfig(c.Config)
+		if err != nil || got.OutputDeliveryRoot != want {
+			t.Fatalf("saved output-delivery root = %q, want %q: %v", got.OutputDeliveryRoot, want, err)
+		}
+		unit, err := os.ReadFile(c.Service)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want != "" {
+			pair := fmt.Sprintf(`"--output-delivery-root" %q`, strings.ReplaceAll(want, "%", "%%"))
+			if !strings.Contains(string(unit), pair) {
+				t.Fatal("service omitted the quoted output-delivery root")
+			}
+		} else if strings.Contains(string(unit), "--output-delivery-root") {
+			t.Fatal("service kept the cleared output-delivery root")
+		}
+		for _, line := range strings.Split(string(unit), "\n") {
+			if strings.HasPrefix(line, "ExecStart=") {
+				return line
+			}
+		}
+		t.Fatal("no generated ExecStart")
+		return ""
+	}
+	start := checkSaved(root)
+	override := filepath.Join(t.TempDir(), "override.conf")
+	if err := os.WriteFile(override, []byte("[Service]\nExecStart=\n"+start+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	withOverride := p
+	withOverride.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "systemctl" && strings.Join(args, " ") == "--user show myce-queue.service --property=DropInPaths --value" {
+			return []byte(override), nil
+		}
+		return p.Command(ctx, name, args...)
+	}
+	if err := setupCommandWithProbe(base, withOverride, c.NAS); err != nil {
+		t.Fatal("upgrade with the generated ExecStart override:", err)
+	}
+	var refusal *myce.InstallExecStartOverrideError
+	if err := setupCommandWithProbe(append(base, "--output-delivery-root="), withOverride, c.NAS); !errors.As(err, &refusal) || !reflect.DeepEqual(refusal.Flags, []string{"--output-delivery-root"}) {
+		t.Fatal("override with the old root did not refuse clearing it:", err)
+	}
+	checkSaved(root)
+	if err := setupCommandWithProbe(append(base, "--output-delivery-root="), p, c.NAS); err != nil {
+		t.Fatal(err)
+	}
+	if err := setupCommandWithProbe(base, p, c.NAS); err != nil {
+		t.Fatal(err)
+	}
+	checkSaved("")
+	if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("installer should leave the unavailable destination alone: %v", err)
+	}
+}
+
 func TestInstallExplicitQueueNASName(t *testing.T) {
 	for _, role := range []string{"queue", "worker"} {
 		for _, field := range []string{"queue", "nas", "name"} {
