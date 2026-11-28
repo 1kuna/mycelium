@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,16 +18,19 @@ func TestCheckpointAdmissionAfterLateMount(t *testing.T) {
 	m := machine("late-mount-worker", "fake")
 	j := submit(t, q, spec("experiment"))
 	var probe checkpointAvailability
-	observe := func() {
-		available, _ := probe.runProgress(root, func(progress func()) (bool, error) {
+	// Wait for each local filesystem observation before changing the mount.
+	// The heartbeat deadline is exercised by the checkpoint I/O tests.
+	probe.timeout = -1
+	observe := func() error {
+		available, err := probe.runProgress(root, func(progress func()) (bool, error) {
 			err := workerCheckpointAvailable(root, progress)
 			return err == nil, err
 		})
 		m.CheckpointUnavailable = !available
+		return err
 	}
-	observe()
-	if !m.CheckpointUnavailable {
-		t.Fatal("missing checkpoint mount reported available")
+	if err := observe(); !errors.Is(err, os.ErrNotExist) || !m.CheckpointUnavailable {
+		t.Fatalf("missing checkpoint mount availability=%t: %v", !m.CheckpointUnavailable, err)
 	}
 	if got := check(t, q, m, nil).Job; got != nil {
 		t.Fatal("checkpoint-dependent work admitted while mount is absent")
@@ -34,9 +38,8 @@ func TestCheckpointAdmissionAfterLateMount(t *testing.T) {
 	if err := os.MkdirAll(root, 0700); err != nil {
 		t.Fatal(err)
 	}
-	observe()
-	if m.CheckpointUnavailable {
-		t.Fatal("checkpoint mount remained unavailable after arrival")
+	if err := observe(); err != nil || m.CheckpointUnavailable {
+		t.Fatalf("late checkpoint mount availability=%t: %v", !m.CheckpointUnavailable, err)
 	}
 	if got := check(t, q, m, nil).Job; got == nil || got.ID != j.ID {
 		t.Fatal("checkpoint-dependent work did not become eligible after mount arrival")

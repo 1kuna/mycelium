@@ -69,9 +69,10 @@ the adjacent-release check below. Run it once per release batch on a host with
 room for the Go cache and test scratch. Native Go tools use their normal cache.
 The gate uses a private fixture HOME and a one-hour Go test timeout. The full
 gate builds the core race test binary once. The submission mutex hold and
-blocked-store lease renewal tests run serially before the other roots run
-across four independent processes. Each root runs in exactly one process and
-each process has its own fixture HOME and one-hour Go timeout.
+blocked-store lease renewal tests run serially. Up to four processes then run
+the remaining roots in groups, starting the longest measured roots first and
+picking up another group as each process finishes. Each root runs exactly once,
+each process has its own fixture HOME, and all groups share one hour.
 Release builds cover the cross-architecture build matrix. The full suite retains
 security, incident and consumer-facing tests under [MY-53](DECISIONS.md#my-53).
 

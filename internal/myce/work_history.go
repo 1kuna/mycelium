@@ -199,12 +199,12 @@ func profileMemoryIdentity(j *Job) string {
 }
 
 func profileMemoryIdentityForConfiguration(j *Job, configuration string) string {
-	if j.planningMemoryIdentity != "" {
-		return j.planningMemoryIdentity
-	}
 	if configuration == "" {
 		s := j.Spec
 		configuration = memoryConfiguration(s.Needs, s.Args, s.Program)
+	}
+	if j.planningMemoryIdentity != "" && j.planningMemoryConfiguration == configuration {
+		return j.planningMemoryIdentity
 	}
 	base := plainMemoryIdentity(j, configuration)
 	if !j.Spec.warmPieces() {
@@ -218,6 +218,18 @@ func profileMemoryIdentityForConfiguration(j *Job, configuration string) string 
 		Files  FileManifest
 		Models map[string]ModelSnapshot
 	}{base, j.Spec.FanOut.Pieces, j.Spec.Files, j.Spec.ModelSnapshots})
+}
+
+// Scheduling can size the same job repeatedly in one writer turn. Freeze its
+// identity outside that mutex, preserving the existing keys for learned work.
+func (j *Job) preparePlanningMemoryIdentity() {
+	if j.Spec.extensionJob() || j.Spec.FanOut != nil || len(j.Spec.Files) == 0 || j.Spec.ProfileMemory != "" {
+		return
+	}
+	s := j.Spec
+	configuration := memoryConfiguration(s.Needs, s.Args, s.Program)
+	j.planningMemoryIdentity = plainMemoryIdentity(j, configuration)
+	j.planningMemoryConfiguration = configuration
 }
 
 func plainMemoryIdentity(j *Job, configuration string) string {

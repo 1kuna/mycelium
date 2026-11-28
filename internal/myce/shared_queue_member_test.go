@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -52,10 +54,9 @@ func TestSharedQueueProofProcess(t *testing.T) {
 	}
 	defer l.Close()
 	dir := os.Getenv("MYCE_SHARED_PROOF_FILES")
-	fmt.Println(l.Addr().String())
 	ctx, cancel := signal.NotifyContext(t.Context(), syscall.SIGTERM)
 	defer cancel()
-	err = ServeSharedQueueProof(ctx, l, SharedQueueMemberConfig{
+	err = ServeSharedQueueProof(ctx, &proofReadyListener{Listener: l}, SharedQueueMemberConfig{
 		Database: path, Postgres: os.Getenv("MYCE_SHARED_PROOF_POSTGRES"),
 		FileStore: filepath.Join(dir, "files"), Checkpoints: filepath.Join(dir, "checkpoints"), Token: proofToken, Clock: proofClock(),
 		interval: 100 * time.Millisecond, lease: proofMemberLease,
@@ -85,6 +86,18 @@ func TestSharedQueueProofProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+type proofReadyListener struct {
+	net.Listener
+	ready sync.Once
+}
+
+func (l *proofReadyListener) Accept() (net.Conn, error) {
+	// Binding the socket precedes PostgreSQL and SQLite setup. Publish it
+	// once the HTTP server can accept, so the first RPC measures the route.
+	l.ready.Do(func() { fmt.Println(l.Addr().String()) })
+	return l.Listener.Accept()
 }
 
 type proofRoundTrip func(*http.Request) (*http.Response, error)
@@ -453,7 +466,7 @@ assert Path(destination).read_bytes() == b"proof"
 			// Handover numbers only increase and are granted once. An acquisition
 			// whose reply was lost still consumes one, so the successor's turn
 			// can be later than stopped+1 (#2134).
-			proofLeader(t, a, next, stopped.number)
+			successor := proofLeader(t, a, next, stopped.number)
 			active := proofJobState(t, next.client, before.ID, func(j *Job) bool { return j.State == "running" })
 			assertProofAttempt(t, before, active)
 			cli := func(args ...string) []byte {
@@ -481,13 +494,10 @@ assert Path(destination).read_bytes() == b"proof"
 				{Execution: Execution{ID: active.ID, Attempt: active.Attempt + 1}, Machine: active.Machine, Session: active.Session},
 				{Execution: Execution{ID: active.ID, Attempt: active.Attempt}, Machine: active.Machine, Session: "wrong-session"},
 			} {
-				var refusal *HTTPError
-				err := next.client.Call(t.Context(), http.MethodPost, "/api/workers/started", bad, nil)
-				if !errors.As(err, &refusal) || refusal.Status != http.StatusConflict {
-					t.Fatalf("start under the wrong attempt identity = %v", err)
-				}
+				successor = proofRejectStarted(t, a, next, successor, bad)
 				bad.Success = true
-				err = next.client.Call(ctx, http.MethodPost, "/api/workers/complete", bad, nil)
+				var refusal *HTTPError
+				err := next.client.Call(ctx, http.MethodPost, "/api/workers/complete", bad, nil)
 				if !errors.As(err, &refusal) || refusal.Code != "request_stale" {
 					t.Fatalf("result under the wrong attempt identity = %v", err)
 				}
@@ -516,6 +526,114 @@ assert Path(destination).read_bytes() == b"proof"
 				t.Fatalf("verified result = %q, %v", b, err)
 			}
 		})
+	}
+}
+
+func proofRejectStarted(t *testing.T, a *sharedQueueAuthority, member *proofProcess, turn sharedQueueTurn, bad Result) sharedQueueTurn {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), testWaitTimeout)
+	defer cancel()
+	for {
+		err := member.client.callOnceShared(ctx, http.MethodPost, "/api/workers/started", bad, nil, strconv.FormatInt(turn.number, 10))
+		var refusal *HTTPError
+		if errors.As(err, &refusal) && refusal.Status == http.StatusConflict && refusal.Code == "request_stale" {
+			return turn
+		}
+		// A successor can lose its own turn after promotion. Retirement closes
+		// in-flight sockets before cancelling their handlers. Require evidence
+		// of that retirement before giving the same report to a later turn.
+		turnRefused := refusal != nil && refusal.Status == http.StatusServiceUnavailable &&
+			(refusal.Code == "queue_stopping" || refusal.Code == "shared_queue_control_retry")
+		if !errors.Is(err, io.EOF) && !turnRefused {
+			t.Fatalf("start under the wrong attempt identity on turn %d: %v", turn.number, err)
+		}
+		t.Logf("Started was interrupted on turn %d: %v", turn.number, err)
+		turn = proofLeader(t, a, member, turn.number)
+	}
+}
+
+func TestSharedQueueMemberWrongStartedDuringRetirement(t *testing.T) {
+	pg := startProofPostgres(t)
+	a := pg.authority(t)
+	dir := t.TempDir()
+	server := httptest.NewUnstartedServer(nil)
+	server.Config.ConnContext = QueueConnectionContext
+	var armed atomic.Bool
+	replyReady := make(chan *sharedQueueWriter, 1)
+	releaseReply := make(chan struct{})
+	release := sync.OnceFunc(func() { close(releaseReply) })
+	m, err := OpenSharedQueueMember(t.Context(), SharedQueueMemberConfig{
+		Postgres: pg.dsn, Database: filepath.Join(dir, "queue.db"),
+		FileStore: filepath.Join(dir, "files"), Checkpoints: filepath.Join(dir, "checkpoints"),
+		Token: proofToken, Clock: proofClock(), Endpoint: "http://" + server.Listener.Addr().String(),
+		Options: []QueueOption{func(q *Queue) {
+			q.observeRequest = func(route string, _, _, _, _ time.Duration) {
+				if route == "POST /api/workers/started" && armed.CompareAndSwap(true, false) {
+					replyReady <- q.sharedWriter
+					<-releaseReply
+				}
+			}
+		}},
+	})
+	if err != nil {
+		server.Close()
+		t.Fatal(err)
+	}
+	server.Config.Handler = m
+	server.Start()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { defer close(done); m.Run(ctx) }()
+	defer func() {
+		release()
+		cancel()
+		<-done
+		server.Close()
+		_ = m.Close()
+	}()
+	dropped := make(chan error, 1)
+	transport := server.Client().Transport
+	c := Client{URL: server.URL, Token: proofToken, SharedQueueProof: true, singleAttempt: true}
+	c.HTTP = &http.Client{Transport: proofRoundTrip(func(r *http.Request) (*http.Response, error) {
+		res, err := transport.RoundTrip(r)
+		if r.URL.Path == "/api/workers/started" && err != nil {
+			select {
+			case dropped <- err:
+			default:
+			}
+			release()
+		}
+		return res, err
+	})}
+	member := &proofProcess{client: c, db: filepath.Join(dir, "queue.db")}
+	turn := proofLeader(t, a, member, 0)
+	job := proofSubmit(t, c, proofSpec("started-during-retirement"))
+	worker := machine("fixture-worker", "cpu", "fixture-host")
+	job = proofAssignment(t, c, worker, job.ID)
+	bad := resultIdentity(job)
+	bad.Attempt++
+	armed.Store(true)
+	go func() {
+		select {
+		case writer := <-replyReady:
+			// The API has built its refusal but the HTTP server has not
+			// flushed it. Retire the coordinator through its normal loop.
+			writer.disabled.Store(true)
+		case <-ctx.Done():
+		}
+	}()
+	later := proofRejectStarted(t, a, member, turn, bad)
+	select {
+	case err := <-dropped:
+		if !errors.Is(err, io.EOF) || later.number <= turn.number {
+			t.Fatalf("retired turn did not interrupt Started: %v, turn %d -> %d", err, turn.number, later.number)
+		}
+	default:
+		t.Fatal("retired turn did not interrupt Started")
+	}
+	after := proofJobState(t, c, job.ID, func(j *Job) bool { return j.State == "running" })
+	if after.Attempt != job.Attempt || after.StartedAt != nil {
+		t.Fatalf("wrong Started changed custody: attempt=%d started=%v", after.Attempt, after.StartedAt)
 	}
 }
 
