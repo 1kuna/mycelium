@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -70,41 +69,50 @@ func (c *workerCompilerCache) acquire(ctx context.Context, s *workerStore, j Job
 	return path, release, nil
 }
 
-func (c *workerCompilerCache) budgetCandidates(ctx context.Context) ([]diskBudgetCandidate, error) {
+func (c *workerCompilerCache) budgetCandidates(ctx context.Context) (diskBudgetCandidateSet, error) {
 	key := identityHash("go-build")
 	path := filepath.Join(c.cache.Root, key)
 	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {
-		return nil, nil
+		return diskBudgetCandidateSet{}, nil
 	}
+	if err != nil || !info.IsDir() {
+		return diskBudgetCandidateSet{}, err
+	}
+	root, err := os.OpenRoot(path)
 	if err != nil {
-		return nil, err
+		return diskBudgetCandidateSet{}, err
 	}
-	if !info.IsDir() {
-		return nil, nil
+	close := func() { _ = root.Close() }
+	parent, err := os.Stat(c.cache.Root)
+	if err != nil {
+		close()
+		return diskBudgetCandidateSet{}, err
 	}
-	return []diskBudgetCandidate{{path: path, used: info.ModTime(), trim: func(ctx context.Context, enough func() (bool, error), limit uint64) error {
-		now := c.cache.Clock.Now()
-		lock, err := c.cache.tryLock(key + ".use")
-		if err != nil {
-			return err
-		}
-		if lock != nil {
-			defer unlockEnvironment(lock)
-		}
-		cutoff, err := compilerTrimCutoff(c.cache.Root, key, now, lock == nil)
-		if err != nil {
-			return err
-		}
-		current, err := os.Lstat(path)
-		if err != nil {
-			return err
-		}
-		if !os.SameFile(info, current) || !info.ModTime().Equal(current.ModTime()) {
-			return nil
-		}
-		return trimCompilerObjects(ctx, path, current, enough, limit, cutoff)
-	}}}, nil
+	current, err := root.Stat(".")
+	if err != nil || !os.SameFile(info, current) || parent.Sys().(*syscall.Stat_t).Dev != current.Sys().(*syscall.Stat_t).Dev {
+		close()
+		return diskBudgetCandidateSet{}, err
+	}
+
+	// This cutoff only filters the inventory. Each unlink takes a fresh lock
+	// and checks pins again, including attempts that start during the pass.
+	cutoff, err := c.trimCutoff(key)
+	if err != nil {
+		close()
+		return diskBudgetCandidateSet{}, err
+	}
+	candidates, err := c.compilerObjects(ctx, root, current, key, cutoff)
+	return diskBudgetCandidateSet{entries: candidates, close: close}, err
+}
+
+func (c *workerCompilerCache) trimCutoff(key string) (time.Time, error) {
+	lock, err := c.cache.tryLock(key + ".use")
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer unlockEnvironment(lock)
+	return compilerTrimCutoff(c.cache.Root, key, c.cache.Clock.Now(), lock == nil)
 }
 
 // compilerCacheGrace keeps what the latest builds just wrote, as the gate's own
@@ -147,23 +155,9 @@ func compilerTrimCutoff(root, key string, now time.Time, locked bool) (time.Time
 
 // Go stores independent action and data files in 256 hex shards. Trim only
 // known regular objects. Gate tooling can keep auxiliary state beside them.
-func trimCompilerObjects(ctx context.Context, path string, info fs.FileInfo, enough func() (bool, error), limit uint64, cutoff time.Time) error {
-	root, err := os.OpenRoot(path)
-	if err != nil {
-		return err
-	}
-	defer root.Close()
-	current, err := root.Stat(".")
-	if err != nil || !os.SameFile(info, current) {
-		return err
-	}
-	device := current.Sys().(*syscall.Stat_t).Dev
-	type object struct {
-		path string
-		used time.Time
-		info fs.FileInfo
-	}
-	var objects []object
+func (c *workerCompilerCache) compilerObjects(ctx context.Context, root *os.Root, info fs.FileInfo, key string, cutoff time.Time) ([]diskBudgetCandidate, error) {
+	device := info.Sys().(*syscall.Stat_t).Dev
+	var objects []diskBudgetCandidate
 	for shard := range 256 {
 		name := fmt.Sprintf("%02x", shard)
 		dir, err := root.Lstat(name)
@@ -176,53 +170,58 @@ func trimCompilerObjects(ctx context.Context, path string, info fs.FileInfo, eno
 		}
 		for _, entry := range entries {
 			if err := ctx.Err(); err != nil {
-				return err
+				return nil, err
 			}
 			file := entry.Name()
 			if len(file) != 66 || file[:2] != name || file[64:] != "-a" && file[64:] != "-d" ||
 				(FileRef{SHA256: file[:64]}).validate() != nil || !entry.Type().IsRegular() {
 				continue
 			}
-			stat, err := entry.Info()
-			if err == nil && stat.Mode().IsRegular() && stat.Sys().(*syscall.Stat_t).Dev == device {
-				objects = append(objects, object{filepath.Join(name, file), stat.ModTime(), stat})
+			info, err := entry.Info()
+			if err != nil || !info.Mode().IsRegular() || !info.ModTime().Before(cutoff) {
+				continue
 			}
-		}
-	}
-	sort.SliceStable(objects, func(i, j int) bool { return objects[i].used.Before(objects[j].used) })
-	var removed uint64
-	for _, entry := range objects {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if !entry.used.Before(cutoff) {
-			return nil // Oldest first: every remaining object is newer.
-		}
-		if enough, err := enough(); enough || err != nil {
-			return err
-		}
-		info, err := root.Lstat(entry.path)
-		if err != nil || !os.SameFile(entry.info, info) || !info.ModTime().Equal(entry.used) {
-			continue // A lookup refreshed it since the scan.
-		}
-		if limit > 0 {
 			stat := info.Sys().(*syscall.Stat_t)
-			if stat.Nlink != 1 || stat.Blocks <= 0 {
+			if stat.Dev != device || stat.Nlink != 1 || stat.Blocks <= 0 {
 				continue
 			}
-			bytes := uint64(stat.Blocks) * 512
-			if bytes > limit-removed {
-				continue
-			}
-			if err := root.Remove(entry.path); err == nil {
-				removed += bytes
-				if removed >= limit {
-					return nil
-				}
-			}
-		} else {
-			_ = root.Remove(entry.path)
+			rel := filepath.Join(name, file)
+			objects = append(objects, diskBudgetCandidate{
+				path: filepath.Join(root.Name(), rel), used: info.ModTime(), bytes: uint64(stat.Blocks) * 512,
+				evict: func(context.Context) (bool, error) {
+					return c.evictCompilerObject(root, key, rel, info)
+				},
+			})
 		}
 	}
-	return nil
+	return objects, nil
+}
+
+func (c *workerCompilerCache) evictCompilerObject(root *os.Root, key, path string, info fs.FileInfo) (bool, error) {
+	lock, err := c.cache.tryLock(key + ".use")
+	if err != nil {
+		return false, err
+	}
+	defer unlockEnvironment(lock)
+	cutoff, err := compilerTrimCutoff(c.cache.Root, key, c.cache.Clock.Now(), lock == nil)
+	if err != nil || !info.ModTime().Before(cutoff) {
+		return false, err
+	}
+	opened, err := root.Stat(".")
+	if err != nil {
+		return false, err
+	}
+	live, err := os.Lstat(root.Name())
+	if err != nil || !os.SameFile(opened, live) {
+		return false, err
+	}
+	current, err := root.Lstat(path)
+	if err != nil || !os.SameFile(info, current) || !info.ModTime().Equal(current.ModTime()) ||
+		current.Sys().(*syscall.Stat_t).Nlink != 1 {
+		return false, err
+	}
+	if err := root.Remove(path); err != nil {
+		return false, err
+	}
+	return true, nil
 }

@@ -595,7 +595,7 @@ func (w *Worker) initAttemptRuntime(stop context.Context, s *workerStore) error 
 	if err := w.environmentCache.initStorage(); err != nil {
 		return err
 	}
-	w.diskBudget.add(diskBudgetRoot{name: "environments", path: w.EnvironmentRoot, candidates: w.environmentCache.budgetCandidates})
+	w.diskBudget.add(diskBudgetRoot{name: "environments", path: w.EnvironmentRoot, candidates: w.environmentCache.budgetCandidates, cacheFloor: true})
 	return nil
 }
 

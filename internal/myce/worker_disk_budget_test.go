@@ -329,8 +329,8 @@ func TestWorkerDiskBudgetSlowReclaimDoesNotStallSharedInput(t *testing.T) {
 		return DiskReading{Volume: "local", TotalBytes: total, FreeBytes: free}, nil
 	})
 	evicted := false
-	b.add(diskBudgetRoot{name: "environments", path: t.TempDir(), candidates: func(context.Context) ([]diskBudgetCandidate, error) {
-		return []diskBudgetCandidate{{path: "slow-environment", evict: func(ctx context.Context) (bool, error) {
+	b.add(diskBudgetRoot{name: "environments", path: t.TempDir(), candidates: func(context.Context) (diskBudgetCandidateSet, error) {
+		return diskBudgetCandidateSet{entries: []diskBudgetCandidate{{path: "slow-environment", evict: func(ctx context.Context) (bool, error) {
 			// A long local tree delete: more than the stall budget passes.
 			for step := time.Duration(0); step < checkpointAvailabilityStallBudget+15*time.Second; step += time.Second {
 				if err := ctx.Err(); err != nil {
@@ -343,7 +343,7 @@ func TestWorkerDiskBudgetSlowReclaimDoesNotStallSharedInput(t *testing.T) {
 			freed, evicted = true, true
 			mu.Unlock()
 			return true, nil
-		}}}, nil
+		}}}}, nil
 	}})
 	c := &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Clock: clock, Limit: 1 << 20}, budget: b}
 	t.Cleanup(func() { _ = removeSharedEntry(c.cache.Root) })
@@ -488,11 +488,11 @@ func TestWorkerCompilerCacheCustodyAndPublicBudget(t *testing.T) {
 	})
 	b.add(diskBudgetRoot{name: "compiler", path: c.cache.Root, candidates: c.budgetCandidates})
 	var expensiveTried bool
-	b.add(diskBudgetRoot{name: "models", path: t.TempDir(), candidates: func(context.Context) ([]diskBudgetCandidate, error) {
-		return []diskBudgetCandidate{{class: transferDiskCache, evict: func(context.Context) (bool, error) {
+	b.add(diskBudgetRoot{name: "models", path: t.TempDir(), candidates: func(context.Context) (diskBudgetCandidateSet, error) {
+		return diskBudgetCandidateSet{entries: []diskBudgetCandidate{{class: transferDiskCache, evict: func(context.Context) (bool, error) {
 			expensiveTried = true
 			return false, nil
-		}}}, nil
+		}}}}, nil
 	}})
 	collector := workerHygieneCollector{w: Worker{Clock: clock, diskBudget: b}, report: WorkerHygieneCollection{NextAt: clock.Now().Add(time.Hour)}}
 	ctx := context.Background()
@@ -565,14 +565,14 @@ func TestWorkerDiskBudgetForeignHeadroom(t *testing.T) {
 		return DiskReading{Volume: "shared", TotalBytes: total, FreeBytes: floor + 6*mib + uint64(initial-owned) - foreign}, err
 	}
 	b := newWorkerDiskBudget(clock, probe)
-	b.add(diskBudgetRoot{name: "files", path: root, candidates: func(context.Context) ([]diskBudgetCandidate, error) {
+	b.add(diskBudgetRoot{name: "files", path: root, candidates: func(context.Context) (diskBudgetCandidateSet, error) {
 		var out []diskBudgetCandidate
 		for i, path := range files {
 			if _, err := os.Stat(path); err == nil {
 				out = append(out, diskBudgetCandidate{path: path, used: clock.Now().Add(time.Duration(i) * time.Second), evict: func(context.Context) (bool, error) { return true, os.Remove(path) }})
 			}
 		}
-		return out, nil
+		return diskBudgetCandidateSet{entries: out}, nil
 	}})
 	// Returns the automatic limit and the allocated bytes the cache holds now.
 	allowance := func() (int64, int64) {

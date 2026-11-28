@@ -387,6 +387,18 @@ func (c *EnvironmentCache) collectionUsage(ctx context.Context) (int64, error) {
 }
 
 type collectionDeviceKey struct{}
+type collectionRejectMountKey struct{}
+
+func cacheEntryAllocation(ctx context.Context, path string) (int64, error) {
+	info, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		return 0, err
+	}
+	device := uint64(info.Sys().(*syscall.Stat_t).Dev)
+	ctx = context.WithValue(ctx, collectionDeviceKey{}, device)
+	ctx = context.WithValue(ctx, collectionRejectMountKey{}, true)
+	return collectionAllocatedBytes(ctx, path)
+}
 
 func collectionAllocatedBytes(ctx context.Context, paths ...string) (int64, error) {
 	seen := map[[2]uint64]bool{}
@@ -414,6 +426,9 @@ func collectionAllocatedBytes(ctx context.Context, paths ...string) (int64, erro
 				return errors.New("environment disk accounting unavailable")
 			}
 			if device, limited := ctx.Value(collectionDeviceKey{}).(uint64); limited && uint64(stat.Dev) != device {
+				if ctx.Value(collectionRejectMountKey{}) == true {
+					return errors.New("cache entry crosses filesystems")
+				}
 				if d.IsDir() {
 					return filepath.SkipDir
 				}

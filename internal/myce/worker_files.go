@@ -41,9 +41,9 @@ func (w *Worker) initFileTransfers(ctx context.Context, s *workerStore) error {
 	w.modelIndex = &modelSnapshotIndex{}
 	w.modelIndex.load(w.modelSnapshots)
 	if w.diskBudget != nil {
-		w.diskBudget.add(diskBudgetRoot{name: "files", path: root, candidates: w.fileCache.budgetCandidates})
-		w.diskBudget.add(diskBudgetRoot{name: "shared_inputs", path: w.sharedInputs.cache.Root, candidates: w.sharedInputs.budgetCandidates})
-		w.diskBudget.add(diskBudgetRoot{name: "model_snapshots", path: w.modelSnapshots.cache.Root, candidates: w.modelSnapshots.budgetCandidates})
+		w.diskBudget.add(diskBudgetRoot{name: "files", path: root, candidates: w.fileCache.budgetCandidates, cacheFloor: true})
+		w.diskBudget.add(diskBudgetRoot{name: "shared_inputs", path: w.sharedInputs.cache.Root, candidates: w.sharedInputs.budgetCandidates, cacheFloor: true})
+		w.diskBudget.add(diskBudgetRoot{name: "model_snapshots", path: w.modelSnapshots.cache.Root, candidates: w.modelSnapshots.budgetCandidates, cacheFloor: true})
 	}
 	if w.fileCheckpoints {
 		if w.CheckpointRoot != "" {

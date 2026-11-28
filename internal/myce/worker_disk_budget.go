@@ -84,10 +84,14 @@ type diskBudgetFloorKey struct{}
 
 type diskBudgetRoot struct {
 	name, path string
-	candidates func(context.Context) ([]diskBudgetCandidate, error)
-	// A rebuildable cache whose trimmable candidates also keep the volume at
-	// cacheFreeFloor, without any job demand.
+	candidates func(context.Context) (diskBudgetCandidateSet, error)
+	// Rebuildable entries that participate in the cache floor.
 	cacheFloor bool
+}
+
+type diskBudgetCandidateSet struct {
+	entries []diskBudgetCandidate
+	close   func()
 }
 
 type diskBudgetCandidate struct {
@@ -95,7 +99,10 @@ type diskBudgetCandidate struct {
 	used  time.Time
 	class diskCacheClass
 	evict func(context.Context) (bool, error)
-	trim  func(context.Context, func() (bool, error), uint64) error
+	// Files have a cheap allocation estimate, trees are measured on demand.
+	bytes uint64
+	tree  bool
+	bulk  bool // Package-manager pruning has no per-entry LRU or size bound.
 }
 
 type diskCacheClass uint8
@@ -177,7 +184,7 @@ func (b *workerDiskBudget) reserve(ctx context.Context, root string, need uint64
 	// headroom for every writer on the volume. Share pending bytes, but derive
 	// other admissions and collection floors from their own live measurements.
 	floor = max(floor, addDiskBytes(addDiskBytes(diskFreeFloor(r.TotalBytes), b.controlGrowth[r.Volume]), b.foreignHeadroomFor(r.Volume)))
-	b.trimCacheFloor(ctx, r.Volume)
+	b.trimCacheFloor(ctx, root, r, need)
 	if err = b.reclaim(ctx, r.Volume, root, need, floor); err != nil {
 		return nil, err
 	}
@@ -235,41 +242,14 @@ func (b *workerDiskBudget) reclaim(ctx context.Context, volume, path string, nee
 	if ok, err := enough(); ok || err != nil {
 		return err
 	}
-	var candidates []diskBudgetCandidate
-	for _, root := range b.roots {
-		r, err := b.probe(root.path)
-		if err != nil || r.Volume != volume || root.candidates == nil {
-			continue
-		}
-		entries, err := root.candidates(ctx)
-		if err != nil {
-			continue
-		} // Unknown/unavailable sources stay protected.
-		candidates = append(candidates, entries...)
+	candidates, close := b.evictionCandidates(ctx, volume, false)
+	defer close()
+	sortDiskCandidates(candidates, true)
+	if err := evictDiskCandidates(ctx, candidates, enough, 0, false); err != nil {
+		return err
 	}
-	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].class != candidates[j].class {
-			return candidates[i].class < candidates[j].class
-		}
-		if candidates[i].used.Equal(candidates[j].used) {
-			return candidates[i].path < candidates[j].path
-		}
-		return candidates[i].used.Before(candidates[j].used)
-	})
-	for _, candidate := range candidates {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		// A failed proof never permits deletion. A cache comprising independent
-		// objects can trim only enough of them to satisfy this same live goal.
-		if candidate.trim != nil {
-			_ = candidate.trim(ctx, enough, 0)
-		} else {
-			_, _ = candidate.evict(ctx)
-		}
-		if ok, err := enough(); ok || err != nil {
-			return err
-		}
+	if ok, err := enough(); ok || err != nil {
+		return err
 	}
 	r, err := b.probe(path)
 	if err != nil {
@@ -291,51 +271,124 @@ func cacheFreeFloor(total uint64) uint64 {
 	return max(min(cacheFreeFloorBytes, total/4), diskFreeFloor(total))
 }
 
-// trimCacheFloor trims opted-in rebuildable caches on volume (all volumes when
-// empty) until free space reaches cacheFreeFloor. Each pass removes at most the
-// measured shortfall: where deleted blocks stay held (local snapshots), statfs
-// does not rise and one pass must not empty the cache. A pass that ends below
-// the floor waits one hygiene interval before admission repeats its full scan.
-// The caller holds b.mu.
-func (b *workerDiskBudget) trimCacheFloor(ctx context.Context, volume string) {
-	now := b.clock.Now()
+// evictionCandidates inventories a single volume and borrows any open cache
+// descriptors until the caller finishes the pass.
+func (b *workerDiskBudget) evictionCandidates(ctx context.Context, volume string, cacheFloor bool) ([]diskBudgetCandidate, func()) {
+	var candidates []diskBudgetCandidate
+	var closing []func()
 	for _, root := range b.roots {
-		if !root.cacheFloor || root.candidates == nil {
+		if root.candidates == nil || cacheFloor && !root.cacheFloor {
 			continue
 		}
 		r, err := b.probe(root.path)
-		if err != nil || r.TotalBytes == 0 || volume != "" && r.Volume != volume || now.Before(b.cacheFloorRetry[r.Volume]) {
+		if err != nil || r.Volume != volume {
 			continue
 		}
-		floor := cacheFreeFloor(r.TotalBytes)
-		if r.FreeBytes >= floor {
-			continue
+		set, err := root.candidates(ctx)
+		if set.close != nil {
+			closing = append(closing, set.close)
 		}
-		limit := floor - r.FreeBytes
-		if r.BlockBytes > 0 && limit%r.BlockBytes != 0 {
-			limit = addDiskBytes(limit, r.BlockBytes-limit%r.BlockBytes)
-		}
-		enough := func() (bool, error) {
-			d, err := b.probe(root.path)
-			return d.FreeBytes >= floor, err
-		}
-		candidates, err := root.candidates(ctx)
 		if err != nil {
-			continue
+			continue // Unknown/unavailable sources stay protected.
 		}
-		for _, candidate := range candidates {
-			if candidate.trim != nil {
-				_ = candidate.trim(ctx, enough, limit)
+		candidates = append(candidates, set.entries...)
+	}
+	return candidates, func() {
+		for _, close := range closing {
+			close()
+		}
+	}
+}
+
+func sortDiskCandidates(candidates []diskBudgetCandidate, byCost bool) {
+	sort.Slice(candidates, func(i, j int) bool {
+		if byCost && candidates[i].class != candidates[j].class {
+			return candidates[i].class < candidates[j].class
+		}
+		if candidates[i].used.Equal(candidates[j].used) {
+			return candidates[i].path < candidates[j].path
+		}
+		return candidates[i].used.Before(candidates[j].used)
+	})
+}
+
+// With a measured shortfall, cap the total attempted allocation per pass.
+// Whole entries may supply the final increment when they cannot be split.
+// Go's independent objects keep the strict cap for queue file-store relief.
+func evictDiskCandidates(ctx context.Context, candidates []diskBudgetCandidate, enough func() (bool, error), limit uint64, wholeEntries bool) error {
+	bounded := limit > 0
+	for _, candidate := range candidates {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if ok, err := enough(); ok || err != nil {
+			return err
+		}
+		bytes := candidate.bytes
+		if bounded {
+			if candidate.bulk {
+				continue
+			}
+			if candidate.tree {
+				n, err := cacheEntryAllocation(ctx, candidate.path)
+				if err != nil {
+					continue
+				}
+				bytes = uint64(n)
+			}
+			if bytes == 0 || !wholeEntries && bytes > limit {
+				continue
 			}
 		}
-		if ok, err := enough(); !ok || err != nil {
-			if b.cacheFloorRetry == nil {
-				b.cacheFloorRetry = map[string]time.Time{}
+		removed, _ := candidate.evict(ctx)
+		if bounded && removed {
+			limit -= min(bytes, limit)
+			if limit == 0 {
+				break
 			}
-			b.cacheFloorRetry[r.Volume] = b.clock.Now().Add(workerHygieneMinInterval)
-		} else {
-			delete(b.cacheFloorRetry, r.Volume)
 		}
+	}
+	return nil
+}
+
+func roundDiskShortfall(limit, block uint64) uint64 {
+	if block > 0 && limit%block != 0 {
+		return addDiskBytes(limit, block-limit%block)
+	}
+	return limit
+}
+
+// trimCacheFloor leaves one budget for rebuildable entries on each volume.
+// Forecast space already promised to writers and measured competing use;
+// a full filesystem block above the floor keeps an idle pass proactive at
+// the boundary. If protected entries prevent trimming, ordinary admission
+// still uses its separate physical floor. The caller holds b.mu.
+func (b *workerDiskBudget) trimCacheFloor(ctx context.Context, path string, r DiskReading, need uint64) {
+	floor := max(cacheFreeFloor(r.TotalBytes), addDiskBytes(diskFreeFloor(r.TotalBytes), b.controlGrowth[r.Volume]))
+	target := addDiskBytes(floor, max(r.BlockBytes, b.foreignHeadroomFor(r.Volume)))
+	target = min(r.TotalBytes, addDiskBytes(target, b.reservations[r.Volume]))
+	if need <= r.TotalBytes-target {
+		target += need
+	}
+	if r.FreeBytes >= target || b.clock.Now().Before(b.cacheFloorRetry[r.Volume]) {
+		return
+	}
+	limit := roundDiskShortfall(target-r.FreeBytes, r.BlockBytes)
+	enough := func() (bool, error) {
+		d, err := b.probe(path)
+		return d.Volume != r.Volume || d.FreeBytes >= target, err
+	}
+	candidates, close := b.evictionCandidates(ctx, r.Volume, true)
+	defer close()
+	sortDiskCandidates(candidates, false)
+	_ = evictDiskCandidates(ctx, candidates, enough, limit, true)
+	if ok, err := enough(); !ok || err != nil {
+		if b.cacheFloorRetry == nil {
+			b.cacheFloorRetry = map[string]time.Time{}
+		}
+		b.cacheFloorRetry[r.Volume] = b.clock.Now().Add(workerHygieneMinInterval)
+	} else {
+		delete(b.cacheFloorRetry, r.Volume)
 	}
 }
 
@@ -354,7 +407,7 @@ func (b *workerDiskBudget) reclaimPressure(ctx context.Context) {
 			continue
 		}
 		seen[r.Volume] = true
-		b.trimCacheFloor(ctx, r.Volume)
+		b.trimCacheFloor(ctx, root.path, r, 0)
 		floor := addDiskBytes(addDiskBytes(diskFreeFloor(r.TotalBytes), b.controlGrowth[r.Volume]), b.foreignHeadroomFor(r.Volume))
 		if r.FreeBytes < addDiskBytes(floor, b.reservations[r.Volume]) {
 			_ = b.reclaim(ctx, r.Volume, root.path, 0, floor)
@@ -397,7 +450,7 @@ func (b *workerDiskBudget) collect(ctx context.Context) []DiskBudgetVolume {
 			continue
 		}
 		before := r.FreeBytes
-		b.trimCacheFloor(ctx, volume)
+		b.trimCacheFloor(ctx, roots[0].path, r, 0)
 		base := addDiskBytes(diskFreeFloor(r.TotalBytes), b.controlGrowth[volume])
 		floor := addDiskBytes(base, b.foreignHeadroomFor(volume))
 		_ = b.reclaim(ctx, volume, roots[0].path, 0, floor)
@@ -449,6 +502,7 @@ func (b *workerDiskBudget) collect(ctx context.Context) []DiskBudgetVolume {
 			// New foreign evidence raised the headroom: evict for it now rather
 			// than at the next collection. Keep this sample's free/owned pair so
 			// the next growth comparison stays consistent.
+			b.trimCacheFloor(ctx, roots[0].path, r, 0)
 			_ = b.reclaim(ctx, volume, roots[0].path, 0, next)
 			v.FloorBytes = next
 		}
