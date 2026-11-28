@@ -454,6 +454,111 @@ func TestMemoryExpectedXPUCardSharing(t *testing.T) {
 	r5Start(t, q, check(), peer.ID)
 }
 
+func TestMemoryExpectedXPUCardRequiresMeasuredInputs(t *testing.T) {
+	q, clock := fixture(t)
+	const budget, shortPeak, longPeak, peerPeak = 30.046, 7.416, 8.758, 22
+	m := sharedDiscreteMachine("xpu")
+	m.Devices[0].TotalMemoryGB, m.Devices[0].BudgetGB, m.Devices[0].FreeMemoryGB = budget, budget, budget
+	pool := MemoryShadowPool{Name: "card/0", CapacityGB: budget, FreeGB: shadowGB(budget)}
+	e := compositionExtension(t, false)
+	v := &e.Variants[0]
+	v.Target = machineTarget(&m)
+	v.Needs = ResourceNeeds{CPUCores: 4, MemoryGB: 7.22, HostMemoryGB: 1}
+	v.References = map[string]WorkReference{"extension:sample": {InputShape: "recording", Unit: "records", Units: 1}}
+	e = freezeComposition(t, e)
+	if err := q.AddExtension(e); err != nil {
+		t.Fatal(err)
+	}
+	m.Devices[0].ExtensionFingerprint = "synthetic-xpu"
+	target := m.Devices[0].machine(m)
+	report := newExtensionReport(e, &target, "extension:sample")
+	report.Setup, report.Qualified, report.CheckID = true, true, "fixture-check"
+	m.Devices[0].ExtensionReports = []ExtensionReport{report}
+	target.ExtensionReports = m.Devices[0].ExtensionReports
+
+	s := Spec{Name: "measure", Project: "test", Class: "experiment", Extension: extensionKey(e),
+		Workload: &Workload{InputShape: "recording", Units: 1},
+		FanOut:   &FanOut{MaxConcurrency: 1, Pieces: []FanOutPiece{{Key: "item"}}}}
+	short, long, peer := s, s, s
+	short.Files = FileManifest{"input": putPieceTestFile(t, q, "short input")}
+	long.Files = FileManifest{"input": putPieceTestFile(t, q, strings.Repeat("long input ", 100))}
+	peer.Files = short.Files
+	peer.Args = []string{"peer"}
+	check := func(runs ...*Job) Reply {
+		clock.Advance(time.Second)
+		return r5Check(t, q, m, pool, runs...)
+	}
+	start := func(parent *Job, charge float64, alone bool, running ...*Job) *Job {
+		t.Helper()
+		run := assignedJob(check(running...))
+		if run == nil || run.Batch == nil || run.Batch.Parent != parent.ID {
+			t.Fatalf("piece not assigned: %+v; parent hold: %+v", run, job(t, q, parent.ID).Hold)
+		}
+		if card := run.Memory.Card; card == nil || card.ChargeGB != charge || card.Alone != alone {
+			t.Fatalf("piece card estimate: %+v, want %g GiB, alone=%t", card, charge, alone)
+		}
+		if err := q.Started(result(run, false)); err != nil {
+			t.Fatal(err)
+		}
+		return run
+	}
+	clean := func(run *Job, peak float64) {
+		t.Helper()
+		r5Clean(t, q, run, memoryRunPool{}, memoryRunPool{PeakGB: peak, Complete: true})
+	}
+	clean(start(submit(t, q, short), budget, true), shortPeak)
+	clean(start(submit(t, q, peer), budget, true), peerPeak)
+	holder := start(submit(t, q, peer), peerPeak, false)
+	demand := submit(t, q, long)
+	// With both inputs declared as one record, the previous E left enough
+	// nominal room for the 22 GiB tenant. The real peak exceeds that room.
+	if run := assignedJob(check(holder)); run != nil {
+		t.Fatalf("unmeasured longer input joined a card with %.3f GiB room", budget-peerPeak)
+	}
+	if hold := r5Hold(t, q, demand.ID); hold == nil || !strings.Contains(hold.Detail, "requires an exclusive first run to measure card memory") {
+		t.Fatalf("unmeasured input wait: %+v", hold)
+	}
+	finish(t, q, holder, true)
+
+	first := start(demand, budget, true)
+	waitingPeer := submit(t, q, peer)
+	if run := assignedJob(check(first)); run != nil {
+		t.Fatal("a learned peer joined while the longer input was measuring")
+	}
+	if hold := r5Hold(t, q, waitingPeer.ID); hold == nil || !strings.Contains(hold.Detail, first.ID) ||
+		!strings.Contains(hold.Detail, "exclusive while measuring card memory") {
+		t.Fatalf("exclusive card owner missing from partner hold: %+v", hold)
+	}
+	clock.Advance(345 * time.Second)
+	clean(first, longPeak)
+	evidence, err := readMemoryEvidence(q.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := pooledEvidenceKey(first, &target)
+	key.Pool = "card"
+	if card := evidence.expectedXPUCard(first, key, budget, budget, true); card.ChargeGB != longPeak || card.Alone {
+		t.Fatalf("complete longer run did not persist the larger shareable estimate: %+v", card)
+	}
+	// Peaks written before input coverage was recorded still load, but cannot
+	// qualify an input. A clean input sample also ages out with its peak.
+	for range memoryPeakWindow {
+		evidence.observeExpected(key, shortPeak)
+	}
+	if card := evidence.expectedXPUCard(first, key, budget, budget, true); card.ChargeGB != budget || !card.Alone {
+		t.Fatalf("expired input coverage admitted sharing: %+v", card)
+	}
+	holder = start(waitingPeer, peerPeak, false)
+	repeat := submit(t, q, long)
+	if run := assignedJob(check(holder)); run != nil {
+		t.Fatal("learned longer input was admitted beside a peer exceeding the card budget")
+	}
+	finish(t, q, holder, true)
+
+	second := start(repeat, longPeak, false)
+	start(submit(t, q, long), longPeak, false, second)
+}
+
 func TestMemoryExpectedXPUCardStaleOwnersForecast(t *testing.T) {
 	q, clock := fixture(t)
 	const (

@@ -111,6 +111,12 @@ A run is **clean** only when every counter in its row was read for the whole run
 
   On a discrete card with no measured device peak, the card's E is the whole card. The reason is physical: a failed allocation can land on a co-tenant. This keeps the 2026-11-23 agent default.
 
+  For one-shot XPU extension workloads that declare `workload`, card sharing
+  requires a clean peak in the exact work's window for the same immutable
+  staged inputs. The number of records can stay at one while the input and
+  its peak grow (#2279). A new input or a mutable input path takes the whole
+  card. Once covered, it uses the exact window's maximum under R5.
+
 "Alone" is no longer a state. It is just E equal to the pool's reach. Whether two jobs that fit one GPU *should* share it is a throughput question, not a memory one. The existing comparison of alone and shared runs answers it (#2037).
 
 ### Constants (MY-34)
