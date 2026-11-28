@@ -202,11 +202,11 @@ func deferredObservationProjection(r *http.Request) bool {
 	}
 	if r.URL.Path == "/api/status" {
 		query := r.URL.Query()
-		// The machine section with current jobs can use the committed view
-		// without the writer turn or the SQLite usage-reader connection.
-		machines := query.Get("sections") == "machines" &&
-			(query.Get("jobs") == "" || query.Get("jobs") == "active") && query.Get("before") == ""
-		return len(query) == 0 || len(query) == 1 && query.Get("view") == "snapshot" || query.Get("detail") == "full" || machines
+		if len(query) == 0 || len(query) == 1 && query.Get("view") == "snapshot" || query.Get("detail") == "full" {
+			return true
+		}
+		options, err := parseStatusOptions(query)
+		return err == nil && options.machinesOnly()
 	}
 	id, ok := strings.CutPrefix(r.URL.Path, "/api/jobs/")
 	return ok && id != "" && !strings.Contains(id, "/") && r.URL.Query().Get("view") != "wait"

@@ -938,7 +938,7 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 		idle, err := q.readIdleStatus(ctx, options, now)
 		return Snapshot{Now: now, Idle: idle, QueueCapabilities: q.queueCapabilities()}, err
 	}
-	if options.compact() {
+	if options.compact() || options.machinesOnly() {
 		v, summary, delivery, err := q.compactStatusObservation(options, ctx)
 		if err != nil {
 			return Snapshot{}, err

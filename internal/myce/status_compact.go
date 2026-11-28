@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -304,7 +305,7 @@ func compactStatusCall(c *ModelCall) *Job {
 // compactInputs takes only the immutable records used to describe current
 // work and custody. Planning catalogs and retained observations are loaded
 // by detail reads, independently of the compact request budget.
-func (g *readGeneration) compactInputs(ctx context.Context) (state, error) {
+func (g *readGeneration) compactInputs(ctx context.Context, detailMachines bool) (state, error) {
 	allocation := projectionAllocation(ctx)
 	load := func(key string, record *readRecord) (any, error) {
 		if allocation != nil && !record.decoded.Load() {
@@ -343,6 +344,23 @@ func (g *readGeneration) compactInputs(ctx context.Context) (state, error) {
 			s.Submissions[id] = value.(*submissionRecord)
 		}
 	})
+	if detailMachines && err == nil {
+		s.ExternalMemory = make(map[string]*externalMemoryRing, len(s.Machines))
+		for _, m := range s.Machines {
+			host := hostID(m)
+			if _, loaded := s.ExternalMemory[host]; loaded {
+				continue
+			}
+			key := "external_memory/" + host
+			if record := readGet(g.root, key); record != nil {
+				value, err := load(key, record)
+				if err != nil {
+					return state{}, err
+				}
+				s.ExternalMemory[host] = value.(*externalMemoryRing)
+			}
+		}
+	}
 	resolveReadSubmissionJobs(&s)
 	return s, err
 }
@@ -355,7 +373,7 @@ func (g *readGeneration) compactInputs(ctx context.Context) (state, error) {
 func (q *Queue) compactStatusObservation(o *statusOptions, ctx context.Context) (*Queue, *StatusSummary, *HealthAlertDelivery, error) {
 	started := readWallStart(q.observeRead)
 	if index := q.readIndex(ctx); index != nil && index.capture != nil && index.capture.generation != nil && !q.simulation && !q.unpublishedRecords() {
-		source, err := index.capture.statusQueue(ctx, q.clock.Now(), q)
+		source, err := index.capture.statusQueue(ctx, q.clock.Now(), q, o.machinesOnly())
 		observeRead(q.observeRead, "", started, started)
 		if err != nil {
 			return nil, nil, nil, err
@@ -365,6 +383,9 @@ func (q *Queue) compactStatusObservation(o *statusOptions, ctx context.Context) 
 	}
 	// Before the first commit (or with unpublished imported records) copy
 	// the same small inputs from the live queue under q.mu.
+	if err := admitObservationProjection(ctx); err != nil {
+		return nil, nil, nil, err
+	}
 	unlock, err := requestObservationLock(ctx, &q.mu)
 	if err != nil {
 		return nil, nil, nil, err
@@ -391,13 +412,23 @@ func (q *Queue) compactStatusView(o *statusOptions, ctx context.Context, retaine
 		Policies: q.s.Policies, PriorityPolicy: q.s.PriorityPolicy,
 		ComponentExclusions: map[string]ComponentExclusion{}, Reservations: map[string]Reservation{},
 		ModelSlots: q.s.ModelSlots, PreparationPlans: q.s.PreparationPlans}
+	detailMachines := o.machinesOnly()
+	if detailMachines {
+		s.FleetUpgrade, s.WorkerHandovers = q.s.FleetUpgrade, q.s.WorkerHandovers
+		s.ExternalMemory = q.s.ExternalMemory
+		s.Submissions = q.s.Submissions
+		v.hostMemorySamples = make(map[string]map[attemptKey]hostMemorySample, len(q.hostMemorySamples))
+		for machine, samples := range q.hostMemorySamples {
+			v.hostMemorySamples[machine] = maps.Clone(samples)
+		}
+	}
 	for key, r := range q.s.Reservations {
-		if r.active() || q.reservationCleanupPending(r, q.retainedJob(r.Job)) {
+		if detailMachines || r.active() || q.reservationCleanupPending(r, q.retainedJob(r.Job)) {
 			s.Reservations[key] = r
 		}
 	}
 	for key, p := range q.s.ComponentExclusions {
-		if p.Active {
+		if detailMachines || p.Active {
 			s.ComponentExclusions[key] = p
 		}
 	}
@@ -405,13 +436,19 @@ func (q *Queue) compactStatusView(o *statusOptions, ctx context.Context, retaine
 	if q.records != nil && !q.simulation && q.records.jobCount == len(q.s.Jobs) {
 		jobs = q.records.live
 	}
-	selection := &statusSelection{ids: map[string]bool{}, page: StatusJobsPage{Mode: "active"}, compact: true}
+	selection := &statusSelection{ids: map[string]bool{}, page: StatusJobsPage{Mode: "active"}, compact: true, detailMachines: detailMachines}
 	for id, j := range jobs {
 		if !mutableJob(j) {
 			continue
 		}
-		copy := compactStatusJob(j)
-		s.Jobs[id] = &copy
+		if detailMachines {
+			// Machine capacity uses current attempt evidence before the
+			// returned job rows are reduced to the summary fields.
+			s.Jobs[id] = j
+		} else {
+			copy := compactStatusJob(j)
+			s.Jobs[id] = &copy
+		}
 		// Filters affect returned rows, never the fleet's capacity/hold context.
 		if o.project != "" && j.Spec.Project != o.project || !o.since.IsZero() && j.Queued.Before(o.since) {
 			continue
@@ -425,14 +462,35 @@ func (q *Queue) compactStatusView(o *statusOptions, ctx context.Context, retaine
 		selection.ids[id] = true
 	}
 	for id, m := range q.s.Machines {
+		if detailMachines {
+			s.Machines[id] = m
+			continue
+		}
 		copy := compactStatusMachine(m)
 		s.Machines[id] = &copy
 	}
-	summary := &StatusSummary{RetainedJobs: retained, Alerts: statusAlertGroups(q.s.Health.Conditions), Diagnostics: "summary; use sections or detail=full; job reasons are last committed, not a new placement plan"}
-	for _, l := range q.openProductionLeases() {
-		summary.Leases = append(summary.Leases, StatusLease{Project: l.Project, Key: l.Key, ExpiresAt: l.ExpiresAt, Hosts: q.productionLeaseHosts(l)})
+	if detailMachines {
+		for _, r := range s.Reservations {
+			if j := q.retainedJob(r.Job); j != nil && s.Jobs[r.Job] == nil {
+				s.Jobs[r.Job] = j
+			}
+		}
+		for _, release := range s.HostReleases {
+			if j := q.s.Jobs[release.Job]; j != nil && terminal(j.State) && j.Spec.StartBy != nil && s.Jobs[release.Job] == nil {
+				// Startup fences need the terminal owner's identity and deadline,
+				// even when that owner is outside the active job list.
+				s.Jobs[release.Job] = &Job{ID: j.ID, State: j.State, Spec: Spec{StartBy: j.Spec.StartBy}}
+			}
+		}
 	}
-	summary.NotQuiescent = q.notQuiescentHosts()
+	var summary *StatusSummary
+	if !detailMachines {
+		summary = &StatusSummary{RetainedJobs: retained, Alerts: statusAlertGroups(q.s.Health.Conditions), Diagnostics: "summary; use sections or detail=full; job reasons are last committed, not a new placement plan"}
+		for _, l := range q.openProductionLeases() {
+			summary.Leases = append(summary.Leases, StatusLease{Project: l.Project, Key: l.Key, ExpiresAt: l.ExpiresAt, Hosts: q.productionLeaseHosts(l)})
+		}
+		summary.NotQuiescent = q.notQuiescentHosts()
+	}
 	selection.page.Total, selection.page.Returned = len(selection.ids), len(selection.ids)
 	inputs := observationState{State: s, Models: q.models, Calls: q.calls, Unreported: q.unreported}
 	if err := chargeProjectionValue(ctx, inputs); err != nil {
@@ -444,9 +502,25 @@ func (q *Queue) compactStatusView(o *statusOptions, ctx context.Context, retaine
 		original := s.Machines[id]
 		m.cpuLedger = original.cpuLedger
 		m.modelReservationDebtGB, m.hostReservationDebtGB = original.modelReservationDebtGB, original.hostReservationDebtGB
+		if detailMachines {
+			m.toolInventory = original.toolInventory
+			m.cpuCapacityBeforeControl = original.cpuCapacityBeforeControl
+			m.MemoryShadow = original.MemoryShadow
+			if m.HostHealth != nil {
+				m.HostHealth.delivery = q.freezeHostHealthDelivery(original)
+			}
+		}
 	}
 	v.observationSelection = selection
 	v.observationLive = v.s.Jobs
+	if detailMachines {
+		v.observationLive = make(map[string]*Job, len(v.s.Jobs))
+		for id, job := range v.s.Jobs {
+			if mutableJob(job) {
+				v.observationLive[id] = job
+			}
+		}
+	}
 	// Recent admission history is diagnostic, never relabel active-only counts
 	// as retained admissions.
 	admissions := []HostAdmissions{}

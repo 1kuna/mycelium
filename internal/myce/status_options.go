@@ -30,11 +30,16 @@ type statusOptions struct {
 }
 
 type statusSelection struct {
-	ids     map[string]bool
-	page    StatusJobsPage
-	compact bool
-	upgrade *FleetUpgradeStatus
-	custody *Queue // Immutable cancellation inputs for a streamed history row.
+	ids            map[string]bool
+	page           StatusJobsPage
+	compact        bool
+	detailMachines bool
+	upgrade        *FleetUpgradeStatus
+	custody        *Queue // Immutable cancellation inputs for a streamed history row.
+}
+
+func (o *statusOptions) machinesOnly() bool {
+	return o != nil && !o.full && o.jobs == "active" && o.before == "" && len(o.sections) == 1 && o.sections[0] == "machines"
 }
 
 func parseStatusOptions(v url.Values) (statusOptions, error) {
