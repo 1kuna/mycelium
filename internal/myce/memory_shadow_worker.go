@@ -284,12 +284,14 @@ func (s *shadowFootprintSampler) finishPeak(peak *AttemptMemoryPeak, end time.Ti
 	device := peak.DeviceSampling
 	completeDevice := device != nil && device.Complete
 	ram := memoryRunPool{PeakGB: r.RAM.PeakGB, Complete: r.RAM.fresh(end, period) && !s.ramMissing}
-	card := memoryRunPool{PeakGB: r.Card.PeakGB, Complete: completeDevice && r.Card.fresh(end, deviceMemorySamplePeriod)}
+	card := memoryRunPool{PeakGB: r.Card.PeakGB}
 	if s.platform == shadowLinuxUnified || s.platform == shadowLinuxDiscrete {
 		ram.Complete = ram.Complete && completeDevice && !s.pairedRAM.At.IsZero()
 	}
-	if card.Complete {
-		card.PeakGB = max(card.PeakGB, device.MaxGB)
+	if s.platform == shadowLinuxDiscrete && completeDevice {
+		// The card footprint is the device counter. Its terminal coverage
+		// already checks the end gap using the original sampler timestamps.
+		card = memoryRunPool{PeakGB: device.MaxGB, Complete: true}
 	}
 	out.Learned = &memoryRunPeaks{RAM: ram, Card: card}
 	return &out
