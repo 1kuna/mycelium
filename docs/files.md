@@ -1165,11 +1165,17 @@ controls that affect placement.
 ## Complete from queue storage, deliver to NAS later (#349)
 
 Tasks explicitly select `output_delivery: async_nas`. Other tasks retain their
-existing completion and publication behavior. Configure the queue (or a laptop
-`myce dev`) with `--output-delivery-root PATH`, an existing NAS destination root;
-keep its SQLite database and file store on durable local disk. This setting is
-independent of `--checkpoints` and does not change checkpoint policy. Laptop
+existing completion and publication behavior. Configure an installed queue with
+`myce install queue --config QUEUE_CONFIG --output-delivery-root PATH`. The
+same flag is available on `myce queue` and `myce dev`. Use an existing NAS
+destination root and keep the SQLite database and file store on durable local
+disk. This setting is independent of `--checkpoints`. Laptop
 fixtures can use a temporary local destination instead of a NAS.
+
+Check `queue_capabilities` in `myce status --json` for
+`async_nas_output_delivery_configured` before submitting. This reports the
+configured setting without probing the NAS. Use ordinary `output_refs` when
+the entry is absent, including with an older queue.
 
 ```yaml
 output_delivery: async_nas

@@ -55,12 +55,14 @@ Outputs are collected at attempt exit. Put progress needed to resume an
 interrupted job in a checkpoint. For a ledger needed after a failed command,
 use the supported [failure diagnostics](https://github.com/1kuna/mycelium/blob/main/docs/files.md#keep-files-from-a-failed-attempt-1341).
 
-When a NAS copy is required, set `output_delivery: async_nas` in the job spec,
-declare `outputs` and estimate their total size with `disk.output_bytes`. This
-requires a queue configured for async NAS delivery. The worker publishes to the
-queue file store and the queue delivers to the NAS in the background. Fetch
-from the queue as soon as the job succeeds. Before consuming the NAS copy,
-check `delivery.state: verified` for the accepted attempt. Keep NAS writes out
+When a NAS copy is required, first check `queue_capabilities` in
+`myce status --json` for `async_nas_output_delivery_configured`. If the entry or
+list is absent, omit `output_delivery` and fetch ordinary `output_refs` with
+`--out`. When the entry is present, set `output_delivery: async_nas` in the job
+spec, declare `outputs` and estimate their total size with `disk.output_bytes`.
+The worker publishes to the queue file store and the queue delivers to the NAS
+in the background. Fetch from the queue as soon as the job succeeds. Before
+consuming the NAS copy, check `delivery.state: verified` for the accepted attempt. Keep NAS writes out
 of payload code, including final copies, so a brief NAS stall delays delivery
 instead of failing the command. See the [async delivery contract](https://github.com/1kuna/mycelium/blob/main/docs/files.md#complete-from-queue-storage-deliver-to-nas-later-349).
 

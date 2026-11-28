@@ -23,6 +23,14 @@ func TestStatusJSONQueueCapabilities(t *testing.T) {
 	t.Cleanup(func() { q.Close() })
 	current := httptest.NewServer(myce.API{Queue: q, Token: "test-only"}.Handler())
 	defer current.Close()
+	deliveryRoot := filepath.Join(root, "offline NAS")
+	configuredQueue, err := myce.Open(filepath.Join(root, "configured.db"), root, myce.RealClock{}, myce.WithOutputDeliveryRoot(deliveryRoot))
+	if err != nil {
+		t.Fatal("configured queue failed to start without its NAS destination:", err)
+	}
+	t.Cleanup(func() { configuredQueue.Close() })
+	configured := httptest.NewServer(myce.API{Queue: configuredQueue, Token: "test-only"}.Handler())
+	defer configured.Close()
 	older := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("sections") != "" {
 			fmt.Fprint(w, `{"machines":[],"summary":{}}`)
@@ -40,11 +48,16 @@ func TestStatusJSONQueueCapabilities(t *testing.T) {
 		flags       []string
 		frozen      bool
 		fenced      bool
+		delivery    bool
 	}{
 		{name: "compact", queue: current.URL, frozen: true, fenced: true},
 		{name: "sections", queue: current.URL, flags: []string{"--sections", "machines"}, frozen: true, fenced: true},
 		{name: "idle", queue: current.URL, flags: []string{"--sections", "idle"}, frozen: true, fenced: true},
 		{name: "full", queue: current.URL, flags: []string{"--history"}, frozen: true, fenced: true},
+		{name: "configured compact", queue: configured.URL, frozen: true, fenced: true, delivery: true},
+		{name: "configured sections", queue: configured.URL, flags: []string{"--sections", "machines"}, frozen: true, fenced: true, delivery: true},
+		{name: "configured idle", queue: configured.URL, flags: []string{"--sections", "idle"}, frozen: true, fenced: true, delivery: true},
+		{name: "configured full", queue: configured.URL, flags: []string{"--history"}, frozen: true, fenced: true, delivery: true},
 		{name: "legacy frozen windows", queue: frozenOnly.URL, frozen: true},
 		{name: "legacy compact", queue: older.URL},
 		{name: "legacy snapshot projection", queue: older.URL, flags: []string{"--sections", "machines"}},
@@ -64,7 +77,16 @@ func TestStatusJSONQueueCapabilities(t *testing.T) {
 			if slices.Contains(status.QueueCapabilities, "paused_start_window_frozen") != tc.frozen || slices.Contains(status.QueueCapabilities, "fenced_job_control") != tc.fenced {
 				t.Fatalf("queue_capabilities = %v, want frozen windows = %t and fenced controls = %t", status.QueueCapabilities, tc.frozen, tc.fenced)
 			}
+			if slices.Contains(status.QueueCapabilities, "async_nas_output_delivery_configured") != tc.delivery {
+				t.Fatalf("queue_capabilities = %v, want configured delivery = %t", status.QueueCapabilities, tc.delivery)
+			}
+			if strings.Contains(output, deliveryRoot) {
+				t.Fatal("status disclosed the destination path")
+			}
 		})
+	}
+	if _, err := os.Stat(deliveryRoot); !os.IsNotExist(err) {
+		t.Fatalf("queue startup should leave the unavailable destination alone: %v", err)
 	}
 }
 

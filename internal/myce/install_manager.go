@@ -222,6 +222,9 @@ func installUnitPaths(c ServiceConfig) []string {
 func snapshotInstall(ctx context.Context, c ServiceConfig, files installFiles, command func(context.Context, string, ...string) ([]byte, error), extraPaths ...string) (*installTransaction, error) {
 	tx := &installTransaction{files: files, manager: installManager{c.Detection.OS, command}, originals: map[string]installedFile{}}
 	paths := []string{c.Binary, c.Config, c.Credentials}
+	if c.Role == "queue" {
+		paths = append(paths, queueOutputDeliverySettings(c.Config))
+	}
 	paths = append(paths, extraPaths...)
 	if c.Detection.OS == "linux" && c.Role == "worker" {
 		paths = append(paths, c.GPUEnvironmentFile())

@@ -160,7 +160,7 @@ func TestInstallQueueSaveSettingsOnly(t *testing.T) {
 			values := ServiceConfig{}
 			flags := flag.NewFlagSet("install", flag.ContinueOnError)
 			RegisterInstallFlags(flags, &values)
-			if err := flags.Parse([]string{"--save-settings-only", "--file-store-bytes=214748364800", "--production-loss-timeout=60s"}); err != nil {
+			if err := flags.Parse([]string{"--save-settings-only", "--file-store-bytes=214748364800", "--production-loss-timeout=60s", "--output-delivery-root=/fixture/offline output share"}); err != nil {
 				t.Fatal(err)
 			}
 			var err error
@@ -208,13 +208,16 @@ func TestInstallQueueSaveSettingsOnly(t *testing.T) {
 					t.Fatal("expected failure")
 				}
 				f.assertRestored(t)
+				if _, err := os.Stat(queueOutputDeliverySettings(c.Config)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("failed publication left output-delivery settings behind", err)
+				}
 				return
 			}
 			if err != nil {
 				t.Fatal(err)
 			}
 			saved, err := ReadServiceConfig(c.Config)
-			if err != nil || saved.SaveSettingsOnly || saved.FileStoreBytes != c.FileStoreBytes || saved.ProductionLossTimeout != time.Minute {
+			if err != nil || saved.SaveSettingsOnly || saved.FileStoreBytes != c.FileStoreBytes || saved.ProductionLossTimeout != time.Minute || saved.OutputDeliveryRoot != c.OutputDeliveryRoot {
 				t.Fatalf("saved settings/ephemeral mode incorrect: %v", err)
 			}
 			for _, path := range []string{c.Binary, c.Credentials} {

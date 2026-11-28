@@ -93,6 +93,7 @@ func (q *Queue) serveStatusHistory(w http.ResponseWriter, r *http.Request, optio
 	// only job payload materialization is deferred until encoding each row.
 	selection.ids = map[string]bool{}
 	out := v.projectSnapshot(true)
+	out.QueueCapabilities = q.queueCapabilities()
 	selection.ids = nil
 	out.RequestLatencies = q.requestLatencies.snapshot()
 	out.Usage, err = v.readUsage(q.usageReader, out.Now.Add(-7*24*time.Hour), ctx)
