@@ -164,7 +164,10 @@ func TestCheckpointProgressEventDriven(t *testing.T) {
 					t.Fatal(err)
 				}
 				write("2")
-				if err := os.WriteFile(signal, []byte(`{"name":"save.json","generation":2}`), 0600); err != nil {
+				// The worker can stat the notification on this same tick. Publish
+				// it atomically, as required of checkpoint writers, so it can only
+				// observe the completed file.
+				if err := writeFileAtomic(signal, []byte(`{"name":"save.json","generation":2}`)); err != nil {
 					t.Fatal(err)
 				}
 				updated, err := os.Stat(path)
@@ -192,8 +195,8 @@ func TestCheckpointProgressEventDriven(t *testing.T) {
 				time.Sleep(100 * time.Millisecond)
 			}
 		}
-		if beforeFS.reads.Load() != 36 || afterFS.reads.Load() != 0 || markers.Load() != 1 {
-			t.Fatal("unexpected directory-read measurement", beforeFS.reads.Load(), afterFS.reads.Load())
+		if before, after, local := beforeFS.reads.Load(), afterFS.reads.Load(), markers.Load(); before != 36 || after != 0 || local != 1 {
+			t.Fatalf("unexpected progress reads: baseline directories=%d live directories=%d local markers=%d", before, after, local)
 		}
 		t.Logf("local counting filesystem, 60s, 100ms actor, 5s reports, three directories: round1=%d NAS reads/min (12 walks), after=%d NAS reads/min (zero walks), published save=%d local marker read", beforeFS.reads.Load(), afterFS.reads.Load(), markers.Load())
 		// An arbitrary final save (no notification) is read at finalization.
