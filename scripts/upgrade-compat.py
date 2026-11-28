@@ -20,9 +20,9 @@ import urllib.parse
 REPO = Path(__file__).resolve().parent.parent
 # MY-42: exercise the exact adjacent release used during rolling upgrades.
 # Advance this pair together at each release.
-PREVIOUS = "09b1aa1a2b8099c12851736c7ffd4f80f2b0a18c"
-OLD_VERSION = "v3.1.0-rc.20261126.s100r6.49"
-VERSION = "v3.1.0-rc.20261126.s100r6.50"
+PREVIOUS = "e16eec81ec66e0697c8e47da3fff078c40262477"
+OLD_VERSION = "v3.1.0-rc.20261128.s100r6.65"
+VERSION = "v3.1.0-rc.20261128.s100r6.66"
 FIXTURE = REPO / "scripts/testdata/upgrade_compat_test.go.txt"
 FIXTURE_SUPPORT = "queue_state_fixture_test.go"
 # Top-level source the build needs; `skills` is the consumer skill embedded in
@@ -301,9 +301,9 @@ def run(args):
 
 
 def reservation_lists(candidate, previous, scratch):
-    for name, queue, cli, expected in (
-        ("previous CLI with candidate queue", candidate, previous, ["current", "released"]),
-        ("candidate CLI with previous queue", previous, candidate, ["current"]),
+    for name, queue, cli in (
+        ("previous CLI with candidate queue", candidate, previous),
+        ("candidate CLI with previous queue", previous, candidate),
     ):
         root = scratch / name.replace(" ", "-")
         with process(queue[0], "queue-reservations", root) as child:
@@ -316,10 +316,9 @@ def reservation_lists(candidate, previous, scratch):
                                   "--token", "upgrade-fixture", *flags], env=env)
                 return [record["id"] for record in json.loads(output)]
 
-            assert ids() == expected, name
-            if cli is candidate:
-                assert ids("--history") == ["current", "released"], name
-                assert ids("--id", "released") == ["released"], name
+            assert ids() == ["current"], name
+            assert ids("--history") == ["current", "released"], name
+            assert ids("--id", "released") == ["released"], name
             print(f"upgrade-compat: PASS {name}", flush=True)
 
 
@@ -437,21 +436,32 @@ def validate_inventory_receipts(rows, allow_additive_retry=False):
 
 def queue_rollback(candidate, previous, scratch):
     root = scratch / "queue-rollback"
-    with process(candidate[0], "queue-rollback-seed", root) as child:
-        if child.wait(timeout=20):
-            raise RuntimeError("rollback seed failed")
     database = root / "state/queue.db"
-    with sqlite3.connect(database) as db:
-        marker, = db.execute("SELECT data FROM queue WHERE id=1").fetchone()
-        assert json.loads(marker) == "myce-normalized-state-v3", "rollback seed did not write v3"
-    with process(previous[0], "queue-rollback-previous", root) as child:
-        if child.wait(timeout=20):
-            raise RuntimeError("previous release did not preserve IDs, decisions and custody")
-    # A rollback remains reversible: current startup can consume previous writes.
-    with process(candidate[0], "queue-rollback-open", root) as child:
-        if child.wait(timeout=20):
-            raise RuntimeError("re-upgrade did not preserve IDs, decisions and custody")
-    print("upgrade-compat: PASS candidate v3 -> exact previous read/write -> current reopen; job states, pending custody and untouched explicit RAM limit intact", flush=True)
+
+    def phase(binary, mode):
+        with process(binary[0], mode, root) as child:
+            if child.wait(timeout=20):
+                raise RuntimeError(f"{mode} did not preserve decisions and custody")
+
+    def claim_rows():
+        with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as db:
+            marker, = db.execute("SELECT data FROM queue WHERE id=1").fetchone()
+            assert json.loads(marker) == "myce-normalized-state-v3", "rollback seed did not write v3"
+            count, = db.execute(
+                "SELECT count(*) FROM queue_state WHERE key GLOB 'file_input_claims/*'"
+            ).fetchone()
+        return count
+
+    phase(previous, "queue-rollback-legacy")
+    assert claim_rows() == 0, "predecessor fixture must start with legacy claim storage"
+    phase(candidate, "queue-rollback-seed")
+    assert claim_rows() == 1, "candidate did not atomically convert the predecessor claim"
+    phase(previous, "queue-rollback-previous")
+    assert claim_rows() == 2, "previous release did not write into the converted claim layout"
+    phase(candidate, "queue-rollback-open")
+    assert claim_rows() == 2, "re-upgrade lost a claim row"
+    print("upgrade-compat: PASS legacy claim -> candidate conversion -> exact previous read/write -> "
+          "current reopen; decisions, pending custody and both claims intact", flush=True)
 
 
 def inspect_queue(binary, root):

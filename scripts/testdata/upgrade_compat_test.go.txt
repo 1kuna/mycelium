@@ -58,7 +58,7 @@ func TestUpgradeCompatProcess(t *testing.T) {
 		if err = os.WriteFile(filepath.Join(root, "durable-state.json"), data, 0600); err != nil {
 			t.Fatal(err)
 		}
-	case "queue-rollback-seed", "queue-rollback-open", "queue-rollback-previous":
+	case "queue-rollback-legacy", "queue-rollback-seed", "queue-rollback-open", "queue-rollback-previous":
 		q, err := Open(filepath.Join(root, "state", "queue.db"), filepath.Join(root, "checkpoints"), upgradeClock{})
 		if err != nil {
 			t.Fatal(err)
@@ -67,7 +67,7 @@ func TestUpgradeCompatProcess(t *testing.T) {
 		claimSpec := Spec{Project: "rollback", Class: "experiment"}
 		claimFile := FileRef{SHA256: strings.Repeat("a", 64), SizeBytes: 1}
 		claimReceipt := filepath.Join(root, "input-claim.id")
-		if mode == "queue-rollback-seed" {
+		if mode == "queue-rollback-legacy" {
 			claim, err := q.claimFileInput(ctx, claimSpec, claimFile)
 			if err != nil {
 				t.Fatal(err)
@@ -75,6 +75,9 @@ func TestUpgradeCompatProcess(t *testing.T) {
 			if err := os.WriteFile(claimReceipt, []byte(claim.ID), 0600); err != nil {
 				t.Fatal(err)
 			}
+			return
+		}
+		if mode == "queue-rollback-seed" {
 			now := q.clock.Now()
 			m := Machine{ID: "rollback-device", HostID: "rollback-host", Session: "rollback-session", GPU: "cpu", FreeMemoryGB: 64, HostMemoryMeasured: true, CapabilityProfile: &CapabilityProfile{Version: 0, OS: runtime.GOOS, Arch: runtime.GOARCH, LogicalCPUs: 16, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30}}
 			// Both releases expose the keyed HTTP contract; their in-process
